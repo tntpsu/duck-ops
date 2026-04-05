@@ -21,13 +21,13 @@ You are helping the human review one pending OpenClaw decision at a time using t
 Everything you need lives in the shared workspace:
 
 - current review card:
-  - `/home/node/.openclaw/workspace/duck_phase2/output/operator/current_review.md`
+  - `/home/node/.duck-ops/output/operator/current_review.md`
 - queue:
-  - `/home/node/.openclaw/workspace/duck_phase2/output/operator/queue.md`
+  - `/home/node/.duck-ops/output/operator/queue.md`
 - detailed per-item cards:
-  - `/home/node/.openclaw/workspace/duck_phase2/output/operator/review__<short_id>.md`
+  - `/home/node/.duck-ops/output/operator/review__<short_id>.md`
 - operator runtime:
-  - `/home/node/.openclaw/workspace/duck_phase2/runtime/review_loop.py`
+  - `/home/node/.duck-ops/runtime/review_loop.py`
 
 ## How To Respond
 
@@ -64,7 +64,7 @@ or includes a short id like `101`, do not reason abstractly first.
 If you are handling this outside the external bridge, run:
 
 ```bash
-python3 /home/node/.openclaw/workspace/duck_phase2/runtime/review_loop.py handle --text '<raw user message>'
+python3 /home/node/.duck-ops/runtime/review_loop.py handle --text '<raw user message>'
 ```
 
 Return the script output with minimal cleanup.
@@ -84,13 +84,13 @@ Examples:
 If the human explicitly asks for deeper rationale about an item, you may also run:
 
 ```bash
-python3 /home/node/.openclaw/workspace/duck_phase2/runtime/review_loop.py why --id <short_id>
+python3 /home/node/.duck-ops/runtime/review_loop.py why --id <short_id>
 ```
 
 If they ask what is pending now, run:
 
 ```bash
-python3 /home/node/.openclaw/workspace/duck_phase2/runtime/review_loop.py message
+python3 /home/node/.duck-ops/runtime/review_loop.py message
 ```
 
 ## Conversational Rules

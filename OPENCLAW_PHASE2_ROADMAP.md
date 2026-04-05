@@ -68,7 +68,7 @@ Preferred runtime model:
 
 - DuckAgent directories are mounted or exposed to OpenClaw in read-only form.
 - Email is accessed through a read-only mailbox view or mirrored Maildir export.
-- OpenClaw writes only to its own workspace under `duck_phase2/`.
+- OpenClaw writes only to its own workspace under `duck-ops/`.
 
 ## Source Inventory
 
@@ -802,10 +802,10 @@ For every decision, OpenClaw writes:
 
 These should live under:
 
-- `openclaw/workspace/duck_phase2/output/trend_rankings/`
-- `openclaw/workspace/duck_phase2/output/quality_gates/`
-- `openclaw/workspace/duck_phase2/output/customer_intelligence/`
-- `openclaw/workspace/duck_phase2/output/digests/`
+- `duck-ops/output/trend_rankings/`
+- `duck-ops/output/quality_gates/`
+- `duck-ops/output/customer_intelligence/`
+- `duck-ops/output/digests/`
 
 ### Layer 2. Human-facing notification
 
@@ -1211,7 +1211,7 @@ Noise should be treated as a system defect and trigger threshold tightening.
 ## Proposed OpenClaw Workspace Layout
 
 ```text
-openclaw/workspace/duck_phase2/
+duck-ops/
 ├── config/
 │   ├── sources.md
 │   ├── evaluator_rules.md
@@ -1872,27 +1872,27 @@ OpenClaw should emit stable, predictable filenames.
 
 ### Trend outputs
 
-- `openclaw/workspace/duck_phase2/output/trend_rankings/trend__<theme>__<date>.json`
-- `openclaw/workspace/duck_phase2/output/trend_rankings/trend__<theme>__<date>.md`
+- `duck-ops/output/trend_rankings/trend__<theme>__<date>.json`
+- `duck-ops/output/trend_rankings/trend__<theme>__<date>.md`
 
 ### Quality-gate outputs
 
-- `openclaw/workspace/duck_phase2/output/quality_gates/publish__<flow>__<run_id>__<artifact_slug>.json`
-- `openclaw/workspace/duck_phase2/output/quality_gates/publish__<flow>__<run_id>__<artifact_slug>.md`
+- `duck-ops/output/quality_gates/publish__<flow>__<run_id>__<artifact_slug>.json`
+- `duck-ops/output/quality_gates/publish__<flow>__<run_id>__<artifact_slug>.md`
 
 ### Customer-intelligence outputs
 
-- `openclaw/workspace/duck_phase2/output/customer_intelligence/customer__<channel>__<artifact_id>.json`
-- `openclaw/workspace/duck_phase2/output/customer_intelligence/customer__<channel>__<artifact_id>.md`
+- `duck-ops/output/customer_intelligence/customer__<channel>__<artifact_id>.json`
+- `duck-ops/output/customer_intelligence/customer__<channel>__<artifact_id>.md`
 
 ### Digest and alert outputs
 
-- `openclaw/workspace/duck_phase2/output/digests/digest__YYYY-MM-DD.json`
-- `openclaw/workspace/duck_phase2/output/digests/digest__YYYY-MM-DD.md`
-- `openclaw/workspace/duck_phase2/output/digests/urgent__YYYY-MM-DDTHHMMSS__<artifact_id>.json`
-- `openclaw/workspace/duck_phase2/output/digests/urgent__YYYY-MM-DDTHHMMSS__<artifact_id>.md`
-- `openclaw/workspace/duck_phase2/output/digests/phase_readiness__YYYY-WW.json`
-- `openclaw/workspace/duck_phase2/output/digests/phase_readiness__YYYY-WW.md`
+- `duck-ops/output/digests/digest__YYYY-MM-DD.json`
+- `duck-ops/output/digests/digest__YYYY-MM-DD.md`
+- `duck-ops/output/digests/urgent__YYYY-MM-DDTHHMMSS__<artifact_id>.json`
+- `duck-ops/output/digests/urgent__YYYY-MM-DDTHHMMSS__<artifact_id>.md`
+- `duck-ops/output/digests/phase_readiness__YYYY-WW.json`
+- `duck-ops/output/digests/phase_readiness__YYYY-WW.md`
 
 ## Notifier trigger rules
 

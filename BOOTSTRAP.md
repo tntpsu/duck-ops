@@ -57,8 +57,7 @@ What does not belong here:
 Current local safety rules:
 
 - the working branch is `codex/openclaw-local`
-- the old `origin` remote was renamed to `upstream` so we do not accidentally push custom work to
-  the public upstream repo
+- `origin` now points to your fork and `upstream` points to the public OpenClaw repo
 
 ## Local-Only Runtime Paths
 
@@ -69,12 +68,12 @@ These stay local on this Mac and should not be treated as git homes:
 - `~/Library/LaunchAgents`
 - local logs, locks, and browser auth/session state
 
-## Compatibility Paths
+## Legacy Paths
 
-- `/Users/philtullai/ai-agents/openclaw/workspace/duck_phase2` is a compatibility symlink that now
-  points to `/Users/philtullai/ai-agents/duck-ops`
+- `/Users/philtullai/ai-agents/openclaw/workspace` is now a legacy compatibility/historical area
 - `/Users/philtullai/ai-agents/openclaw/workspace/.git` was disabled and renamed to
-  `.git.legacy-disabled` so that legacy folder no longer behaves like the active duck workspace repo
+  `.git.legacy-disabled` so that legacy folder no longer behaves like an active duck workspace repo
+- active launchd jobs and runtime scripts now point directly at `/Users/philtullai/ai-agents/duck-ops`
 
 ## Practical Rule Of Thumb
 

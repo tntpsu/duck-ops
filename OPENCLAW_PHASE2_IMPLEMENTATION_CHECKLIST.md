@@ -38,9 +38,9 @@ These decisions are already made and should not be reopened unless something bre
 ## Phase 0 Checklist: Design Freeze
 
 - [x] Confirm the roadmap file is the source of truth:
-  - `/Users/philtullai/ai-agents/openclaw/workspace/duck_phase2/OPENCLAW_PHASE2_ROADMAP.md`
+  - `/Users/philtullai/ai-agents/duck-ops/OPENCLAW_PHASE2_ROADMAP.md`
 - [x] Confirm this checklist file is the implementation source of truth:
-  - `/Users/philtullai/ai-agents/openclaw/workspace/duck_phase2/OPENCLAW_PHASE2_IMPLEMENTATION_CHECKLIST.md`
+  - `/Users/philtullai/ai-agents/duck-ops/OPENCLAW_PHASE2_IMPLEMENTATION_CHECKLIST.md`
 - [x] Freeze the three artifact contracts:
   - `trend_candidate`
   - `publish_candidate`
@@ -68,13 +68,13 @@ These decisions are already made and should not be reopened unless something bre
 ### 1. Workspace and state layout
 
 - [x] Create or confirm OpenClaw workspace folders:
-  - `openclaw/workspace/duck_phase2/config/`
-  - `openclaw/workspace/duck_phase2/state/`
-  - `openclaw/workspace/duck_phase2/output/trend_rankings/`
-  - `openclaw/workspace/duck_phase2/output/quality_gates/`
-  - `openclaw/workspace/duck_phase2/output/customer_intelligence/`
-  - `openclaw/workspace/duck_phase2/output/digests/`
-  - `openclaw/workspace/duck_phase2/contracts/`
+  - `duck-ops/config/`
+  - `duck-ops/state/`
+  - `duck-ops/output/trend_rankings/`
+  - `duck-ops/output/quality_gates/`
+  - `duck-ops/output/customer_intelligence/`
+  - `duck-ops/output/digests/`
+  - `duck-ops/contracts/`
 - [x] Create initial OpenClaw-owned state files:
   - `artifact_registry.jsonl`
   - `decision_history.jsonl`
