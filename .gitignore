@@ -5,3 +5,4 @@ runtime/*.pyc
 **/__pycache__/
 **/*.pyc
 .DS_Store
+.playwright-cli/

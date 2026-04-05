@@ -317,7 +317,25 @@ Current status on 2026-04-05:
 - [x] Exact-row-not-found failures are now treated as retryable when the seller session is still signed in.
 - [x] Retryable row misses now probe a wider review-page window before giving up.
 - [x] Auth/session loss is now handled as a queue-level pause with one rate-limited auth-required alert instead of cascading per-item failures.
-- [ ] The remaining reliability gap is making Etsy seller-session persistence stable enough that unattended drains rarely need a manual sign-in at all.
+- [x] Etsy seller-session auth state is now saved to `duck-ops` and restored on session reopen or signed-out recovery before manual sign-in is required.
+
+Residual risk on 2026-04-05:
+
+- Etsy can still expire the saved seller session itself, and seller-surface DOM drift can still break execution.
+- In those cases the executor should still fail closed, pause the queue, and send one auth-required alert instead of posting incorrectly.
+
+Soak gate before moving to the next step:
+
+- [ ] Soak the executor through 48 hours of hourly sidecar runs, ending no earlier than `2026-04-07`.
+- [ ] `Review Execution` shows `Auth = healthy` and `Saved Auth = available` throughout the soak except during a real Etsy expiry.
+- [ ] No repeated auth-alert spam is sent for the same sign-out event.
+- [ ] At least one browser reopen or signed-out recovery succeeds from saved auth without a manual Etsy sign-in.
+- [ ] If a real `publish_ready` reply appears during the soak, the sidecar auto-queues it and drains it without manual help.
+- [ ] Any failure still fails closed:
+  - no wrong review row
+  - no duplicate post
+  - queue pauses cleanly
+  - one clear alert
 
 ### 1. Scope freeze
 
@@ -345,15 +363,16 @@ Current status on 2026-04-05:
 - [x] The WhatsApp operator bridge reads a fixed transcript snapshot per pass so one run cannot chase its own freshly appended self-echo lines.
 - [x] Operator cards now explicitly say what approving the item will do, so social-post approvals are clearly distinct from customer-reply approvals.
 - [x] Weekly sale operator cards now summarize the actual sale targets and discounts from DuckAgent's structured sale playbook.
-- [ ] If decision is `needs_revision` or `discard`, send the recommendation to the operator channel first.
-- [ ] If the operator responds with `agree`, record agreement with the recommendation.
-- [ ] If the operator responds with `approve`, enqueue the exact approved reply text for execution.
-- [ ] Keep operator notes on exceptions and overrides.
+- [x] If decision is `needs_revision` or `discard`, send the recommendation to the operator channel first.
+- [x] If the operator responds with `agree`, record agreement with the recommendation.
+- [x] If the operator responds with `approve`, enqueue the exact approved reply text for execution.
+- [x] Keep operator notes on exceptions and overrides.
 - [x] The operator lane can return a concrete `rewrite` suggestion for weak review replies.
 
 ### 4. Deterministic Etsy executor
 
 - [x] Use a fixed signed-in Etsy browser session or profile owned by the operator.
+- [x] Persist the Etsy seller-session auth state so unattended drains can restore it when the browser session is reopened.
 - [x] Open the exact review target using the strongest available identifier.
 - [x] Verify review text or transaction context before entering any reply.
 - [x] Paste the exact approved reply text without regenerating it.

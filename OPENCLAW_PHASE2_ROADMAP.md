@@ -1434,7 +1434,15 @@ Current status on 2026-04-05:
 - the executor now prefers Etsy's paginated `/shop/.../reviews?page=N` surface and can probe back to the correct review page when needed
 - one queued `publish_ready` public reply has now been recovered after auth restoration and posted successfully through that executor path
 - auth/session loss now pauses the whole queue with a rate-limited sign-in alert instead of turning into noisy per-item failures
-- the main remaining reliability gap is preserving the authenticated Etsy seller session for unattended drains without frequent operator intervention
+- the executor now saves Etsy seller-session auth state into `duck-ops`, restores it when the automation browser session is reopened, and retries that restore before asking for a manual sign-in
+- the remaining reliability risk is now Etsy expiring the saved auth state itself or changing the seller reviews surface in a way that forces a fresh discovery/auth pass
+
+Current soak gate:
+
+- let this run through 48 hours of hourly queue-drain windows before moving to the next Phase 3.6 slice
+- treat the soak as successful if auth stays healthy, saved auth remains available, no repeated auth-alert spam appears, and at least one restore-based recovery succeeds without a manual sign-in
+- if a real `publish_ready` reply appears during that window, it should auto-queue and drain without manual help
+- if no real reply appears, one intentional recovery test plus a healthy unattended auth state for the full soak window is still enough to move on
 
 Only add it after the review-quality lane and operator channel are already useful enough that execution would remove real friction instead of just adding risk.
 
@@ -1476,7 +1484,8 @@ Current implementation note:
 
 - `publish_ready` Etsy public replies can now inherit a previously approved browser path instead of forcing a fresh manual browser approval for each new review target
 - the hourly sidecar is allowed to auto-queue those replies and drain the queue with one batched session-summary email after successful posts
-- `needs_revision` and `discard` replies remain outside the auto-post path
+- the executor now persists Etsy auth state into a canonical `duck-ops/state/review_reply_execution_auth_storage/` file and can mirror that file through the Playwright session's allowed root when an older browser session was opened from a different cwd
+- `needs_revision` and `discard` replies still remain outside the auto-post path, but an explicit operator `approve` now queues the exact approved text for deterministic execution without needing the browser review page
 - the operator channel now supports `rewrite`, which returns a concrete replacement reply for weak review drafts; `approve because use rewrite` approves that rewritten text for execution
 - the WhatsApp operator bridge now suppresses its own reflected outbound replies by remembering the exact sent message hashes, so adding new commands does not require another echo-prefix patch
 - the WhatsApp operator bridge now reads a fixed transcript snapshot per polling pass so it cannot recursively react to self-echo lines appended during the same run

@@ -106,6 +106,7 @@ python3 /home/node/.duck-ops/runtime/review_loop.py message
 - Treat `approve`, `needs changes`, and `discard` as the human's real review decision.
 - `agree` means "I accept OpenClaw's recommendation."
 - `approve because use rewrite` means "approve the rewritten reply instead of the original draft."
+- For Etsy public review replies, an explicit final `approve` now queues the exact approved text for deterministic execution. `agree` only queues when it effectively means `approve` for that item.
 
 ## If The Human Asks "Why?"
 
@@ -119,6 +120,6 @@ Example:
 
 ## Safety Boundary
 
-- Do not publish, send, or execute anything external from this chat.
-- Only record the human's review decision.
-- DuckAgent remains the execution system.
+- Do not improvise new execution behavior from chat alone.
+- Only queue work that the deterministic executor already supports.
+- DuckAgent and the deterministic Etsy executor remain the execution systems.

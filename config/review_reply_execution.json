@@ -8,5 +8,9 @@
   "auto_drain_send_session_summary": true,
   "stop_after_first_failure": true,
   "auth_block_retry_delay_seconds": 1800,
-  "auth_alert_cooldown_seconds": 21600
+  "auth_alert_cooldown_seconds": 21600,
+  "auth_storage_state_enabled": true,
+  "auth_storage_restore_on_open": true,
+  "auth_storage_restore_on_auth_failure": true,
+  "auth_storage_save_on_healthy": true
 }

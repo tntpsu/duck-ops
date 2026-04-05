@@ -1094,6 +1094,7 @@ def render_rewrite_suggestion(item: dict[str, Any], hint: str = "") -> str:
             f"\"{rewrite_text}\"",
             "",
             f"If you want to approve this version, reply `approve {item['short_id']} because use rewrite`.",
+            "For Etsy public replies, that approval will also queue the rewritten text for execution.",
         ]
     )
 
@@ -1508,6 +1509,35 @@ def record_action(
     return record, source_name
 
 
+def maybe_queue_review_reply_after_operator_approval(artifact_id: str, decision: dict[str, Any]) -> dict[str, Any] | None:
+    if str(decision.get("artifact_type") or "") != "review_reply":
+        return None
+    if str(decision.get("flow") or "") != "reviews_reply_positive":
+        return None
+    operator_resolution = decision.get("operator_resolution") or {}
+    if str(operator_resolution.get("action") or "") != "approve":
+        return None
+    if str(decision.get("execution_state") or "") == "posted":
+        return {
+            "ok": True,
+            "status": "already_posted",
+            "message": "This Etsy reply was already posted, so nothing new was queued.",
+        }
+    try:
+        from review_reply_executor import queue_review_reply
+
+        return queue_review_reply(
+            artifact_id,
+            queued_by="operator_review_loop",
+        )
+    except SystemExit as exc:
+        return {
+            "ok": False,
+            "status": "queue_failed",
+            "message": str(exc),
+        }
+
+
 def operator_help(current_item: dict[str, Any] | None = None) -> str:
     lines = [
         "OpenClaw operator commands:",
@@ -1708,24 +1738,37 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
         approved_reply_text=approved_reply_override,
     )
     write_state_source(source_name, state_bundle[source_name])
+    recorded_decision = (
+        ((state_bundle.get(source_name) or {}).get("artifacts") or {}).get(target_item["artifact_id"], {}).get("decision") or {}
+    )
+    execution_handoff = maybe_queue_review_reply_after_operator_approval(target_item["artifact_id"], recorded_decision)
     write_review_queue(state_bundle, operator_state)
 
     remaining_items = build_review_items(state_bundle)
     assign_short_ids(remaining_items, operator_state)
     next_pending = next_item(remaining_items, None)
+    ack = f"Recorded: {target_item['short_id']} -> {resolution_label(desired_resolution)}."
+    if note:
+        ack += f" Note: {note}"
+    if execution_handoff:
+        handoff_message = str(execution_handoff.get("message") or "").strip()
+        if execution_handoff.get("ok"):
+            if execution_handoff.get("status") in {"queued", "running"}:
+                ack += "\nQueued for Etsy execution."
+            elif execution_handoff.get("status") == "already_posted":
+                ack += "\nAlready posted on Etsy, so nothing new was queued."
+            elif handoff_message:
+                ack += f"\n{handoff_message}"
+        elif handoff_message:
+            ack += f"\nExecution handoff failed closed: {handoff_message}"
+
     if next_pending:
         operator_state["current_artifact_id"] = next_pending["artifact_id"]
         write_review_queue(state_bundle, operator_state)
-        ack = f"Recorded: {target_item['short_id']} -> {resolution_label(desired_resolution)}."
-        if note:
-            ack += f" Note: {note}"
         return ack + "\n\nNext review:\n\n" + render_operator_card(next_pending)
 
     operator_state["current_artifact_id"] = None
     write_review_queue(state_bundle, operator_state)
-    ack = f"Recorded: {target_item['short_id']} -> {resolution_label(desired_resolution)}."
-    if note:
-        ack += f" Note: {note}"
     return ack + "\n\nNo more queued reviews right now."
 
 

@@ -52,6 +52,7 @@ QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
 EXECUTION_QUEUE_STATE_PATH = STATE_DIR / "review_reply_execution_queue.json"
 EXECUTION_SESSION_STATE_PATH = STATE_DIR / "review_reply_execution_sessions.json"
 EXECUTION_AUTH_STATE_PATH = STATE_DIR / "review_reply_execution_auth.json"
+AUTH_STORAGE_DIR = STATE_DIR / "review_reply_execution_auth_storage"
 DISCOVERY_APPROVALS_PATH = STATE_DIR / "review_reply_discovery_approvals.json"
 DISCOVERY_OUTPUT_DIR = OUTPUT_DIR / "discovery"
 EXECUTION_POLICY_PATH = CONFIG_DIR / "review_reply_execution.json"
@@ -71,6 +72,10 @@ DEFAULT_EXECUTION_POLICY: dict[str, Any] = {
     "retryable_row_not_found_retry_delay_seconds": 3600,
     "auth_block_retry_delay_seconds": 1800,
     "auth_alert_cooldown_seconds": 21600,
+    "auth_storage_state_enabled": True,
+    "auth_storage_restore_on_open": True,
+    "auth_storage_restore_on_auth_failure": True,
+    "auth_storage_save_on_healthy": True,
 }
 
 
@@ -142,33 +147,96 @@ def load_session_state() -> dict[str, Any]:
     )
 
 
+def _default_storage_state() -> dict[str, Any]:
+    return {
+        "path": None,
+        "exists": False,
+        "saved_at": None,
+        "last_restore_at": None,
+        "last_restore_status": None,
+        "last_restore_reason": None,
+        "last_restore_error": None,
+        "last_save_at": None,
+        "last_save_status": None,
+        "last_save_error": None,
+    }
+
+
 def save_session_state(payload: dict[str, Any]) -> None:
     payload["generated_at"] = now_iso()
     write_json(EXECUTION_SESSION_STATE_PATH, payload)
 
 
 def load_auth_state() -> dict[str, Any]:
-    return load_json(
-        EXECUTION_AUTH_STATE_PATH,
-        {
-            "generated_at": None,
-            "auth_status": "unknown",
-            "blocked_at": None,
-            "cleared_at": None,
-            "last_auth_check_at": None,
-            "last_error": None,
-            "last_session_name": None,
-            "last_checked_url": None,
-            "next_retry_after": None,
-            "last_alert_sent_at": None,
-            "last_alert_subject": None,
-        },
-    )
+    payload = load_json(EXECUTION_AUTH_STATE_PATH, {})
+    auth_state = {
+        "generated_at": None,
+        "auth_status": "unknown",
+        "blocked_at": None,
+        "cleared_at": None,
+        "last_auth_check_at": None,
+        "last_error": None,
+        "last_session_name": None,
+        "last_checked_url": None,
+        "next_retry_after": None,
+        "last_alert_sent_at": None,
+        "last_alert_subject": None,
+        "storage_state": _default_storage_state(),
+    }
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key == "storage_state" and isinstance(value, dict):
+                storage_state = _default_storage_state()
+                storage_state.update(value)
+                auth_state["storage_state"] = storage_state
+            elif key in auth_state:
+                auth_state[key] = value
+    return auth_state
 
 
 def save_auth_state(payload: dict[str, Any]) -> None:
     payload["generated_at"] = now_iso()
     write_json(EXECUTION_AUTH_STATE_PATH, payload)
+
+
+def auth_storage_state_path(session_name: str) -> Path:
+    return AUTH_STORAGE_DIR / f"{slugify(session_name)}.json"
+
+
+def _session_local_storage_path(allowed_roots: list[Path], session_name: str) -> Path | None:
+    for root in allowed_roots:
+        if not root.exists():
+            continue
+        if root.name == ".playwright-cli":
+            base = root / "review_reply_execution_auth_storage"
+        else:
+            base = root / ".playwright-cli" / "review_reply_execution_auth_storage"
+        return base / f"{slugify(session_name)}.json"
+    return None
+
+
+def current_storage_state(session_name: str, existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    storage_state = _default_storage_state()
+    if isinstance(existing, dict):
+        storage_state.update(existing)
+    path = Path(str(storage_state.get("path") or auth_storage_state_path(session_name)))
+    storage_state["path"] = str(path)
+    storage_state["exists"] = path.exists()
+    if path.exists() and not storage_state.get("saved_at"):
+        storage_state["saved_at"] = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).astimezone().isoformat()
+    return storage_state
+
+
+def merge_storage_state(
+    auth_state: dict[str, Any],
+    session_name: str,
+    storage_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    auth_state["storage_state"] = current_storage_state(
+        session_name,
+        storage_state if isinstance(storage_state, dict) else (auth_state.get("storage_state") or {}),
+    )
+    return auth_state
 
 
 def _new_session_id() -> str:
@@ -285,6 +353,52 @@ def _reply_excerpt(value: str, limit: int = 120) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def _pw_error_text(exc: subprocess.CalledProcessError) -> str:
+    return re.sub(r"\s+", " ", f"{exc.stdout}\n{exc.stderr}".strip()).strip()
+
+
+def _pw_cli_error(output: str) -> str | None:
+    text = str(output or "").strip()
+    if not text.startswith("### Error"):
+        return None
+    cleaned = re.sub(r"^### Error\s*", "", text, count=1).strip()
+    return re.sub(r"\s+", " ", cleaned).strip() or "Unknown Playwright CLI error"
+
+
+def _allowed_roots_from_error(error_text: str | None) -> list[Path]:
+    if not error_text:
+        return []
+    match = re.search(r"Allowed roots:\s*(?P<roots>.+)$", error_text)
+    if not match:
+        return []
+    roots: list[Path] = []
+    for raw_root in match.group("roots").split(","):
+        root = raw_root.strip()
+        if root:
+            roots.append(Path(root))
+    return roots
+
+
+def _run_pw_command_checked(session_name: str, *args: str) -> dict[str, Any]:
+    try:
+        output = run_pw_command(session_name, *args)
+    except subprocess.CalledProcessError as exc:
+        error_text = _pw_error_text(exc)
+        return {
+            "ok": False,
+            "output": error_text,
+            "error": error_text,
+            "allowed_roots": _allowed_roots_from_error(error_text),
+        }
+    error_text = _pw_cli_error(output)
+    return {
+        "ok": error_text is None,
+        "output": output,
+        "error": error_text,
+        "allowed_roots": _allowed_roots_from_error(error_text),
+    }
+
+
 def auth_retry_due(auth_state: dict[str, Any]) -> bool:
     retry_at = parse_iso(str(auth_state.get("next_retry_after") or ""))
     if retry_at is None:
@@ -307,6 +421,10 @@ def is_auth_error(error: Exception | str | None) -> bool:
         "public signed-out",
     )
     return any(marker in text for marker in markers)
+
+
+def is_signed_out_state(current_url: str | None, auth_probe: dict[str, Any] | None) -> bool:
+    return "/signin" in str(current_url or "").lower() or bool((auth_probe or {}).get("signInVisible"))
 
 
 def _load_send_email():
@@ -346,6 +464,94 @@ def choose_session() -> tuple[str, str]:
                 str(entry.get("url") or DEFAULT_ETSY_REVIEWS_URL),
             )
     return ("esd", DEFAULT_ETSY_REVIEWS_URL)
+
+
+def restore_auth_storage_state(
+    session_name: str,
+    start_url: str,
+    *,
+    reason: str,
+    existing_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    storage_state = current_storage_state(session_name, existing_state)
+    storage_state["last_restore_at"] = now_iso()
+    storage_state["last_restore_reason"] = reason
+    storage_state["last_restore_error"] = None
+    path = Path(str(storage_state.get("path") or ""))
+    if not path.exists():
+        storage_state["last_restore_status"] = "missing"
+        storage_state["exists"] = False
+        return storage_state
+    session_local_path: Path | None = None
+    result = _run_pw_command_checked(session_name, "state-load", str(path))
+    if not result["ok"]:
+        session_local_path = _session_local_storage_path(result.get("allowed_roots") or [], session_name)
+        if session_local_path is not None:
+            ensure_parent(session_local_path).write_bytes(path.read_bytes())
+            result = _run_pw_command_checked(session_name, "state-load", str(session_local_path))
+    if not result["ok"]:
+        storage_state["last_restore_status"] = "failed"
+        storage_state["last_restore_error"] = result.get("error")
+        storage_state["exists"] = path.exists()
+        if session_local_path is not None:
+            storage_state["session_local_path"] = str(session_local_path)
+        return storage_state
+
+    time.sleep(0.5)
+    landed_url, landed_title = navigate_within_session(session_name, start_url, wait_seconds=1.5)
+    snapshot_output = run_pw_command(session_name, "snapshot")
+    current_url, page_title = parse_page_metadata(snapshot_output)
+    storage_state["last_restore_status"] = "restored"
+    storage_state["exists"] = True
+    storage_state["saved_at"] = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).astimezone().isoformat()
+    storage_state["current_url"] = current_url or landed_url
+    storage_state["page_title"] = page_title or landed_title
+    if session_local_path is not None:
+        storage_state["session_local_path"] = str(session_local_path)
+    return storage_state
+
+
+def save_auth_storage_state(
+    session_name: str,
+    existing_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    storage_state = current_storage_state(session_name, existing_state)
+    storage_state["last_save_at"] = now_iso()
+    storage_state["last_save_error"] = None
+    path = Path(str(storage_state.get("path") or ""))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    session_local_path: Path | None = None
+    result = _run_pw_command_checked(session_name, "state-save", str(path))
+    if result.get("ok") and not path.exists():
+        result = {
+            "ok": False,
+            "error": f"Playwright state-save returned success but did not create `{path}`.",
+            "allowed_roots": [],
+        }
+    if not result["ok"]:
+        session_local_path = _session_local_storage_path(result.get("allowed_roots") or [], session_name)
+        if session_local_path is not None:
+            ensure_parent(session_local_path)
+            retry = _run_pw_command_checked(session_name, "state-save", str(session_local_path))
+            if retry.get("ok") and session_local_path.exists():
+                ensure_parent(path).write_bytes(session_local_path.read_bytes())
+                result = retry
+            else:
+                result = retry
+    if result.get("ok") and path.exists():
+        storage_state["last_save_status"] = "saved"
+        storage_state["exists"] = True
+        storage_state["saved_at"] = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).astimezone().isoformat()
+        if session_local_path is not None:
+            storage_state["session_local_path"] = str(session_local_path)
+        return storage_state
+
+    storage_state["last_save_status"] = "failed"
+    storage_state["last_save_error"] = result.get("error")
+    storage_state["exists"] = path.exists()
+    if session_local_path is not None:
+        storage_state["session_local_path"] = str(session_local_path)
+    return storage_state
 
 
 def artifact_record(state: dict[str, Any], artifact_id: str) -> dict[str, Any]:
@@ -600,18 +806,41 @@ def auto_enqueue_publish_ready(*, queued_by: str = "phase2_sidecar_auto_enqueue"
     }
 
 
-def ensure_browser_session(session_name: str, start_url: str) -> dict[str, Any]:
+def ensure_browser_session(
+    session_name: str,
+    start_url: str,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    policy = policy or load_execution_policy()
     reused = session_is_open(session_name)
+    storage_state = current_storage_state(session_name)
     if not reused:
-        run_pw_command(session_name, "open", start_url, "--headed")
+        run_pw_command(session_name, "open", "about:blank", "--headed")
         time.sleep(2)
-    snapshot_output = run_pw_command(session_name, "snapshot")
-    current_url, page_title = parse_page_metadata(snapshot_output)
+        if policy.get("auth_storage_state_enabled") and policy.get("auth_storage_restore_on_open"):
+            storage_state = restore_auth_storage_state(
+                session_name,
+                start_url,
+                reason="session_reopen",
+                existing_state=storage_state,
+            )
+        if not storage_state.get("current_url"):
+            landed_url, landed_title = navigate_within_session(session_name, start_url, wait_seconds=1.5)
+            snapshot_output = run_pw_command(session_name, "snapshot")
+            current_url, page_title = parse_page_metadata(snapshot_output)
+            storage_state["current_url"] = current_url or landed_url
+            storage_state["page_title"] = page_title or landed_title
+    else:
+        snapshot_output = run_pw_command(session_name, "snapshot")
+        current_url, page_title = parse_page_metadata(snapshot_output)
+        storage_state["current_url"] = current_url
+        storage_state["page_title"] = page_title
     return {
         "session_name": session_name,
         "reused_existing_session": reused,
-        "current_url": current_url,
-        "page_title": page_title,
+        "current_url": storage_state.get("current_url"),
+        "page_title": storage_state.get("page_title"),
+        "storage_state": storage_state,
     }
 
 
@@ -632,19 +861,49 @@ def inspect_auth_state(session_name: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {"signInVisible": False, "sellerControlsVisible": False}
 
 
-def ensure_authenticated_session(session_name: str, start_url: str) -> dict[str, Any]:
-    meta = ensure_browser_session(session_name, start_url)
+def ensure_authenticated_session(
+    session_name: str,
+    start_url: str,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    policy = policy or load_execution_policy()
+    meta = ensure_browser_session(session_name, start_url, policy=policy)
     current_url = str(meta.get("current_url") or "")
-    if "/signin" in current_url.lower():
-        raise RuntimeError(
-            f"Etsy seller session `{session_name}` is not authenticated. Sign in again in that browser session before retrying."
-        )
     auth_probe = inspect_auth_state(session_name)
     meta["auth_probe"] = auth_probe
-    if auth_probe.get("signInVisible"):
+    if is_signed_out_state(current_url, auth_probe):
+        storage_state = current_storage_state(session_name, meta.get("storage_state"))
+        restored_on_open = (
+            storage_state.get("last_restore_reason") == "session_reopen"
+            and storage_state.get("last_restore_status") == "restored"
+        )
+        if (
+            policy.get("auth_storage_state_enabled")
+            and policy.get("auth_storage_restore_on_auth_failure")
+            and not restored_on_open
+        ):
+            storage_state = restore_auth_storage_state(
+                session_name,
+                start_url,
+                reason="auth_recovery",
+                existing_state=storage_state,
+            )
+            meta["storage_state"] = storage_state
+            current_url = str(storage_state.get("current_url") or current_url)
+            auth_probe = inspect_auth_state(session_name)
+            meta["auth_probe_after_restore"] = auth_probe
+            meta["current_url"] = current_url
+            meta["page_title"] = storage_state.get("page_title") or meta.get("page_title")
+
+    if is_signed_out_state(current_url, auth_probe):
         raise RuntimeError(
             f"Etsy seller session `{session_name}` is showing a public signed-out view. Sign in again in that browser session before retrying."
         )
+
+    storage_state = current_storage_state(session_name, meta.get("storage_state"))
+    if policy.get("auth_storage_state_enabled") and policy.get("auth_storage_save_on_healthy"):
+        storage_state = save_auth_storage_state(session_name, storage_state)
+    meta["storage_state"] = storage_state
     return meta
 
 
@@ -1001,7 +1260,7 @@ def mark_auth_healthy(auth_state: dict[str, Any], session_name: str, session_met
     auth_state["last_error"] = None
     auth_state["next_retry_after"] = None
     auth_state["cleared_at"] = now
-    return auth_state
+    return merge_storage_state(auth_state, session_name, session_meta.get("storage_state"))
 
 
 def mark_auth_blocked(
@@ -1011,6 +1270,7 @@ def mark_auth_blocked(
     error_text: str,
     policy: dict[str, Any],
     current_url: str | None = None,
+    storage_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = now_iso()
     if not auth_state.get("blocked_at"):
@@ -1024,7 +1284,7 @@ def mark_auth_blocked(
     auth_state["next_retry_after"] = (
         datetime.now(timezone.utc).astimezone() + timedelta(seconds=delay_seconds)
     ).isoformat()
-    return auth_state
+    return merge_storage_state(auth_state, session_name, storage_state)
 
 
 def maybe_send_auth_alert(auth_state: dict[str, Any], session_name: str, error_text: str, policy: dict[str, Any]) -> dict[str, Any] | None:
@@ -1189,6 +1449,7 @@ def handle_auth_blocked_attempt(
         error_text=str(attempt.get("error") or "Etsy auth is required."),
         policy=policy,
         current_url=str((session_meta or {}).get("current_url") or ""),
+        storage_state=(session_meta or {}).get("storage_state") if isinstance(session_meta, dict) else None,
     )
     alert = maybe_send_auth_alert(auth_state, session_name, str(attempt.get("error") or ""), policy)
     save_auth_state(auth_state)
@@ -1239,7 +1500,7 @@ def prepare_auth_for_drain(policy: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        session_meta = ensure_authenticated_session(session_name, start_url)
+        session_meta = ensure_authenticated_session(session_name, start_url, policy=policy)
     except Exception as exc:  # noqa: BLE001
         if not is_auth_error(exc):
             raise
@@ -1248,6 +1509,7 @@ def prepare_auth_for_drain(policy: dict[str, Any]) -> dict[str, Any]:
             session_name=session_name,
             error_text=str(exc),
             policy=policy,
+            storage_state=auth_state.get("storage_state"),
         )
         alert = maybe_send_auth_alert(auth_state, session_name, str(exc), policy)
         save_auth_state(auth_state)
@@ -1276,8 +1538,9 @@ def prepare_review_row_for_execution(
     session_name: str,
     decision: dict[str, Any],
     attempt: dict[str, Any],
+    policy: dict[str, Any],
 ) -> tuple[str, str]:
-    session_meta = ensure_authenticated_session(session_name, choose_session()[1])
+    session_meta = ensure_authenticated_session(session_name, choose_session()[1], policy=policy)
     attempt["session"] = session_meta
 
     navigation = navigate_to_reviews_surface(session_name)
@@ -1458,10 +1721,10 @@ def run_dry_run_fill(
     save_queue_state(queue_state)
 
     try:
-        auth_meta = ensure_authenticated_session(session_name, start_url)
+        auth_meta = ensure_authenticated_session(session_name, start_url, policy=policy)
         auth_state = mark_auth_healthy(load_auth_state(), session_name, auth_meta)
         save_auth_state(auth_state)
-        expected_transaction_id, _ = prepare_review_row_for_execution(session_name, decision, attempt)
+        expected_transaction_id, _ = prepare_review_row_for_execution(session_name, decision, attempt, policy)
 
         fill_result = fill_reply_text_without_submit(
             session_name,
@@ -1622,10 +1885,10 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = True) -> dict
     save_queue_state(queue_state)
 
     try:
-        auth_meta = ensure_authenticated_session(session_name, start_url)
+        auth_meta = ensure_authenticated_session(session_name, start_url, policy=policy)
         auth_state = mark_auth_healthy(load_auth_state(), session_name, auth_meta)
         save_auth_state(auth_state)
-        expected_transaction_id, _ = prepare_review_row_for_execution(session_name, decision, attempt)
+        expected_transaction_id, _ = prepare_review_row_for_execution(session_name, decision, attempt, policy)
         approved_reply_text = str(decision.get("approved_reply_text") or "")
 
         fill_result = fill_reply_text_without_submit(session_name, expected_transaction_id, approved_reply_text)
