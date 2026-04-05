@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "mode": "standalone_notifier",
+  "env_file": "/Users/philtullai/ai-agents/duckAgent/.env",
+  "smtp": {
+    "host_env_precedence": [
+      "SMTP_HOST"
+    ],
+    "port_env_precedence": [
+      "SMTP_PORT"
+    ],
+    "user_env_precedence": [
+      "SMTP_USER"
+    ],
+    "password_env_precedence": [
+      "SMTP_PASS"
+    ],
+    "to_env_precedence": [
+      "EMAIL_TO",
+      "SMTP_USER"
+    ],
+    "default_port": 587,
+    "use_starttls": true
+  },
+  "subjects": {
+    "digest": "[OpenClaw Digest] <date>",
+    "trend_digest": "[OpenClaw Trends] <date>",
+    "urgent": "[OpenClaw Urgent] <artifact_id>",
+    "phase_readiness": "[OpenClaw Phase Readiness] <week>"
+  },
+  "whatsapp": {
+    "enabled": true,
+    "target": "+18148124112",
+    "docker_path": "/usr/local/bin/docker",
+    "gateway_container": "openclaw-openclaw-gateway-1"
+  }
+}

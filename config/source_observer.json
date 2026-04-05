@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "mode": "passive_read_only",
+  "polling": {
+    "file_sources_seconds": 300,
+    "mailbox_seconds": 300,
+    "phase_readiness_day": "sunday",
+    "phase_readiness_hour_local": 18
+  },
+  "hashing": {
+    "algorithm": "sha256",
+    "text_encoding": "utf-8",
+    "normalize_newlines": true
+  },
+  "mailbox": {
+    "env_file": "/Users/philtullai/ai-agents/duckAgent/.env",
+    "bootstrap_message_limit": 75,
+    "default_folders": [
+      "$IMAP_FOLDER",
+      "INBOX"
+    ],
+    "host_env_precedence": [
+      "IMAP_HOST",
+      "SMTP_HOST"
+    ],
+    "user_env_precedence": [
+      "IMAP_USER",
+      "SMTP_USER"
+    ],
+    "password_env_precedence": [
+      "IMAP_PASS",
+      "SMTP_PASS"
+    ],
+    "port_env_precedence": [
+      "IMAP_PORT"
+    ],
+    "default_ssl_port": 993,
+    "default_starttls_port": 143
+  },
+  "sources": [
+    {
+      "id": "duckagent_cache",
+      "type": "directory",
+      "mode": "read_only",
+      "path": "/Users/philtullai/ai-agents/duckAgent/cache",
+      "include": [
+        "weekly_insights.json",
+        "product_recommendations.json",
+        "products_cache.json",
+        "publication_cache.json",
+        "reddit_signal_history.json"
+      ]
+    },
+    {
+      "id": "duckagent_runs",
+      "type": "directory",
+      "mode": "read_only",
+      "path": "/Users/philtullai/ai-agents/duckAgent/runs",
+      "include_globs": [
+        "**/state_competitor.json",
+        "**/state_reviews.json",
+        "**/state_newduck.json",
+        "**/state_weekly.json",
+        "**/assets/*"
+      ]
+    },
+    {
+      "id": "duckagent_logs",
+      "type": "directory",
+      "mode": "read_only",
+      "path": "/Users/philtullai/ai-agents/duckAgent/logs",
+      "include_globs": [
+        "*.log",
+        "*.out"
+      ]
+    },
+    {
+      "id": "duckagent_mailbox",
+      "type": "mailbox",
+      "mode": "read_only",
+      "transport": "imap",
+      "purpose": [
+        "approval_emails",
+        "review_summary_emails",
+        "customer_or_platform_emails"
+      ]
+    }
+  ]
+}

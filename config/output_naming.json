@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "patterns": {
+    "trend_json": "output/trend_rankings/trend__<theme>__<date>.json",
+    "trend_md": "output/trend_rankings/trend__<theme>__<date>.md",
+    "trend_digest_json": "output/digests/trend_digest__YYYY-MM-DD.json",
+    "trend_digest_md": "output/digests/trend_digest__YYYY-MM-DD.md",
+    "quality_gate_json": "output/quality_gates/publish__<flow>__<run_id>__<artifact_slug>.json",
+    "quality_gate_md": "output/quality_gates/publish__<flow>__<run_id>__<artifact_slug>.md",
+    "customer_json": "output/customer_intelligence/customer__<channel>__<artifact_id>.json",
+    "customer_md": "output/customer_intelligence/customer__<channel>__<artifact_id>.md",
+    "digest_json": "output/digests/digest__YYYY-MM-DD.json",
+    "digest_md": "output/digests/digest__YYYY-MM-DD.md",
+    "review_queue_json": "output/digests/review_queue__YYYY-MM-DD.json",
+    "review_queue_md": "output/digests/review_queue__YYYY-MM-DD.md",
+    "operator_queue_json": "output/operator/queue.json",
+    "operator_queue_md": "output/operator/queue.md",
+    "operator_current_json": "output/operator/current_review.json",
+    "operator_current_md": "output/operator/current_review.md",
+    "operator_detail_json": "output/operator/review__<short_id>.json",
+    "operator_detail_md": "output/operator/review__<short_id>.md",
+    "discovery_json": "output/discovery/review_reply_discovery__<run_id>__<artifact_slug>.json",
+    "discovery_md": "output/discovery/review_reply_discovery__<run_id>__<artifact_slug>.md",
+    "execution_attempt_json": "output/execution/review_reply_execution__<run_id>__<artifact_slug>__<attempt_id>.json",
+    "execution_attempt_md": "output/execution/review_reply_execution__<run_id>__<artifact_slug>__<attempt_id>.md",
+    "urgent_json": "output/digests/urgent__YYYY-MM-DDTHHMMSS__<artifact_id>.json",
+    "urgent_md": "output/digests/urgent__YYYY-MM-DDTHHMMSS__<artifact_id>.md",
+    "phase_readiness_json": "output/digests/phase_readiness__YYYY-WW.json",
+    "phase_readiness_md": "output/digests/phase_readiness__YYYY-WW.md"
+  }
+}

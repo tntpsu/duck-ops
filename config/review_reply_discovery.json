@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "entry_points": [
+    {
+      "id": "seller_dashboard",
+      "url": "https://www.etsy.com/your/shops/me/dashboard",
+      "session_name": "esd",
+      "notes": "Preferred signed-in seller entry point."
+    },
+    {
+      "id": "seller_shop_root",
+      "url": "https://www.etsy.com/your/shops/me",
+      "session_name": "esr",
+      "notes": "Fallback seller root."
+    },
+    {
+      "id": "legacy_reviews",
+      "url": "https://www.etsy.com/your/shops/me/reviews",
+      "session_name": "elr",
+      "notes": "Legacy direct review path. Expected to fail closed if Etsy has changed routes."
+    }
+  ],
+  "signals": {
+    "sign_in_url_fragments": [
+      "/signin"
+    ],
+    "not_found_text_fragments": [
+      "uh oh!",
+      "page you were looking for was not found"
+    ],
+    "review_text_fragments": [
+      "reviews",
+      "shop reviews",
+      "feedback"
+    ]
+  }
+}

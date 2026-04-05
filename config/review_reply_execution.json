@@ -1,0 +1,12 @@
+{
+  "auto_execution_enabled": true,
+  "auto_queue_publish_ready_positive": true,
+  "auto_queue_requires_browser_approval": true,
+  "auto_drain_enabled": true,
+  "auto_drain_max_submits_per_run": 3,
+  "auto_drain_close_browser_after_run": false,
+  "auto_drain_send_session_summary": true,
+  "stop_after_first_failure": true,
+  "auth_block_retry_delay_seconds": 1800,
+  "auth_alert_cooldown_seconds": 21600
+}
