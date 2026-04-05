@@ -75,6 +75,13 @@ These stay local on this Mac and should not be treated as git homes:
   `.git.legacy-disabled` so that legacy folder no longer behaves like an active duck workspace repo
 - active launchd jobs and runtime scripts now point directly at `/Users/philtullai/ai-agents/duck-ops`
 
+## Later Cleanup
+
+- after you are confident nothing useful remains in the old historical workspace, archive or delete
+  `/Users/philtullai/ai-agents/openclaw/workspace`
+- before deleting it, double-check whether `duck_phase1/` or the old markdown notes still contain
+  anything you want to preserve elsewhere
+
 ## Practical Rule Of Thumb
 
 - if the change is about ducks, operator decisions, review execution, or duck-specific config, it
