@@ -1345,7 +1345,7 @@ def normalize_publish_candidates(
                 "source_refs": [{"path": str(path), "source_type": "state_weekly"}],
                 "candidate_summary": {
                     "title": "Weekly Sale Playbook",
-                    "body": playbook.get("strategic_summary"),
+                    "body": playbook.get("approval_summary") or playbook.get("strategic_summary"),
                     "images": [],
                     "platform_targets": ["shopify", "etsy"],
                     "publish_token": path.parent.name,

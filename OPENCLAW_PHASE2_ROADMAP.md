@@ -1492,6 +1492,10 @@ Current implementation note:
 - the WhatsApp operator bridge now tracks a durable `last_processed_message_id` cursor instead of relying only on a fixed 500-id memory window, which prevents old operator commands from replaying when the session transcript grows
 - operator cards now explicitly state what the approval means, so a review-story/social approval is clearly distinguished from a customer-reply approval
 - weekly sale cards now pull the concrete sale targets and discounts from DuckAgent's structured `sale_playbook`, so the approval message shows what discounts and products the human is actually agreeing to
+- weekly sale cards now explicitly say when OpenClaw's objection is mainly "too incomplete / too vague to approve safely" instead of "the sale strategy is wrong"
+- weekly sale `suggest changes` and `rewrite` now return a tightened sale-plan version so the operator can see the concrete changes OpenClaw wants without guessing
+- DuckAgent weekly sale generation now finishes with a deterministic `approval_summary`, normalized platforms/discounts, and resolved Shopify product IDs so the playbook is closer to operator-ready before OpenClaw touches it
+- OpenClaw now reads that richer weekly-sale `approval_summary` from `state_weekly.json` instead of collapsing the artifact down to the one-line strategic summary
 - trend review carry-forward now suppresses semantically-close sibling variants like `flamingo duck` versus `pink flamingo duck` when the prior reviewed resolution still applies
 - daily digests now separate `new decisions this run` from `still pending review`, and no longer present already-reviewed items as if they were new
 - bridge progress is now written after each handled message so a long backlog or interrupted run cannot replay the same stale commands for minutes

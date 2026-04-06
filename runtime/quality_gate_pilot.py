@@ -35,7 +35,7 @@ OUTPUT_DIR = ROOT / "output"
 PUBLISH_CANDIDATES_PATH = NORMALIZED_DIR / "publish_candidates.json"
 DECISION_HISTORY_PATH = STATE_DIR / "decision_history.jsonl"
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
-EVALUATOR_VERSION = 3
+EVALUATOR_VERSION = 4
 
 
 def now_iso() -> str:
@@ -137,6 +137,11 @@ def default_suggestions(flow: str) -> list[str]:
         return [
             "Keep private recovery replies empathetic and specific about the remedy without promising more than you intend to do.",
             "Preserve the order or transaction reference so follow-up actions can be tied back to the exact customer case.",
+        ]
+    if flow == "weekly_sale":
+        return [
+            "Keep the final campaign summary concise enough that the publish recommendation is readable without parsing email scaffolding.",
+            "Preserve the exact sale actions in a deterministic summary so the operator can approve the plan without opening the raw email.",
         ]
     return [
         "Preserve the sale playbook as a structured state artifact so the gate can inspect the actual recommended actions instead of email formatting.",
@@ -415,6 +420,8 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
     body = summary.get("body") or ""
     title = summary.get("title") or "unknown"
     body_len = len(body)
+    publish_token = str(summary.get("publish_token") or "").strip()
+    source_mode = str(notes.get("source_mode") or "").strip()
     trend_refs = supporting.get("trend_refs") or []
     catalog_overlap = supporting.get("catalog_overlap") or []
     source_refs = candidate.get("source_refs") or []
@@ -545,6 +552,8 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
         clarity += 2
     if "[PUBLISH:" in body:
         clarity += 1
+    if flow == "weekly_sale" and source_mode == "state_file" and publish_token:
+        clarity += 1
     if body_has_css_noise(body):
         clarity -= 4
         suggestions.append("Strip CSS and email wrapper noise before using this artifact as the final publish-review surface.")
@@ -571,6 +580,18 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
         conversion += 3
     if flow == "weekly_sale" and "strategic summary" in body.lower():
         conversion += 4
+    if flow == "weekly_sale":
+        sale_action_markers = [
+            "theme of the week:",
+            "market match:",
+            "momentum boosters:",
+            "re-engagement:",
+        ]
+        marker_count = sum(marker in body.lower() for marker in sale_action_markers)
+        if marker_count >= 4:
+            conversion += 4
+        elif marker_count >= 2:
+            conversion += 2
     if summary.get("platform_variants"):
         conversion += 2
     conversion = int(clamp(conversion, 0, 15))
@@ -620,7 +641,7 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
         suggestions.append("Re-run the weekly flow so the sale playbook reflects the current week before publishing.")
     if flow == "newduck" and not summary.get("images"):
         suggestions.append("Preserve or attach the final review images so the gate can verify the full listing package next time.")
-    if flow == "weekly_sale" and "[PUBLISH:" not in body:
+    if flow == "weekly_sale" and "[PUBLISH:" not in body and not publish_token:
         suggestions.append("Ensure the final review artifact carries a publish token so approval can be traced back to the exact run.")
 
     if fail_closed:

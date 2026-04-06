@@ -586,6 +586,108 @@ def weekly_sale_summary_lines(item: dict[str, Any]) -> list[str]:
     return lines if len(lines) > 1 else []
 
 
+def weekly_sale_issue_summary_lines(item: dict[str, Any]) -> list[str]:
+    if str(item.get("flow") or "") != "weekly_sale":
+        return []
+    metadata = item.get("quality_gate_metadata") or {}
+    component_scores = metadata.get("component_scores") or {}
+    fail_closed = [str(reason).strip() for reason in (metadata.get("fail_closed") or []) if str(reason).strip()]
+    clarity_score = int(component_scores.get("clarity") or 0)
+    conversion_score = int(component_scores.get("conversion_quality") or 0)
+
+    lines = ["", "OpenClaw concern:"]
+    if fail_closed or clarity_score <= 5 or conversion_score <= 5:
+        lines.append("- This looks more incomplete than strategically wrong.")
+        lines.append("- OpenClaw mostly wants the exact sale actions surfaced clearly enough to approve safely.")
+        if fail_closed:
+            lines.extend(f"- {reason}" for reason in fail_closed[:2])
+        return lines
+
+    lines.append("- OpenClaw thinks the current sale plan needs revision before approval.")
+    return lines
+
+
+def weekly_sale_change_lines(item: dict[str, Any]) -> list[str]:
+    if str(item.get("flow") or "") != "weekly_sale":
+        return []
+    sale_playbook = load_weekly_sale_playbook(item.get("run_id"))
+    suggestions: list[str] = []
+    metadata = item.get("quality_gate_metadata") or {}
+    component_scores = metadata.get("component_scores") or {}
+    clarity_score = int(component_scores.get("clarity") or 0)
+    conversion_score = int(component_scores.get("conversion_quality") or 0)
+    fail_closed = [str(reason).strip() for reason in (metadata.get("fail_closed") or []) if str(reason).strip()]
+
+    if clarity_score <= 5 or fail_closed:
+        suggestions.append("Keep the current targets and discounts, but surface the exact sale actions directly instead of only the strategic summary.")
+    if conversion_score <= 5:
+        suggestions.append("Lead with the theme-of-the-week sale first, then the top market-match and momentum items so the plan reads like concrete actions.")
+
+    theme = sale_playbook.get("theme_of_the_week") if isinstance(sale_playbook, dict) else {}
+    if isinstance(theme, dict) and theme.get("name"):
+        bits = [str(theme.get("name")).strip()]
+        if theme.get("discount"):
+            bits.append(f"{theme.get('discount')} off")
+        if theme.get("platform"):
+            bits.append(str(theme.get("platform")).strip())
+        suggestions.append("Make the main sale explicit: " + " | ".join(bit for bit in bits if bit))
+
+    for explicit in item.get("improvement_suggestions") or []:
+        text = str(explicit).strip()
+        if text:
+            suggestions.append(text)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for suggestion in suggestions:
+        if suggestion not in seen:
+            deduped.append(suggestion)
+            seen.add(suggestion)
+    return deduped[:5]
+
+
+def build_weekly_sale_rewrite_text(item: dict[str, Any], hint: str = "") -> str | None:
+    if str(item.get("flow") or "") != "weekly_sale":
+        return None
+    sale_playbook = load_weekly_sale_playbook(item.get("run_id"))
+    if not sale_playbook:
+        return None
+
+    hint_text = normalize_operator_note(hint).lower()
+    shorter = "short" in hint_text
+
+    lines: list[str] = []
+    strategic_summary = str(sale_playbook.get("strategic_summary") or "").strip()
+    theme = sale_playbook.get("theme_of_the_week") or {}
+    theme_name = str(theme.get("name") or "").strip()
+    theme_discount = str(theme.get("discount") or "").strip()
+    theme_platform = str(theme.get("platform") or "").strip()
+    if theme_name:
+        headline_bits = [theme_name]
+        if theme_discount:
+            headline_bits.append(f"{theme_discount} off")
+        if theme_platform:
+            headline_bits.append(theme_platform)
+        lines.append("Theme of the week: " + " | ".join(headline_bits))
+    if strategic_summary and not shorter:
+        lines.append(strategic_summary)
+
+    sections = [
+        ("Market match", sale_playbook.get("market_match_recs") or [], 2 if shorter else 3),
+        ("Momentum boosters", sale_playbook.get("momentum_boosters") or [], 2 if shorter else 4),
+        ("Re-engagement", sale_playbook.get("re_engagement_recs") or [], 2 if shorter else 3),
+        ("Etsy clearance", sale_playbook.get("etsy_clearance") or [], 2 if shorter else 3),
+        ("Shopify clearance", sale_playbook.get("shopify_clearance") or [], 2 if shorter else 3),
+    ]
+    for label, entries, limit in sections:
+        if isinstance(entries, list) and entries:
+            summary = summarize_sale_entries(entries, limit=limit)
+            if summary:
+                lines.append(f"{label}: {summary}")
+
+    return "\n".join(line for line in lines if line.strip()) or None
+
+
 def build_quality_gate_items(state: dict[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for artifact_id, record in state.get("artifacts", {}).items():
@@ -821,6 +923,12 @@ def render_operator_card(item: dict[str, Any], include_help: bool = True) -> str
     ]
     lines.extend(render_preview_lines(item.get("preview")))
     lines.extend(weekly_sale_summary_lines(item))
+    if str(item.get("flow") or "") == "weekly_sale" and str(item.get("decision") or "") != "publish_ready":
+        lines.extend(weekly_sale_issue_summary_lines(item))
+        sale_changes = weekly_sale_change_lines(item)
+        if sale_changes:
+            lines.extend(["", "What OpenClaw would change now:"])
+            lines.extend(f"- {suggestion}" for suggestion in sale_changes[:4])
     lines.extend(["", "Why:"])
     lines.extend(f"{index}. {reason}" for index, reason in enumerate(summarize_reasons(item.get("reasoning") or []), start=1))
     if include_help:
@@ -889,6 +997,12 @@ def render_operator_detail(item: dict[str, Any]) -> str:
     ]
     lines.extend(render_preview_lines(item.get("preview")))
     lines.extend(weekly_sale_summary_lines(item))
+    if str(item.get("flow") or "") == "weekly_sale" and str(item.get("decision") or "") != "publish_ready":
+        lines.extend(weekly_sale_issue_summary_lines(item))
+        sale_changes = weekly_sale_change_lines(item)
+        if sale_changes:
+            lines.extend(["", "What OpenClaw would change now:"])
+            lines.extend(f"- {suggestion}" for suggestion in sale_changes[:5])
     lines.extend(["", "Reasoning:"])
     lines.extend(f"- {reason}" for reason in (item.get("reasoning") or ["No reasoning captured."]))
     suggestions = item.get("improvement_suggestions") or []
@@ -1031,6 +1145,9 @@ def private_reply_remedy_line(draft_text: str) -> str:
 
 
 def build_rewrite_suggestion_text(item: dict[str, Any], hint: str = "") -> str | None:
+    if str(item.get("flow") or "") == "weekly_sale":
+        return build_weekly_sale_rewrite_text(item, hint=hint)
+
     if item.get("artifact_type") != "review_reply":
         return None
 
@@ -1077,8 +1194,25 @@ def build_rewrite_suggestion_text(item: dict[str, Any], hint: str = "") -> str |
 
 
 def render_rewrite_suggestion(item: dict[str, Any], hint: str = "") -> str:
+    if str(item.get("flow") or "") == "weekly_sale":
+        rewrite_text = build_weekly_sale_rewrite_text(item, hint=hint)
+        if not rewrite_text:
+            return "I couldn't build a rewritten sale playbook for this item yet."
+        hint_suffix = f" ({normalize_operator_note(hint)})" if normalize_operator_note(hint) else ""
+        return "\n".join(
+            [
+                f"OpenClaw Rewrite {item['short_id']}{hint_suffix}",
+                f"{item.get('title') or item.get('artifact_id')}",
+                "",
+                "Suggested revised sale plan:",
+                rewrite_text,
+                "",
+                f"If this is the direction you want, reply `approve {item['short_id']} because use rewrite`.",
+            ]
+        )
+
     if item.get("artifact_type") != "review_reply":
-        return "That command only works on review-reply items. For trends, use `why` or `suggest changes`."
+        return "That command only works on review-reply and weekly-sale items. For trends, use `why` or `suggest changes`."
 
     rewrite_text = build_rewrite_suggestion_text(item, hint=hint)
     if not rewrite_text:
@@ -1158,6 +1292,22 @@ def render_change_suggestions(item: dict[str, Any]) -> str:
         "",
         "Suggested changes:",
     ]
+    if str(item.get("flow") or "") == "weekly_sale":
+        lines.extend(f"- {suggestion}" for suggestion in weekly_sale_change_lines(item))
+        issue_lines = weekly_sale_issue_summary_lines(item)
+        if issue_lines:
+            lines.extend(issue_lines)
+        rewrite_text = build_weekly_sale_rewrite_text(item)
+        if rewrite_text:
+            lines.extend(
+                [
+                    "",
+                    "Suggested revised sale plan:",
+                    rewrite_text,
+                ]
+            )
+        return "\n".join(lines)
+
     lines.extend(f"- {suggestion}" for suggestion in derive_change_suggestions(item))
     preview = item.get("preview") or {}
     proposed_label = preview.get("proposed_label") or "Draft"

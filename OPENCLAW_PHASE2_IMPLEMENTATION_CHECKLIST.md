@@ -368,6 +368,10 @@ Soak gate before moving to the next step:
 - [x] If the operator responds with `approve`, enqueue the exact approved reply text for execution.
 - [x] Keep operator notes on exceptions and overrides.
 - [x] The operator lane can return a concrete `rewrite` suggestion for weak review replies.
+- [x] Weekly sale playbook cards now say when OpenClaw mainly thinks the artifact is incomplete / too vague rather than strategically wrong.
+- [x] Weekly sale `suggest changes` and `rewrite` now return a tightened sale-plan version instead of only generic feedback.
+- [x] DuckAgent weekly sale playbooks now generate a deterministic `approval_summary`, normalize discount/platform formatting, and resolve Shopify product IDs before review.
+- [x] OpenClaw now prefers DuckAgent's structured weekly-sale `approval_summary` from `state_weekly.json` over the one-line strategic summary when building publish candidates.
 
 ### 4. Deterministic Etsy executor
 

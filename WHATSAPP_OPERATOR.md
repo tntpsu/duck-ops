@@ -103,6 +103,11 @@ python3 /home/node/.duck-ops/runtime/review_loop.py message
 - If the human disagrees, help them record the decision they actually want.
 - Make the approval intent explicit in the card itself, especially distinguishing social-post approvals from customer-reply approvals.
 - For weekly sale playbooks, include the concrete sale targets and discounts so the human can see what sale actions they are approving.
+- For weekly sale playbooks, say clearly whether OpenClaw thinks the issue is:
+  - the sale strategy itself
+  - or mainly that the artifact is too incomplete / too vague to approve safely
+- `suggest changes` for weekly sale playbooks should now include the concrete sale changes OpenClaw would make plus a tightened sale-plan version.
+- `rewrite` now works for weekly sale playbooks too and returns a revised sale-plan summary, not just review replies.
 - Treat `approve`, `needs changes`, and `discard` as the human's real review decision.
 - `agree` means "I accept OpenClaw's recommendation."
 - `approve because use rewrite` means "approve the rewritten reply instead of the original draft."
