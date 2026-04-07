@@ -442,6 +442,58 @@ Soak gate before moving to the next step:
 
 ## Phase 4 Checklist: Customer Intelligence
 
+Companion planning doc:
+
+- `CUSTOMER_INTERACTION_AGENT_PLAN.md`
+
+### 0. Foundation implemented
+
+- [x] Formalize `customer_case`, `custom_design_case`, and `print_queue_candidate` contracts.
+- [x] Map current DuckAgent review, mailbox, and weekly-insight data into those contracts.
+- [x] Write a staged operator-facing queue view to:
+  - `state/customer_interaction_queue.json`
+  - `output/operator/customer_interaction_queue.md`
+- [x] Keep all customer and print actions staged or operator-approved in this first slice.
+- [x] Suppress low-signal customer noise and collapse Etsy conversation emails into one queue item per customer thread.
+- [x] Add explicit `context_state`, `response_recommendation`, and `recovery_recommendation` structure to `customer_case`.
+- [x] Add first-pass Etsy order and tracking enrichment from order emails and cached Etsy receipt snapshots.
+- [x] Add first-pass `resolution_enrichment` on `customer_case` from:
+  - Etsy receipt refund status
+  - Duck Ops public review-reply execution history
+  - Etsy shipment-count history as a possible resend signal
+- [x] Stage explicit customer action packets under:
+  - `state/customer_action_packets.json`
+  - `output/operator/customer_action_packets.md`
+- [x] Snapshot open Etsy and Shopify orders for nightly operations under:
+  - `state/normalized/etsy_open_orders_snapshot.json`
+  - `state/normalized/shopify_open_orders_snapshot.json`
+  - `state/normalized/packing_summary.json`
+- [x] Write a nightly action summary preview under:
+  - `state/nightly_action_summary.json`
+  - `output/operator/nightly_action_summary.md`
+- [x] Shape the nightly action summary around:
+  - customer issues needing reply
+  - buy replacement labels now
+  - orders to pack
+  - custom / novel ducks to make
+  - watch list
+- [x] Suppress clearly stale customer packets when Duck Ops can tell the refund or public review reply already happened.
+- [x] Downgrade possible prior resend history into a confirm/watch state instead of a fresh buy-label action.
+- [x] Add persisted customer recovery decision support under:
+  - `state/customer_recovery_decisions.jsonl`
+  - `runtime/customer_recovery_decisions.py`
+- [x] Apply persisted customer recovery decisions to staged customer cases, customer action packets, and nightly summaries.
+- [x] Add a lightweight customer operator lane under:
+  - `output/operator/current_customer_action.md`
+  - `output/operator/customer_queue.md`
+  - `runtime/customer_operator.py`
+- [x] Route `customer status`, `customer next`, and customer recovery decisions through `review_loop.py handle`.
+- [x] Add fail-closed USPS and Google Tasks adapter scaffolding under:
+  - `runtime/usps_tracking.py`
+  - `runtime/google_tasks_bridge.py`
+  - `state/normalized/usps_tracking_snapshot.json`
+  - `state/google_tasks_custom_design_tasks.json`
+
 ### 1. Customer signal ingestion
 
 - [ ] Normalize customer signals from:
@@ -470,6 +522,21 @@ Soak gate before moving to the next step:
   - JSON packet
 - [ ] Include draft replies in digest or owner-facing alerting as appropriate.
 - [ ] Keep final sending manual or DuckAgent-mediated.
+
+### 4. Order and tracking enrichment
+
+- [x] Match Etsy reviews by `transaction_id` into staged order context.
+- [x] Match Etsy conversations by `order #...` into staged order context.
+- [x] Carry tracking number and carrier when Etsy receipt data already has it.
+- [x] Stage nightly Etsy and Shopify open-order snapshots for `orders to pack`.
+- [x] Carry first-pass prior-resolution history into staged customer cases and customer action packets.
+- [x] Add read-only USPS adapter scaffolding and staged snapshot output.
+- [ ] Add live USPS status lookups when credentials and endpoint config exist.
+- [ ] Stage `wait_for_tracking` response packets for shipping-delay cases.
+- [x] Persist explicit customer recovery decisions so resend/refund reminders can honor approved operator choices.
+- [x] Expose customer recovery decision recording through the operator lane / WhatsApp flow.
+- [x] Add Google Tasks bridge scaffolding and staged task-state output.
+- [ ] Stage live Google Tasks API task creation for ready `custom_design_case` items once auth/config exists.
 
 ### Phase 4 acceptance
 

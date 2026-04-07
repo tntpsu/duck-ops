@@ -1641,10 +1641,74 @@ Exit criteria:
 
 ### Phase 4. Customer intelligence
 
+Companion planning doc:
+
+- `CUSTOMER_INTERACTION_AGENT_PLAN.md`
+
 Goals:
 
 - detect risk from reviews and inbound customer emails
 - recommend action and draft responses
+
+Current foundation implemented on April 6, 2026:
+
+- `customer_case`, `custom_design_case`, and `print_queue_candidate` contracts exist
+- current DuckAgent review, mailbox, and weekly-insight signals are mapped into those contracts
+- a staged operator-facing queue is written to:
+  - `state/customer_interaction_queue.json`
+  - `output/operator/customer_interaction_queue.md`
+- low-signal customer cases are hidden from the staged queue
+- Etsy conversation emails are collapsed into one queue item per customer thread
+- customer cases now carry explicit `context_state`, `response_recommendation`, and `recovery_recommendation`
+- first-pass Etsy order and tracking enrichment is staged:
+  - Etsy order-email parsing
+  - cached Etsy receipt snapshot
+  - product / receipt / shipment / tracking context on matched customer cases
+- first-pass customer-resolution history is now staged:
+  - refund history from Etsy receipt status
+  - public review-reply history from Duck Ops execution sessions
+  - possible prior resend history from multiple Etsy shipments
+- staged customer action packets now exist for the operator lane:
+  - reply
+  - refund
+  - replacement
+- stale refund/reply packets are now suppressed when Duck Ops can tell the action already happened
+- possible prior resend history is downgraded into a confirm/watch state instead of a fresh label-buy action
+- explicit customer recovery decisions are now persisted under:
+  - `state/customer_recovery_decisions.jsonl`
+  - `runtime/customer_recovery_decisions.py`
+- customer cases, action packets, and nightly summaries now honor approved operator choices such as:
+  - replacement
+  - refund
+  - wait
+  - reply_only
+- a lightweight customer operator lane now exists:
+  - `output/operator/current_customer_action.md`
+  - `output/operator/customer_queue.md`
+  - `runtime/customer_operator.py`
+- `review_loop.py handle` now routes `customer status`, `customer next`, and decisions like `replacement C301 because ...` into that lane
+- fail-closed USPS and Google Tasks bridges now exist:
+  - `runtime/usps_tracking.py`
+  - `runtime/google_tasks_bridge.py`
+  - both currently report `credentials_missing` until real auth/config is added
+- nightly operations snapshots now exist for:
+  - Etsy open orders
+  - Shopify open orders
+  - aggregated orders to pack tonight
+- a nightly action summary preview is now written with sections for:
+  - customer issues needing reply
+  - buy replacement labels now
+  - orders to pack
+  - custom / novel ducks to make
+  - watch list
+
+Immediate next slice:
+
+- add `wait_for_tracking` packets once USPS read-only status checks exist
+- make customer-case cards and nightly summaries explain whether the problem is missing context, refund/resend leaning, reply-only, or escalate
+- add real USPS credentials / endpoint config so live carrier lookups can run
+- add real Google Tasks credentials / task-list config so ready custom-design cases can create tasks
+- surface customer packets more proactively in the operator push / WhatsApp flow
 
 Exit criteria:
 

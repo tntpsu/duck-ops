@@ -80,6 +80,12 @@ Examples:
 - `suggest changes`
 - `rewrite`
 - `rewrite shorter`
+- `customer status`
+- `customer next`
+- `replacement C301 because resend approved`
+- `refund C301 because customer only wants refund`
+- `wait C301 because USPS is still moving`
+- `reply only C301 because no refund or resend needed`
 
 If the human explicitly asks for deeper rationale about an item, you may also run:
 
@@ -112,6 +118,9 @@ python3 /home/node/.duck-ops/runtime/review_loop.py message
 - `agree` means "I accept OpenClaw's recommendation."
 - `approve because use rewrite` means "approve the rewritten reply instead of the original draft."
 - For Etsy public review replies, an explicit final `approve` now queues the exact approved text for deterministic execution. `agree` only queues when it effectively means `approve` for that item.
+- Customer action packets now have their own operator lane with short ids like `C301`.
+- `replacement C301 ...`, `refund C301 ...`, `wait C301 ...`, and `reply only C301 ...` persist business recovery decisions into Duck Ops so nightly summaries stop resurfacing the same unresolved path.
+- `customer status` and `customer next` are the lightweight navigation commands for that lane.
 
 ## If The Human Asks "Why?"
 

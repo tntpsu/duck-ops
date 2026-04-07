@@ -82,6 +82,7 @@ ACTION_ALIASES = {
     "same": "same_as",
     "have": "same_as",
 }
+CUSTOMER_SHORT_ID_PATTERN = re.compile(r"^c\d+$", re.IGNORECASE)
 RECOMMENDED_ACTION_BY_DECISION = {
     "publish_ready": "approve",
     "needs_revision": "needs_changes",
@@ -1568,6 +1569,27 @@ def parse_command(text: str) -> tuple[str, str | None, str]:
     return command, target_token, note
 
 
+def should_delegate_to_customer_operator(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    lowered = raw.lower()
+    if lowered.startswith("customer "):
+        return True
+    if lowered == "customer":
+        return True
+    parts = raw.split()
+    if not parts:
+        return False
+    first = parts[0].lower()
+    if first in {"replacement", "replace", "resend", "refund", "wait", "reply", "reply_only"}:
+        if len(parts) > 1 and CUSTOMER_SHORT_ID_PATTERN.match(parts[1]):
+            return True
+    if lowered.startswith("reply only ") and len(parts) > 2 and CUSTOMER_SHORT_ID_PATTERN.match(parts[2]):
+        return True
+    return False
+
+
 def record_action(
     state_bundle: dict[str, dict[str, Any]],
     artifact_id: str,
@@ -1708,6 +1730,14 @@ def operator_help(current_item: dict[str, Any] | None = None) -> str:
         "same as [id] <your product name>",
         "status",
         "next",
+        "",
+        "Customer lane commands:",
+        "customer status",
+        "customer next",
+        "replacement C301 because ...",
+        "refund C301 because ...",
+        "wait C301 because ...",
+        "reply only C301 because ...",
     ]
     if current_item:
         lines.extend(["", "Current review:", "", render_operator_card(current_item)])
@@ -1761,6 +1791,11 @@ def render_queue_status(
 
 
 def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state: dict[str, Any], text: str) -> str:
+    if should_delegate_to_customer_operator(text):
+        from customer_operator import handle_customer_text
+
+        return handle_customer_text(text)
+
     items = build_review_items(state_bundle)
     assign_short_ids(items, operator_state)
     current_item = sync_current_item(items, operator_state)

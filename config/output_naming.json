@@ -11,6 +11,8 @@
     "customer_md": "output/customer_intelligence/customer__<channel>__<artifact_id>.md",
     "digest_json": "output/digests/digest__YYYY-MM-DD.json",
     "digest_md": "output/digests/digest__YYYY-MM-DD.md",
+    "nightly_action_summary_json": "output/digests/nightly_action_summary__YYYY-MM-DD.json",
+    "nightly_action_summary_md": "output/digests/nightly_action_summary__YYYY-MM-DD.md",
     "review_queue_json": "output/digests/review_queue__YYYY-MM-DD.json",
     "review_queue_md": "output/digests/review_queue__YYYY-MM-DD.md",
     "operator_queue_json": "output/operator/queue.json",

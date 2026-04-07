@@ -15,11 +15,20 @@ import hashlib
 import json
 import smtplib
 import subprocess
+import sys
 from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
+from customer_action_packets import build_customer_action_packets
+from customer_interaction_cases import build_customer_interaction_queue
+from nightly_action_summary import build_nightly_action_summary, render_nightly_action_summary_markdown
+from open_order_intelligence import (
+    build_etsy_open_orders_snapshot,
+    build_packing_summary,
+    build_shopify_open_orders_snapshot,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "notifier.json"
@@ -30,6 +39,64 @@ TREND_DIGEST_SIGNATURE_VERSION = 1
 QUALITY_GATE_STATE_PATH = ROOT / "state" / "quality_gate_state.json"
 OPERATOR_CURRENT_PATH = ROOT / "output" / "operator" / "current_review.json"
 WHATSAPP_PUSH_SENTINEL = "OPENCLAW_OPERATOR_PUSH"
+CUSTOMER_ACTION_PACKETS_PATH = ROOT / "state" / "customer_action_packets.json"
+CUSTOMER_CASES_PATH = ROOT / "state" / "normalized" / "customer_cases.json"
+CUSTOM_DESIGN_CASES_PATH = ROOT / "state" / "normalized" / "custom_design_cases.json"
+PRINT_QUEUE_CANDIDATES_PATH = ROOT / "state" / "normalized" / "print_queue_candidates.json"
+NIGHTLY_ACTION_SUMMARY_STATE_PATH = ROOT / "state" / "nightly_action_summary.json"
+NIGHTLY_ACTION_SUMMARY_OPERATOR_JSON_PATH = ROOT / "output" / "operator" / "nightly_action_summary.json"
+NIGHTLY_ACTION_SUMMARY_OPERATOR_MD_PATH = ROOT / "output" / "operator" / "nightly_action_summary.md"
+
+
+def refresh_nightly_action_summary_sources() -> None:
+    now_local = datetime.now().astimezone()
+    customer_cases_payload = load_json(CUSTOMER_CASES_PATH, {"items": []})
+    custom_design_payload = load_json(CUSTOM_DESIGN_CASES_PATH, {"items": []})
+    print_queue_payload = load_json(PRINT_QUEUE_CANDIDATES_PATH, {"items": []})
+    customer_queue = build_customer_interaction_queue(
+        customer_cases_payload.get("items") or [],
+        custom_design_payload.get("items") or [],
+        print_queue_payload.get("items") or [],
+    )
+    customer_issue_items = [
+        item
+        for item in customer_queue.get("items") or []
+        if item.get("item_type") == "customer_case"
+    ]
+    packet_items = build_customer_action_packets(customer_issue_items)
+    packet_payload = {
+        "generated_at": now_local.isoformat(),
+        "counts": {
+            "packets_total": len(packet_items),
+            "reply_packets": sum(1 for item in packet_items if item.get("packet_type") == "reply"),
+            "refund_packets": sum(1 for item in packet_items if item.get("packet_type") == "refund"),
+            "replacement_packets": sum(1 for item in packet_items if item.get("packet_type") == "replacement"),
+            "wait_for_tracking_packets": sum(1 for item in packet_items if item.get("packet_type") == "wait_for_tracking"),
+        },
+        "items": packet_items,
+    }
+    CUSTOMER_ACTION_PACKETS_PATH.write_text(json.dumps(packet_payload, indent=2), encoding="utf-8")
+    etsy_open_orders = build_etsy_open_orders_snapshot()
+    shopify_open_orders = build_shopify_open_orders_snapshot()
+    packing_summary = build_packing_summary(etsy_open_orders, shopify_open_orders)
+    summary_payload = build_nightly_action_summary(
+        packet_payload,
+        custom_design_payload.get("items") or [],
+        packing_summary,
+        now_local=now_local,
+    )
+    markdown = render_nightly_action_summary_markdown(summary_payload)
+    NIGHTLY_ACTION_SUMMARY_STATE_PATH.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+    NIGHTLY_ACTION_SUMMARY_OPERATOR_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    NIGHTLY_ACTION_SUMMARY_OPERATOR_JSON_PATH.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+    NIGHTLY_ACTION_SUMMARY_OPERATOR_MD_PATH.write_text(markdown + "\n", encoding="utf-8")
+    if summary_payload.get("send_window_open"):
+        summary_date = str(summary_payload.get("summary_date") or now_local.strftime("%Y-%m-%d"))
+        digest_json = OUTPUT_DIGESTS / f"nightly_action_summary__{summary_date}.json"
+        digest_md = digest_json.with_suffix(".md")
+        digest_json.parent.mkdir(parents=True, exist_ok=True)
+        digest_json.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+        digest_md.write_text(markdown + "\n", encoding="utf-8")
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -271,6 +338,22 @@ def load_sendable_artifacts(state: dict[str, Any]) -> list[dict[str, Any]]:
                     "payload": payload,
                     "send_reason": send_reason,
                     "trend_digest_signature": signature,
+                }
+            )
+
+    nightly_action_summary_path = OUTPUT_DIGESTS / f"nightly_action_summary__{today}.json"
+    nightly_key = str(nightly_action_summary_path)
+    if nightly_action_summary_path.exists() and not (state.get("sent") or {}).get(nightly_key):
+        payload = load_json(nightly_action_summary_path, {})
+        if payload.get("send_window_open"):
+            artifacts.append(
+                {
+                    "kind": "nightly_action_summary",
+                    "key": nightly_key,
+                    "json_path": nightly_action_summary_path,
+                    "md_path": md_for_json(nightly_action_summary_path),
+                    "payload": payload,
+                    "send_reason": "nightly_action_summary",
                 }
             )
 
@@ -554,6 +637,10 @@ def main() -> int:
     settings = notifier_settings()
     state = load_json(STATE_PATH, {"sent": {}})
     state.setdefault("sent", {})
+    try:
+        refresh_nightly_action_summary_sources()
+    except Exception as exc:
+        print(f"[notifier] Warning: could not refresh nightly action summary sources: {exc}", file=sys.stderr)
     state_changed = hydrate_digest_signature(state)
     state_changed = hydrate_trend_digest_signature(state) or state_changed
     artifacts = load_sendable_artifacts(state)

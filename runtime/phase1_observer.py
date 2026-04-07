@@ -29,6 +29,26 @@ from email.policy import default as email_policy
 from pathlib import Path
 from typing import Any
 
+from customer_interaction_cases import (
+    build_custom_design_cases,
+    build_customer_cases,
+    build_customer_interaction_queue,
+    build_print_queue_candidates,
+    render_customer_interaction_queue_markdown,
+)
+from customer_action_packets import build_customer_action_packets, render_customer_action_packets_markdown
+from customer_case_enrichment import enrich_customer_cases
+from customer_operator import write_customer_operator_outputs
+from customer_recovery_decisions import apply_customer_recovery_decisions
+from google_tasks_bridge import sync_ready_custom_design_cases
+from nightly_action_summary import build_nightly_action_summary, render_nightly_action_summary_markdown
+from open_order_intelligence import (
+    build_etsy_open_orders_snapshot,
+    build_packing_summary,
+    build_shopify_open_orders_snapshot,
+)
+from usps_tracking import enrich_cases_with_usps_tracking
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "config"
@@ -42,6 +62,16 @@ SOURCE_CONFIG_PATH = CONFIG_DIR / "source_observer.json"
 REGISTRY_PATH = STATE_DIR / "artifact_registry.jsonl"
 OBSERVATION_SUMMARY_PATH = STATE_DIR / "observation_summary.json"
 MAILBOX_OBSERVATIONS_PATH = NORMALIZED_DIR / "mailbox_observations.json"
+CUSTOMER_INTERACTION_QUEUE_PATH = STATE_DIR / "customer_interaction_queue.json"
+CUSTOMER_INTERACTION_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "customer_interaction_queue.json"
+CUSTOMER_INTERACTION_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "customer_interaction_queue.md"
+CUSTOMER_ACTION_PACKETS_PATH = STATE_DIR / "customer_action_packets.json"
+CUSTOMER_ACTION_PACKETS_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "customer_action_packets.json"
+CUSTOMER_ACTION_PACKETS_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "customer_action_packets.md"
+NIGHTLY_ACTION_SUMMARY_PATH = STATE_DIR / "nightly_action_summary.json"
+NIGHTLY_ACTION_SUMMARY_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "nightly_action_summary.json"
+NIGHTLY_ACTION_SUMMARY_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "nightly_action_summary.md"
+NIGHTLY_ACTION_SUMMARY_DIGEST_DIR = OUTPUT_DIR / "digests"
 
 PILOT_PUBLISH_FLOWS = {"newduck", "weekly_sale"}
 INITIAL_MAILBOX_BOOTSTRAP_LIMIT = 75
@@ -351,6 +381,115 @@ def likely_support_message(subject: str, from_line: str) -> bool:
     return any(signal in haystack for signal in signals)
 
 
+def looks_like_customer_issue_email(email_item: dict[str, Any]) -> bool:
+    subject = str(email_item.get("subject") or "")
+    from_line = str(email_item.get("from") or "")
+    body_text = str(email_item.get("body_text") or "")
+    normalized_subject = normalize_text(subject)
+    normalized_body = normalize_text(body_text)
+    normalized_from = normalize_text(from_line)
+
+    excluded_subject_terms = [
+        "daily etsy review summary",
+        "you made a sale on etsy",
+        "your etsy order",
+        "ship by",
+        "story ready",
+        "no story today",
+        "order #",
+        "congratulations on your etsy order",
+        "ordered:",
+        "review your upcoming delivery",
+        "thanks for your delivery order",
+        "we re confirming changes to your order",
+    ]
+    excluded_sender_terms = [
+        "transaction etsy com",
+        "tullaipsu gmail com",
+        "mailgun",
+        "patreon",
+        "walmart com",
+        "amazon com",
+        "tldrnewsletter com",
+        "fedex",
+        "ups",
+        "usps",
+        "sunlu",
+        "enduraflap",
+        "invoicefalcon",
+        "ticketmaster",
+        "linkedin",
+        "newsletter",
+    ]
+    excluded_body_terms = [
+        "selected review",
+        "ready to post as instagram facebook story",
+        "summary statistics",
+        "view the invoice",
+        "we ve finished processing your etsy sale",
+        "thank you for your purchase",
+        "order #",
+        "tracking number",
+        "items in your order are on the way",
+        "last items in your order are on the way",
+        "unsubscribe",
+        "manage preferences",
+        "#outlook a",
+        "fedex",
+        "sunlu",
+        "enduraflap",
+        "invoicefalcon",
+        "flo pen",
+        "claude can now take control",
+    ]
+    if any(term in normalized_subject for term in excluded_subject_terms):
+        return False
+    if any(term in normalized_from for term in excluded_sender_terms):
+        return False
+    if any(term in normalized_body for term in excluded_body_terms):
+        return False
+
+    if "etsy conversation with" in normalized_subject or "sent you a message" in normalized_body:
+        return True
+
+    customer_problem_signals = [
+        "i received",
+        "i got",
+        "my order",
+        "my duck",
+        "it arrived",
+        "it came",
+        "can you help",
+        "could you help",
+        "can you replace",
+        "could you replace",
+        "can you refund",
+        "could you refund",
+        "wrong item",
+        "missing item",
+        "refund",
+        "replacement",
+        "damaged",
+        "broken",
+        "late",
+        "cancel",
+    ]
+    first_person_markers = [
+        " i ",
+        " i m ",
+        " i ve ",
+        " my ",
+        " me ",
+        " we ",
+        " our ",
+    ]
+    has_problem_signal = any(signal in normalized_body or signal in normalized_subject for signal in customer_problem_signals)
+    has_first_person_context = any(marker in f" {normalized_body} " or marker in f" {normalized_subject} " for marker in first_person_markers)
+    if has_problem_signal and has_first_person_context:
+        return True
+    return False
+
+
 def parse_email_bytes(raw_bytes: bytes) -> dict[str, Any]:
     msg = BytesParser(policy=email_policy).parsebytes(raw_bytes)
     body_text = ""
@@ -596,6 +735,17 @@ def load_publications_index() -> dict[str, dict[str, Any]]:
         }
     write_json(NORMALIZED_DIR / "publication_index.json", {"generated_at": now_iso(), "items": publications})
     return publications
+
+
+def load_weekly_insights() -> dict[str, Any]:
+    path = Path("/Users/philtullai/ai-agents/duckAgent/cache/weekly_insights.json")
+    if not path.exists():
+        return {}
+    payload = load_json(path)
+    if isinstance(payload, dict):
+        write_json(NORMALIZED_DIR / "weekly_insights_snapshot.json", {"generated_at": now_iso(), "items": payload})
+        return payload
+    return {}
 
 
 def match_catalog(
@@ -1486,22 +1636,7 @@ def normalize_customer_signals(mailbox_items: list[dict[str, Any]]) -> list[dict
         subject_data = email_item.get("subject_metadata", {})
         if subject_data.get("flow"):
             continue
-        body_text = normalize_text(email_item.get("body_text") or "")
-        subject = email_item.get("subject") or ""
-        from_line = (email_item.get("from") or "").lower()
-        support_signals = [
-            "refund",
-            "replacement",
-            "damaged",
-            "broken",
-            "late",
-            "shipping",
-            "delivery",
-            "etsy",
-            "shopify",
-            "order",
-        ]
-        if not any(token in body_text or token in subject.lower() or token in from_line for token in support_signals):
+        if not looks_like_customer_issue_email(email_item):
             continue
         artifact_id = f"customer::mail::{email_item['uid']}"
         rows.append(
@@ -1539,6 +1674,49 @@ def normalize_customer_signals(mailbox_items: list[dict[str, Any]]) -> list[dict
 
     write_json(NORMALIZED_DIR / "customer_signals.json", {"generated_at": now_iso(), "items": rows})
     return rows
+
+
+def write_customer_interaction_queue_outputs(queue_payload: dict[str, Any]) -> None:
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H%M%S")
+    OUTPUT_DIR.joinpath("customer_intelligence").mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.joinpath("operator").mkdir(parents=True, exist_ok=True)
+    snapshot_json = OUTPUT_DIR / "customer_intelligence" / f"customer_interaction_queue__{timestamp}.json"
+    snapshot_md = OUTPUT_DIR / "customer_intelligence" / f"customer_interaction_queue__{timestamp}.md"
+    markdown = render_customer_interaction_queue_markdown(queue_payload)
+    write_json(CUSTOMER_INTERACTION_QUEUE_PATH, queue_payload)
+    write_json(snapshot_json, queue_payload)
+    write_json(CUSTOMER_INTERACTION_OPERATOR_JSON_PATH, queue_payload)
+    snapshot_md.write_text(markdown + "\n", encoding="utf-8")
+    CUSTOMER_INTERACTION_OPERATOR_MD_PATH.write_text(markdown + "\n", encoding="utf-8")
+
+
+def write_customer_action_packet_outputs(packet_payload: dict[str, Any]) -> None:
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H%M%S")
+    OUTPUT_DIR.joinpath("customer_intelligence").mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.joinpath("operator").mkdir(parents=True, exist_ok=True)
+    snapshot_json = OUTPUT_DIR / "customer_intelligence" / f"customer_action_packets__{timestamp}.json"
+    snapshot_md = OUTPUT_DIR / "customer_intelligence" / f"customer_action_packets__{timestamp}.md"
+    markdown = render_customer_action_packets_markdown(packet_payload)
+    write_json(CUSTOMER_ACTION_PACKETS_PATH, packet_payload)
+    write_json(snapshot_json, packet_payload)
+    write_json(CUSTOMER_ACTION_PACKETS_OPERATOR_JSON_PATH, packet_payload)
+    snapshot_md.write_text(markdown + "\n", encoding="utf-8")
+    CUSTOMER_ACTION_PACKETS_OPERATOR_MD_PATH.write_text(markdown + "\n", encoding="utf-8")
+
+
+def write_nightly_action_summary_outputs(summary_payload: dict[str, Any]) -> None:
+    OUTPUT_DIR.joinpath("operator").mkdir(parents=True, exist_ok=True)
+    markdown = render_nightly_action_summary_markdown(summary_payload)
+    write_json(NIGHTLY_ACTION_SUMMARY_PATH, summary_payload)
+    write_json(NIGHTLY_ACTION_SUMMARY_OPERATOR_JSON_PATH, summary_payload)
+    NIGHTLY_ACTION_SUMMARY_OPERATOR_MD_PATH.write_text(markdown + "\n", encoding="utf-8")
+
+    if summary_payload.get("send_window_open"):
+        summary_date = str(summary_payload.get("summary_date") or datetime.now().strftime("%Y-%m-%d"))
+        digest_json = NIGHTLY_ACTION_SUMMARY_DIGEST_DIR / f"nightly_action_summary__{summary_date}.json"
+        digest_md = NIGHTLY_ACTION_SUMMARY_DIGEST_DIR / f"nightly_action_summary__{summary_date}.md"
+        write_json(digest_json, summary_payload)
+        digest_md.write_text(markdown + "\n", encoding="utf-8")
 
 
 def observe_mailbox(
@@ -1717,6 +1895,15 @@ def write_observation_digest(summary: dict[str, Any]) -> None:
         f"- Trend candidates: `{summary['normalized_counts']['trend_candidates']}`",
         f"- Publish candidates: `{summary['normalized_counts']['publish_candidates']}`",
         f"- Customer signals: `{summary['normalized_counts']['customer_signals']}`",
+        f"- Customer cases: `{summary['normalized_counts']['customer_cases']}`",
+        f"- Customer action packets: `{summary['normalized_counts']['customer_action_packets']}`",
+        f"- Custom design cases: `{summary['normalized_counts']['custom_design_cases']}`",
+        f"- Print queue candidates: `{summary['normalized_counts']['print_queue_candidates']}`",
+        f"- Customer interaction queue items: `{summary['normalized_counts']['customer_interaction_queue_items']}`",
+        f"- Etsy open orders: `{summary['normalized_counts']['etsy_open_orders']}`",
+        f"- Shopify open orders: `{summary['normalized_counts']['shopify_open_orders']}`",
+        f"- Orders to pack tonight: `{summary['normalized_counts']['orders_to_pack_units']}` units across `{summary['normalized_counts']['orders_to_pack_titles']}` titles",
+        f"- Custom orders to make: `{summary['normalized_counts']['custom_orders_to_make']}`",
         f"- Mailbox status: `{summary['mailbox_status']}`",
     ]
     if summary.get("mailbox", {}).get("transport"):
@@ -1730,6 +1917,14 @@ def write_observation_digest(summary: dict[str, Any]) -> None:
         md.append("- Mailbox errors:")
         for error in summary["mailbox"]["errors"]:
             md.append(f"  - {error}")
+    enrichment = summary.get("customer_enrichment", {})
+    if enrichment:
+        counts = enrichment.get("counts", {})
+        md.append("- Customer enrichment:")
+        md.append(f"  - Etsy order-email index items: `{counts.get('email_index_items', 0)}`")
+        md.append(f"  - Etsy receipt snapshot items: `{counts.get('receipt_snapshot_items', 0)}`")
+        md.append(f"  - Email enrichment hits: `{counts.get('email_hits', 0)}`")
+        md.append(f"  - Etsy API enrichment hits: `{counts.get('etsy_api_hits', 0)}`")
     md_path.write_text("\n".join(md) + "\n", encoding="utf-8")
 
 
@@ -1774,9 +1969,54 @@ def main() -> int:
 
     products = load_products_index()
     publications = load_publications_index()
+    weekly_insights = load_weekly_insights()
     trend_candidates = normalize_trends(products, publications)
     publish_candidates = normalize_publish_candidates(mailbox_items, trend_candidates, products, publications)
     customer_signals = normalize_customer_signals(mailbox_items)
+    customer_cases = build_customer_cases(customer_signals)
+    customer_cases, customer_enrichment_summary = enrich_customer_cases(customer_cases, mailbox_items)
+    customer_cases, usps_tracking_summary = enrich_cases_with_usps_tracking(customer_cases)
+    customer_cases, customer_recovery_summary = apply_customer_recovery_decisions(customer_cases)
+    custom_design_cases = build_custom_design_cases(mailbox_items)
+    custom_design_cases, google_tasks_summary = sync_ready_custom_design_cases(custom_design_cases)
+    print_queue_candidates = build_print_queue_candidates(weekly_insights, products)
+    etsy_open_orders = build_etsy_open_orders_snapshot()
+    shopify_open_orders = build_shopify_open_orders_snapshot()
+    packing_summary = build_packing_summary(etsy_open_orders, shopify_open_orders)
+    customer_interaction_queue = build_customer_interaction_queue(
+        customer_cases,
+        custom_design_cases,
+        print_queue_candidates,
+    )
+    customer_issue_queue_items = [
+        item
+        for item in customer_interaction_queue.get("items") or []
+        if item.get("item_type") == "customer_case"
+    ]
+    customer_action_packets = {
+        "generated_at": now_iso(),
+        "counts": {},
+        "items": build_customer_action_packets(customer_issue_queue_items),
+    }
+    customer_action_packets["counts"] = {
+        "packets_total": len(customer_action_packets["items"]),
+        "reply_packets": sum(1 for item in customer_action_packets["items"] if item.get("packet_type") == "reply"),
+        "refund_packets": sum(1 for item in customer_action_packets["items"] if item.get("packet_type") == "refund"),
+        "replacement_packets": sum(1 for item in customer_action_packets["items"] if item.get("packet_type") == "replacement"),
+        "wait_for_tracking_packets": sum(1 for item in customer_action_packets["items"] if item.get("packet_type") == "wait_for_tracking"),
+    }
+    nightly_action_summary = build_nightly_action_summary(
+        customer_action_packets,
+        custom_design_cases,
+        packing_summary,
+    )
+    write_json(NORMALIZED_DIR / "customer_cases.json", {"generated_at": now_iso(), "items": customer_cases})
+    write_json(NORMALIZED_DIR / "custom_design_cases.json", {"generated_at": now_iso(), "items": custom_design_cases})
+    write_json(NORMALIZED_DIR / "print_queue_candidates.json", {"generated_at": now_iso(), "items": print_queue_candidates})
+    write_customer_action_packet_outputs(customer_action_packets)
+    write_customer_operator_outputs(customer_action_packets)
+    write_customer_interaction_queue_outputs(customer_interaction_queue)
+    write_nightly_action_summary_outputs(nightly_action_summary)
 
     summary = {
         "generated_at": now_iso(),
@@ -1796,10 +2036,27 @@ def main() -> int:
             "duckagent_mailbox": mailbox_summary.get("artifacts_total", 0),
         },
         "mailbox": mailbox_summary,
+        "customer_enrichment": customer_enrichment_summary,
+        "usps_tracking": usps_tracking_summary,
+        "customer_recovery_decisions": customer_recovery_summary,
+        "google_tasks": google_tasks_summary,
         "normalized_counts": {
             "trend_candidates": len(trend_candidates),
             "publish_candidates": len(publish_candidates),
             "customer_signals": len(customer_signals),
+            "customer_cases": len(customer_cases),
+            "customer_action_packets": len(customer_action_packets.get("items") or []),
+            "usps_live_tracking_cases": (usps_tracking_summary.get("counts") or {}).get("lookups_succeeded", 0),
+            "customer_recovery_decision_matches": (customer_recovery_summary.get("counts") or {}).get("matched_cases", 0),
+            "custom_design_cases": len(custom_design_cases),
+            "google_tasks_created": (google_tasks_summary.get("counts") or {}).get("created_tasks", 0),
+            "print_queue_candidates": len(print_queue_candidates),
+            "customer_interaction_queue_items": len(customer_interaction_queue.get("items") or []),
+            "etsy_open_orders": len(etsy_open_orders.get("items") or []),
+            "shopify_open_orders": len(shopify_open_orders.get("items") or []),
+            "orders_to_pack_titles": len(packing_summary.get("orders_to_pack") or []),
+            "orders_to_pack_units": sum(int(item.get("total_quantity") or 0) for item in packing_summary.get("orders_to_pack") or []),
+            "custom_orders_to_make": len(packing_summary.get("custom_orders_to_make") or []),
         },
     }
     write_json(OBSERVATION_SUMMARY_PATH, summary)

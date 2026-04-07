@@ -25,6 +25,7 @@
   "subjects": {
     "digest": "[OpenClaw Digest] <date>",
     "trend_digest": "[OpenClaw Trends] <date>",
+    "nightly_action_summary": "[Duck Ops Tonight] <date>",
     "urgent": "[OpenClaw Urgent] <artifact_id>",
     "phase_readiness": "[OpenClaw Phase Readiness] <week>"
   },
