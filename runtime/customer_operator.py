@@ -43,6 +43,8 @@ RESOLUTION_COMMANDS = {
     "reply": "reply_only",
     "replyonly": "reply_only",
     "reply_only": "reply_only",
+    "open": "open",
+    "browser": "open",
 }
 
 
@@ -146,6 +148,17 @@ def _packet_source_refs(packet: dict[str, Any]) -> str:
     return ", ".join(values)
 
 
+def _best_browser_url(packet: dict[str, Any]) -> str | None:
+    candidates = [str(url).strip() for url in (packet.get("browser_url_candidates") or []) if str(url).strip()]
+    for url in candidates:
+        if "etsy.com" in url and "/your/messages" not in url and "/your/account/messages" not in url:
+            return url
+    for url in candidates:
+        if "etsy.com/your/messages" in url:
+            return url
+    return candidates[0] if candidates else None
+
+
 def render_customer_card(packet: dict[str, Any] | None) -> str:
     if not packet:
         return "No customer action packets right now."
@@ -182,6 +195,10 @@ def render_customer_card(packet: dict[str, Any] | None) -> str:
             f" at `{operator_decision.get('recorded_at') or 'unknown'}`"
             f" - {operator_decision.get('note') or 'No note provided.'}"
         )
+    browser_url = _best_browser_url(packet)
+    if browser_url:
+        lines.append(f"Browser review: `customer open {packet.get('short_id')}`")
+        lines.append(f"Best browser URL: {browser_url}")
     lines.extend(
         [
             f"Source refs: {_packet_source_refs(packet)}",
@@ -191,6 +208,7 @@ def render_customer_card(packet: dict[str, Any] | None) -> str:
             f"- `refund {packet.get('short_id')} because ...`",
             f"- `wait {packet.get('short_id')} because ...`",
             f"- `reply only {packet.get('short_id')} because ...`",
+            f"- `customer open {packet.get('short_id')}`",
             "- `customer next`",
             "- `customer status`",
         ]
@@ -221,6 +239,7 @@ def render_customer_queue(items: list[dict[str, Any]], current: dict[str, Any] |
                 f"- Priority: `{item.get('priority')}`",
                 f"- Next operator action: `{item.get('next_operator_action')}`",
                 f"- Summary: {_trim_text(item.get('customer_summary'))}",
+                f"- Browser command: `customer open {item.get('short_id')}`" if _best_browser_url(item) else "- Browser command: `(none)`",
                 "",
             ]
         )
@@ -263,6 +282,10 @@ def parse_customer_command(text: str) -> tuple[str, str | None, str]:
         parts = raw.split()
         target = parts[2] if len(parts) > 2 else None
         return "show", target, ""
+    if lowered.startswith("customer open"):
+        parts = raw.split()
+        target = parts[2] if len(parts) > 2 else None
+        return "open", target, ""
     if lowered.startswith("reply only"):
         parts = raw.split()
         target = parts[2] if len(parts) > 2 else None
@@ -375,12 +398,31 @@ def handle_customer_text(text: str) -> str:
         write_customer_operator_outputs(packet_payload, operator_state)
         return render_customer_card(target)
 
+    if command == "open":
+        target = resolve_target_packet(items, operator_state, target_token)
+        if not target:
+            write_customer_operator_outputs(packet_payload, operator_state)
+            return "I couldn't find that customer packet."
+        browser_url = _best_browser_url(target)
+        if not browser_url:
+            write_customer_operator_outputs(packet_payload, operator_state)
+            return f"{target.get('short_id') or 'That packet'} does not have a browser URL yet."
+        subprocess.run(["open", browser_url], cwd=str(ROOT), check=False)
+        operator_state["current_packet_id"] = target.get("packet_id")
+        write_customer_operator_outputs(packet_payload, operator_state)
+        return (
+            f"Opened {target.get('short_id')} in the browser.\n"
+            f"- Customer: {target.get('title')}\n"
+            f"- URL: {browser_url}"
+        )
+
     if command not in {"replacement", "refund", "wait", "reply_only"}:
         write_customer_operator_outputs(packet_payload, operator_state)
         return (
             "Customer operator commands:\n"
             "- customer status\n"
             "- customer next\n"
+            "- customer open C301\n"
             "- replacement C301 because ...\n"
             "- refund C301 because ...\n"
             "- wait C301 because ...\n"

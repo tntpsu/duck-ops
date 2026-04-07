@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from business_operator_desk import render_business_section
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, write_decision
 from trend_ranker import build_trend_concepts
 
@@ -33,11 +34,13 @@ OVERRIDES_PATH = STATE_DIR / "overrides.jsonl"
 REVIEW_QUEUE_STATE_PATH = STATE_DIR / "review_queue.json"
 OPERATOR_STATE_PATH = STATE_DIR / "operator_state.json"
 CATALOG_ALIASES_PATH = STATE_DIR / "catalog_aliases.json"
+BUSINESS_OPERATOR_DESK_PATH = STATE_DIR / "business_operator_desk.json"
 PRODUCTS_CACHE_PATH = Path("/Users/philtullai/ai-agents/duckAgent/cache/products_cache.json")
 DUCK_AGENT_RUNS_DIR = Path("/Users/philtullai/ai-agents/duckAgent/runs")
 
 SHORT_ID_START = 101
 MAX_TREND_OPERATOR_ITEMS = 8
+FRESH_REVIEW_WINDOW_DAYS = 3.0
 TREND_DEDUPE_IGNORED_TOKENS = {
     "duck",
     "ducks",
@@ -111,6 +114,23 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
         handle.write("\n")
 
 
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
 def priority_rank(priority: str) -> int:
     return {"urgent": 3, "high": 2, "medium": 1, "low": 0}.get(priority, 0)
 
@@ -175,6 +195,152 @@ def write_state_source(source: str, state: dict[str, Any]) -> None:
         write_json(TREND_RANKER_STATE_PATH, state)
         return
     raise SystemExit(f"Unknown state source: {source}")
+
+
+def latest_override_index() -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for row in load_jsonl(OVERRIDES_PATH):
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        if not artifact_id:
+            continue
+        recorded_at = str(row.get("recorded_at") or "")
+        previous = latest.get(artifact_id)
+        if previous is None or recorded_at >= str(previous.get("recorded_at") or ""):
+            latest[artifact_id] = row
+    return latest
+
+
+def duckagent_publish_reconciliation(decision: dict[str, Any]) -> dict[str, Any] | None:
+    run_id = str(decision.get("run_id") or "").strip()
+    flow = str(decision.get("flow") or "")
+    artifact_type = str(decision.get("artifact_type") or "")
+    if not run_id:
+        return None
+
+    if flow == "newduck" or artifact_type == "listing":
+        state_path = DUCK_AGENT_RUNS_DIR / run_id / "state_newduck.json"
+        payload = load_json(state_path, {})
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("newduck_published") or payload.get("shopify_product_id") or payload.get("etsy_listing_id"):
+            return {
+                "recorded_at": now_iso(),
+                "resolution": "approve",
+                "note": "Reconciled automatically because DuckAgent already shows this listing as published.",
+                "source": str(state_path),
+            }
+        return None
+
+    if flow == "weekly_sale" or artifact_type == "promotion":
+        state_path = DUCK_AGENT_RUNS_DIR / run_id / "state_weekly.json"
+        payload = load_json(state_path, {})
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("weekly_sale_published") or payload.get("weekly_sale_published_at"):
+            return {
+                "recorded_at": str(payload.get("weekly_sale_published_at") or now_iso()),
+                "resolution": "approve",
+                "note": "Reconciled automatically because DuckAgent already shows this weekly sale as published.",
+                "source": str(state_path),
+            }
+        return None
+
+    return None
+
+
+def apply_reconciled_review_status(
+    record: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    review_status: str,
+    action: str,
+    resolution: str,
+    recorded_at: str,
+    note: str,
+    source: str,
+) -> None:
+    decision["review_status"] = review_status
+    decision["human_review"] = {
+        "action": action,
+        "resolution": resolution,
+        "recorded_at": recorded_at,
+        "note": note,
+    }
+    decision["reconciled_resolution"] = {
+        "action": action,
+        "resolution": resolution,
+        "recorded_at": recorded_at,
+        "note": note,
+        "source": source,
+    }
+    record["decision"] = decision
+    record["reviewed_at"] = recorded_at
+    record["reconciled_at"] = now_iso()
+    record["reconciliation_reason"] = note
+
+
+def reconcile_quality_gate_state(state: dict[str, Any]) -> bool:
+    changed = False
+    override_index = latest_override_index()
+    artifacts = state.get("artifacts") or {}
+    for artifact_id, record in artifacts.items():
+        decision = record.get("decision") or {}
+        if str(decision.get("review_status") or "") != "pending":
+            continue
+
+        override = override_index.get(artifact_id)
+        if override:
+            resolution = str(override.get("resolution") or "").strip().lower()
+            if resolution in {"approve", "publish"}:
+                apply_reconciled_review_status(
+                    record,
+                    decision,
+                    review_status="approved",
+                    action=str(override.get("action") or "override"),
+                    resolution="approve",
+                    recorded_at=str(override.get("recorded_at") or now_iso()),
+                    note=str(override.get("note") or "Reconciled from the operator override log."),
+                    source="override_log",
+                )
+                changed = True
+                continue
+            if resolution in {"discard", "ignore"}:
+                apply_reconciled_review_status(
+                    record,
+                    decision,
+                    review_status="rejected",
+                    action=str(override.get("action") or "override"),
+                    resolution=resolution,
+                    recorded_at=str(override.get("recorded_at") or now_iso()),
+                    note=str(override.get("note") or "Reconciled from the operator override log."),
+                    source="override_log",
+                )
+                changed = True
+                continue
+
+        published_state = duckagent_publish_reconciliation(decision)
+        if published_state:
+            apply_reconciled_review_status(
+                record,
+                decision,
+                review_status="approved",
+                action="reconcile",
+                resolution=str(published_state.get("resolution") or "approve"),
+                recorded_at=str(published_state.get("recorded_at") or now_iso()),
+                note=str(published_state.get("note") or "Reconciled from DuckAgent publish state."),
+                source=str(published_state.get("source") or "duckagent_state"),
+            )
+            changed = True
+
+    return changed
+
+
+def reconcile_state_bundle(state_bundle: dict[str, dict[str, Any]]) -> bool:
+    quality_gate_state = state_bundle.get("quality_gate", {})
+    changed = reconcile_quality_gate_state(quality_gate_state)
+    if changed:
+        write_state_source("quality_gate", quality_gate_state)
+    return changed
 
 
 def archive_stale_quality_gate_items(state: dict[str, Any]) -> bool:
@@ -608,6 +774,34 @@ def weekly_sale_issue_summary_lines(item: dict[str, Any]) -> list[str]:
     return lines
 
 
+def newduck_issue_summary_lines(item: dict[str, Any]) -> list[str]:
+    if str(item.get("flow") or "") != "newduck":
+        return []
+    if str(item.get("decision") or "") == "publish_ready":
+        return []
+
+    metadata = item.get("quality_gate_metadata") or {}
+    component_scores = metadata.get("component_scores") or {}
+    fail_closed = [str(reason).strip() for reason in (metadata.get("fail_closed") or []) if str(reason).strip()]
+    differentiation = int(component_scores.get("differentiation") or 0)
+    clarity = int(component_scores.get("clarity") or 0)
+    support = int(component_scores.get("support") or 0)
+
+    lines = ["", "OpenClaw concern:"]
+    if any("Existing catalog already covers this duck theme" in reason for reason in fail_closed) or differentiation <= 6:
+        lines.append("- This usually means OpenClaw sees a differentiation or support problem, not necessarily that the listing itself is bad.")
+        lines.append("- It wants clearer evidence that this duck is meaningfully distinct from what you already sell.")
+    elif clarity <= 5:
+        lines.append("- This looks more incomplete or unclear than strategically wrong.")
+        lines.append("- OpenClaw wants the actual listing package surfaced more clearly before approving it.")
+    else:
+        lines.append("- OpenClaw wants a clearer reason to publish this listing now before approving it.")
+
+    if support <= 13:
+        lines.append("- The supporting evidence is fairly thin, so this can get noisy if old trend signals keep drifting around the same listing.")
+    return lines
+
+
 def weekly_sale_change_lines(item: dict[str, Any]) -> list[str]:
     if str(item.get("flow") or "") != "weekly_sale":
         return []
@@ -716,6 +910,8 @@ def build_quality_gate_items(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "state_source": "quality_gate",
                 "first_reason": (decision.get("reasoning") or ["No reasoning captured."])[0],
                 "output_paths": record.get("output_paths", {}),
+                "input_hash": record.get("input_hash"),
+                "material_hash": record.get("material_hash"),
             }
         )
     return items
@@ -841,7 +1037,27 @@ def build_review_items(state_bundle: dict[str, dict[str, Any]]) -> list[dict[str
         key=item_sort_key,
         reverse=True,
     )
+    return annotate_review_freshness(items)
+
+
+def annotate_review_freshness(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for item in items:
+        age_days = item_age_days(item.get("created_at"))
+        is_fresh = age_days is not None and age_days <= FRESH_REVIEW_WINDOW_DAYS
+        if age_days is None:
+            freshness_label = "unknown"
+        elif is_fresh:
+            freshness_label = "new"
+        else:
+            freshness_label = "backlog"
+        item["age_days"] = age_days
+        item["is_fresh"] = is_fresh
+        item["freshness_label"] = freshness_label
     return items
+
+
+def surfaced_review_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in items if item.get("is_fresh")]
 
 
 def assign_short_ids(items: list[dict[str, Any]], operator_state: dict[str, Any]) -> None:
@@ -857,20 +1073,21 @@ def assign_short_ids(items: list[dict[str, Any]], operator_state: dict[str, Any]
 
 
 def sync_current_item(items: list[dict[str, Any]], operator_state: dict[str, Any]) -> dict[str, Any] | None:
-    pending_ids = [item["artifact_id"] for item in items]
+    surfaced_items = surfaced_review_items(items)
+    pending_ids = [item["artifact_id"] for item in surfaced_items]
     current_artifact_id = operator_state.get("current_artifact_id")
-    item_by_artifact = {item["artifact_id"]: item for item in items}
-    review_items = [item for item in items if (item.get("flow") or "").startswith("reviews")]
-    preferred_item = review_items[0] if review_items else (items[0] if items else None)
+    item_by_artifact = {item["artifact_id"]: item for item in surfaced_items}
+    review_items = [item for item in surfaced_items if (item.get("flow") or "").startswith("reviews")]
+    preferred_item = review_items[0] if review_items else (surfaced_items[0] if surfaced_items else None)
     if current_artifact_id not in pending_ids:
         current_artifact_id = preferred_item["artifact_id"] if preferred_item else None
-    elif items and current_artifact_id not in item_by_artifact:
+    elif surfaced_items and current_artifact_id not in item_by_artifact:
         current_artifact_id = preferred_item["artifact_id"] if preferred_item else None
     operator_state["current_artifact_id"] = current_artifact_id
     operator_state["last_queue_generated_at"] = now_iso()
     if not current_artifact_id:
         return None
-    for item in items:
+    for item in surfaced_items:
         if item["artifact_id"] == current_artifact_id:
             return item
     return None
@@ -930,6 +1147,8 @@ def render_operator_card(item: dict[str, Any], include_help: bool = True) -> str
         if sale_changes:
             lines.extend(["", "What OpenClaw would change now:"])
             lines.extend(f"- {suggestion}" for suggestion in sale_changes[:4])
+    if str(item.get("flow") or "") == "newduck":
+        lines.extend(newduck_issue_summary_lines(item))
     lines.extend(["", "Why:"])
     lines.extend(f"{index}. {reason}" for index, reason in enumerate(summarize_reasons(item.get("reasoning") or []), start=1))
     if include_help:
@@ -1004,6 +1223,8 @@ def render_operator_detail(item: dict[str, Any]) -> str:
         if sale_changes:
             lines.extend(["", "What OpenClaw would change now:"])
             lines.extend(f"- {suggestion}" for suggestion in sale_changes[:5])
+    if str(item.get("flow") or "") == "newduck":
+        lines.extend(newduck_issue_summary_lines(item))
     lines.extend(["", "Reasoning:"])
     lines.extend(f"- {reason}" for reason in (item.get("reasoning") or ["No reasoning captured."]))
     suggestions = item.get("improvement_suggestions") or []
@@ -1326,12 +1547,15 @@ def render_change_suggestions(item: dict[str, Any]) -> str:
 
 def write_operator_outputs(items: list[dict[str, Any]], current_item: dict[str, Any] | None) -> dict[str, str]:
     patterns = load_output_patterns()
+    surfaced_items = surfaced_review_items(items)
     queue_payload = {
         "generated_at": now_iso(),
-        "pending_count": len(items),
+        "pending_count": len(surfaced_items),
+        "pending_count_all": len(items),
         "current_short_id": current_item.get("short_id") if current_item else None,
         "current_artifact_id": current_item.get("artifact_id") if current_item else None,
         "items": items,
+        "surfaced_items": surfaced_items,
     }
 
     queue_json = render_pattern(patterns["operator_queue_json"], {})
@@ -1342,13 +1566,17 @@ def write_operator_outputs(items: list[dict[str, Any]], current_item: dict[str, 
         "# Operator Queue",
         "",
         f"- Generated at: `{queue_payload['generated_at']}`",
-        f"- Pending items: `{queue_payload['pending_count']}`",
+        f"- New/material items surfaced now: `{queue_payload['pending_count']}`",
+        f"- Full pending backlog: `{queue_payload['pending_count_all']}`",
         "",
     ]
-    if not items:
-        queue_lines.append("No pending operator items.")
+    if not surfaced_items:
+        if items:
+            queue_lines.append("No new operator items are surfaced right now. Use `status all` to inspect older backlog.")
+        else:
+            queue_lines.append("No pending operator items.")
     else:
-        for item in items:
+        for item in surfaced_items:
             queue_lines.append(
                 f"- `{item['short_id']}` | `{decision_label(item['decision'])}` | `{item['priority']}` | `{item['title']}`"
             )
@@ -1357,10 +1585,17 @@ def write_operator_outputs(items: list[dict[str, Any]], current_item: dict[str, 
 
     current_json = render_pattern(patterns["operator_current_json"], {})
     current_md = render_pattern(patterns["operator_current_md"], {})
+    current_message = (
+        render_operator_card(current_item)
+        if current_item
+        else "No new pending reviews right now.\n\nUse `status` for the summary or `status all` to inspect older backlog."
+        if items
+        else "No pending reviews right now."
+    )
     current_payload = {
         "generated_at": now_iso(),
         "current": current_item,
-        "message": render_operator_card(current_item) if current_item else "No pending reviews right now.",
+        "message": current_message,
     }
     write_json(current_json, current_payload)
     ensure_parent(current_md).write_text(current_payload["message"] + "\n", encoding="utf-8")
@@ -1388,18 +1623,22 @@ def write_operator_outputs(items: list[dict[str, Any]], current_item: dict[str, 
 
 
 def write_review_queue(state_bundle: dict[str, dict[str, Any]], operator_state: dict[str, Any] | None = None) -> dict[str, Any]:
+    reconcile_state_bundle(state_bundle)
     if archive_stale_quality_gate_items(state_bundle.get("quality_gate", {})):
         write_state_source("quality_gate", state_bundle["quality_gate"])
     items = build_review_items(state_bundle)
     local_operator_state = operator_state or load_operator_state()
     assign_short_ids(items, local_operator_state)
     current_item = sync_current_item(items, local_operator_state)
+    surfaced_items = surfaced_review_items(items)
 
     payload = {
         "generated_at": now_iso(),
-        "pending_count": len(items),
+        "pending_count": len(surfaced_items),
+        "pending_count_all": len(items),
         "current_short_id": current_item.get("short_id") if current_item else None,
         "items": items,
+        "surfaced_items": surfaced_items,
     }
     write_json(REVIEW_QUEUE_STATE_PATH, payload)
 
@@ -1414,21 +1653,34 @@ def write_review_queue(state_bundle: dict[str, dict[str, Any]], operator_state: 
         "# Review Queue",
         "",
         f"- Generated at: `{payload['generated_at']}`",
-        f"- Pending items: `{payload['pending_count']}`",
+        f"- New/material items surfaced now: `{payload['pending_count']}`",
+        f"- Full pending backlog: `{payload['pending_count_all']}`",
     ]
     if current_item:
         lines.append(f"- Current short ID: `{current_item['short_id']}`")
     lines.append("")
-    if not items:
-        lines.append("No pending review items.")
+    if not surfaced_items:
+        if items:
+            lines.append("No new items are surfaced right now. Older backlog remains available via `status all`.")
+        else:
+            lines.append("No pending review items.")
     else:
-        for item in items:
+        for item in surfaced_items:
             lines.append(
                 f"- `{item['short_id']}` | `{item['priority']}` | `{item['decision']}` | score `{item['score']}` | confidence `{item['confidence']}` | `{item['title']}`"
             )
             lines.append(f"  Reason: {item['first_reason']}")
             if item.get("output_paths", {}).get("md_path"):
                 lines.append(f"  Review file: `{item['output_paths']['md_path']}`")
+    if items and len(items) > len(surfaced_items):
+        lines.extend(["", "## Older Pending Backlog", ""])
+        for item in items:
+            if item.get("is_fresh"):
+                continue
+            lines.append(
+                f"- `{item['short_id']}` | `{item['priority']}` | `{item['decision']}` | `{item['title']}`"
+            )
+            lines.append(f"  First reason: {item['first_reason']}")
     ensure_parent(md_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     operator_paths = write_operator_outputs(items, current_item)
@@ -1482,6 +1734,8 @@ def parse_command(text: str) -> tuple[str, str | None, str]:
     if not raw:
         return "help", None, ""
     lowered = raw.lower()
+    if lowered == "status all" or lowered == "queue all" or lowered == "backlog":
+        return "status_all", None, ""
     if lowered.startswith("suggest changes"):
         parts = raw.split()
         target_token = parts[2] if len(parts) > 2 and parts[2].isdigit() else None
@@ -1588,6 +1842,55 @@ def should_delegate_to_customer_operator(text: str) -> bool:
     if lowered.startswith("reply only ") and len(parts) > 2 and CUSTOMER_SHORT_ID_PATTERN.match(parts[2]):
         return True
     return False
+
+
+def should_delegate_to_business_desk(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    lowered = raw.lower()
+    return lowered == "desk" or lowered.startswith("desk ") or lowered == "business" or lowered.startswith("business ")
+
+
+def handle_business_desk_text(text: str) -> str:
+    payload = load_json(BUSINESS_OPERATOR_DESK_PATH, {})
+    if not isinstance(payload, dict) or not payload:
+        return "Duck Ops business desk is not ready yet. Re-run the observer first."
+
+    raw = (text or "").strip()
+    lowered = raw.lower()
+    section = "status"
+    if lowered in {"desk", "desk status", "business", "business status"}:
+        section = "status"
+    elif lowered.startswith("desk next") or lowered.startswith("business next"):
+        section = "next"
+    elif lowered.startswith("desk show "):
+        section = raw.split(" ", 2)[2].strip()
+    elif lowered.startswith("business show "):
+        section = raw.split(" ", 2)[2].strip()
+    elif lowered in {"desk help", "business help"}:
+        return (
+            "Duck Ops desk commands:\n"
+            "- desk status\n"
+            "- desk next\n"
+            "- desk show customer\n"
+            "- desk show threads\n"
+            "- desk show builds\n"
+            "- desk show packing\n"
+            "- desk show stock\n"
+            "- desk show reviews"
+        )
+
+    body = render_business_section(payload, section)
+    footer = (
+        "\n\nUseful follow-ups:\n"
+        "- customer status\n"
+        "- customer open C301\n"
+        "- why 220\n"
+        "- desk show stock\n"
+        "- desk show builds"
+    )
+    return body + footer
 
 
 def record_action(
@@ -1729,6 +2032,7 @@ def operator_help(current_item: dict[str, Any] | None = None) -> str:
         "show asset [id]",
         "same as [id] <your product name>",
         "status",
+        "status all",
         "next",
         "",
         "Customer lane commands:",
@@ -1738,6 +2042,15 @@ def operator_help(current_item: dict[str, Any] | None = None) -> str:
         "refund C301 because ...",
         "wait C301 because ...",
         "reply only C301 because ...",
+        "",
+        "Business desk commands:",
+        "desk status",
+        "desk next",
+        "desk show customer",
+        "desk show builds",
+        "desk show packing",
+        "desk show stock",
+        "desk show reviews",
     ]
     if current_item:
         lines.extend(["", "Current review:", "", render_operator_card(current_item)])
@@ -1747,14 +2060,16 @@ def operator_help(current_item: dict[str, Any] | None = None) -> str:
 def render_queue_status(
     items: list[dict[str, Any]],
     current_item: dict[str, Any] | None,
+    all_items: list[dict[str, Any]] | None = None,
     full_review_count: int | None = None,
     full_trend_count: int | None = None,
 ) -> str:
+    all_items = all_items if all_items is not None else items
     surfaced_total = len(items)
     surfaced_review_count = sum(1 for item in items if item.get("artifact_type") != "trend")
     surfaced_trend_count = sum(1 for item in items if item.get("artifact_type") == "trend")
-    full_review_count = surfaced_review_count if full_review_count is None else full_review_count
-    full_trend_count = surfaced_trend_count if full_trend_count is None else full_trend_count
+    full_review_count = sum(1 for item in all_items if item.get("artifact_type") != "trend") if full_review_count is None else full_review_count
+    full_trend_count = sum(1 for item in all_items if item.get("artifact_type") == "trend") if full_trend_count is None else full_trend_count
 
     lines = [
         "OpenClaw queue status:",
@@ -1785,20 +2100,28 @@ def render_queue_status(
                 f"- {item['short_id']} | {resolution_label(recommended_action(item))} | {item.get('title') or item.get('artifact_id')}"
             )
     else:
-        lines.append("- No pending items right now.")
+        if all_items:
+            lines.append("- No new items are surfaced right now.")
+            lines.append("- Older unresolved backlog exists; reply `status all` if you want to inspect it.")
+        else:
+            lines.append("- No pending items right now.")
 
     return "\n".join(lines)
 
 
 def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state: dict[str, Any], text: str) -> str:
+    reconcile_state_bundle(state_bundle)
+    if should_delegate_to_business_desk(text):
+        return handle_business_desk_text(text)
     if should_delegate_to_customer_operator(text):
         from customer_operator import handle_customer_text
 
         return handle_customer_text(text)
 
-    items = build_review_items(state_bundle)
-    assign_short_ids(items, operator_state)
-    current_item = sync_current_item(items, operator_state)
+    all_items = build_review_items(state_bundle)
+    assign_short_ids(all_items, operator_state)
+    current_item = sync_current_item(all_items, operator_state)
+    items = surfaced_review_items(all_items)
     command, target_token, note = parse_command(text)
 
     if command == "help":
@@ -1809,7 +2132,18 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
         write_review_queue(state_bundle, operator_state)
         full_review_count = len(build_quality_gate_items(state_bundle.get("quality_gate", {})))
         full_trend_count = len(collect_trend_items(state_bundle.get("trend_ranker", {})))
-        return render_queue_status(items, current_item, full_review_count=full_review_count, full_trend_count=full_trend_count)
+        return render_queue_status(items, current_item, all_items=all_items, full_review_count=full_review_count, full_trend_count=full_trend_count)
+
+    if command == "status_all":
+        write_review_queue(state_bundle, operator_state)
+        full_review_count = len(build_quality_gate_items(state_bundle.get("quality_gate", {})))
+        full_trend_count = len(collect_trend_items(state_bundle.get("trend_ranker", {})))
+        status_text = render_queue_status(items, current_item, all_items=all_items, full_review_count=full_review_count, full_trend_count=full_trend_count)
+        if all_items:
+            status_text += "\n\nBacklog:\n"
+            for item in all_items[:8]:
+                status_text += f"\n- {item['short_id']} | {resolution_label(recommended_action(item))} | {item.get('freshness_label')} | {item.get('title') or item.get('artifact_id')}"
+        return status_text
 
     if command == "next":
         target = next_item(items, current_item)
@@ -1819,7 +2153,7 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
             return "No pending reviews right now."
         return render_operator_card(target)
 
-    target_item = resolve_target_item(items, operator_state, target_token)
+    target_item = resolve_target_item(all_items, operator_state, target_token)
     if not target_item:
         write_review_queue(state_bundle, operator_state)
         if current_item:
@@ -1982,24 +2316,33 @@ def main() -> int:
     operator_state = load_operator_state()
 
     if args.command == "queue":
+        reconcile_state_bundle(state_bundle)
         write_review_queue(state_bundle, operator_state)
         return 0
 
     if args.command == "record":
+        reconcile_state_bundle(state_bundle)
         _, source_name = record_action(state_bundle, args.artifact_id, args.action, args.note, resolution=args.resolution)
         write_state_source(source_name, state_bundle[source_name])
         write_review_queue(state_bundle, operator_state)
         return 0
 
     if args.command == "message":
+        reconcile_state_bundle(state_bundle)
         items = build_review_items(state_bundle)
         assign_short_ids(items, operator_state)
         current_item = sync_current_item(items, operator_state)
         write_review_queue(state_bundle, operator_state)
-        print(render_operator_card(current_item) if current_item else "No pending reviews right now.")
+        if current_item:
+            print(render_operator_card(current_item))
+        elif items:
+            print("No new pending reviews right now.\n\nUse `status` for the summary or `status all` to inspect older backlog.")
+        else:
+            print("No pending reviews right now.")
         return 0
 
     if args.command == "why":
+        reconcile_state_bundle(state_bundle)
         items = build_review_items(state_bundle)
         assign_short_ids(items, operator_state)
         target_item = resolve_target_item(items, operator_state, args.id)

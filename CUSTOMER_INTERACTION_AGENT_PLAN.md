@@ -211,6 +211,34 @@ Should capture:
 - job completion state
 - empty / blocked / needs operator
 
+### 6. `custom_build_task_candidate`
+
+Represents one paid, unfulfilled custom-order line that should become tracked build work.
+
+Should capture:
+
+- buyer name
+- channel and order / receipt id
+- quantity
+- custom type
+- personalization / build detail
+- whether it is ready for tasking
+- linked Google Task id when created
+
+### 7. `etsy_conversation_thread`
+
+Represents one Etsy conversation thread that should be reviewed in the browser when the notification email itself is too weak.
+
+Should capture:
+
+- conversation contact
+- thread key
+- latest preview
+- grouped message count
+- browser URL candidates
+- linked order context when available
+- browser review status
+
 ## Phased Build
 
 ### Phase A. Unified operating inbox
@@ -314,6 +342,13 @@ Acceptance:
 
 Build:
 
+- add a browser-assisted Etsy conversation sync lane so Duck Ops can read the real thread state when the notification email itself is too weak
+- stage per-thread browser sync artifacts with:
+  - conversation contact
+  - latest notification email metadata
+  - candidate Etsy thread URL(s) when available
+  - browser review status
+  - order context already matched from Etsy receipts
 - add read-only USPS tracking lookup using tracking numbers already staged from Etsy or Shopify
 - distinguish:
   - moving normally
@@ -326,6 +361,7 @@ Acceptance:
 
 - shipping-delay cases stop feeling like guesswork
 - Duck Ops can explain when to wait versus when to consider refund/resend review
+- Etsy conversation items stop depending only on thin notification emails and can graduate into richer browser-reviewed thread records when the browser lane is available
 
 ### Phase B3. Explicit operator recovery decisions
 
@@ -350,7 +386,16 @@ Acceptance:
 
 Build:
 
+- stage `custom_build_task_candidate` artifacts from paid, unfulfilled custom-order lines even before Google Tasks creds are live
+- include:
+  - buyer name
+  - order / receipt id
+  - quantity
+  - custom type
+  - personalization text
+  - source refs back to the Etsy order and later browser conversation thread
 - create Google Tasks API task records for ready `custom_design_case` items
+- extend Google Tasks creation to support ready `custom_build_task_candidate` items too
 - keep blocked custom requests in a clarification-needed state
 - later hand ready briefs into the concept-builder workflow
 
@@ -358,6 +403,7 @@ Acceptance:
 
 - custom design work stops living only in inbox threads
 - ready custom work is visible as a tracked manual task
+- open custom builds can be tracked as actionable work even before every conversation is fully normalized into a richer design brief
 
 ### Phase C. Custom design intake and tasking
 
@@ -376,6 +422,36 @@ Acceptance:
 
 - a scattered design conversation turns into one coherent brief
 - manual design tasks stop being lost in message threads
+
+### Phase C1. Customer concept approval loop
+
+Goal:
+
+- bridge custom-design work from inbox conversation into concept review, customer feedback, and finally manufacturing approval
+
+Build:
+
+- hand ready `custom_design_case` or `custom_build_task_candidate` work into the concept-builder machine with:
+  - normalized brief
+  - customer-facing notes
+  - any logos / reference images / color requests
+- stage one customer-review bundle that can be sent back for approval:
+  - concept summary
+  - concept preview
+  - later character sheet preview when appropriate
+- persist feedback rounds so Duck Ops knows whether the current concept is:
+  - waiting on us
+  - waiting on customer approval
+  - approved for 3D / print work
+  - needs revision
+- when the customer approves:
+  - unlock the build/manufacturing path instead of leaving the concept stranded in email or chat
+
+Acceptance:
+
+- a custom customer thread can move from intake to one tracked concept review loop
+- revision history stays attached to the same work item
+- Duck Ops can tell whether a design is still in customer review or is ready for model/print work
 
 ### Phase D. Creative review and learning loop
 
@@ -487,14 +563,39 @@ Implemented on April 6, 2026:
   - `runtime/usps_tracking.py`
   - `runtime/google_tasks_bridge.py`
   - they currently report `credentials_missing` until real auth/config is present
+- staged `custom_build_task_candidate` artifacts now exist from live paid custom-order lines:
+  - `state/custom_build_task_candidates.json`
+  - `output/operator/custom_build_task_candidates.md`
+- staged `etsy_conversation_thread` browser-review artifacts now exist:
+  - `state/etsy_conversation_browser_sync.json`
+  - `output/operator/etsy_conversation_browser_sync.md`
+- the customer operator lane now supports explicit Etsy browser-open review commands when a thread has a usable URL:
+  - `customer open C301`
+  - `runtime/customer_operator.py`
+- a unified staged business desk now exists:
+  - `state/business_operator_desk.json`
+  - `output/operator/business_operator_desk.json`
+  - `output/operator/business_operator_desk.md`
+  - it combines customer packets, Etsy browser-review work, custom build candidates, packing work, print-soon candidates, and review-queue counts in one operator view
+  - `review_loop.py handle` now supports:
+    - `desk status`
+    - `desk next`
+    - `desk show customer|threads|builds|packing|stock|reviews`
+- the nightly `Orders To Pack` section is now a shopping-list-style table:
+  - grouped by duck title
+  - split into Etsy / Shopify / total
+  - sorted by ship urgency first, then quantity
+  - with simple urgency cues such as `Ship today`, `Ship soon`, `Aging order`, and `Open`
+- staged custom build candidates now carry the actual Etsy personalization / build detail in the nightly summary so the operator can see what to make, not just that a custom order exists
 - all actions remain staged or operator-approved
 
 Next implementation slice:
 
-1. add real USPS credentials / endpoint config so live carrier lookups can start
-2. add real Google Tasks credentials / task-list config so ready custom briefs can create tasks
-3. expose customer packets more proactively in the operator push / WhatsApp flow instead of only the manual `customer status` lane
-4. keep all customer-facing and manufacturing actions manual in the first pass
+1. upgrade staged Etsy conversation threads into real browser-reviewed thread captures with latest thread text and read/unread state
+2. add real USPS credentials / endpoint config so live carrier lookups can start
+3. add real Google Tasks credentials / task-list config so ready custom briefs and custom build candidates can create tasks
+4. expose customer packets and the staged business desk more proactively in the operator push / WhatsApp flow instead of only the manual `customer status` lane
+5. keep all customer-facing and manufacturing actions manual in the first pass
 
 Why this is first:
 

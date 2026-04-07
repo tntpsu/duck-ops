@@ -16,7 +16,7 @@ import json
 import smtplib
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
@@ -46,6 +46,7 @@ PRINT_QUEUE_CANDIDATES_PATH = ROOT / "state" / "normalized" / "print_queue_candi
 NIGHTLY_ACTION_SUMMARY_STATE_PATH = ROOT / "state" / "nightly_action_summary.json"
 NIGHTLY_ACTION_SUMMARY_OPERATOR_JSON_PATH = ROOT / "output" / "operator" / "nightly_action_summary.json"
 NIGHTLY_ACTION_SUMMARY_OPERATOR_MD_PATH = ROOT / "output" / "operator" / "nightly_action_summary.md"
+SOURCE_OBSERVER_CONFIG_PATH = ROOT / "config" / "source_observer.json"
 
 
 def refresh_nightly_action_summary_sources() -> None:
@@ -167,6 +168,193 @@ def md_for_json(path: Path) -> Path:
 def canonical_hash(payload: Any) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed.astimezone()
+    except ValueError:
+        return None
+
+
+def iso_week_token(now_local: datetime) -> str:
+    iso_year, iso_week, _ = now_local.isocalendar()
+    return f"{iso_year}-{iso_week:02d}"
+
+
+def observer_phase_readiness_window_open(now_local: datetime) -> bool:
+    config = load_json(SOURCE_OBSERVER_CONFIG_PATH, {})
+    polling = config.get("polling") or {}
+    target_day = str(polling.get("phase_readiness_day") or "sunday").strip().lower()
+    target_hour = int(polling.get("phase_readiness_hour_local") or 18)
+    weekday_map = {
+        "monday": 0,
+        "tuesday": 1,
+        "wednesday": 2,
+        "thursday": 3,
+        "friday": 4,
+        "saturday": 5,
+        "sunday": 6,
+    }
+    desired_weekday = weekday_map.get(target_day, 6)
+    if now_local.weekday() != desired_weekday:
+        return False
+    return now_local.hour >= target_hour
+
+
+def summarize_phase_readiness(now_local: datetime) -> dict[str, Any]:
+    window_start = now_local - timedelta(days=7)
+    decision_rows = [
+        row
+        for row in load_jsonl(ROOT / "state" / "decision_history.jsonl")
+        if (parse_iso_datetime(row.get("evaluated_at")) or now_local) >= window_start
+    ]
+    override_rows = [
+        row
+        for row in load_jsonl(ROOT / "state" / "overrides.jsonl")
+        if (parse_iso_datetime(row.get("recorded_at")) or now_local) >= window_start
+    ]
+    quality_gate = load_json(QUALITY_GATE_STATE_PATH, {"artifacts": {}})
+    artifacts = (quality_gate.get("artifacts") or {}).values()
+    pending_items = []
+    stale_high_priority = []
+    for record in artifacts:
+        decision = record.get("decision") or {}
+        if str(decision.get("review_status") or "") != "pending":
+            continue
+        pending_items.append(decision)
+        created_at = parse_iso_datetime(decision.get("created_at"))
+        if (
+            str(decision.get("priority") or "") in {"high", "urgent"}
+            and created_at is not None
+            and created_at <= now_local - timedelta(days=2)
+        ):
+            stale_high_priority.append(decision)
+
+    urgent_alert_count = 0
+    for path in OUTPUT_DIGESTS.glob("urgent__*.json"):
+        payload = load_json(path, {})
+        generated_at = parse_iso_datetime(payload.get("generated_at"))
+        if generated_at and generated_at >= window_start:
+            urgent_alert_count += 1
+
+    total_decisions = len(decision_rows)
+    override_count = len(override_rows)
+    publish_ready_count = sum(1 for row in decision_rows if str(row.get("decision") or "") == "publish_ready")
+    needs_revision_count = sum(1 for row in decision_rows if str(row.get("decision") or "") == "needs_revision")
+    discard_count = sum(1 for row in decision_rows if str(row.get("decision") or "") == "discard")
+    override_rate = (override_count / total_decisions) if total_decisions else 0.0
+
+    evidence = [
+        f"Collected {total_decisions} quality-gate decisions in the last 7 days.",
+        f"Operator overrides in the same window: {override_count} ({override_rate:.0%} of decisions)." if total_decisions else "Operator overrides in the same window: 0.",
+        f"Current pending quality-gate backlog: {len(pending_items)}.",
+        f"Urgent alerts in the last 7 days: {urgent_alert_count}.",
+        f"Decision mix: {publish_ready_count} publish-ready, {needs_revision_count} needs-revision, {discard_count} discard.",
+    ]
+    blockers: list[str] = []
+    if stale_high_priority:
+        blockers.append(f"{len(stale_high_priority)} high-priority pending items are older than 2 days.")
+    if urgent_alert_count > 0:
+        blockers.append("Urgent alerts are still firing in the last 7 days.")
+
+    if blockers:
+        readiness_decision = "blocked"
+        confidence = 0.78
+    elif total_decisions >= 20 and override_rate <= 0.20 and len(pending_items) <= 3:
+        readiness_decision = "ready_to_advance"
+        confidence = 0.74
+    else:
+        readiness_decision = "stay_in_current_phase"
+        confidence = 0.66 if total_decisions >= 10 else 0.58
+
+    return {
+        "current_phase": "phase_2_pilot",
+        "readiness_decision": readiness_decision,
+        "confidence": round(confidence, 2),
+        "evidence": evidence,
+        "blockers": blockers,
+        "recommended_next_phase": "phase_3" if readiness_decision == "ready_to_advance" else "phase_2_pilot",
+        "generated_at": now_local.isoformat(),
+        "window": {
+            "started_at": window_start.isoformat(),
+            "ended_at": now_local.isoformat(),
+            "week": iso_week_token(now_local),
+        },
+        "metrics": {
+            "total_decisions": total_decisions,
+            "override_count": override_count,
+            "override_rate": round(override_rate, 3),
+            "pending_items": len(pending_items),
+            "urgent_alert_count": urgent_alert_count,
+            "publish_ready_count": publish_ready_count,
+            "needs_revision_count": needs_revision_count,
+            "discard_count": discard_count,
+        },
+    }
+
+
+def render_phase_readiness_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# OpenClaw Phase Readiness",
+        "",
+        f"- Generated at: `{payload.get('generated_at')}`",
+        f"- Current phase: `{payload.get('current_phase')}`",
+        f"- Readiness decision: `{payload.get('readiness_decision')}`",
+        f"- Confidence: `{payload.get('confidence')}`",
+        f"- Recommended next phase: `{payload.get('recommended_next_phase')}`",
+        "",
+        "## Evidence",
+        "",
+    ]
+    for item in payload.get("evidence") or []:
+        lines.append(f"- {item}")
+    blockers = payload.get("blockers") or []
+    lines.extend(["", "## Blockers", ""])
+    if blockers:
+        for item in blockers:
+            lines.append(f"- {item}")
+    else:
+        lines.append("No active blockers were detected.")
+    return "\n".join(lines)
+
+
+def refresh_phase_readiness_artifact() -> None:
+    now_local = datetime.now().astimezone()
+    if not observer_phase_readiness_window_open(now_local):
+        return
+    week = iso_week_token(now_local)
+    json_path = OUTPUT_DIGESTS / f"phase_readiness__{week}.json"
+    md_path = OUTPUT_DIGESTS / f"phase_readiness__{week}.md"
+    if json_path.exists() and md_path.exists():
+        return
+    payload = summarize_phase_readiness(now_local)
+    markdown = render_phase_readiness_markdown(payload)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    md_path.write_text(markdown + "\n", encoding="utf-8")
 
 
 def digest_signature(payload: dict[str, Any]) -> str:
@@ -641,6 +829,10 @@ def main() -> int:
         refresh_nightly_action_summary_sources()
     except Exception as exc:
         print(f"[notifier] Warning: could not refresh nightly action summary sources: {exc}", file=sys.stderr)
+    try:
+        refresh_phase_readiness_artifact()
+    except Exception as exc:
+        print(f"[notifier] Warning: could not refresh phase readiness artifact: {exc}", file=sys.stderr)
     state_changed = hydrate_digest_signature(state)
     state_changed = hydrate_trend_digest_signature(state) or state_changed
     artifacts = load_sendable_artifacts(state)

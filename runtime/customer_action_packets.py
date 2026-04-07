@@ -127,6 +127,8 @@ def _normalized_case(record: dict[str, Any]) -> dict[str, Any]:
             "operator_decision": details.get("operator_decision") or {},
             "approved_recovery_action": details.get("approved_recovery_action"),
             "conversation_contact": details.get("conversation_contact"),
+            "conversation_thread_key": details.get("conversation_thread_key"),
+            "browser_url_candidates": details.get("browser_url_candidates") or [],
             "grouped_message_count": details.get("grouped_message_count"),
             "latest_message_preview": details.get("latest_message_preview"),
             "source_refs": record.get("source_refs") or [],
@@ -212,6 +214,8 @@ def _base_packet(case: dict[str, Any], packet_type: str) -> dict[str, Any]:
             280,
         ),
         "conversation_contact": normalized.get("conversation_contact"),
+        "conversation_thread_key": normalized.get("conversation_thread_key"),
+        "browser_url_candidates": normalized.get("browser_url_candidates") or [],
         "grouped_message_count": normalized.get("grouped_message_count"),
         "context_state": normalized.get("context_state"),
         "response_recommendation": normalized.get("response_recommendation") or {},
@@ -224,6 +228,53 @@ def _base_packet(case: dict[str, Any], packet_type: str) -> dict[str, Any]:
         "approved_recovery_action": normalized.get("approved_recovery_action"),
         "source_refs": normalized.get("source_refs") or [],
     }
+
+
+def _priority_rank(value: str | None) -> int:
+    return {"high": 0, "medium": 1, "low": 2}.get(str(value or "medium").lower(), 9)
+
+
+def _merge_thread_packets(packets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    ungrouped: list[dict[str, Any]] = []
+    for packet in packets:
+        thread_key = str(packet.get("conversation_thread_key") or "").strip()
+        if not thread_key:
+            ungrouped.append(packet)
+            continue
+        group_key = (str(packet.get("packet_type") or "").strip(), thread_key)
+        existing = grouped.get(group_key)
+        if existing is None:
+            seed = dict(packet)
+            seed["source_artifact_ids"] = [packet.get("source_artifact_id")] if packet.get("source_artifact_id") else []
+            grouped[group_key] = seed
+            continue
+
+        source_artifact_id = packet.get("source_artifact_id")
+        if source_artifact_id and source_artifact_id not in existing["source_artifact_ids"]:
+            existing["source_artifact_ids"].append(source_artifact_id)
+        existing["grouped_message_count"] = max(
+            int(existing.get("grouped_message_count") or 1),
+            int(packet.get("grouped_message_count") or 1),
+        )
+        for url in packet.get("browser_url_candidates") or []:
+            normalized_url = str(url).strip()
+            if normalized_url and normalized_url not in existing["browser_url_candidates"]:
+                existing["browser_url_candidates"].append(normalized_url)
+        if _priority_rank(packet.get("priority")) < _priority_rank(existing.get("priority")):
+            replacement = dict(packet)
+            replacement["source_artifact_ids"] = existing["source_artifact_ids"]
+            grouped[group_key] = replacement
+
+    merged = list(grouped.values()) + ungrouped
+    merged.sort(
+        key=lambda packet: (
+            _priority_rank(packet.get("priority")),
+            {"reply": 0, "replacement": 1, "refund": 2, "wait_for_tracking": 3}.get(packet.get("packet_type"), 9),
+            str(packet.get("title") or "").lower(),
+        )
+    )
+    return merged
 
 
 def build_customer_action_packets(customer_cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -331,14 +382,7 @@ def build_customer_action_packets(customer_cases: list[dict[str, Any]]) -> list[
             wait_packet["suggested_reply"] = _suggested_customer_reply(wait_packet)
             packets.append(wait_packet)
 
-    packets.sort(
-        key=lambda packet: (
-            {"high": 0, "medium": 1, "low": 2}.get(str(packet.get("priority") or "medium"), 9),
-            {"reply": 0, "replacement": 1, "refund": 2, "wait_for_tracking": 3}.get(packet.get("packet_type"), 9),
-            str(packet.get("title") or "").lower(),
-        )
-    )
-    return packets
+    return _merge_thread_packets(packets)
 
 
 def render_customer_action_packets_markdown(packet_payload: dict[str, Any]) -> str:

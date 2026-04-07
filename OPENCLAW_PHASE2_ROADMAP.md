@@ -1691,6 +1691,23 @@ Current foundation implemented on April 6, 2026:
   - `runtime/usps_tracking.py`
   - `runtime/google_tasks_bridge.py`
   - both currently report `credentials_missing` until real auth/config is added
+- staged `custom_build_task_candidate` outputs now exist from live paid custom-order lines:
+  - `state/custom_build_task_candidates.json`
+  - `output/operator/custom_build_task_candidates.md`
+- staged `etsy_conversation_thread` browser-review records now exist:
+  - `state/etsy_conversation_browser_sync.json`
+  - `output/operator/etsy_conversation_browser_sync.md`
+- the customer operator lane now supports browser-open commands for staged Etsy thread work when a usable URL exists:
+  - `customer open C301`
+- a unified staged business desk now exists:
+  - `state/business_operator_desk.json`
+  - `output/operator/business_operator_desk.json`
+  - `output/operator/business_operator_desk.md`
+  - it combines customer packets, Etsy browser-review work, custom build candidates, packing work, print-soon candidates, and review-queue counts in one operator surface
+  - `review_loop.py handle` now supports:
+    - `desk status`
+    - `desk next`
+    - `desk show customer|threads|builds|packing|stock|reviews`
 - nightly operations snapshots now exist for:
   - Etsy open orders
   - Shopify open orders
@@ -1701,14 +1718,16 @@ Current foundation implemented on April 6, 2026:
   - orders to pack
   - custom / novel ducks to make
   - watch list
+- the nightly `orders to pack` section is now sorted by ship urgency first and rendered as a shopping-list-style table instead of a raw order dump
+- staged custom build candidates now show the actual Etsy personalization / build detail in the nightly summary so the operator can see what needs to be made
 
 Immediate next slice:
 
+- upgrade staged Etsy conversation thread records into real browser-reviewed thread captures with latest message text and read/unread state
 - add `wait_for_tracking` packets once USPS read-only status checks exist
-- make customer-case cards and nightly summaries explain whether the problem is missing context, refund/resend leaning, reply-only, or escalate
 - add real USPS credentials / endpoint config so live carrier lookups can run
-- add real Google Tasks credentials / task-list config so ready custom-design cases can create tasks
-- surface customer packets more proactively in the operator push / WhatsApp flow
+- add real Google Tasks credentials / task-list config so ready custom-design cases and custom build candidates can create tasks
+- surface customer packets and the staged business desk more proactively in the operator push / WhatsApp flow
 
 Exit criteria:
 

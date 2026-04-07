@@ -69,6 +69,83 @@ def _ts_to_iso(value: Any) -> str | None:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone().isoformat()
 
 
+def _earlier_iso(left: str | None, right: str | None) -> str | None:
+    if not left:
+        return right
+    if not right:
+        return left
+    return left if left <= right else right
+
+
+def _earlier_timestamp(left: Any, right: Any) -> Any:
+    if left in {None, ""}:
+        return right
+    if right in {None, ""}:
+        return left
+    try:
+        return left if int(left) <= int(right) else right
+    except (TypeError, ValueError):
+        return left
+
+
+def _packing_urgency_rank(item: dict[str, Any]) -> tuple[int, str, int, str]:
+    earliest_ship = item.get("earliest_expected_ship_date")
+    oldest_created = item.get("oldest_created_at")
+    urgency = str(item.get("urgency_label") or "open").lower()
+    urgency_rank = {
+        "ship today": 0,
+        "ship soon": 1,
+        "aging order": 2,
+        "open": 3,
+    }.get(urgency, 9)
+    ship_key = str(earliest_ship or "9999-12-31T23:59:59+00:00")
+    created_key = str(oldest_created or "9999-12-31T23:59:59+00:00")
+    return (
+        urgency_rank,
+        ship_key,
+        -int(item.get("total_quantity") or 0),
+        created_key,
+    )
+
+
+def _packing_urgency_fields(*, earliest_expected_ship_date: Any, oldest_created_at: str | None) -> dict[str, Any]:
+    now_local = datetime.now().astimezone()
+    ship_dt = None
+    if earliest_expected_ship_date not in {None, ""}:
+        try:
+            ship_dt = datetime.fromtimestamp(int(earliest_expected_ship_date), tz=timezone.utc).astimezone()
+        except (TypeError, ValueError):
+            ship_dt = None
+
+    created_dt = None
+    if oldest_created_at:
+        try:
+            created_dt = datetime.fromisoformat(str(oldest_created_at).replace("Z", "+00:00")).astimezone()
+        except ValueError:
+            created_dt = None
+
+    label = "Open"
+    if ship_dt:
+        delta_days = (ship_dt.date() - now_local.date()).days
+        if delta_days <= 0:
+            label = "Ship today"
+        elif delta_days == 1:
+            label = "Ship soon"
+        else:
+            label = f"Ship by {ship_dt.strftime('%b')} {ship_dt.day}"
+    elif created_dt:
+        age_days = (now_local - created_dt).total_seconds() / 86400.0
+        if age_days >= 3:
+            label = "Aging order"
+
+    return {
+        "urgency_label": label,
+        "oldest_created_at": oldest_created_at,
+        "earliest_expected_ship_date": earliest_expected_ship_date,
+        "earliest_expected_ship_iso": _ts_to_iso(earliest_expected_ship_date),
+    }
+
+
 def _run_duckagent_etsy_transaction_lookup(transaction_ids: list[str], max_pages: int = 20) -> dict[str, Any] | None:
     wanted_ids = [str(item).strip() for item in transaction_ids if str(item).strip()]
     if not wanted_ids:
@@ -260,6 +337,7 @@ def build_etsy_open_orders_snapshot() -> dict[str, Any]:
                 "order_ref": str(receipt.get("receipt_id") or ""),
                 "buyer_name": receipt.get("buyer_name"),
                 "created_at": _ts_to_iso(receipt.get("created_timestamp")),
+                "expected_ship_date": receipt.get("expected_ship_date"),
                 "financial_status": "paid" if receipt.get("is_paid") else "unknown",
                 "fulfillment_status": "shipped" if receipt.get("is_shipped") else "unfulfilled",
                 "line_items": line_items,
@@ -344,6 +422,7 @@ def build_shopify_open_orders_snapshot() -> dict[str, Any]:
                 "order_ref": str(order.get("name") or order.get("id") or ""),
                 "buyer_name": None,
                 "created_at": order.get("created_at"),
+                "expected_ship_date": None,
                 "financial_status": order.get("financial_status"),
                 "fulfillment_status": order.get("fulfillment_status") or "unfulfilled",
                 "line_items": line_items,
@@ -403,6 +482,8 @@ def build_packing_summary(
                         "total_quantity": 0,
                         "by_channel": {"etsy": 0, "shopify": 0},
                         "order_refs": [],
+                        "oldest_created_at": None,
+                        "earliest_expected_ship_date": None,
                     },
                 )
                 bucket["total_quantity"] += quantity
@@ -411,11 +492,22 @@ def build_packing_summary(
                     bucket["by_channel"][channel] += quantity
                 if line_item.get("order_ref") and line_item.get("order_ref") not in bucket["order_refs"]:
                     bucket["order_refs"].append(line_item.get("order_ref"))
+                bucket["oldest_created_at"] = _earlier_iso(bucket.get("oldest_created_at"), order.get("created_at"))
+                bucket["earliest_expected_ship_date"] = _earlier_timestamp(
+                    bucket.get("earliest_expected_ship_date"),
+                    order.get("expected_ship_date"),
+                )
 
-    orders_to_pack = sorted(
-        non_custom.values(),
-        key=lambda item: (-int(item.get("total_quantity") or 0), str(item.get("product_title") or "").lower()),
-    )
+    orders_to_pack = []
+    for bucket in non_custom.values():
+        bucket.update(
+            _packing_urgency_fields(
+                earliest_expected_ship_date=bucket.get("earliest_expected_ship_date"),
+                oldest_created_at=bucket.get("oldest_created_at"),
+            )
+        )
+        orders_to_pack.append(bucket)
+    orders_to_pack.sort(key=_packing_urgency_rank)
     custom_orders.sort(key=lambda item: (str(item.get("channel") or ""), str(item.get("product_title") or "").lower()))
 
     payload = {

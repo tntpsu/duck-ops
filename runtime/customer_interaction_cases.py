@@ -25,6 +25,23 @@ ACTION_ORDER = {
     "watch": 5,
     "reply_recommended": 6,
 }
+LOW_SIGNAL_PREVIEW_TOKENS = {
+    "on",
+    "sale",
+    "gift",
+    "guide",
+    "home",
+    "living",
+    "etsy",
+    "view",
+    "message",
+    "friends",
+    "instagram",
+    "facebook",
+    "pinterest",
+    "shop",
+    "browse",
+}
 
 
 def _slugify(value: str) -> str:
@@ -80,7 +97,14 @@ def _clean_customer_preview(value: str | None, limit: int = 240) -> str:
     if not cleaned:
         cleaned = re.sub(r"\s+", " ", original).strip()
     normalized_cleaned = _normalize_text(cleaned)
+    preview_tokens = [token for token in normalized_cleaned.split() if token]
+    low_signal_only = bool(preview_tokens) and all(token in LOW_SIGNAL_PREVIEW_TOKENS for token in preview_tokens)
     if "text decoration none" in normalized_cleaned or "sent you a message" in normalized_cleaned:
+        if conversation_name:
+            cleaned = f"Latest Etsy conversation from {conversation_name} needs review."
+        else:
+            cleaned = "Latest Etsy conversation needs review."
+    elif low_signal_only or any(fragment in normalized_cleaned for fragment in ("on sale", "gift guide", "home living")):
         if conversation_name:
             cleaned = f"Latest Etsy conversation from {conversation_name} needs review."
         else:
@@ -126,6 +150,15 @@ def _extract_customer_name(from_line: str | None) -> str | None:
 def _contains_any(text: str, terms: list[str]) -> bool:
     lowered = _normalize_text(text)
     return any(term in lowered for term in terms)
+
+
+def _contains_phrase(text: str, terms: list[str]) -> bool:
+    normalized = f" {_normalize_text(text)} "
+    for term in terms:
+        candidate = _normalize_text(term)
+        if candidate and f" {candidate} " in normalized:
+            return True
+    return False
 
 
 def _resolution_signals(case: dict[str, Any]) -> set[str]:
@@ -199,6 +232,13 @@ def build_customer_cases(customer_signals: list[dict[str, Any]]) -> list[dict[st
         event = signal.get("customer_event") or {}
         context = signal.get("business_context") or {}
         customer_text = str(event.get("customer_text") or "").strip()
+        conversation_contact = str(event.get("conversation_contact") or "").strip() or None
+        conversation_thread_key = str(event.get("conversation_thread_key") or "").strip() or None
+        browser_url_candidates = [
+            str(url).strip()
+            for url in (event.get("browser_url_candidates") or [])
+            if str(url).strip()
+        ]
         rating = event.get("rating")
         issue_type = str(context.get("issue_type") or "unknown").strip()
         sentiment = str(event.get("sentiment") or "unknown").strip()
@@ -222,15 +262,15 @@ def build_customer_cases(customer_signals: list[dict[str, Any]]) -> list[dict[st
                 recommended_recovery_action = "public_reply"
         else:
             lowered = _normalize_text(customer_text)
-            if any(term in lowered for term in ("refund", "money back", "cancel")):
+            if _contains_phrase(lowered, ["refund", "money back", "cancel"]):
                 priority = "high"
                 recommended_action = "refund_review"
                 recommended_recovery_action = "refund"
-            elif any(term in lowered for term in ("replacement", "replace", "resend", "another one")):
+            elif _contains_phrase(lowered, ["replacement", "replace", "resend", "another one"]):
                 priority = "high"
                 recommended_action = "replacement_review"
                 recommended_recovery_action = "replacement"
-            elif any(term in lowered for term in ("damaged", "broken", "chipped", "late", "delivery", "shipping")):
+            elif _contains_phrase(lowered, ["damaged", "broken", "chipped", "late", "delivery", "shipping"]):
                 priority = "high"
                 recommended_action = "escalate"
                 recommended_recovery_action = "human_review"
@@ -349,6 +389,9 @@ def build_customer_cases(customer_signals: list[dict[str, Any]]) -> list[dict[st
                 "source_refs": signal.get("source_refs") or [],
                 "customer_event": event,
                 "business_context": context,
+                "conversation_contact": conversation_contact,
+                "conversation_thread_key": conversation_thread_key,
+                "browser_url_candidates": browser_url_candidates,
                 "notes": {
                     "normalization_stage": "customer_case_v1",
                     "safe_reply_autonomy": "manual_only",
@@ -504,9 +547,26 @@ def _customer_case_approval_meaning(case: dict[str, Any]) -> str:
 
 
 def _extract_etsy_conversation_name(summary: str | None) -> str | None:
-    match = re.search(r"^\s*([A-Za-z0-9 .'\-]+)\s+sent you a message\b", str(summary or ""), re.IGNORECASE)
+    text = str(summary or "")
+    match = re.search(r"^\s*([A-Za-z0-9 .'\-]+)\s+sent you a message\b", text, re.IGNORECASE)
     if match:
         return match.group(1).strip()
+    match = re.search(r"Latest Etsy conversation from ([A-Za-z0-9 .'\-]+) needs review", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _conversation_group_key(case: dict[str, Any]) -> str | None:
+    thread_key = str(case.get("conversation_thread_key") or "").strip()
+    if thread_key:
+        return thread_key.lower()
+    conversation_contact = str(case.get("conversation_contact") or "").strip()
+    if conversation_contact:
+        return conversation_contact.lower()
+    conversation_name = _extract_etsy_conversation_name(case.get("customer_summary"))
+    if conversation_name:
+        return conversation_name.lower()
     return None
 
 
@@ -538,11 +598,18 @@ def _collapse_customer_case_group(cases: list[dict[str, Any]]) -> dict[str, Any]
     )[0]
     recommended_action = _representative_action(cases)
     latest_message_preview = _clean_customer_preview(representative.get("customer_summary") or "")
+    thread_key = str(representative.get("conversation_thread_key") or "").strip() or _slugify(name)
+    browser_url_candidates = []
+    for case in cases:
+        for url in case.get("browser_url_candidates") or []:
+            normalized_url = str(url).strip()
+            if normalized_url and normalized_url not in browser_url_candidates:
+                browser_url_candidates.append(normalized_url)
     summary = latest_message_preview or f"{len(cases)} Etsy conversation message(s) from {name} need review."
     if summary:
         summary = f"{summary} ({len(cases)} message{'s' if len(cases) != 1 else ''} in thread)"
     return {
-        "queue_item_id": f"ops_queue::conversation::{_slugify(name)}",
+        "queue_item_id": f"ops_queue::conversation::{thread_key}",
         "source_artifact_id": representative["artifact_id"],
         "source_artifact_ids": [case["artifact_id"] for case in cases],
         "item_type": "customer_case",
@@ -556,6 +623,8 @@ def _collapse_customer_case_group(cases: list[dict[str, Any]]) -> dict[str, Any]
         "details": {
             "channel": "mailbox_email",
             "conversation_contact": name,
+            "conversation_thread_key": thread_key,
+            "browser_url_candidates": browser_url_candidates,
             "grouped_message_count": len(cases),
             "latest_uid": _source_uid(representative),
             "latest_message_preview": latest_message_preview,
@@ -613,9 +682,9 @@ def build_customer_interaction_queue(
             continue
         conversation_name = None
         if case.get("channel") == "mailbox_email":
-            conversation_name = _extract_etsy_conversation_name(case.get("customer_summary"))
+            conversation_name = _conversation_group_key(case)
         if conversation_name:
-            grouped_customer_cases.setdefault(conversation_name.lower(), []).append(case)
+            grouped_customer_cases.setdefault(conversation_name, []).append(case)
             continue
         items.append(
             {
@@ -641,6 +710,9 @@ def build_customer_interaction_queue(
                     "resolution_enrichment": case.get("resolution_enrichment"),
                     "operator_decision": case.get("operator_decision"),
                     "approved_recovery_action": case.get("approved_recovery_action"),
+                    "conversation_contact": case.get("conversation_contact"),
+                    "conversation_thread_key": case.get("conversation_thread_key"),
+                    "browser_url_candidates": case.get("browser_url_candidates") or [],
                     "missing_context": case.get("missing_context") or [],
                     "recommended_recovery_action": case.get("recommended_recovery_action"),
                 },

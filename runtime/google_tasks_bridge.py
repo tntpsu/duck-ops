@@ -157,7 +157,7 @@ def resolve_tasklist_id(config: dict[str, Any], access_token: str) -> tuple[str 
     return None, {"ok": False, "reason": "tasklist_title_not_found", "title": title}
 
 
-def _task_notes_for_case(case: dict[str, Any]) -> str:
+def _task_notes_for_custom_design_case(case: dict[str, Any]) -> str:
     lines = [
         "Duck Ops custom design case",
         "",
@@ -180,11 +180,34 @@ def _task_notes_for_case(case: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def create_google_task(access_token: str, tasklist_id: str, case: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    title = str(case.get("request_summary") or "Custom duck design task").strip() or "Custom duck design task"
+def _task_notes_for_custom_build_candidate(candidate: dict[str, Any]) -> str:
+    lines = [
+        "Duck Ops custom build candidate",
+        "",
+        f"Artifact: {candidate.get('artifact_id')}",
+        f"Buyer: {candidate.get('buyer_name') or '(unknown)'}",
+        f"Channel / order: {candidate.get('channel') or 'unknown'} / {candidate.get('order_ref') or 'unknown'}",
+        f"Product: {candidate.get('product_title') or '(none)'}",
+        f"Quantity: {candidate.get('quantity') or 0}",
+        f"Build details: {candidate.get('custom_design_summary') or '(none)'}",
+    ]
+    tx_ids = candidate.get("transaction_ids") or []
+    if tx_ids:
+        lines.extend(["", "Transaction ids:"])
+        for tx_id in tx_ids:
+            lines.append(f"- {tx_id}")
+    refs = candidate.get("source_refs") or []
+    if refs:
+        lines.extend(["", "Source refs:"])
+        for ref in refs[:5]:
+            lines.append(f"- {ref}")
+    return "\n".join(lines)
+
+
+def create_google_task(access_token: str, tasklist_id: str, *, title: str, notes: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     payload = {
-        "title": title,
-        "notes": _task_notes_for_case(case),
+        "title": title.strip() or "Duck Ops task",
+        "notes": notes,
     }
     status, response = _http_json(
         GOOGLE_TASKS_URL_TEMPLATE.format(tasklist_id=tasklist_id),
@@ -197,77 +220,22 @@ def create_google_task(access_token: str, tasklist_id: str, case: dict[str, Any]
     return response, {"ok": True, "status_code": status}
 
 
-def sync_ready_custom_design_cases(custom_design_cases: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    config = google_tasks_config()
-    state = load_json(
-        TASKS_STATE_PATH,
-        {
-            "generated_at": None,
-            "config_status": "not_started",
-            "tasklist_id": None,
-            "items": {},
-        },
-    )
+def _sync_item_batch(
+    items: list[dict[str, Any]],
+    *,
+    kind: str,
+    access_token: str,
+    tasklist_id: str,
+    state: dict[str, Any],
+    summary: dict[str, Any],
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    summary = {
-        "generated_at": now_iso(),
-        "config_status": "credentials_missing",
-        "tasklist_id": state.get("tasklist_id"),
-        "counts": {
-            "ready_cases": sum(1 for case in custom_design_cases if case.get("ready_for_manual_design")),
-            "matched_existing_tasks": 0,
-            "created_tasks": 0,
-        },
-        "state_path": str(TASKS_STATE_PATH),
-    }
-    if not config.get("credentials_ready"):
-        for case in custom_design_cases:
-            enriched = dict(case)
-            enriched["google_task_status"] = "credentials_missing"
-            rows.append(enriched)
-        state["generated_at"] = summary["generated_at"]
-        state["config_status"] = "credentials_missing"
-        write_json(TASKS_STATE_PATH, state)
-        return rows, summary
-
-    access_token, token_result = fetch_google_access_token(config)
-    if not access_token:
-        summary["config_status"] = "token_failed"
-        summary["token_result"] = token_result
-        for case in custom_design_cases:
-            enriched = dict(case)
-            enriched["google_task_status"] = "token_failed"
-            rows.append(enriched)
-        state["generated_at"] = summary["generated_at"]
-        state["config_status"] = "token_failed"
-        state["token_result"] = token_result
-        write_json(TASKS_STATE_PATH, state)
-        return rows, summary
-
-    tasklist_id, tasklist_result = resolve_tasklist_id(config, access_token)
-    if not tasklist_id:
-        summary["config_status"] = "tasklist_unavailable"
-        summary["tasklist_result"] = tasklist_result
-        for case in custom_design_cases:
-            enriched = dict(case)
-            enriched["google_task_status"] = "tasklist_unavailable"
-            rows.append(enriched)
-        state["generated_at"] = summary["generated_at"]
-        state["config_status"] = "tasklist_unavailable"
-        state["tasklist_result"] = tasklist_result
-        write_json(TASKS_STATE_PATH, state)
-        return rows, summary
-
     state.setdefault("items", {})
-    state["tasklist_id"] = tasklist_id
-    state["config_status"] = "ready"
-    summary["config_status"] = "ready"
-    summary["tasklist_id"] = tasklist_id
-
-    for case in custom_design_cases:
-        enriched = dict(case)
-        artifact_id = str(case.get("artifact_id") or "")
+    for item in items:
+        enriched = dict(item)
+        artifact_id = str(item.get("artifact_id") or "")
         existing = (state.get("items") or {}).get(artifact_id) or {}
+        ready = bool(item.get("ready_for_manual_design")) if kind == "custom_design_case" else bool(item.get("ready_for_task"))
         if existing.get("task_id"):
             enriched["google_task_status"] = "created"
             enriched["google_task_id"] = existing.get("task_id")
@@ -275,15 +243,32 @@ def sync_ready_custom_design_cases(custom_design_cases: list[dict[str, Any]]) ->
             summary["counts"]["matched_existing_tasks"] += 1
             rows.append(enriched)
             continue
-
-        if not case.get("ready_for_manual_design"):
+        if not ready:
             enriched["google_task_status"] = "not_ready"
             rows.append(enriched)
             continue
 
-        task_response, task_result = create_google_task(access_token, tasklist_id, case)
+        if kind == "custom_design_case":
+            title = str(item.get("request_summary") or "Custom duck design task").strip() or "Custom duck design task"
+            notes = _task_notes_for_custom_design_case(item)
+        else:
+            build_summary = str(item.get("custom_design_summary") or item.get("product_title") or "custom duck build").strip()
+            buyer = str(item.get("buyer_name") or "").strip()
+            quantity = int(item.get("quantity") or 0)
+            qty_prefix = f"{quantity}x " if quantity > 1 else ""
+            owner_prefix = f"{buyer}: " if buyer else ""
+            title = f"{owner_prefix}{qty_prefix}{build_summary}"
+            notes = _task_notes_for_custom_build_candidate(item)
+
+        task_response, task_result = create_google_task(
+            access_token,
+            tasklist_id,
+            title=title,
+            notes=notes,
+        )
         if task_response:
             task_row = {
+                "kind": kind,
                 "task_id": task_response.get("id"),
                 "title": task_response.get("title"),
                 "web_view_link": task_response.get("webViewLink"),
@@ -299,7 +284,115 @@ def sync_ready_custom_design_cases(custom_design_cases: list[dict[str, Any]]) ->
             enriched["google_task_status"] = "create_failed"
             enriched["google_task_error"] = task_result
         rows.append(enriched)
+    return rows
+
+
+def sync_custom_work_items(
+    custom_design_cases: list[dict[str, Any]],
+    custom_build_task_candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    config = google_tasks_config()
+    state = load_json(
+        TASKS_STATE_PATH,
+        {
+            "generated_at": None,
+            "config_status": "not_started",
+            "tasklist_id": None,
+            "items": {},
+        },
+    )
+    design_rows: list[dict[str, Any]] = []
+    build_rows: list[dict[str, Any]] = []
+    summary = {
+        "generated_at": now_iso(),
+        "config_status": "credentials_missing",
+        "tasklist_id": state.get("tasklist_id"),
+        "counts": {
+            "ready_custom_design_cases": sum(1 for case in custom_design_cases if case.get("ready_for_manual_design")),
+            "ready_custom_build_candidates": sum(1 for item in custom_build_task_candidates if item.get("ready_for_task")),
+            "matched_existing_tasks": 0,
+            "created_tasks": 0,
+        },
+        "state_path": str(TASKS_STATE_PATH),
+    }
+    if not config.get("credentials_ready"):
+        for case in custom_design_cases:
+            enriched = dict(case)
+            enriched["google_task_status"] = "credentials_missing"
+            design_rows.append(enriched)
+        for candidate in custom_build_task_candidates:
+            enriched = dict(candidate)
+            enriched["google_task_status"] = "credentials_missing"
+            build_rows.append(enriched)
+        state["generated_at"] = summary["generated_at"]
+        state["config_status"] = "credentials_missing"
+        write_json(TASKS_STATE_PATH, state)
+        return design_rows, build_rows, summary
+
+    access_token, token_result = fetch_google_access_token(config)
+    if not access_token:
+        summary["config_status"] = "token_failed"
+        summary["token_result"] = token_result
+        for case in custom_design_cases:
+            enriched = dict(case)
+            enriched["google_task_status"] = "token_failed"
+            design_rows.append(enriched)
+        for candidate in custom_build_task_candidates:
+            enriched = dict(candidate)
+            enriched["google_task_status"] = "token_failed"
+            build_rows.append(enriched)
+        state["generated_at"] = summary["generated_at"]
+        state["config_status"] = "token_failed"
+        state["token_result"] = token_result
+        write_json(TASKS_STATE_PATH, state)
+        return design_rows, build_rows, summary
+
+    tasklist_id, tasklist_result = resolve_tasklist_id(config, access_token)
+    if not tasklist_id:
+        summary["config_status"] = "tasklist_unavailable"
+        summary["tasklist_result"] = tasklist_result
+        for case in custom_design_cases:
+            enriched = dict(case)
+            enriched["google_task_status"] = "tasklist_unavailable"
+            design_rows.append(enriched)
+        for candidate in custom_build_task_candidates:
+            enriched = dict(candidate)
+            enriched["google_task_status"] = "tasklist_unavailable"
+            build_rows.append(enriched)
+        state["generated_at"] = summary["generated_at"]
+        state["config_status"] = "tasklist_unavailable"
+        state["tasklist_result"] = tasklist_result
+        write_json(TASKS_STATE_PATH, state)
+        return design_rows, build_rows, summary
+
+    state.setdefault("items", {})
+    state["tasklist_id"] = tasklist_id
+    state["config_status"] = "ready"
+    summary["config_status"] = "ready"
+    summary["tasklist_id"] = tasklist_id
+
+    design_rows = _sync_item_batch(
+        custom_design_cases,
+        kind="custom_design_case",
+        access_token=access_token,
+        tasklist_id=tasklist_id,
+        state=state,
+        summary=summary,
+    )
+    build_rows = _sync_item_batch(
+        custom_build_task_candidates,
+        kind="custom_build_task_candidate",
+        access_token=access_token,
+        tasklist_id=tasklist_id,
+        state=state,
+        summary=summary,
+    )
 
     state["generated_at"] = summary["generated_at"]
     write_json(TASKS_STATE_PATH, state)
-    return rows, summary
+    return design_rows, build_rows, summary
+
+
+def sync_ready_custom_design_cases(custom_design_cases: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    design_rows, _, summary = sync_custom_work_items(custom_design_cases, [])
+    return design_rows, summary

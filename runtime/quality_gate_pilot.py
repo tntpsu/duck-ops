@@ -67,6 +67,119 @@ def canonical_hash(payload: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def material_candidate_view(candidate: dict[str, Any]) -> dict[str, Any]:
+    summary = candidate.get("candidate_summary") or {}
+    flow = str(candidate.get("flow") or "")
+    payload: dict[str, Any] = {
+        "artifact_id": candidate.get("artifact_id"),
+        "artifact_type": candidate.get("artifact_type"),
+        "flow": flow,
+        "run_id": candidate.get("run_id"),
+        "review_target": candidate.get("review_target"),
+        "title": summary.get("title"),
+        "body": summary.get("body"),
+        "images": summary.get("images") or [],
+        "platform_targets": summary.get("platform_targets") or [],
+        "platform_variants": summary.get("platform_variants") or {},
+        "execution_state": candidate.get("execution_state") or {},
+    }
+    if flow in {"reviews_reply_positive", "reviews_reply_private"}:
+        payload.update(
+            {
+                "customer_review": summary.get("customer_review"),
+                "review_date": summary.get("review_date"),
+                "review_rating": summary.get("review_rating"),
+                "response_kind": summary.get("response_kind"),
+                "transaction_id": summary.get("transaction_id"),
+                "next_steps": summary.get("next_steps"),
+            }
+        )
+    if flow == "weekly_sale":
+        payload["publish_token"] = summary.get("publish_token")
+    return payload
+
+
+def material_candidate_hash(candidate: dict[str, Any]) -> str:
+    return canonical_hash(material_candidate_view(candidate))
+
+
+def carry_forward_review_resolution(
+    decision: dict[str, Any],
+    previous_record: dict[str, Any] | None,
+    *,
+    material_hash: str,
+) -> dict[str, Any]:
+    if not previous_record:
+        return {}
+
+    previous_decision = previous_record.get("decision") or {}
+    previous_review_status = str(previous_decision.get("review_status") or "")
+    if previous_review_status in {"", "pending"}:
+        return {}
+
+    decision["review_status"] = previous_review_status
+    for key in (
+        "human_review",
+        "operator_resolution",
+        "approved_reply_text",
+        "execution_mode",
+        "execution_state",
+        "execution_attempts",
+        "archive_reason",
+        "archived_at",
+    ):
+        if key in previous_decision:
+            decision[key] = previous_decision[key]
+
+    carried: dict[str, Any] = {}
+    if previous_record.get("reviewed_at"):
+        carried["reviewed_at"] = previous_record["reviewed_at"]
+    if previous_record.get("reconciled_at"):
+        carried["reconciled_at"] = previous_record["reconciled_at"]
+    if previous_record.get("reconciliation_reason"):
+        carried["reconciliation_reason"] = previous_record["reconciliation_reason"]
+    return carried
+
+
+def apply_execution_state_reconciliation(candidate: dict[str, Any], decision: dict[str, Any]) -> dict[str, Any]:
+    execution_state = candidate.get("execution_state") or {}
+    if not execution_state.get("already_published"):
+        return {}
+
+    published_channels = list(execution_state.get("published_channels") or [])
+    channel_text = ", ".join(published_channels) if published_channels else "connected marketplaces"
+    recorded_at = (
+        str(execution_state.get("published_at") or "")
+        or decision.get("created_at")
+        or now_iso()
+    )
+    note = f"Reconciled automatically because DuckAgent already shows this item as published to {channel_text}."
+    decision["review_status"] = "approved"
+    decision["human_review"] = {
+        "action": "reconcile",
+        "resolution": "approve",
+        "recorded_at": recorded_at,
+        "note": note,
+    }
+    decision["reconciled_resolution"] = {
+        "action": "reconcile",
+        "resolution": "approve",
+        "recorded_at": recorded_at,
+        "note": note,
+        "source": execution_state.get("state_source"),
+    }
+    reasoning = list(decision.get("reasoning") or [])
+    reconciliation_reason = f"Execution-state reconciliation: DuckAgent already published this item to {channel_text}."
+    if reconciliation_reason not in reasoning:
+        reasoning.append(reconciliation_reason)
+    decision["reasoning"] = reasoning
+    return {
+        "reviewed_at": recorded_at,
+        "reconciled_at": now_iso(),
+        "reconciliation_reason": note,
+    }
+
+
 def priority_rank(priority: str) -> int:
     return {"urgent": 3, "high": 2, "medium": 1, "low": 0}.get(priority, 0)
 
@@ -885,21 +998,27 @@ def main() -> int:
 
     for candidate in candidates:
         artifact_id = candidate["artifact_id"]
-        input_hash = canonical_hash({"evaluator_version": EVALUATOR_VERSION, "candidate": candidate})
+        material_hash = material_candidate_hash(candidate)
+        input_hash = canonical_hash({"evaluator_version": EVALUATOR_VERSION, "material_hash": material_hash})
         previous = latest_records.get(artifact_id)
         if previous and previous.get("input_hash") == input_hash:
             continue
 
         previous_decision = previous.get("decision") if previous else None
         decision = evaluate_quality_gate(candidate)
+        execution_reconciliation_fields = apply_execution_state_reconciliation(candidate, decision)
+        carried_record_fields = carry_forward_review_resolution(decision, previous, material_hash=material_hash)
         output_paths = write_decision(decision)
         record = {
             "artifact_id": artifact_id,
             "input_hash": input_hash,
+            "material_hash": material_hash,
             "evaluated_at": decision["created_at"],
             "decision": decision,
             "output_paths": output_paths,
         }
+        record.update(execution_reconciliation_fields)
+        record.update(carried_record_fields)
         latest_records[artifact_id] = record
         new_decisions.append(decision)
         history_rows.append(

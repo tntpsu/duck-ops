@@ -37,10 +37,19 @@ from customer_interaction_cases import (
     render_customer_interaction_queue_markdown,
 )
 from customer_action_packets import build_customer_action_packets, render_customer_action_packets_markdown
+from business_operator_desk import build_business_operator_desk, render_business_operator_desk_markdown
 from customer_case_enrichment import enrich_customer_cases
 from customer_operator import write_customer_operator_outputs
 from customer_recovery_decisions import apply_customer_recovery_decisions
-from google_tasks_bridge import sync_ready_custom_design_cases
+from custom_build_task_candidates import (
+    build_custom_build_task_candidates,
+    render_custom_build_task_candidates_markdown,
+)
+from etsy_conversation_browser_sync import (
+    build_etsy_conversation_browser_sync,
+    render_etsy_conversation_browser_sync_markdown,
+)
+from google_tasks_bridge import sync_custom_work_items
 from nightly_action_summary import build_nightly_action_summary, render_nightly_action_summary_markdown
 from open_order_intelligence import (
     build_etsy_open_orders_snapshot,
@@ -72,6 +81,16 @@ NIGHTLY_ACTION_SUMMARY_PATH = STATE_DIR / "nightly_action_summary.json"
 NIGHTLY_ACTION_SUMMARY_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "nightly_action_summary.json"
 NIGHTLY_ACTION_SUMMARY_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "nightly_action_summary.md"
 NIGHTLY_ACTION_SUMMARY_DIGEST_DIR = OUTPUT_DIR / "digests"
+BUSINESS_OPERATOR_DESK_PATH = STATE_DIR / "business_operator_desk.json"
+BUSINESS_OPERATOR_DESK_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "business_operator_desk.json"
+BUSINESS_OPERATOR_DESK_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "business_operator_desk.md"
+CUSTOM_BUILD_TASK_CANDIDATES_PATH = STATE_DIR / "custom_build_task_candidates.json"
+CUSTOM_BUILD_TASK_CANDIDATES_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "custom_build_task_candidates.json"
+CUSTOM_BUILD_TASK_CANDIDATES_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "custom_build_task_candidates.md"
+ETSY_CONVERSATION_BROWSER_SYNC_PATH = STATE_DIR / "etsy_conversation_browser_sync.json"
+ETSY_CONVERSATION_BROWSER_SYNC_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "etsy_conversation_browser_sync.json"
+ETSY_CONVERSATION_BROWSER_SYNC_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "etsy_conversation_browser_sync.md"
+REVIEW_QUEUE_STATE_PATH = STATE_DIR / "review_queue.json"
 
 PILOT_PUBLISH_FLOWS = {"newduck", "weekly_sale"}
 INITIAL_MAILBOX_BOOTSTRAP_LIMIT = 75
@@ -98,6 +117,13 @@ PRIVATE_REVIEW_PATTERN = re.compile(
     re.DOTALL,
 )
 TRANSACTION_ID_PATTERN = re.compile(r"transaction ID:\s*(?P<tx>\d+)", re.IGNORECASE)
+ORDER_NUMBER_PATTERN = re.compile(r"order\s*#(?P<order>\d+)", re.IGNORECASE)
+ETSY_CONVERSATION_SUBJECT_PATTERN = re.compile(
+    r"etsy conversation with (?P<name>.+?) about order\s*#(?P<order>\d+)",
+    re.IGNORECASE,
+)
+ETSY_SENT_YOU_MESSAGE_PATTERN = re.compile(r"^\s*(?P<name>[A-Za-z0-9 .'\-]+)\s+sent you a message\b", re.IGNORECASE | re.MULTILINE)
+ETSY_VIEW_MESSAGE_PATTERN = re.compile(r"View\s*message\s*\(\s*(?P<url>https?://[^\s)]+)", re.IGNORECASE)
 RECENT_REVIEW_WINDOW_DAYS = 7
 
 
@@ -1428,8 +1454,48 @@ def merge_publish_candidate(candidates: dict[str, dict[str, Any]], candidate: di
         existing["candidate_summary"] = candidate["candidate_summary"]
         existing["supporting_context"] = candidate["supporting_context"]
         existing["normalization_notes"] = candidate_notes
+        if candidate.get("execution_state"):
+            existing["execution_state"] = candidate["execution_state"]
     elif not existing.get("candidate_summary", {}).get("body") and candidate.get("candidate_summary", {}).get("body"):
         existing["candidate_summary"] = candidate["candidate_summary"]
+    if candidate.get("execution_state") and not existing.get("execution_state"):
+        existing["execution_state"] = candidate["execution_state"]
+
+
+def extract_publish_execution_state(flow: str, payload: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    if flow == "newduck":
+        shopify_product_id = payload.get("shopify_product_id")
+        etsy_listing_id = payload.get("etsy_listing_id")
+        already_published = bool(payload.get("newduck_published") or shopify_product_id or etsy_listing_id)
+        published_channels: list[str] = []
+        if shopify_product_id:
+            published_channels.append("shopify")
+        if etsy_listing_id:
+            published_channels.append("etsy")
+        return {
+            "already_published": already_published,
+            "state": "published" if already_published else "draft",
+            "published_channels": published_channels,
+            "shopify_product_id": str(shopify_product_id) if shopify_product_id else None,
+            "etsy_listing_id": str(etsy_listing_id) if etsy_listing_id else None,
+            "state_source": str(run_dir / "state_newduck.json"),
+        }
+    if flow == "weekly_sale":
+        published_at = payload.get("weekly_sale_published_at")
+        already_published = bool(payload.get("weekly_sale_published") or published_at)
+        return {
+            "already_published": already_published,
+            "state": "published" if already_published else "draft",
+            "published_channels": ["shopify", "etsy"] if already_published else [],
+            "published_at": str(published_at) if published_at else None,
+            "state_source": str(run_dir / "state_weekly.json"),
+        }
+    return {
+        "already_published": False,
+        "state": "draft",
+        "published_channels": [],
+        "state_source": str(run_dir),
+    }
 
 
 def normalize_publish_candidates(
@@ -1477,6 +1543,7 @@ def normalize_publish_candidates(
                     "completeness": "high",
                     "input_confidence_cap": 0.85,
                 },
+                "execution_state": extract_publish_execution_state("newduck", payload, path.parent),
             },
         )
 
@@ -1514,6 +1581,7 @@ def normalize_publish_candidates(
                     "completeness": "high",
                     "input_confidence_cap": 0.85,
                 },
+                "execution_state": extract_publish_execution_state("weekly_sale", payload, path.parent),
             },
         )
 
@@ -1591,6 +1659,52 @@ def infer_issue_type(review: dict[str, Any]) -> str:
     return "unknown"
 
 
+def extract_etsy_conversation_signal(email_item: dict[str, Any]) -> dict[str, Any] | None:
+    subject = str(email_item.get("subject") or "").strip()
+    body_text = str(email_item.get("body_text") or "")
+    if "etsy conversation with" not in normalize_text(subject) and "sent you a message" not in normalize_text(body_text):
+        return None
+
+    subject_match = ETSY_CONVERSATION_SUBJECT_PATTERN.search(subject)
+    body_match = ETSY_SENT_YOU_MESSAGE_PATTERN.search(body_text)
+    conversation_name = None
+    order_number = None
+    if subject_match:
+        conversation_name = subject_match.group("name").strip()
+        order_number = subject_match.group("order").strip()
+    if not conversation_name and body_match:
+        conversation_name = body_match.group("name").strip()
+    if not order_number:
+        order_match = ORDER_NUMBER_PATTERN.search(subject) or ORDER_NUMBER_PATTERN.search(body_text)
+        if order_match:
+            order_number = order_match.group("order").strip()
+
+    browser_url_candidates: list[str] = []
+    url_match = ETSY_VIEW_MESSAGE_PATTERN.search(body_text)
+    if url_match:
+        browser_url_candidates.append(url_match.group("url").strip())
+    for url in (
+        "https://www.etsy.com/your/messages",
+        "https://www.etsy.com/your/account/messages",
+    ):
+        if url not in browser_url_candidates:
+            browser_url_candidates.append(url)
+
+    if conversation_name:
+        preview_text = f"Latest Etsy conversation from {conversation_name} needs review."
+    else:
+        preview_text = "Latest Etsy conversation needs review."
+
+    thread_key = f"etsy-thread::{order_number}" if order_number else f"etsy-thread::{slugify(conversation_name or subject)}"
+    return {
+        "conversation_contact": conversation_name,
+        "order_number": order_number,
+        "preview_text": preview_text,
+        "browser_url_candidates": browser_url_candidates,
+        "conversation_thread_key": thread_key,
+    }
+
+
 def normalize_customer_signals(mailbox_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in sorted(Path("/Users/philtullai/ai-agents/duckAgent/runs").glob("*/state_reviews.json")):
@@ -1638,6 +1752,7 @@ def normalize_customer_signals(mailbox_items: list[dict[str, Any]]) -> list[dict
             continue
         if not looks_like_customer_issue_email(email_item):
             continue
+        etsy_conversation = extract_etsy_conversation_signal(email_item)
         artifact_id = f"customer::mail::{email_item['uid']}"
         rows.append(
             {
@@ -1650,19 +1765,29 @@ def normalize_customer_signals(mailbox_items: list[dict[str, Any]]) -> list[dict
                         "folder": email_item.get("folder"),
                         "uid": email_item.get("uid"),
                         "message_id": email_item.get("message_id"),
+                        "subject": email_item.get("subject"),
                     }
                 ],
                 "customer_event": {
                     "event_type": "email",
                     "rating": None,
                     "sentiment": "unknown",
-                    "customer_text": trim_text(email_item.get("body_text"), 1500),
+                    "customer_text": (
+                        etsy_conversation.get("preview_text")
+                        if etsy_conversation
+                        else trim_text(email_item.get("body_text"), 1500)
+                    ),
+                    "raw_customer_text": trim_text(email_item.get("body_text"), 1500),
+                    "email_subject": email_item.get("subject"),
+                    "conversation_contact": etsy_conversation.get("conversation_contact") if etsy_conversation else None,
+                    "conversation_thread_key": etsy_conversation.get("conversation_thread_key") if etsy_conversation else None,
+                    "browser_url_candidates": etsy_conversation.get("browser_url_candidates") if etsy_conversation else [],
                     "event_time": email_item.get("date"),
                 },
                 "business_context": {
-                    "order_id": None,
+                    "order_id": etsy_conversation.get("order_number") if etsy_conversation else None,
                     "product_title": None,
-                    "issue_type": "email_support",
+                    "issue_type": "etsy_conversation" if etsy_conversation else "email_support",
                     "allowed_remedies": ["reply", "refund", "replacement", "escalation"],
                 },
                 "normalization_notes": {
@@ -1717,6 +1842,30 @@ def write_nightly_action_summary_outputs(summary_payload: dict[str, Any]) -> Non
         digest_md = NIGHTLY_ACTION_SUMMARY_DIGEST_DIR / f"nightly_action_summary__{summary_date}.md"
         write_json(digest_json, summary_payload)
         digest_md.write_text(markdown + "\n", encoding="utf-8")
+
+
+def write_custom_build_task_candidate_outputs(payload: dict[str, Any]) -> None:
+    OUTPUT_DIR.joinpath("operator").mkdir(parents=True, exist_ok=True)
+    markdown = render_custom_build_task_candidates_markdown(payload)
+    write_json(CUSTOM_BUILD_TASK_CANDIDATES_PATH, payload)
+    write_json(CUSTOM_BUILD_TASK_CANDIDATES_OPERATOR_JSON_PATH, payload)
+    CUSTOM_BUILD_TASK_CANDIDATES_OPERATOR_MD_PATH.write_text(markdown + "\n", encoding="utf-8")
+
+
+def write_etsy_conversation_browser_sync_outputs(payload: dict[str, Any]) -> None:
+    OUTPUT_DIR.joinpath("operator").mkdir(parents=True, exist_ok=True)
+    markdown = render_etsy_conversation_browser_sync_markdown(payload)
+    write_json(ETSY_CONVERSATION_BROWSER_SYNC_PATH, payload)
+    write_json(ETSY_CONVERSATION_BROWSER_SYNC_OPERATOR_JSON_PATH, payload)
+    ETSY_CONVERSATION_BROWSER_SYNC_OPERATOR_MD_PATH.write_text(markdown + "\n", encoding="utf-8")
+
+
+def write_business_operator_desk_outputs(payload: dict[str, Any]) -> None:
+    OUTPUT_DIR.joinpath("operator").mkdir(parents=True, exist_ok=True)
+    markdown = render_business_operator_desk_markdown(payload)
+    write_json(BUSINESS_OPERATOR_DESK_PATH, payload)
+    write_json(BUSINESS_OPERATOR_DESK_OPERATOR_JSON_PATH, payload)
+    BUSINESS_OPERATOR_DESK_OPERATOR_MD_PATH.write_text(markdown + "\n", encoding="utf-8")
 
 
 def observe_mailbox(
@@ -1978,11 +2127,22 @@ def main() -> int:
     customer_cases, usps_tracking_summary = enrich_cases_with_usps_tracking(customer_cases)
     customer_cases, customer_recovery_summary = apply_customer_recovery_decisions(customer_cases)
     custom_design_cases = build_custom_design_cases(mailbox_items)
-    custom_design_cases, google_tasks_summary = sync_ready_custom_design_cases(custom_design_cases)
     print_queue_candidates = build_print_queue_candidates(weekly_insights, products)
     etsy_open_orders = build_etsy_open_orders_snapshot()
     shopify_open_orders = build_shopify_open_orders_snapshot()
     packing_summary = build_packing_summary(etsy_open_orders, shopify_open_orders)
+    custom_build_task_candidates = build_custom_build_task_candidates(packing_summary)
+    custom_design_cases, custom_build_task_candidates["items"], google_tasks_summary = sync_custom_work_items(
+        custom_design_cases,
+        custom_build_task_candidates.get("items") or [],
+    )
+    custom_build_task_candidates["generated_at"] = now_iso()
+    custom_build_task_candidates["counts"]["ready_for_task"] = sum(
+        1 for item in custom_build_task_candidates["items"] if item.get("ready_for_task")
+    )
+    custom_build_task_candidates["counts"]["with_google_task"] = sum(
+        1 for item in custom_build_task_candidates["items"] if item.get("google_task_status") == "created"
+    )
     customer_interaction_queue = build_customer_interaction_queue(
         customer_cases,
         custom_design_cases,
@@ -2005,18 +2165,35 @@ def main() -> int:
         "replacement_packets": sum(1 for item in customer_action_packets["items"] if item.get("packet_type") == "replacement"),
         "wait_for_tracking_packets": sum(1 for item in customer_action_packets["items"] if item.get("packet_type") == "wait_for_tracking"),
     }
+    customer_operator_payload = write_customer_operator_outputs(customer_action_packets)
+    etsy_conversation_browser_sync = build_etsy_conversation_browser_sync(
+        customer_issue_queue_items,
+        customer_packets=customer_operator_payload,
+    )
     nightly_action_summary = build_nightly_action_summary(
         customer_action_packets,
         custom_design_cases,
         packing_summary,
     )
+    review_queue = load_json(REVIEW_QUEUE_STATE_PATH)
+    business_operator_desk = build_business_operator_desk(
+        customer_packets=customer_operator_payload,
+        nightly_summary=nightly_action_summary,
+        etsy_browser_sync=etsy_conversation_browser_sync,
+        custom_build_candidates=custom_build_task_candidates,
+        print_queue_candidates=print_queue_candidates,
+        review_queue=review_queue if isinstance(review_queue, dict) else {},
+    )
     write_json(NORMALIZED_DIR / "customer_cases.json", {"generated_at": now_iso(), "items": customer_cases})
     write_json(NORMALIZED_DIR / "custom_design_cases.json", {"generated_at": now_iso(), "items": custom_design_cases})
     write_json(NORMALIZED_DIR / "print_queue_candidates.json", {"generated_at": now_iso(), "items": print_queue_candidates})
+    write_json(NORMALIZED_DIR / "custom_build_task_candidates.json", custom_build_task_candidates)
     write_customer_action_packet_outputs(customer_action_packets)
-    write_customer_operator_outputs(customer_action_packets)
     write_customer_interaction_queue_outputs(customer_interaction_queue)
+    write_custom_build_task_candidate_outputs(custom_build_task_candidates)
+    write_etsy_conversation_browser_sync_outputs(etsy_conversation_browser_sync)
     write_nightly_action_summary_outputs(nightly_action_summary)
+    write_business_operator_desk_outputs(business_operator_desk)
 
     summary = {
         "generated_at": now_iso(),
@@ -2045,10 +2222,13 @@ def main() -> int:
             "publish_candidates": len(publish_candidates),
             "customer_signals": len(customer_signals),
             "customer_cases": len(customer_cases),
+            "etsy_conversation_browser_threads": len(etsy_conversation_browser_sync.get("items") or []),
             "customer_action_packets": len(customer_action_packets.get("items") or []),
             "usps_live_tracking_cases": (usps_tracking_summary.get("counts") or {}).get("lookups_succeeded", 0),
             "customer_recovery_decision_matches": (customer_recovery_summary.get("counts") or {}).get("matched_cases", 0),
             "custom_design_cases": len(custom_design_cases),
+            "custom_build_task_candidates": len(custom_build_task_candidates.get("items") or []),
+            "business_operator_sections": len((business_operator_desk.get("sections") or {})),
             "google_tasks_created": (google_tasks_summary.get("counts") or {}).get("created_tasks", 0),
             "print_queue_candidates": len(print_queue_candidates),
             "customer_interaction_queue_items": len(customer_interaction_queue.get("items") or []),

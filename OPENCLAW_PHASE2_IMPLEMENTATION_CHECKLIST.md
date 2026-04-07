@@ -191,14 +191,15 @@ These decisions are already made and should not be reopened unless something bre
 
 ### 6. Weekly phase-readiness reporting
 
-- [ ] Generate weekly:
+- [x] Generate weekly:
   - `phase_readiness__YYYY-WW.json`
   - `phase_readiness__YYYY-WW.md`
-- [ ] Emit:
+- [x] Emit:
   - `ready_to_advance`
   - `stay_in_current_phase`
   - `blocked`
-- [ ] Trigger a one-off alert if readiness becomes `ready_to_advance`.
+- [x] Trigger a one-off alert if readiness becomes `ready_to_advance`.
+  - current implementation generates the readiness artifact inside `runtime/notifier.py` during the scheduled weekly window and sends it through the existing notifier path
 
 ### 7. Runtime scheduling
 
@@ -493,6 +494,28 @@ Companion planning doc:
   - `runtime/google_tasks_bridge.py`
   - `state/normalized/usps_tracking_snapshot.json`
   - `state/google_tasks_custom_design_tasks.json`
+- [x] Stage `custom_build_task_candidate` artifacts from live paid custom-order lines under:
+  - `state/custom_build_task_candidates.json`
+  - `output/operator/custom_build_task_candidates.md`
+- [x] Stage `etsy_conversation_thread` browser-review artifacts under:
+  - `state/etsy_conversation_browser_sync.json`
+  - `output/operator/etsy_conversation_browser_sync.md`
+- [x] Add browser-open support to the customer operator lane so staged Etsy thread work can jump into the browser with commands like `customer open C301`.
+- [x] Add a unified staged business desk under:
+  - `state/business_operator_desk.json`
+  - `output/operator/business_operator_desk.json`
+  - `output/operator/business_operator_desk.md`
+- [x] Route that staged business desk through `review_loop.py handle` with commands like:
+  - `desk status`
+  - `desk next`
+  - `desk show customer`
+  - `desk show builds`
+  - `desk show packing`
+  - `desk show stock`
+  - `desk show reviews`
+- [x] Extend the business desk so it surfaces print-soon candidates in addition to customer work, builds, packing, and creative review items.
+- [x] Sort nightly `orders to pack` by ship urgency first and render the section as a shopping-list-style table.
+- [x] Include actual Etsy personalization / build detail for staged custom build candidates in the nightly summary.
 
 ### 1. Customer signal ingestion
 
@@ -536,7 +559,9 @@ Companion planning doc:
 - [x] Persist explicit customer recovery decisions so resend/refund reminders can honor approved operator choices.
 - [x] Expose customer recovery decision recording through the operator lane / WhatsApp flow.
 - [x] Add Google Tasks bridge scaffolding and staged task-state output.
-- [ ] Stage live Google Tasks API task creation for ready `custom_design_case` items once auth/config exists.
+- [x] Stage browser-review Etsy conversation records with best browser URLs and operator-open commands so thread notifications no longer stop at the email subject alone.
+- [ ] Stage browser-reviewed Etsy conversation capture so thread notifications can become real latest-message records.
+- [ ] Stage live Google Tasks API task creation for ready `custom_design_case` and `custom_build_task_candidate` items once auth/config exists.
 
 ### Phase 4 acceptance
 

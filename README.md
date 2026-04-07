@@ -49,9 +49,16 @@ Current staged customer/work outputs:
 - `output/operator/customer_queue.md`
 - `state/nightly_action_summary.json`
 - `output/operator/nightly_action_summary.md`
+- `state/business_operator_desk.json`
+- `output/operator/business_operator_desk.md`
+- `state/custom_build_task_candidates.json`
+- `output/operator/custom_build_task_candidates.md`
+- `state/etsy_conversation_browser_sync.json`
+- `output/operator/etsy_conversation_browser_sync.md`
 - `state/normalized/etsy_open_orders_snapshot.json`
 - `state/normalized/shopify_open_orders_snapshot.json`
 - `state/normalized/packing_summary.json`
+- `state/normalized/print_queue_candidates.json`
 - `state/normalized/usps_tracking_snapshot.json`
 - `state/google_tasks_custom_design_tasks.json`
 
@@ -60,3 +67,18 @@ Customer recovery decisions can now be staged with:
 - `runtime/customer_recovery_decisions.py record --receipt-id ... --resolution replacement|refund|wait|reply_only --note "..."`
 - `runtime/customer_operator.py status`
 - `runtime/customer_operator.py handle --text 'replacement C301 because ...'`
+
+Unified desk commands now run through the main operator loop too:
+
+- `python3 runtime/review_loop.py handle --text 'desk status'`
+- `python3 runtime/review_loop.py handle --text 'desk next'`
+- `python3 runtime/review_loop.py handle --text 'desk show customer'`
+- `python3 runtime/review_loop.py handle --text 'desk show builds'`
+- `python3 runtime/review_loop.py handle --text 'desk show packing'`
+- `python3 runtime/review_loop.py handle --text 'desk show stock'`
+- `python3 runtime/review_loop.py handle --text 'desk show reviews'`
+- `python3 runtime/review_loop.py handle --text 'status all'`
+
+Publish review reconciliation is now fail-closed in Duck Ops:
+
+- if DuckAgent already shows a `newduck` listing as published to Shopify/Etsy, or a weekly sale as already published, OpenClaw reconciles the pending review state back to handled instead of resurfacing the old review item

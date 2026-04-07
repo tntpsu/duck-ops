@@ -70,7 +70,9 @@ def _format_custom_order_line(order: dict[str, Any]) -> str:
 def _merge_attention_packets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in items:
-        key = str(item.get("source_artifact_id") or item.get("packet_id") or "")
+        thread_key = str(item.get("conversation_thread_key") or "").strip()
+        receipt_id = str((item.get("order_enrichment") or {}).get("receipt_id") or "").strip()
+        key = thread_key or (f"receipt::{receipt_id}" if receipt_id else str(item.get("source_artifact_id") or item.get("packet_id") or ""))
         grouped.setdefault(key, []).append(item)
 
     merged: list[dict[str, Any]] = []
@@ -264,16 +266,19 @@ def render_nightly_action_summary_markdown(payload: dict[str, Any]) -> str:
         grand_total = sum(int(item.get("total_quantity") or 0) for item in orders_to_pack)
         lines.extend(
             [
-                "| Duck | Etsy | Shopify | Total |",
-                "| --- | ---: | ---: | ---: |",
+                "_Sorted by ship urgency first, then quantity._",
+                "",
+                "| Duck | When | Etsy | Shopify | Total |",
+                "| --- | --- | ---: | ---: | ---: |",
             ]
         )
         for item in orders_to_pack:
             channels = item.get("by_channel") or {}
+            when_label = str(item.get("urgency_label") or "Open")
             lines.append(
-                f"| {item.get('product_title')} | {channels.get('etsy', 0)} | {channels.get('shopify', 0)} | {item.get('total_quantity', 0)} |"
+                f"| {item.get('product_title')} | {when_label} | {channels.get('etsy', 0)} | {channels.get('shopify', 0)} | {item.get('total_quantity', 0)} |"
             )
-        lines.append(f"| **Total** | **{etsy_total}** | **{shopify_total}** | **{grand_total}** |")
+        lines.append(f"| **Total** |  | **{etsy_total}** | **{shopify_total}** | **{grand_total}** |")
 
     lines.extend(["", "## 4. Custom / Novel Ducks To Make", ""])
     custom_section = sections.get("custom_novel_ducks_to_make") or {}
