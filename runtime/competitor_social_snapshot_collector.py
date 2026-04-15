@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,8 @@ OUTPUT_MD_PATH = OUTPUT_OPERATOR_DIR / "competitor_social_snapshots.md"
 
 IG_APP_ID = "936619743392459"
 REQUEST_TIMEOUT = 20
+REQUEST_RETRY_DELAYS = (0.4, 1.0)
+RETRYABLE_HTTP_CODES = {401, 408, 409, 425, 429, 500, 502, 503, 504}
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9']+")
 HASHTAG_PATTERN = re.compile(r"(?<!\w)#([A-Za-z0-9_]+)")
@@ -113,6 +116,11 @@ def _save_history(snapshots: list[dict[str, Any]]) -> None:
     )
 
 
+def _load_existing_snapshot() -> dict[str, Any]:
+    payload = load_json(STATE_PATH, {})
+    return payload if isinstance(payload, dict) else {}
+
+
 def _load_config() -> dict[str, Any]:
     payload = load_json(CONFIG_PATH, {})
     return payload if isinstance(payload, dict) else {}
@@ -129,6 +137,33 @@ def _request_json(url: str, *, referer_handle: str | None = None) -> dict[str, A
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
         return json.loads(response.read().decode("utf-8", "ignore"))
+
+
+def _request_json_with_retries(url: str, *, referer_handle: str | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    attempts: list[dict[str, Any]] = []
+    max_attempts = len(REQUEST_RETRY_DELAYS) + 1
+    last_error: Exception | None = None
+    for attempt_no in range(1, max_attempts + 1):
+        try:
+            payload = _request_json(url, referer_handle=referer_handle)
+            attempts.append({"attempt": attempt_no, "outcome": "success"})
+            return payload, attempts
+        except urllib.error.HTTPError as exc:
+            attempts.append({"attempt": attempt_no, "outcome": "http_error", "code": exc.code})
+            last_error = exc
+            if exc.code not in RETRYABLE_HTTP_CODES or attempt_no >= max_attempts:
+                setattr(exc, "codex_attempts", list(attempts))
+                raise
+        except Exception as exc:
+            attempts.append({"attempt": attempt_no, "outcome": "error", "error": str(exc)})
+            last_error = exc
+            if attempt_no >= max_attempts:
+                setattr(exc, "codex_attempts", list(attempts))
+                raise
+        time.sleep(REQUEST_RETRY_DELAYS[attempt_no - 1])
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"Request failed without returning a payload: {url}")
 
 
 def _profile_info_url(handle: str) -> str:
@@ -266,6 +301,27 @@ def _engagement_score(row: dict[str, Any]) -> float:
     return round(likes + comments * 4 + plays * 0.05 + views * 0.03, 2)
 
 
+def _clone_cached_profile(profile: dict[str, Any], *, snapshot_source: str, refreshed_at: str) -> dict[str, Any]:
+    cloned = dict(profile or {})
+    cloned["snapshot_source"] = snapshot_source
+    cloned["cache_refreshed_at"] = refreshed_at
+    cloned["original_observed_at"] = _compact_text(cloned.get("observed_at")) or None
+    return cloned
+
+
+def _clone_cached_posts(posts: list[dict[str, Any]], *, refreshed_at: str, limit: int) -> list[dict[str, Any]]:
+    cloned_rows: list[dict[str, Any]] = []
+    for row in list(posts or [])[:limit]:
+        if not isinstance(row, dict):
+            continue
+        cloned = dict(row)
+        cloned["snapshot_source"] = "cached"
+        cloned["cache_refreshed_at"] = refreshed_at
+        cloned["original_observed_at"] = _compact_text(cloned.get("observed_at")) or None
+        cloned_rows.append(cloned)
+    return cloned_rows
+
+
 def _profile_summary(profile_payload: dict[str, Any], seed: dict[str, Any]) -> dict[str, Any]:
     user = (((profile_payload.get("data") or {}).get("user")) or {}) if isinstance(profile_payload, dict) else {}
     return {
@@ -286,6 +342,7 @@ def _profile_summary(profile_payload: dict[str, Any], seed: dict[str, Any]) -> d
         "confidence": _compact_text(seed.get("confidence")) or None,
         "category": _compact_text(seed.get("category")) or None,
         "reason": _compact_text(seed.get("reason")) or None,
+        "snapshot_source": "live",
     }
 
 
@@ -326,31 +383,94 @@ def _normalized_posts(seed: dict[str, Any], timeline_payload: dict[str, Any], *,
             "notes": None,
             "confidence": "public_api",
             "source_url": f"https://www.instagram.com/{_compact_text(seed.get('instagram_handle'))}/",
+            "snapshot_source": "live",
         }
         row["engagement_score"] = _engagement_score(row)
         results.append(row)
     return results
 
 
-def _collect_account(seed: dict[str, Any], *, latest_posts_per_account: int) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
+def _collect_account(
+    seed: dict[str, Any],
+    *,
+    latest_posts_per_account: int,
+    cached_profile: dict[str, Any] | None = None,
+    cached_posts: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
     handle = _compact_text(seed.get("instagram_handle"))
     if not handle:
         return None, [], {"account_handle": None, "failure_class": "missing_handle", "message": "Seed account has no confirmed Instagram handle."}
 
     observed_at = now_local_iso()
     try:
-        profile_payload = _request_json(_profile_info_url(handle), referer_handle=handle)
+        profile_payload, profile_attempts = _request_json_with_retries(_profile_info_url(handle), referer_handle=handle)
     except urllib.error.HTTPError as exc:
-        return None, [], {"account_handle": handle, "failure_class": "profile_http_error", "message": f"Profile endpoint returned HTTP {exc.code}."}
+        if cached_profile or cached_posts:
+            fallback_profile = _clone_cached_profile(cached_profile or _profile_summary({}, seed), snapshot_source="cached_profile_and_posts", refreshed_at=observed_at)
+            fallback_posts = _clone_cached_posts(cached_posts or [], refreshed_at=observed_at, limit=latest_posts_per_account)
+            return (
+                fallback_profile,
+                fallback_posts,
+                {
+                    "account_handle": handle,
+                    "failure_class": "profile_http_error",
+                    "message": f"Profile endpoint returned HTTP {exc.code}; cached snapshot reused.",
+                    "fallback_used": True,
+                    "attempts": list(getattr(exc, "codex_attempts", [])),
+                },
+            )
+        return None, [], {"account_handle": handle, "failure_class": "profile_http_error", "message": f"Profile endpoint returned HTTP {exc.code}.", "attempts": list(getattr(exc, "codex_attempts", []))}
     except Exception as exc:
-        return None, [], {"account_handle": handle, "failure_class": "profile_fetch_failed", "message": str(exc)}
+        if cached_profile or cached_posts:
+            fallback_profile = _clone_cached_profile(cached_profile or _profile_summary({}, seed), snapshot_source="cached_profile_and_posts", refreshed_at=observed_at)
+            fallback_posts = _clone_cached_posts(cached_posts or [], refreshed_at=observed_at, limit=latest_posts_per_account)
+            return (
+                fallback_profile,
+                fallback_posts,
+                {
+                    "account_handle": handle,
+                    "failure_class": "profile_fetch_failed",
+                    "message": f"{exc}; cached snapshot reused.",
+                    "fallback_used": True,
+                    "attempts": list(getattr(exc, "codex_attempts", [])),
+                },
+            )
+        return None, [], {"account_handle": handle, "failure_class": "profile_fetch_failed", "message": str(exc), "attempts": list(getattr(exc, "codex_attempts", []))}
 
     try:
-        timeline_payload = _request_json(_timeline_url(handle, count=latest_posts_per_account), referer_handle=handle)
+        timeline_payload, timeline_attempts = _request_json_with_retries(_timeline_url(handle, count=latest_posts_per_account), referer_handle=handle)
     except urllib.error.HTTPError as exc:
-        return _profile_summary(profile_payload, seed), [], {"account_handle": handle, "failure_class": "timeline_http_error", "message": f"Timeline endpoint returned HTTP {exc.code}."}
+        live_profile = _profile_summary(profile_payload, seed)
+        if cached_posts:
+            live_profile["snapshot_source"] = "live_profile_cached_posts"
+            return (
+                live_profile,
+                _clone_cached_posts(cached_posts, refreshed_at=observed_at, limit=latest_posts_per_account),
+                {
+                    "account_handle": handle,
+                    "failure_class": "timeline_http_error",
+                    "message": f"Timeline endpoint returned HTTP {exc.code}; cached posts reused.",
+                    "fallback_used": True,
+                    "attempts": list(getattr(exc, "codex_attempts", [])),
+                },
+            )
+        return live_profile, [], {"account_handle": handle, "failure_class": "timeline_http_error", "message": f"Timeline endpoint returned HTTP {exc.code}.", "attempts": list(getattr(exc, "codex_attempts", []))}
     except Exception as exc:
-        return _profile_summary(profile_payload, seed), [], {"account_handle": handle, "failure_class": "timeline_fetch_failed", "message": str(exc)}
+        live_profile = _profile_summary(profile_payload, seed)
+        if cached_posts:
+            live_profile["snapshot_source"] = "live_profile_cached_posts"
+            return (
+                live_profile,
+                _clone_cached_posts(cached_posts, refreshed_at=observed_at, limit=latest_posts_per_account),
+                {
+                    "account_handle": handle,
+                    "failure_class": "timeline_fetch_failed",
+                    "message": f"{exc}; cached posts reused.",
+                    "fallback_used": True,
+                    "attempts": list(getattr(exc, "codex_attempts", [])),
+                },
+            )
+        return live_profile, [], {"account_handle": handle, "failure_class": "timeline_fetch_failed", "message": str(exc), "attempts": list(getattr(exc, "codex_attempts", []))}
 
     profile = _profile_summary(profile_payload, seed)
     posts = _normalized_posts(seed, timeline_payload, observed_at=observed_at)
@@ -412,6 +532,20 @@ def _account_rollups(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = None) -> dict[str, Any]:
     config = _load_config()
+    existing_snapshot = _load_existing_snapshot()
+    cached_profiles_by_handle = {
+        _compact_text(item.get("account_handle")): item
+        for item in (existing_snapshot.get("profiles") or [])
+        if isinstance(item, dict) and _compact_text(item.get("account_handle"))
+    }
+    cached_posts_by_handle: dict[str, list[dict[str, Any]]] = {}
+    for row in (existing_snapshot.get("posts") or []):
+        if not isinstance(row, dict):
+            continue
+        handle = _compact_text(row.get("account_handle"))
+        if not handle:
+            continue
+        cached_posts_by_handle.setdefault(handle, []).append(row)
     seed_accounts = [item for item in (config.get("seed_accounts") or []) if isinstance(item, dict)]
     target_count = latest_posts_per_account or int(((config.get("collection_boundary") or {}).get("latest_posts_per_account")) or 12)
 
@@ -420,7 +554,13 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
     failures: list[dict[str, Any]] = []
 
     for seed in seed_accounts[: int(((config.get("collection_boundary") or {}).get("max_accounts_per_run")) or 10)]:
-        profile, account_posts, failure = _collect_account(seed, latest_posts_per_account=target_count)
+        handle = _compact_text(seed.get("instagram_handle"))
+        profile, account_posts, failure = _collect_account(
+            seed,
+            latest_posts_per_account=target_count,
+            cached_profile=cached_profiles_by_handle.get(handle),
+            cached_posts=cached_posts_by_handle.get(handle),
+        )
         if profile:
             profiles.append(profile)
         posts.extend(account_posts)
@@ -432,6 +572,12 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
     hook_counter: Counter[str] = Counter(_compact_text(row.get("hook_family")).lower() for row in posts if _compact_text(row.get("hook_family")))
     motif_counter: Counter[str] = Counter(_compact_text(row.get("repeated_motif")).lower() for row in posts if _compact_text(row.get("repeated_motif")))
 
+    cached_account_count = sum(
+        1
+        for profile in profiles
+        if _compact_text(profile.get("snapshot_source")) not in {"", "live"}
+    )
+
     payload = {
         "generated_at": now_local_iso(),
         "summary": {
@@ -439,6 +585,8 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
             "seed_account_count": len(seed_accounts),
             "collected_account_count": len(profiles),
             "failed_account_count": len(failures),
+            "cached_account_count": cached_account_count,
+            "live_account_count": max(0, len(profiles) - cached_account_count),
             "post_count": len(posts),
             "latest_posts_per_account": target_count,
             "data_quality_note": "Visible metrics vary by post type and account. Treat this as directional benchmark data, not first-party truth.",
@@ -478,6 +626,7 @@ def render_competitor_social_snapshots_markdown(payload: dict[str, Any]) -> str:
         f"- Seed accounts: `{summary.get('seed_account_count') or 0}`",
         f"- Accounts collected: `{summary.get('collected_account_count') or 0}`",
         f"- Accounts failed: `{summary.get('failed_account_count') or 0}`",
+        f"- Accounts using cached fallback: `{summary.get('cached_account_count') or 0}`",
         f"- Posts observed: `{summary.get('post_count') or 0}`",
         "",
         str(summary.get("headline") or ""),
