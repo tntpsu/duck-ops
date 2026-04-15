@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 
@@ -15,6 +16,35 @@ import weekly_sale_monitor
 
 
 class WeeklyControlTests(unittest.TestCase):
+    def test_build_weekly_sale_monitor_rehydrates_stale_active_sales(self) -> None:
+        with TemporaryDirectory() as tmp:
+            active_sales_path = Path(tmp) / "active_sales.json"
+            stale_payload = {
+                "shopify": [],
+                "timestamp": "2026-04-12T07:10:54-04:00",
+            }
+            refreshed_payload = {
+                "shopify": [{"id": "1", "title": "Sale Duck", "discount": "20%"}],
+                "timestamp": "2026-04-15T06:30:00-04:00",
+                "source": "shopify_live_collection",
+            }
+            sales_cache = {"last_sync": "2026-04-15T06:15:00-04:00", "lifetime": {"1": 22}, "last_30d": {"1": 4}}
+            with patch.object(weekly_sale_monitor, "ACTIVE_SALES_PATH", active_sales_path), patch.object(
+                weekly_sale_monitor,
+                "_fetch_live_active_sales_payload",
+                return_value=refreshed_payload,
+            ):
+                payload = weekly_sale_monitor.build_weekly_sale_monitor(
+                    active_sales_payload=stale_payload,
+                    sales_cache_payload=sales_cache,
+                    weekly_insights_payload={},
+                )
+
+            self.assertEqual(payload["counts"]["active_sale_items"], 1)
+            self.assertEqual(payload["source_timestamps"]["active_sales"], refreshed_payload["timestamp"])
+            self.assertEqual(payload["items"][0]["product_title"], "Sale Duck")
+            self.assertTrue(active_sales_path.exists())
+
     def test_weekly_sale_monitor_sync_marks_stale_input_as_blocked(self) -> None:
         payload = {
             "generated_at": "2026-04-12T17:00:00-04:00",

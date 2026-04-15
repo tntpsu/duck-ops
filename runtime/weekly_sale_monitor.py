@@ -7,7 +7,10 @@ feed that back into future sale and marketing choices.
 from __future__ import annotations
 
 import json
+import os
 import re
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +22,8 @@ DUCK_AGENT_ROOT = ROOT.parent / "duckAgent"
 ACTIVE_SALES_PATH = DUCK_AGENT_ROOT / "cache" / "active_sales.json"
 SALES_CACHE_PATH = DUCK_AGENT_ROOT / "cache" / "sales_cache.json"
 WEEKLY_INSIGHTS_PATH = DUCK_AGENT_ROOT / "cache" / "weekly_insights.json"
+DUCK_AGENT_ENV_PATH = DUCK_AGENT_ROOT / ".env"
+SALE_COLLECTION_TITLE = "On Sale Duck Collection – 3D-Printed Ducks at Discounted Prices"
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -57,6 +62,102 @@ def _hours_since(value: str | None, now_local: datetime) -> float | None:
     return round(max(0.0, (now_local - parsed.astimezone()).total_seconds() / 3600.0), 1)
 
 
+def _load_env_defaults(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def _shopify_rest_get(endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    _load_env_defaults(DUCK_AGENT_ENV_PATH)
+    domain = os.getenv("SHOPIFY_DOMAIN")
+    token = os.getenv("SHOPIFY_TOKEN")
+    api_version = os.getenv("SHOPIFY_API_VERSION", "2025-01")
+    if not domain or not token:
+        raise RuntimeError("Shopify credentials are not available for live sale refresh.")
+    query = f"?{urlencode(params or {})}" if params else ""
+    url = f"https://{domain}/admin/api/{api_version}/{endpoint}{query}"
+    request = Request(url, headers={"X-Shopify-Access-Token": token, "Content-Type": "application/json"})
+    with urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _discount_from_variants(variants: list[dict[str, Any]]) -> str:
+    best_discount = 0
+    for variant in variants:
+        try:
+            price = float(variant.get("price") or 0)
+            compare_at_price = float(variant.get("compare_at_price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if compare_at_price > price > 0:
+            discount = round(((compare_at_price - price) / compare_at_price) * 100)
+            best_discount = max(best_discount, int(discount))
+    return f"{best_discount}%" if best_discount > 0 else ""
+
+
+def _fetch_live_active_sales_payload(now_local: datetime) -> dict[str, Any] | None:
+    collections_payload = _shopify_rest_get("custom_collections.json", {"limit": 250})
+    collection_id = None
+    for collection in list(collections_payload.get("custom_collections") or []):
+        if str(collection.get("title") or "").strip() == SALE_COLLECTION_TITLE:
+            collection_id = str(collection.get("id") or "").strip()
+            break
+    if not collection_id:
+        return None
+
+    products_payload = _shopify_rest_get(
+        "products.json",
+        {
+            "collection_id": collection_id,
+            "fields": "id,title,variants",
+            "limit": 250,
+        },
+    )
+    items: list[dict[str, Any]] = []
+    for product in list(products_payload.get("products") or []):
+        variants = list(product.get("variants") or [])
+        discount = _discount_from_variants(variants)
+        if not discount:
+            continue
+        items.append(
+            {
+                "id": str(product.get("id") or "").strip(),
+                "title": str(product.get("title") or "").strip(),
+                "discount": discount,
+            }
+        )
+    return {
+        "shopify": items,
+        "timestamp": now_local.isoformat(),
+        "source": "shopify_live_collection",
+        "collection_id": collection_id,
+    }
+
+
+def _maybe_refresh_active_sales_payload(active_sales_payload: dict[str, Any], now_local: datetime) -> dict[str, Any]:
+    age = _hours_since(active_sales_payload.get("timestamp"), now_local)
+    active_items = list(active_sales_payload.get("shopify") or [])
+    if age is not None and age < 30 and active_items:
+        return active_sales_payload
+    try:
+        refreshed = _fetch_live_active_sales_payload(now_local)
+    except Exception:
+        return active_sales_payload
+    if not refreshed:
+        return active_sales_payload
+    ACTIVE_SALES_PATH.write_text(json.dumps(refreshed, indent=2), encoding="utf-8")
+    return refreshed
+
+
 def _marketing_recommendation(effectiveness: str) -> str:
     if effectiveness == "strong":
         return "Feature this sale in marketing. Use it in the email hero, social post, and supporting story slots."
@@ -84,6 +185,8 @@ def build_weekly_sale_monitor(
 ) -> dict[str, Any]:
     now_local = _now_local()
     active_sales_payload = active_sales_payload or load_json(ACTIVE_SALES_PATH, {"shopify": []})
+    if isinstance(active_sales_payload, dict):
+        active_sales_payload = _maybe_refresh_active_sales_payload(active_sales_payload, now_local)
     sales_cache_payload = sales_cache_payload or load_json(SALES_CACHE_PATH, {"lifetime": {}, "last_30d": {}})
     weekly_insights_payload = weekly_insights_payload or load_json(WEEKLY_INSIGHTS_PATH, {})
 

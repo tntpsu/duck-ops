@@ -2,6 +2,9 @@
 
 Last updated: 2026-04-14
 
+Detailed execution sequence:
+- [ROADMAP_EXECUTION_SEQUENCE.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/ROADMAP_EXECUTION_SEQUENCE.md)
+
 ## Completed Major Work
 
 ### 1. Workflow Control Plane
@@ -50,6 +53,22 @@ Last updated: 2026-04-14
 - Review execution and trend/health reporting were cleaned up to reduce false bad states.
 - Weekly/workflow health is more root-cause-aware than before.
 
+### 7. Shopify Draft Activation Controls
+- Newduck is now a two-step Shopify flow:
+  - first reply creates drafts
+  - second reply audits Shopify completeness and activates Shopify only
+- Weekly Shopify draft activation review now exists with email approval -> reply apply/publish.
+- Blocking listing issues are separated from advisory quality suggestions so activation stays operator-friendly.
+- Weekly launchd scheduling is installed for the Shopify draft review pass.
+
+### 8. Agent Governance Foundation
+- `duck-architecture-guard` skill is now created and validated.
+- `duck-change-planner`, `duck-reliability-review`, `duck-data-model-governance`, and `duck-automation-safety` are now created and validated.
+- `duck-tech-debt-triage`, `duck-social-insights`, and `duck-competitor-benchmark` are now created and validated.
+- Agent/skill governance policy now exists to define power tiers, recommendation flow, and review/push expectations.
+- Engineering governance digest lane now exists and is scheduled for the morning.
+- Governance digest email delivery is smoke-tested, so the observe/propose recommendation channel is live.
+
 ## Active Operational Lanes
 
 ### 1. Shopify SEO Category Workflow
@@ -64,6 +83,11 @@ Last updated: 2026-04-14
 ### 3. Review Carousel Publishing
 - Approval/publish loop is working.
 - Tuesday approval scheduling is installed.
+
+### 4. Shopify Draft Activation Review
+- Monday review email is installed.
+- Reply apply/publish activates only ready Shopify drafts and leaves blocked drafts alone.
+- Quality suggestions are surfaced separately from blocking issues.
 
 ## Highest-Value Open Work
 
@@ -82,9 +106,10 @@ Why this is high value:
 - That makes it finally worth learning from outcomes instead of just automating actions.
 - It also gives us a disciplined way to borrow strong ideas from competitors instead of guessing when to shift content strategy.
 
-### Priority 2: Fix Remaining Broken Social Publishing Pieces
-- Facebook publishing is still blocked by page/token configuration issues.
-- This is still a meaningful gap because some social workflows are not fully healthy until Meta auth/page access is fixed.
+### Priority 2: Social Performance Observability
+- Facebook page/token wiring is now fixed enough for scheduled-post smoke testing.
+- The remaining gap is not auth anymore; it is collecting post outcomes reliably from both Instagram and Facebook after publish.
+- Best next step is to turn cross-channel posting truth into a normalized performance warehouse instead of waiting on manual inspection.
 
 ### Priority 3: Expand SEO Audit Intelligence
 Current audit checks:
@@ -113,6 +138,32 @@ Best next SEO heuristics to add:
   - only listings with at least one prior sale
 - This still needs careful rollout around Etsy bot-sensitivity and browser pacing.
 
+### Priority 6: Operationalize Product Engineering Skills
+The reusable skill layer now exists. The next job is to use it consistently instead of letting it sit as documentation.
+
+Key uses next:
+1. `duck-social-insights`
+   - govern the social performance collector and weekly recommendation packet
+2. `duck-competitor-benchmark`
+   - govern competitor snapshots and benchmark reporting
+3. `duck-tech-debt-triage`
+   - feed ranked cleanup work into the morning governance digest
+4. `duck-architecture-guard`
+   - review cross-repo changes before rollout and before commit
+5. `duck-data-model-governance`
+   - review new state/output/schema changes before they spread
+6. `duck-automation-safety`
+   - gate browser-heavy or approval-boundary-sensitive automation changes
+7. `duck-reliability-review`
+   - review scheduled lanes and degraded health before promotion
+8. `duck-change-planner`
+   - remain the entry point for major roadmap work
+
+Why this matters:
+- DuckAgent and Duck Ops are getting more capable and more complex.
+- Skills now give Codex/agents a stable operating manual for recurring work.
+- The value now comes from enforcing them in real workflows, not from creating more skill files.
+
 ## Recommended Next 3 Steps
 
 ### 1. Build the Social Performance Collector
@@ -120,8 +171,9 @@ Best next SEO heuristics to add:
 - Normalize by post type, duck family, caption, hashtags, and publish time.
 - Include competitor-post snapshots so we can benchmark what is winning outside our own account.
 
-### 2. Fix Facebook Publishing Auth/Page Configuration
-- Restore the broken Facebook lane so social automation is actually complete.
+### 2. Build Weekly Social And Competitor Reports
+- Turn the new `duck-social-insights` and `duck-competitor-benchmark` skills into real weekly output lanes.
+- Keep them observe/propose only at first and route findings into the governance/operator surfaces.
 
 ### 3. Add Smarter SEO Heuristics
 - Expand beyond missing/length/duplicate checks.
