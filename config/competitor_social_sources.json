@@ -56,8 +56,8 @@
     {
       "brand_key": "wilderkindstudioco",
       "display_name": "WilderkindStudioCo",
-      "instagram_handle": null,
-      "verification_status": "needs_exact_handle",
+      "instagram_handle": "wilderkind.studio",
+      "verification_status": "confirmed",
       "confidence": "high",
       "category": "direct_adjacent_product_competitor",
       "reason": "Strong overlap in dashboard ducks, cruise ducks, and giftable novelty ducks."
@@ -74,8 +74,8 @@
     {
       "brand_key": "duckduck3d",
       "display_name": "duckduck3d",
-      "instagram_handle": null,
-      "verification_status": "needs_exact_handle",
+      "instagram_handle": "duckduck_3d",
+      "verification_status": "confirmed",
       "confidence": "medium_high",
       "category": "direct_product_competitor",
       "reason": "Dedicated 3D printed dashboard and collectible duck positioning."
@@ -92,11 +92,11 @@
     {
       "brand_key": "jeepducklove",
       "display_name": "JeepDuckLove",
-      "instagram_handle": "license2playtoys",
-      "verification_status": "confirmed_parent_brand",
+      "instagram_handle": "jeepducklove",
+      "verification_status": "confirmed",
       "confidence": "medium",
       "category": "adjacent_competitor",
-      "reason": "Jeep duck storefront appears tied to parent License2PlayToys social account."
+      "reason": "Jeep-duck-focused audience and product overlap, though not the same custom 3D-printed lane."
     },
     {
       "brand_key": "f1rstwarrior_offroad",
@@ -106,6 +106,24 @@
       "confidence": "medium_high",
       "category": "direct_adjacent_product_competitor",
       "reason": "Strong JEEPish duck branding and overlapping offroad duck product mix."
+    },
+    {
+      "brand_key": "ducks_in_space",
+      "display_name": "ducks_in_space",
+      "instagram_handle": "ducks_in_space",
+      "verification_status": "confirmed",
+      "confidence": "medium",
+      "category": "adjacent_competitor",
+      "reason": "Relevant duck-themed account worth benchmarking for recurring themes, style, and attention patterns."
+    },
+    {
+      "brand_key": "f3dprinted",
+      "display_name": "f3dprinted",
+      "instagram_handle": "f3dprinted",
+      "verification_status": "confirmed",
+      "confidence": "medium",
+      "category": "direct_adjacent_product_competitor",
+      "reason": "3D-printed product account with likely overlap in format, product presentation, and duck-adjacent audience."
     }
   ]
 }
