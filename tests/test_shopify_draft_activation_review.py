@@ -89,9 +89,10 @@ class ShopifyDraftActivationReviewTests(unittest.TestCase):
             self.assertEqual(payload["item_count"], 2)
             self.assertEqual(payload["ready_count"], 1)
             self.assertEqual(payload["blocked_count"], 1)
-            self.assertEqual(payload["suggestion_count"], 1)
+            self.assertEqual(payload["suggestion_count"], 2)
             self.assertEqual(payload["items"][0]["title"], "Ready Duck")
             self.assertTrue(payload["items"][0]["quality_suggestions"])
+            self.assertTrue(any("browse phrases" in suggestion or "alt text" in suggestion for suggestion in payload["items"][0]["quality_suggestions"]))
             self.assertTrue((review_run_dir / f"{payload['run_id']}.json").exists())
             self.assertTrue(output_path.exists())
 
@@ -131,8 +132,10 @@ class ShopifyDraftActivationReviewTests(unittest.TestCase):
         self.assertIn("FLOW:shopify_draft_activation", subject)
         self.assertIn('Reply "publish" or "apply"', text_body)
         self.assertIn("Quality suggestions are advisory only", text_body)
+        self.assertIn("not just using the maximum number of tags", text_body)
         self.assertIn("Reply <strong>\"publish\"</strong> or <strong>\"apply\"</strong>", html_body)
         self.assertIn("Quality suggestions are advisory only", html_body)
+        self.assertIn("not simply maximizing the raw tag count", html_body)
 
 
 if __name__ == "__main__":

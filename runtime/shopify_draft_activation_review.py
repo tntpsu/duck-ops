@@ -15,6 +15,7 @@ DUCK_AGENT_VENV_PY = DUCK_AGENT_ROOT / ".venv" / "bin" / "python3"
 REVIEW_STATE_DIR = DUCK_OPS_ROOT / "state" / "shopify_draft_activation_review"
 REVIEW_RUN_DIR = REVIEW_STATE_DIR / "runs"
 REVIEW_OUTPUT_MD = DUCK_OPS_ROOT / "output" / "operator" / "shopify_draft_activation_review.md"
+NEW_DUCK_ARRIVALS_COLLECTION_TITLE = "New Duck Arrivals"
 
 
 def _ensure_duckagent_python() -> None:
@@ -107,6 +108,34 @@ def _tag_list(tags_csv: Any) -> list[str]:
     return [tag.strip() for tag in str(tags_csv or "").split(",") if tag.strip()]
 
 
+def _tag_quality_suggestions(tag_list: list[str], *, title: str) -> list[str]:
+    if not tag_list:
+        return []
+    normalized = [" ".join(tag.lower().split()) for tag in tag_list if tag.strip()]
+    unique_count = len(set(normalized))
+    duplicate_count = len(normalized) - unique_count
+    single_word_count = sum(1 for tag in normalized if len(tag.split()) <= 1)
+    generic_tags = [
+        tag
+        for tag in normalized
+        if tag in {"duck", "ducks", "collectible", "gift", "dashboard decor", "3d printed"}
+    ]
+    suggestions: list[str] = []
+    if len(tag_list) < 10:
+        suggestions.append(f"Only {len(tag_list)} Shopify tags; consider expanding to more distinct browse phrases.")
+    if duplicate_count > 0:
+        suggestions.append(f"Tag list has {duplicate_count} overlapping or duplicate phrase(s); keep the strongest distinct tags.")
+    if single_word_count > max(6, len(tag_list) // 2):
+        suggestions.append("A lot of the Shopify tags are single-word terms; prefer more 2-3 word browse phrases.")
+    if len(tag_list) > 30 and (duplicate_count > 0 or len(generic_tags) > 2):
+        suggestions.append("The tag set is broad but overlapping; trim weak generic tags instead of maximizing quantity.")
+    title_words = {part for part in _normalize_text(title).lower().split() if part}
+    title_overlap = sum(1 for tag in normalized if title_words and set(tag.split()).issubset(title_words))
+    if title_overlap > max(4, len(tag_list) // 2):
+        suggestions.append("Many Shopify tags just restate the product title; add more use-case, gift, or style phrases.")
+    return suggestions
+
+
 def _shopify_admin_product_url(product_id: Any) -> str:
     store_slug = str(os.getenv("SHOPIFY_ADMIN_STORE_SLUG", "") or "").strip()
     if not store_slug or not product_id:
@@ -140,6 +169,11 @@ def _fetch_graphql_product_details(product_id: int | str, product_id_to_gid, sho
           id
           fullName
         }
+        collections(first: 20) {
+          nodes {
+            title
+          }
+        }
       }
     }
     """
@@ -153,6 +187,11 @@ def _fetch_graphql_product_details(product_id: int | str, product_id_to_gid, sho
         "seo_description": _normalize_text(seo.get("description")),
         "category_id": _normalize_text(category.get("id")),
         "category_name": _normalize_text(category.get("fullName")),
+        "collection_titles": [
+            _normalize_text(node.get("title"))
+            for node in ((((product.get("collections") or {}).get("nodes")) or []))
+            if isinstance(node, dict) and _normalize_text(node.get("title"))
+        ],
     }
 
 
@@ -197,6 +236,8 @@ def _audit_product(product: dict[str, Any], gql_details: dict[str, Any]) -> dict
     description_text = _html_to_text(product.get("body_html"))
     tag_list = _tag_list(tags)
     variant_ready, variant_details = _variant_checks(product)
+    collection_titles = set(gql_details.get("collection_titles") or [])
+    image_alt_missing_count = sum(1 for image in images if isinstance(image, dict) and not _normalize_text(image.get("alt")))
     checks = [
         {
             "label": "Status is draft",
@@ -247,6 +288,15 @@ def _audit_product(product: dict[str, Any], gql_details: dict[str, Any]) -> dict
             "ok": bool(gql_details.get("category_id")),
             "detail": gql_details.get("category_name") or "Category is missing.",
         },
+        {
+            "label": "New Duck Arrivals collection",
+            "ok": NEW_DUCK_ARRIVALS_COLLECTION_TITLE in collection_titles,
+            "detail": (
+                f"In {NEW_DUCK_ARRIVALS_COLLECTION_TITLE}"
+                if NEW_DUCK_ARRIVALS_COLLECTION_TITLE in collection_titles
+                else f"Not currently in {NEW_DUCK_ARRIVALS_COLLECTION_TITLE}."
+            ),
+        },
     ]
     blocking_labels = {
         "Title present",
@@ -264,8 +314,13 @@ def _audit_product(product: dict[str, Any], gql_details: dict[str, Any]) -> dict
         quality_suggestions.append(f"Only {len(images)} image(s); consider adding at least 3 polished product shots.")
     if description_text and len(description_text) < 140:
         quality_suggestions.append("Description is short; consider adding a little more buyer-facing detail before activation.")
-    if len(tag_list) > 25:
-        quality_suggestions.append(f"Tag list is crowded at {len(tag_list)} tags; consider trimming to the strongest Shopify tags.")
+    if not _normalize_text(product.get("handle")):
+        quality_suggestions.append("Handle is missing or blank; confirm Shopify generated a clean product handle.")
+    if image_alt_missing_count:
+        quality_suggestions.append(f"{image_alt_missing_count} product image(s) are missing alt text.")
+    quality_suggestions.extend(_tag_quality_suggestions(tag_list, title=title))
+    if NEW_DUCK_ARRIVALS_COLLECTION_TITLE not in collection_titles and product_type.lower() == "collectible duck":
+        quality_suggestions.append(f"Add this draft to {NEW_DUCK_ARRIVALS_COLLECTION_TITLE} so the newest ducks rotate through the launch collection.")
     seo_title = str(gql_details.get("seo_title") or "")
     seo_description = str(gql_details.get("seo_description") or "")
     if seo_title and not 45 <= len(seo_title) <= 70:
@@ -372,6 +427,7 @@ def render_shopify_draft_activation_email(payload: dict[str, Any], *, render_rep
                     "<div style=\"color:#374151;margin-bottom:8px;\">DuckAgent checked every current Shopify draft product for listing completeness.</div>"
                     "<div style=\"color:#374151;margin-bottom:8px;\">Reply <strong>\"publish\"</strong> or <strong>\"apply\"</strong> to activate all drafts in the <strong>ready</strong> bucket. Blocked drafts will be left alone.</div>"
                     "<div style=\"color:#6b7280;\">Quality suggestions are advisory only. They help us tighten the listing, but they do not block activation.</div>"
+                    "<div style=\"color:#6b7280;margin-top:6px;\">Shopify tag advice is about distinct browse phrases and overlap cleanup, not simply maximizing the raw tag count.</div>"
                 ),
                 eyebrow="Summary",
             ),
@@ -402,6 +458,7 @@ def render_shopify_draft_activation_email(payload: dict[str, Any], *, render_rep
         "",
         'Reply "publish" or "apply" to activate all ready Shopify drafts. Blocked drafts will be left alone.',
         "Quality suggestions are advisory only and do not block activation.",
+        "Shopify tag suggestions are about better phrase coverage and less overlap, not just using the maximum number of tags.",
         "",
     ]
     if preview_ready:
