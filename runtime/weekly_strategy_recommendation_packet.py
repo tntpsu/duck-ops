@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from typing import Any
 
 from governance_review_common import DUCK_OPS_ROOT, OUTPUT_OPERATOR_DIR, load_json, now_local_iso, write_json, write_markdown
@@ -9,6 +10,7 @@ from governance_review_common import DUCK_OPS_ROOT, OUTPUT_OPERATOR_DIR, load_js
 SOCIAL_ROLLUPS_PATH = DUCK_OPS_ROOT / "state" / "social_performance_rollups.json"
 COMPETITOR_SOCIAL_BENCHMARK_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_benchmark.json"
 COMPETITOR_SOCIAL_SNAPSHOTS_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_snapshots.json"
+COMPETITOR_SOCIAL_SNAPSHOT_HISTORY_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_snapshot_history.json"
 CURRENT_LEARNINGS_PATH = DUCK_OPS_ROOT / "state" / "current_learnings.json"
 PACKET_STATE_PATH = DUCK_OPS_ROOT / "state" / "weekly_strategy_recommendation_packet.json"
 PACKET_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "weekly_strategy_recommendation_packet.json"
@@ -26,6 +28,70 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _humanize_label(value: Any) -> str:
+    text = _compact_text(value).replace("_", " ")
+    if not text:
+        return ""
+    return " ".join(part if part.isupper() else part.capitalize() for part in text.split())
+
+
+def _recent_snapshot_stability(history_payload: dict[str, Any], *, lookback: int = 5) -> dict[str, Any]:
+    snapshots = [item for item in (history_payload.get("snapshots") or []) if isinstance(item, dict)][-lookback:]
+    top_theme_counts: Counter[str] = Counter(
+        _compact_text(item.get("top_theme")).lower() for item in snapshots if _compact_text(item.get("top_theme"))
+    )
+    top_account_counts: Counter[str] = Counter(
+        _compact_text(item.get("top_account")).lower() for item in snapshots if _compact_text(item.get("top_account"))
+    )
+    stable_threshold = 3 if len(snapshots) >= 3 else len(snapshots)
+    top_theme, top_theme_count = top_theme_counts.most_common(1)[0] if top_theme_counts else ("", 0)
+    top_account, top_account_count = top_account_counts.most_common(1)[0] if top_account_counts else ("", 0)
+    return {
+        "recent_snapshot_count": len(snapshots),
+        "stable_threshold": stable_threshold,
+        "stable_top_theme": top_theme if top_theme and top_theme_count >= stable_threshold else None,
+        "stable_top_theme_count": top_theme_count,
+        "stable_top_account": top_account if top_account and top_account_count >= stable_threshold else None,
+        "stable_top_account_count": top_account_count,
+    }
+
+
+def _competitor_account_labels(snapshot_payload: dict[str, Any]) -> set[str]:
+    labels: set[str] = set()
+    for item in snapshot_payload.get("profiles") or []:
+        if not isinstance(item, dict):
+            continue
+        for raw in (
+            item.get("account_handle"),
+            item.get("display_name"),
+            item.get("brand_key"),
+            item.get("full_name"),
+        ):
+            text = _compact_text(raw).lower()
+            if not text:
+                continue
+            labels.add(text)
+            labels.add(text.replace(" ", ""))
+            labels.add(text.replace("_", " "))
+            labels.add(text.replace(".", ""))
+    return labels
+
+
+def _meaningful_theme_row(benchmark_payload: dict[str, Any], snapshot_payload: dict[str, Any]) -> dict[str, Any] | None:
+    excluded_labels = _competitor_account_labels(snapshot_payload)
+    for item in benchmark_payload.get("by_theme") or []:
+        if not isinstance(item, dict):
+            continue
+        label = _compact_text(item.get("label")).lower()
+        if not label:
+            continue
+        normalized = label.replace(" ", "").replace(".", "")
+        if label in excluded_labels or normalized in excluded_labels:
+            continue
+        return item
+    return None
 
 
 def _own_signal_quality(social_payload: dict[str, Any]) -> tuple[str, str]:
@@ -67,9 +133,14 @@ def _recommendations(
     social_payload: dict[str, Any],
     competitor_social_payload: dict[str, Any],
     snapshot_payload: dict[str, Any],
+    snapshot_history_payload: dict[str, Any],
     current_learnings_payload: dict[str, Any],
 ) -> list[dict[str, Any]]:
     recommendations: list[dict[str, Any]] = []
+    competitor_signal = _competitor_signal_quality(competitor_social_payload, snapshot_payload)
+    strongest_workflow = ((social_payload.get("rollups") or {}).get("by_workflow") or [{}])[0]
+    strongest_workflow_label = _compact_text(strongest_workflow.get("label"))
+    stability = _recent_snapshot_stability(snapshot_history_payload)
 
     best_window = ((social_payload.get("rollups") or {}).get("by_time_window") or [{}])[0]
     if _compact_text(best_window.get("label")):
@@ -84,29 +155,74 @@ def _recommendations(
             }
         )
 
-    strongest_workflow = ((social_payload.get("rollups") or {}).get("by_workflow") or [{}])[0]
-    if _compact_text(strongest_workflow.get("label")):
+    if strongest_workflow_label:
         recommendations.append(
             {
                 "priority": "P1",
                 "category": "workflow",
-                "title": f"Keep `{strongest_workflow.get('label')}` in the mix",
-                "recommendation": f"Use `{strongest_workflow.get('label')}` as one of this week’s scheduled posts while receipt coverage is still growing.",
+                "title": f"Keep `{strongest_workflow_label}` in the mix",
+                "recommendation": f"Use `{strongest_workflow_label}` as one of this week’s scheduled posts while receipt coverage is still growing.",
                 "evidence": f"{strongest_workflow.get('post_count') or 0} observed posts with average score {strongest_workflow.get('avg_engagement_score') or 0}.",
                 "confidence": _own_signal_quality(social_payload)[0],
             }
         )
 
-    competitor_ideas = list(competitor_social_payload.get("ideas_to_test") or [])
-    for idea in competitor_ideas[:2]:
+    stable_top_account = _compact_text(stability.get("stable_top_account"))
+    if stable_top_account:
         recommendations.append(
             {
                 "priority": "P2",
-                "category": "competitor_test",
-                "title": "Run one bounded competitor-inspired test",
-                "recommendation": str(idea),
-                "evidence": _compact_text(((competitor_social_payload.get("current_learnings") or [{}])[0]).get("evidence")) or "Competitor benchmark shows repeated patterns worth testing.",
-                "confidence": _competitor_signal_quality(competitor_social_payload, snapshot_payload)[0],
+                "category": "competitor_watch",
+                "title": f"Use `{stable_top_account}` as the watch account for this week’s experiment",
+                "recommendation": (
+                    f"Review the last few hooks and formats from `{stable_top_account}` before drafting one bounded post test. "
+                    "Borrow structure and pacing, not exact copy."
+                ),
+                "evidence": (
+                    f"`{stable_top_account}` held the top-account slot across "
+                    f"{stability.get('stable_top_account_count') or 0} of the last {stability.get('recent_snapshot_count') or 0} competitor snapshots."
+                ),
+                "confidence": competitor_signal[0],
+            }
+        )
+
+    meaningful_theme = _meaningful_theme_row(competitor_social_payload, snapshot_payload)
+    if meaningful_theme and strongest_workflow_label:
+        theme_label = _compact_text(meaningful_theme.get("label"))
+        recommendations.append(
+            {
+                "priority": "P2",
+                "category": "competitor_theme",
+                "title": f"Stage one `{theme_label}`-leaning test inside `{strongest_workflow_label}`",
+                "recommendation": (
+                    f"Use `{theme_label}` as the concept input, but keep the execution in our existing `{strongest_workflow_label}` lane "
+                    "instead of changing the whole content rhythm."
+                ),
+                "evidence": (
+                    f"`{theme_label}` appeared in {meaningful_theme.get('post_count') or 0} competitor posts with average visible score "
+                    f"{meaningful_theme.get('avg_engagement_score') or 0}."
+                ),
+                "confidence": competitor_signal[0],
+            }
+        )
+
+    top_format = ((competitor_social_payload.get("by_format") or [{}])[0])
+    total_competitor_posts = int((competitor_social_payload.get("summary") or {}).get("post_count") or 0)
+    dominant_format_label = _compact_text(top_format.get("label"))
+    dominant_format_count = int(top_format.get("post_count") or 0)
+    if dominant_format_label and total_competitor_posts > 0 and dominant_format_count / max(1, total_competitor_posts) >= 0.5:
+        recommendations.append(
+            {
+                "priority": "P2",
+                "category": "competitor_format",
+                "title": f"Keep one bounded `{dominant_format_label}` test on this week’s board",
+                "recommendation": (
+                    f"Do one small `{dominant_format_label}` experiment this week, but keep it isolated to a single post until our own signal set gets bigger."
+                ),
+                "evidence": (
+                    f"`{dominant_format_label}` accounts for {dominant_format_count} of {total_competitor_posts} competitor posts in the current benchmark."
+                ),
+                "confidence": competitor_signal[0],
             }
         )
 
@@ -165,6 +281,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
     competitor_social_payload = load_json(COMPETITOR_SOCIAL_BENCHMARK_PATH, {})
     snapshot_payload = load_json(COMPETITOR_SOCIAL_SNAPSHOTS_PATH, {})
     current_learnings_payload = load_json(CURRENT_LEARNINGS_PATH, {})
+    snapshot_history_payload = load_json(COMPETITOR_SOCIAL_SNAPSHOT_HISTORY_PATH, {})
     if not isinstance(social_payload, dict):
         social_payload = {}
     if not isinstance(competitor_social_payload, dict):
@@ -173,9 +290,18 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
         snapshot_payload = {}
     if not isinstance(current_learnings_payload, dict):
         current_learnings_payload = {}
+    if not isinstance(snapshot_history_payload, dict):
+        snapshot_history_payload = {}
 
     own_signal = _own_signal_quality(social_payload)
     competitor_signal = _competitor_signal_quality(competitor_social_payload, snapshot_payload)
+    stability = _recent_snapshot_stability(snapshot_history_payload)
+    stability_note = "Competitor history is still too short to call any pattern stable."
+    if _compact_text(stability.get("stable_top_account")):
+        stability_note = (
+            f"`{_compact_text(stability.get('stable_top_account'))}` stayed on top across "
+            f"{stability.get('stable_top_account_count') or 0} of the last {stability.get('recent_snapshot_count') or 0} snapshots."
+        )
     payload = {
         "generated_at": now_local_iso(),
         "summary": {
@@ -184,6 +310,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
             "own_signal_note": own_signal[1],
             "competitor_signal_confidence": competitor_signal[0],
             "competitor_signal_note": competitor_signal[1],
+            "competitor_stability_note": stability_note,
             "recommendation_count": 0,
             "watchout_count": 0,
         },
@@ -191,6 +318,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
             social_payload,
             competitor_social_payload,
             snapshot_payload,
+            snapshot_history_payload,
             current_learnings_payload,
         ),
         "watchouts": _watchouts(snapshot_payload, social_payload),
@@ -198,6 +326,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
             "social_rollups": str(SOCIAL_ROLLUPS_PATH),
             "competitor_social_benchmark": str(COMPETITOR_SOCIAL_BENCHMARK_PATH),
             "competitor_social_snapshots": str(COMPETITOR_SOCIAL_SNAPSHOTS_PATH),
+            "competitor_social_snapshot_history": str(COMPETITOR_SOCIAL_SNAPSHOT_HISTORY_PATH),
             "current_learnings": str(CURRENT_LEARNINGS_PATH),
         },
     }
@@ -223,6 +352,8 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
         f"Own-signal note: {summary.get('own_signal_note') or ''}",
         "",
         f"Competitor-signal note: {summary.get('competitor_signal_note') or ''}",
+        "",
+        f"Competitor-stability note: {summary.get('competitor_stability_note') or ''}",
         "",
         "## Recommended Moves",
         "",
