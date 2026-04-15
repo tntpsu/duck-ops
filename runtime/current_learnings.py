@@ -9,6 +9,7 @@ from governance_review_common import DUCK_OPS_ROOT, OUTPUT_OPERATOR_DIR, load_js
 
 SOCIAL_ROLLUPS_PATH = DUCK_OPS_ROOT / "state" / "social_performance_rollups.json"
 COMPETITOR_BENCHMARK_PATH = DUCK_OPS_ROOT / "state" / "social_competitor_benchmark.json"
+COMPETITOR_SOCIAL_BENCHMARK_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_benchmark.json"
 CURRENT_LEARNINGS_STATE_PATH = DUCK_OPS_ROOT / "state" / "current_learnings.json"
 CURRENT_LEARNINGS_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "current_learnings.json"
 CURRENT_LEARNINGS_MD_PATH = OUTPUT_OPERATOR_DIR / "current_learnings.md"
@@ -18,14 +19,21 @@ def _compact_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
 
-def _current_beliefs(social_payload: dict[str, Any], competitor_payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _current_beliefs(
+    social_payload: dict[str, Any],
+    competitor_market_payload: dict[str, Any],
+    competitor_social_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
     beliefs: list[dict[str, Any]] = []
     for item in social_payload.get("current_learnings") or []:
         if isinstance(item, dict):
             beliefs.append({"source": "own_social", **item})
-    for item in competitor_payload.get("market_learnings") or []:
+    for item in competitor_market_payload.get("market_learnings") or []:
         if isinstance(item, dict):
             beliefs.append({"source": "competitor_market", **item})
+    for item in competitor_social_payload.get("current_learnings") or []:
+        if isinstance(item, dict):
+            beliefs.append({"source": "competitor_social", **item})
     return beliefs[:8]
 
 
@@ -37,24 +45,34 @@ def _strongest_workflows(social_payload: dict[str, Any]) -> list[dict[str, Any]]
     return list(((social_payload.get("rollups") or {}).get("by_workflow") or []))[:5]
 
 
-def _changes(social_payload: dict[str, Any], competitor_payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _changes(
+    social_payload: dict[str, Any],
+    competitor_market_payload: dict[str, Any],
+    competitor_social_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
     changes: list[dict[str, Any]] = []
     for item in social_payload.get("changes_since_previous") or []:
         if isinstance(item, dict):
             changes.append({"source": "own_social", **item})
-    for item in competitor_payload.get("changes_since_previous") or []:
+    for item in competitor_market_payload.get("changes_since_previous") or []:
         if isinstance(item, dict):
             changes.append({"source": "competitor_market", **item})
+    for item in competitor_social_payload.get("changes_since_previous") or []:
+        if isinstance(item, dict):
+            changes.append({"source": "competitor_social", **item})
     return changes
 
 
 def build_current_learnings_payload() -> dict[str, Any]:
     social_payload = load_json(SOCIAL_ROLLUPS_PATH, {})
-    competitor_payload = load_json(COMPETITOR_BENCHMARK_PATH, {})
+    competitor_market_payload = load_json(COMPETITOR_BENCHMARK_PATH, {})
+    competitor_social_payload = load_json(COMPETITOR_SOCIAL_BENCHMARK_PATH, {})
     if not isinstance(social_payload, dict):
         social_payload = {}
-    if not isinstance(competitor_payload, dict):
-        competitor_payload = {}
+    if not isinstance(competitor_market_payload, dict):
+        competitor_market_payload = {}
+    if not isinstance(competitor_social_payload, dict):
+        competitor_social_payload = {}
 
     payload = {
         "generated_at": now_local_iso(),
@@ -62,20 +80,27 @@ def build_current_learnings_payload() -> dict[str, Any]:
             "headline": "Current learnings across our own social results and competitor market signals.",
             "social_post_count": int(((social_payload.get("summary") or {}).get("post_count")) or 0),
             "social_metrics_coverage_pct": float(((social_payload.get("summary") or {}).get("metrics_coverage_pct")) or 0.0),
-            "competitor_observation_days": int(((competitor_payload.get("summary") or {}).get("observation_days")) or 0),
+            "competitor_observation_days": int(((competitor_market_payload.get("summary") or {}).get("observation_days")) or 0),
+            "competitor_social_post_count": int(((competitor_social_payload.get("summary") or {}).get("post_count")) or 0),
             "data_quality_note": _compact_text((social_payload.get("summary") or {}).get("data_quality_note"))
-            or _compact_text((competitor_payload.get("summary") or {}).get("data_quality_note")),
+            or _compact_text((competitor_social_payload.get("summary") or {}).get("data_quality_note"))
+            or _compact_text((competitor_market_payload.get("summary") or {}).get("data_quality_note")),
         },
-        "current_beliefs": _current_beliefs(social_payload, competitor_payload),
-        "changes_since_previous": _changes(social_payload, competitor_payload),
+        "current_beliefs": _current_beliefs(social_payload, competitor_market_payload, competitor_social_payload),
+        "changes_since_previous": _changes(social_payload, competitor_market_payload, competitor_social_payload),
         "best_windows": _best_windows(social_payload),
         "strongest_workflows": _strongest_workflows(social_payload),
         "top_posts": list(social_payload.get("top_posts") or [])[:5],
-        "competitor_motifs": list(competitor_payload.get("emergent_motifs") or [])[:8],
-        "ideas_to_test": list(competitor_payload.get("ideas_to_test") or [])[:6],
+        "competitor_motifs": list(
+            (competitor_social_payload.get("by_theme") or competitor_market_payload.get("emergent_motifs") or [])
+        )[:8],
+        "ideas_to_test": list(
+            competitor_social_payload.get("ideas_to_test") or competitor_market_payload.get("ideas_to_test") or []
+        )[:6],
         "paths": {
             "social_rollups": str(SOCIAL_ROLLUPS_PATH),
             "competitor_benchmark": str(COMPETITOR_BENCHMARK_PATH),
+            "competitor_social_benchmark": str(COMPETITOR_SOCIAL_BENCHMARK_PATH),
         },
     }
     return payload
@@ -90,6 +115,7 @@ def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
         f"- Own posts observed: `{summary.get('social_post_count') or 0}`",
         f"- Own metrics coverage: `{summary.get('social_metrics_coverage_pct') or 0}%`",
         f"- Competitor observation days: `{summary.get('competitor_observation_days') or 0}`",
+        f"- Competitor social posts observed: `{summary.get('competitor_social_post_count') or 0}`",
         "",
         str(summary.get("headline") or ""),
         "",
@@ -148,7 +174,10 @@ def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
         lines.append("")
     else:
         for item in motifs:
-            lines.append(f"- `{item.get('keyword')}` | score `{item.get('score')}` | listings `{item.get('listing_count')}`")
+            label = item.get("keyword") or item.get("label")
+            score = item.get("score") if item.get("score") is not None else item.get("avg_engagement_score")
+            count = item.get("listing_count") if item.get("listing_count") is not None else item.get("post_count")
+            lines.append(f"- `{label}` | score `{score}` | count `{count}`")
         lines.append("")
 
     lines.extend(["## Ideas Worth Testing", ""])

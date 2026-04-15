@@ -81,6 +81,18 @@ SURFACES = [
         "operator_json": OUTPUT_OPERATOR_DIR / "competitor_social_phase1.json",
         "markdown": OUTPUT_OPERATOR_DIR / "competitor_social_phase1.md",
     },
+    {
+        "surface": "competitor_social_snapshots",
+        "state_json": STATE_DIR / "competitor_social_snapshots.json",
+        "operator_json": OUTPUT_OPERATOR_DIR / "competitor_social_snapshots.json",
+        "markdown": OUTPUT_OPERATOR_DIR / "competitor_social_snapshots.md",
+    },
+    {
+        "surface": "competitor_social_benchmark",
+        "state_json": STATE_DIR / "competitor_social_benchmark.json",
+        "operator_json": OUTPUT_OPERATOR_DIR / "competitor_social_benchmark.json",
+        "markdown": OUTPUT_OPERATOR_DIR / "competitor_social_benchmark.md",
+    },
 ]
 
 

@@ -21,6 +21,7 @@ class CurrentLearningsTests(unittest.TestCase):
             root = Path(tmp)
             social_path = root / "state" / "social_performance_rollups.json"
             competitor_path = root / "state" / "social_competitor_benchmark.json"
+            competitor_social_path = root / "state" / "competitor_social_benchmark.json"
             social_path.parent.mkdir(parents=True, exist_ok=True)
             social_path.write_text(
                 json.dumps(
@@ -49,12 +50,33 @@ class CurrentLearningsTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            competitor_social_path.write_text(
+                json.dumps(
+                    {
+                        "summary": {"post_count": 12},
+                        "current_learnings": [
+                            {
+                                "headline": "Reels are the dominant competitor format.",
+                                "confidence": "medium",
+                                "evidence": "8 competitor posts",
+                                "recommendation": "Test one reel without changing cadence broadly.",
+                            }
+                        ],
+                        "changes_since_previous": [{"headline": "Top competitor account changed.", "kind": "account_shift"}],
+                        "by_theme": [{"label": "music", "post_count": 5, "avg_engagement_score": 18.0}],
+                        "ideas_to_test": ["Try one `engagement_prompt` hook on a music-themed post."],
+                    }
+                ),
+                encoding="utf-8",
+            )
             state_path = root / "state" / "current_learnings.json"
             operator_json_path = root / "output" / "operator" / "current_learnings.json"
             markdown_path = root / "output" / "operator" / "current_learnings.md"
 
             with patch.object(current_learnings, "SOCIAL_ROLLUPS_PATH", social_path), patch.object(
                 current_learnings, "COMPETITOR_BENCHMARK_PATH", competitor_path
+            ), patch.object(
+                current_learnings, "COMPETITOR_SOCIAL_BENCHMARK_PATH", competitor_social_path
             ), patch.object(
                 current_learnings, "CURRENT_LEARNINGS_STATE_PATH", state_path
             ), patch.object(
@@ -64,9 +86,10 @@ class CurrentLearningsTests(unittest.TestCase):
             ):
                 payload = current_learnings.build_current_learnings()
 
-            self.assertEqual(len(payload["current_beliefs"]), 2)
-            self.assertEqual(len(payload["changes_since_previous"]), 2)
+            self.assertEqual(len(payload["current_beliefs"]), 3)
+            self.assertEqual(len(payload["changes_since_previous"]), 3)
             self.assertTrue(payload["ideas_to_test"])
+            self.assertEqual(payload["summary"]["competitor_social_post_count"], 12)
             self.assertTrue(state_path.exists())
             self.assertTrue(operator_json_path.exists())
             self.assertTrue(markdown_path.exists())
