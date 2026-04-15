@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "platform_scope": [
+    "instagram"
+  ],
+  "collection_boundary": {
+    "mode": "public_observe_only",
+    "login_allowed": false,
+    "interaction_allowed": false,
+    "bounded_scroll_only": true,
+    "autoplay_allowed": false,
+    "max_accounts_per_run": 10,
+    "latest_posts_per_account": 12,
+    "notes": [
+      "Collect only public-facing competitor snapshots in the first slice.",
+      "Do not like, follow, comment, or log in.",
+      "Keep competitor social observations separate from our own post truth."
+    ]
+  },
+  "snapshot_schema": {
+    "required_fields": [
+      "account_name",
+      "platform",
+      "account_handle",
+      "post_url",
+      "observed_at",
+      "post_date",
+      "hour_bucket",
+      "post_format",
+      "visible_hook",
+      "theme",
+      "duck_family",
+      "engagement_visible",
+      "repeated_motif"
+    ],
+    "optional_fields": [
+      "post_id",
+      "account_url",
+      "caption_excerpt",
+      "notes",
+      "confidence",
+      "visible_likes",
+      "visible_comments",
+      "source_url",
+      "hook_family"
+    ],
+    "comparison_dimensions": [
+      "post_format",
+      "theme",
+      "hour_bucket",
+      "duck_family",
+      "hook_family"
+    ]
+  },
+  "seed_accounts": [
+    {
+      "brand_key": "wilderkindstudioco",
+      "display_name": "WilderkindStudioCo",
+      "instagram_handle": null,
+      "verification_status": "needs_exact_handle",
+      "confidence": "high",
+      "category": "direct_adjacent_product_competitor",
+      "reason": "Strong overlap in dashboard ducks, cruise ducks, and giftable novelty ducks."
+    },
+    {
+      "brand_key": "mattmademe",
+      "display_name": "MattMadeMe",
+      "instagram_handle": "MattMadeMe.com",
+      "verification_status": "confirmed",
+      "confidence": "high",
+      "category": "direct_product_competitor",
+      "reason": "Dedicated custom/funny duck brand with strong overlap in collectible and giftable ducks."
+    },
+    {
+      "brand_key": "duckduck3d",
+      "display_name": "duckduck3d",
+      "instagram_handle": null,
+      "verification_status": "needs_exact_handle",
+      "confidence": "medium_high",
+      "category": "direct_product_competitor",
+      "reason": "Dedicated 3D printed dashboard and collectible duck positioning."
+    },
+    {
+      "brand_key": "duck3dprint",
+      "display_name": "Duck3DPrint",
+      "instagram_handle": "duck3dprint.shop",
+      "verification_status": "confirmed",
+      "confidence": "medium",
+      "category": "direct_adjacent_product_competitor",
+      "reason": "Broader print-shop profile but real overlap in 3D printed duck offerings."
+    },
+    {
+      "brand_key": "jeepducklove",
+      "display_name": "JeepDuckLove",
+      "instagram_handle": "license2playtoys",
+      "verification_status": "confirmed_parent_brand",
+      "confidence": "medium",
+      "category": "adjacent_competitor",
+      "reason": "Jeep duck storefront appears tied to parent License2PlayToys social account."
+    },
+    {
+      "brand_key": "f1rstwarrior_offroad",
+      "display_name": "JEEPish / F1rstWarrior",
+      "instagram_handle": "f1rstwarrior.offroad",
+      "verification_status": "confirmed",
+      "confidence": "medium_high",
+      "category": "direct_adjacent_product_competitor",
+      "reason": "Strong JEEPish duck branding and overlapping offroad duck product mix."
+    }
+  ]
+}

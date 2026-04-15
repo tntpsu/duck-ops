@@ -75,6 +75,12 @@ SURFACES = [
         "operator_json": OUTPUT_OPERATOR_DIR / "current_learnings.json",
         "markdown": OUTPUT_OPERATOR_DIR / "current_learnings.md",
     },
+    {
+        "surface": "competitor_social_phase1",
+        "state_json": STATE_DIR / "competitor_social_phase1.json",
+        "operator_json": OUTPUT_OPERATOR_DIR / "competitor_social_phase1.json",
+        "markdown": OUTPUT_OPERATOR_DIR / "competitor_social_phase1.md",
+    },
 ]
 
 
