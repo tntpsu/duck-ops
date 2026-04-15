@@ -59,6 +59,13 @@ Current local safety rules:
 - the working branch is `codex/openclaw-local`
 - `origin` now points to your fork and `upstream` points to the public OpenClaw repo
 
+Current customer-thread refresh pattern:
+
+- mailbox/file observation stays lightweight and frequent
+- Etsy inbox truth-sync runs as a separate `duck-ops` runtime lane
+- launchd should schedule the Etsy inbox sync locally; do not commit machine-specific plist files
+- recommended cadence is every 2 hours during the day/evening plus one guaranteed `6:30 PM` pass
+
 ## Local-Only Runtime Paths
 
 These stay local on this Mac and should not be treated as git homes:

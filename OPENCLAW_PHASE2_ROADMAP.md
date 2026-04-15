@@ -1076,6 +1076,21 @@ Instead:
 - OpenClaw writes its decision
 - you remain the one who replies `publish` or does not
 
+Current preferred tightening path for social flows:
+
+- normalize DuckAgent state-file publish candidates such as `meme` and `jeepfact` into OpenClaw's review queue
+- send the current operator card to WhatsApp, including media when the artifact has image URLs
+- when you reply `approve`, OpenClaw calls back into DuckAgent through the same rich `FLOW / RUN / ACTION` mail-event contract DuckAgent already understands
+- when you reply `needs changes`, OpenClaw calls back into DuckAgent with `ACTION:revise` so the refreshed draft returns through the normal review surface
+
+That keeps the operator surface unified without giving OpenClaw permission to impersonate your email reply stream.
+
+`newduck` stays outside this direct path for now:
+
+- OpenClaw can still review the listing draft
+- but final approval should pause at a browser-assisted Etsy listing tweak step because the API draft still misses some required listing-field cleanup
+- after that browser pass is defined, `newduck` can join the same WhatsApp-first operator standard
+
 If you later want a tighter loop, the safest future approach is:
 
 - OpenClaw writes an approval artifact
@@ -1493,6 +1508,22 @@ Current implementation note:
 - operator cards now explicitly state what the approval means, so a review-story/social approval is clearly distinguished from a customer-reply approval
 - weekly sale cards now pull the concrete sale targets and discounts from DuckAgent's structured `sale_playbook`, so the approval message shows what discounts and products the human is actually agreeing to
 - weekly sale cards now explicitly say when OpenClaw's objection is mainly "too incomplete / too vague to approve safely" instead of "the sale strategy is wrong"
+- weekly sale `publish_ready` items can now be auto-approved and sent back to DuckAgent for publish when they meet a configurable score/confidence threshold
+- weekly sale `needs changes` can now feed a rewrite back into DuckAgent's `revise` action instead of stopping at operator commentary
+- weekly sale operator cards and WhatsApp fallback prompts now show the concrete rewrite loop explicitly: `rewrite` first, then `needs changes ... use rewrite`
+- Duck Ops now writes a `weekly_sale_monitor` artifact so active sale performance can inform future sale rotations and marketing emphasis
+- Creative Agent can now read the weekly coordination artifact so theme-led weeks can open with the right creative kickoff already selected
+- the weekly coordination layer now distinguishes the one sale-blog week from the three creative-review weeks, so sale weeks stay tied to DuckAgent's sale playbook while non-sale weeks route into Creative Agent reviewable posts
+
+Next review-social expansion:
+
+- keep using DuckAgent's daily review workflow as the source path
+- save approved/generated `review_story` visuals into a reusable review-social pool instead of treating each one as a one-off
+- build a `review_carousel` candidate when either:
+  - the queue reaches `5` strong candidates, or
+  - Tuesday arrives with at least `3`
+- send a separate approval email for that carousel candidate
+- on publish success, mark the used review assets as consumed so the queue only contains new material
 - weekly sale `suggest changes` and `rewrite` now return a tightened sale-plan version so the operator can see the concrete changes OpenClaw wants without guessing
 - DuckAgent weekly sale generation now finishes with a deterministic `approval_summary`, normalized platforms/discounts, and resolved Shopify product IDs so the playbook is closer to operator-ready before OpenClaw touches it
 - OpenClaw now reads that richer weekly-sale `approval_summary` from `state_weekly.json` instead of collapsing the artifact down to the one-line strategic summary

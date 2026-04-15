@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, write_decision
+from workflow_control import record_workflow_transition
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -927,7 +928,120 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
+    state = sync_trend_ranker_control(state)
     write_json(TREND_RANKER_STATE_PATH, state)
+
+
+def sync_trend_ranker_control(state: dict[str, Any]) -> dict[str, Any]:
+    concepts = state.get("concepts") or {}
+    artifacts = state.get("artifacts") or {}
+    concept_records = build_trend_concepts(artifacts)
+    operator_surface_count = 0
+    pending_review_count = 0
+    actionable_pending_review_count = 0
+    backlog_pending_review_count = 0
+    new_in_run_count = 0
+    latest_concept_dt: datetime | None = None
+
+    trend_queue_iterable: list[dict[str, Any]]
+    if concept_records:
+        trend_queue_iterable = concept_records
+    else:
+        trend_queue_iterable = [concept for concept in concepts.values() if isinstance(concept, dict)]
+
+    for concept in trend_queue_iterable:
+        is_pending = str(concept.get("review_status") or "").strip().lower() == "pending"
+        if is_pending:
+            pending_review_count += 1
+        if concept_records:
+            if concept.get("operator_surface"):
+                actionable_pending_review_count += 1
+                operator_surface_count += 1
+            elif concept.get("background_watch"):
+                backlog_pending_review_count += 1
+        else:
+            if should_surface_trend_for_operator(concept):
+                actionable_pending_review_count += 1
+                operator_surface_count += 1
+            elif is_pending:
+                backlog_pending_review_count += 1
+        if concept.get("new_in_run"):
+            new_in_run_count += 1
+        concept_dt = parse_dt(concept.get("created_at"))
+        if concept_dt and (latest_concept_dt is None or concept_dt > latest_concept_dt):
+            latest_concept_dt = concept_dt
+
+    digest_dt = parse_dt(state.get("last_digest_date"))
+    reference_dt = latest_concept_dt if latest_concept_dt and (digest_dt is None or latest_concept_dt >= digest_dt) else digest_dt
+    age_hours = None
+    if reference_dt is not None:
+        age_hours = round((datetime.now(timezone.utc).astimezone() - reference_dt).total_seconds() / 3600.0, 2)
+
+    if age_hours is not None and age_hours >= 72:
+        control_state = "blocked"
+        reason = "stale_input"
+        next_action = "Refresh the trend ranker so operator-facing signals match the current catalog and search data."
+    elif actionable_pending_review_count:
+        control_state = "observed"
+        reason = "pending_review"
+        next_action = "Review the actionable trend concepts in the surfaced queue and either approve, revise, or archive them."
+    elif backlog_pending_review_count:
+        control_state = "verified"
+        reason = "backlog_outside_operator_queue"
+        next_action = "No operator action is needed right now; the remaining pending trend backlog is outside the surfaced review queue."
+    elif new_in_run_count:
+        control_state = "observed"
+        reason = "background_refresh"
+        next_action = "Trend monitoring is refreshing in the background; no operator action is required yet."
+    elif concepts or artifacts:
+        control_state = "verified"
+        reason = "ranked_ready"
+        next_action = "Use the trend ranker output as the current signal summary."
+    else:
+        control_state = "observed"
+        reason = "idle"
+        next_action = "No trend concepts are available yet."
+
+    control = record_workflow_transition(
+        workflow_id="trend_ranker",
+        lane="trend_ranker",
+        display_label="Trend Ranker",
+        entity_id="trend_ranker",
+        state=control_state,
+        state_reason=reason,
+        input_freshness={
+            "source": str(TREND_RANKER_STATE_PATH),
+            "age_hours": age_hours,
+        },
+        next_action=next_action,
+        metadata={
+            "concept_count": len(concepts),
+            "artifact_count": len(artifacts),
+            "operator_surface_count": operator_surface_count,
+            "pending_review_count": pending_review_count,
+            "actionable_pending_review_count": actionable_pending_review_count,
+            "backlog_pending_review_count": backlog_pending_review_count,
+            "new_in_run_count": new_in_run_count,
+        },
+        receipt_kind="state_sync",
+        receipt_payload={
+            "concept_count": len(concepts),
+            "artifact_count": len(artifacts),
+            "operator_surface_count": operator_surface_count,
+            "pending_review_count": pending_review_count,
+            "actionable_pending_review_count": actionable_pending_review_count,
+            "backlog_pending_review_count": backlog_pending_review_count,
+            "new_in_run_count": new_in_run_count,
+        },
+        history_summary=reason.replace("_", " "),
+    )
+    state["workflow_control"] = {
+        "state": control_state,
+        "state_reason": reason,
+        "age_hours": age_hours,
+        "path": str((control or {}).get("latest_receipt", {}).get("path") or ""),
+    }
+    return state
 
 
 def write_daily_digest(latest_records: dict[str, dict[str, Any]], new_decisions: list[dict[str, Any]]) -> dict[str, str] | None:

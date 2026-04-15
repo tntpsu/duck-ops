@@ -1,0 +1,28 @@
+name: Duck Ops Checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  py-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile runtime python files
+        run: |
+          python - <<'PY'
+          import pathlib
+          import py_compile
+
+          root = pathlib.Path("runtime")
+          files = sorted(root.rglob("*.py"))
+          if not files:
+              raise SystemExit("No runtime python files found.")
+          for path in files:
+              py_compile.compile(str(path), doraise=True)
+          print(f"Compiled {len(files)} Python files.")
+          PY

@@ -17,7 +17,9 @@
     "bootstrap_message_limit": 75,
     "default_folders": [
       "$IMAP_FOLDER",
-      "INBOX"
+      "INBOX",
+      "$IMAP_SPAM_FOLDER",
+      "[Gmail]/Spam"
     ],
     "host_env_precedence": [
       "IMAP_HOST",

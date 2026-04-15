@@ -16,12 +16,16 @@ import argparse
 import html
 import json
 import re
+import subprocess
+import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from business_operator_desk import render_business_section
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, write_decision
+from ops_control import sync_ops_control
 from trend_ranker import build_trend_concepts
 
 
@@ -32,11 +36,32 @@ QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
 TREND_RANKER_STATE_PATH = STATE_DIR / "trend_ranker_state.json"
 OVERRIDES_PATH = STATE_DIR / "overrides.jsonl"
 REVIEW_QUEUE_STATE_PATH = STATE_DIR / "review_queue.json"
+CUSTOMER_INTERACTION_QUEUE_PATH = STATE_DIR / "customer_interaction_queue.json"
 OPERATOR_STATE_PATH = STATE_DIR / "operator_state.json"
 CATALOG_ALIASES_PATH = STATE_DIR / "catalog_aliases.json"
 BUSINESS_OPERATOR_DESK_PATH = STATE_DIR / "business_operator_desk.json"
 PRODUCTS_CACHE_PATH = Path("/Users/philtullai/ai-agents/duckAgent/cache/products_cache.json")
 DUCK_AGENT_RUNS_DIR = Path("/Users/philtullai/ai-agents/duckAgent/runs")
+DUCK_AGENT_ROOT = Path("/Users/philtullai/ai-agents/duckAgent")
+SYSTEM_HEALTH_PATH = DUCK_AGENT_ROOT / "creative_agent" / "runtime" / "output" / "operator" / "system_health.json"
+DUCK_AGENT_PYTHON = DUCK_AGENT_ROOT / ".venv" / "bin" / "python"
+DUCK_AGENT_HANDOFF_FLOWS = {
+    "meme": {
+        "approve": {"flow": "meme", "action": "publish"},
+        "needs_changes": {"flow": "meme", "action": "revise"},
+    },
+    "jeepfact": {
+        "approve": {"flow": "jeepfact", "action": "publish"},
+        "needs_changes": {"flow": "jeepfact", "action": "revise"},
+    },
+    "weekly_sale": {
+        "approve": {"flow": "weekly_sale", "action": "publish"},
+        "needs_changes": {"flow": "weekly_sale", "action": "revise"},
+    },
+    "reviews_story": {
+        "approve": {"flow": "reviews", "action": "publish"},
+    },
+}
 
 SHORT_ID_START = 101
 MAX_TREND_OPERATOR_ITEMS = 8
@@ -610,7 +635,19 @@ def approval_intent_lines(item: dict[str, Any]) -> list[str]:
     if flow == "weekly_sale" or artifact_type == "promotion":
         return [
             "You are approving: a weekly sale / promotion plan.",
-            "If approved, DuckAgent can use this promotion plan in the sale workflow.",
+            "If approved, DuckAgent can hand this promotion plan back to DuckAgent for direct weekly-sale publishing.",
+            "If it needs work, reply `rewrite` first to see a stronger plan, then `needs changes <id> use rewrite` to send that exact feedback back into DuckAgent revise.",
+        ]
+    if flow == "meme":
+        return [
+            "You are approving: a Meme Monday social post package.",
+            "If approved, DuckAgent can schedule this meme directly for social publishing. If you reply needs changes, DuckAgent can regenerate the draft.",
+        ]
+    if flow == "jeepfact":
+        return [
+            "You are approving: a Jeep Fact Wednesday social post package.",
+            "If approved, DuckAgent can schedule this post directly for social publishing. If you reply needs changes, DuckAgent can regenerate the draft.",
+            "If you want to steer the rewrite, reply `rewrite <id> <hint>` first, then `needs changes <id> use rewrite` to send a structured revise packet back into DuckAgent.",
         ]
     if artifact_type == "trend":
         return [
@@ -642,6 +679,13 @@ def render_preview_lines(preview: dict[str, Any] | None) -> list[str]:
     context_text = (preview.get("context_text") or "").strip()
     proposed_text = (preview.get("proposed_text") or "").strip()
     asset_url = (preview.get("asset_url") or "").strip()
+    asset_urls = [
+        str(url).strip()
+        for url in (preview.get("asset_urls") or [])
+        if str(url).strip()
+    ]
+    if asset_url and asset_url not in asset_urls:
+        asset_urls.insert(0, asset_url)
     if context_text:
         lines.extend(
             [
@@ -658,14 +702,18 @@ def render_preview_lines(preview: dict[str, Any] | None) -> list[str]:
                 f"\"{proposed_text}\"",
             ]
         )
-    if asset_url:
+    if asset_urls:
         lines.extend(
             [
                 "",
                 "Asset:",
-                str(asset_url),
+                asset_urls[0],
             ]
         )
+        if len(asset_urls) > 1:
+            lines.extend(["", "Additional assets:"])
+            for extra_url in asset_urls[1:5]:
+                lines.append(str(extra_url))
     return lines
 
 
@@ -881,6 +929,96 @@ def build_weekly_sale_rewrite_text(item: dict[str, Any], hint: str = "") -> str 
                 lines.append(f"{label}: {summary}")
 
     return "\n".join(line for line in lines if line.strip()) or None
+
+
+def build_jeepfact_rewrite_text(item: dict[str, Any], hint: str = "") -> str | None:
+    if str(item.get("flow") or "") != "jeepfact":
+        return None
+
+    hint_text = normalize_operator_note(hint).lower()
+    selection_mode = "reroll_all"
+    if "same ducks" in hint_text:
+        selection_mode = "same_ducks_new_facts"
+    elif "same facts" in hint_text or "new ducks" in hint_text or "different ducks" in hint_text:
+        selection_mode = "new_ducks_same_facts"
+
+    prefer_tags: list[str] = []
+    avoid_tags: list[str] = []
+    for tag in ("seasonal", "summer", "spring", "fall", "winter", "beach", "camping"):
+        if tag in hint_text:
+            prefer_tags.append("seasonal" if tag in {"summer", "spring", "fall", "winter"} else tag)
+    if any(term in hint_text for term in ("avoid sports", "no sports", "without sports")):
+        avoid_tags.append("sports")
+    if any(term in hint_text for term in ("avoid patriotic", "no patriotic", "without patriotic")):
+        avoid_tags.append("patriotic")
+
+    hook_style = "punchy"
+    if "curious" in hint_text:
+        hook_style = "curious"
+    elif "funny" in hint_text:
+        hook_style = "funny"
+
+    caption_tone = "standard"
+    if "short" in hint_text:
+        caption_tone = "shorter"
+    elif "warm" in hint_text:
+        caption_tone = "warmer"
+    elif "educational" in hint_text:
+        caption_tone = "educational"
+
+    template_policy = "new_templates"
+    if "keep template" in hint_text or "same template" in hint_text:
+        template_policy = "keep_templates"
+
+    operator_note = normalize_operator_note(hint) or "Pick a fresher duck slate, avoid recent repeats, and tighten the Jeep Fact package."
+    lines = [
+        "selection_mode: " + selection_mode,
+        "avoid_recent_weeks: 6",
+    ]
+    if avoid_tags:
+        lines.append("avoid_tags: " + ", ".join(dict.fromkeys(avoid_tags)))
+    if prefer_tags:
+        lines.append("prefer_tags: " + ", ".join(dict.fromkeys(prefer_tags)))
+    lines.extend(
+        [
+            "hook_style: " + hook_style,
+            "caption_tone: " + caption_tone,
+            "template_policy: " + template_policy,
+            "operator_note: " + operator_note,
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_jeepfact_contract_card(contract_text: str) -> list[str]:
+    values: dict[str, str] = {}
+    for raw_line in contract_text.splitlines():
+        if ":" not in raw_line:
+            continue
+        key, value = raw_line.split(":", 1)
+        values[key.strip()] = value.strip()
+    lines = [
+        "Rewrite plan:",
+        f"- Duck selection: {values.get('selection_mode', 'reroll_all')}",
+        f"- Avoid recent weeks: {values.get('avoid_recent_weeks', '6')}",
+    ]
+    if values.get("avoid_tags"):
+        lines.append(f"- Avoid tags: {values['avoid_tags']}")
+    if values.get("prefer_tags"):
+        lines.append(f"- Prefer tags: {values['prefer_tags']}")
+    if values.get("prefer_categories"):
+        lines.append(f"- Prefer categories: {values['prefer_categories']}")
+    lines.extend(
+        [
+            f"- Hook style: {values.get('hook_style', 'punchy')}",
+            f"- Caption tone: {values.get('caption_tone', 'standard')}",
+            f"- Template policy: {values.get('template_policy', 'new_templates')}",
+        ]
+    )
+    if values.get("operator_note"):
+        lines.extend(["", "Operator note:", values["operator_note"]])
+    lines.extend(["", "Raw contract:", contract_text])
+    return lines
 
 
 def build_quality_gate_items(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1147,6 +1285,14 @@ def render_operator_card(item: dict[str, Any], include_help: bool = True) -> str
         if sale_changes:
             lines.extend(["", "What OpenClaw would change now:"])
             lines.extend(f"- {suggestion}" for suggestion in sale_changes[:4])
+        lines.extend(
+            [
+                "",
+                "Fast rewrite path:",
+                f"rewrite {item['short_id']}",
+                f"needs changes {item['short_id']} use rewrite",
+            ]
+        )
     if str(item.get("flow") or "") == "newduck":
         lines.extend(newduck_issue_summary_lines(item))
     lines.extend(["", "Why:"])
@@ -1369,6 +1515,8 @@ def private_reply_remedy_line(draft_text: str) -> str:
 def build_rewrite_suggestion_text(item: dict[str, Any], hint: str = "") -> str | None:
     if str(item.get("flow") or "") == "weekly_sale":
         return build_weekly_sale_rewrite_text(item, hint=hint)
+    if str(item.get("flow") or "") == "jeepfact":
+        return build_jeepfact_rewrite_text(item, hint=hint)
 
     if item.get("artifact_type") != "review_reply":
         return None
@@ -1429,7 +1577,23 @@ def render_rewrite_suggestion(item: dict[str, Any], hint: str = "") -> str:
                 "Suggested revised sale plan:",
                 rewrite_text,
                 "",
-                f"If this is the direction you want, reply `approve {item['short_id']} because use rewrite`.",
+                f"If this is the direction you want, reply `needs changes {item['short_id']} use rewrite` and DuckAgent will regenerate the sale with this feedback.",
+            ]
+        )
+    if str(item.get("flow") or "") == "jeepfact":
+        rewrite_text = build_jeepfact_rewrite_text(item, hint=hint)
+        if not rewrite_text:
+            return "I couldn't build a Jeep Fact rewrite contract for this item yet."
+        hint_suffix = f" ({normalize_operator_note(hint)})" if normalize_operator_note(hint) else ""
+        return "\n".join(
+            [
+                f"OpenClaw Rewrite {item['short_id']}{hint_suffix}",
+                f"{item.get('title') or item.get('artifact_id')}",
+                "",
+                "Suggested revised Jeep Fact contract:",
+                *_render_jeepfact_contract_card(rewrite_text),
+                "",
+                f"If this is the direction you want, reply `needs changes {item['short_id']} use rewrite` and DuckAgent will regenerate Jeep Fact with this exact contract.",
             ]
         )
 
@@ -1641,6 +1805,8 @@ def write_review_queue(state_bundle: dict[str, dict[str, Any]], operator_state: 
         "surfaced_items": surfaced_items,
     }
     write_json(REVIEW_QUEUE_STATE_PATH, payload)
+    customer_queue = load_json(CUSTOMER_INTERACTION_QUEUE_PATH, {})
+    sync_ops_control(customer_queue if isinstance(customer_queue, dict) else {}, payload)
 
     patterns = load_output_patterns()
     current = datetime.now()
@@ -1736,6 +1902,10 @@ def parse_command(text: str) -> tuple[str, str | None, str]:
     lowered = raw.lower()
     if lowered == "status all" or lowered == "queue all" or lowered == "backlog":
         return "status_all", None, ""
+    if lowered == "health":
+        return "health", None, ""
+    if lowered.startswith("health "):
+        return "health", None, raw.split(" ", 1)[1].strip()
     if lowered.startswith("suggest changes"):
         parts = raw.split()
         target_token = parts[2] if len(parts) > 2 and parts[2].isdigit() else None
@@ -1885,12 +2055,60 @@ def handle_business_desk_text(text: str) -> str:
     footer = (
         "\n\nUseful follow-ups:\n"
         "- customer status\n"
+        "- customer threads\n"
+        "- customer followups\n"
         "- customer open C301\n"
+        "- customer drafted C301 <reply text>\n"
+        "- customer waiting C301 <what we are waiting on>\n"
+        "- customer resolved C301 <resolution note>\n"
         "- why 220\n"
         "- desk show stock\n"
         "- desk show builds"
     )
     return body + footer
+
+
+def _health_rank(item: dict[str, Any]) -> int:
+    return {"bad": 0, "warn": 1, "ok": 2}.get(str(item.get("status") or "").strip().lower(), 3)
+
+
+def render_system_health_summary(filter_text: str = "") -> str:
+    payload = load_json(SYSTEM_HEALTH_PATH, {})
+    if not isinstance(payload, dict) or not payload:
+        return "System health is not ready yet. Regenerate the health artifact first."
+
+    flows = list(payload.get("flow_health") or [])
+    filter_value = str(filter_text or "").strip().lower()
+    if filter_value in {"bad", "warn", "ok"}:
+        flows = [item for item in flows if str(item.get("status") or "").strip().lower() == filter_value]
+    elif filter_value:
+        flows = [
+            item for item in flows
+            if filter_value in str(item.get("flow_id") or "").lower()
+            or filter_value in str(item.get("label") or "").lower()
+            or filter_value in str(item.get("last_run_state") or "").lower()
+        ]
+
+    flows = sorted(flows, key=lambda item: (_health_rank(item), str(item.get("label") or item.get("flow_id") or "")))
+    if not flows:
+        return f"No health rows matched `{filter_text}`."
+
+    lines = [
+        f"System health: {payload.get('overall_status') or 'unknown'}",
+        f"- Generated: {payload.get('generated_at') or 'unknown'}",
+        f"- Flows: {len(flows)}",
+        "",
+    ]
+    for item in flows:
+        label = str(item.get("label") or item.get("flow_id") or "flow").strip()
+        status = str(item.get("status") or "unknown").strip()
+        last_state = str(item.get("last_run_state") or "unknown").replace("_", " ").strip()
+        success = str(item.get("success_rate_label") or "").strip()
+        line = f"- {label}: {status} | {last_state}"
+        if success:
+            line += f" | {success}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def record_action(
@@ -1938,17 +2156,17 @@ def record_action(
             }
         )
     decision["human_review"] = human_review
+    operator_action = resolution or {
+        "approve": "approve",
+        "reject": "discard",
+        "override": "needs_changes",
+    }.get(action, action)
+    decision["operator_resolution"] = {
+        "action": operator_action,
+        "note": note.strip() if note else None,
+        "recorded_at": human_review["recorded_at"],
+    }
     if decision.get("artifact_type") == "review_reply" or decision.get("review_target"):
-        operator_action = resolution or {
-            "approve": "approve",
-            "reject": "discard",
-            "override": "needs_changes",
-        }.get(action, action)
-        decision["operator_resolution"] = {
-            "action": operator_action,
-            "note": note.strip() if note else None,
-            "recorded_at": human_review["recorded_at"],
-        }
         decision.setdefault("execution_mode", "manual_only")
         decision.setdefault("execution_state", "not_queued")
         decision.setdefault("execution_attempts", [])
@@ -2013,6 +2231,109 @@ def maybe_queue_review_reply_after_operator_approval(artifact_id: str, decision:
         }
 
 
+def duckagent_mail_subject(flow: str, run_id: str | None, title: str, action: str) -> str:
+    return f"MJD: [{flow}] {title} | FLOW:{flow} | RUN:{run_id or datetime.now().strftime('%Y-%m-%d')} | ACTION:{action}"
+
+
+def invoke_duckagent_mail_event(flow: str, run_id: str | None, title: str, action: str, note: str | None) -> dict[str, Any]:
+    payload = {
+        "subject": duckagent_mail_subject(flow, run_id, title, action),
+        "body": (note or action).strip() or action,
+        "text": (note or action).strip() or action,
+    }
+    python_bin = DUCK_AGENT_PYTHON if DUCK_AGENT_PYTHON.exists() else Path(sys.executable)
+    temp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
+            json.dump(payload, handle)
+            temp_path = handle.name
+        command = [str(python_bin), "src/main_agent.py", "--mail-file", temp_path]
+        proc = subprocess.run(
+            command,
+            cwd=str(DUCK_AGENT_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        if temp_path:
+            Path(temp_path).unlink(missing_ok=True)
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": (proc.stdout or "").strip(),
+        "stderr": (proc.stderr or "").strip(),
+        "command": command,
+    }
+
+
+def maybe_handoff_duckagent_publish_after_operator_action(decision: dict[str, Any]) -> dict[str, Any] | None:
+    flow = str(decision.get("flow") or "")
+    mapping = DUCK_AGENT_HANDOFF_FLOWS.get(flow)
+    if not mapping:
+        return None
+
+    operator_resolution = decision.get("operator_resolution") or {}
+    operator_action = str(operator_resolution.get("action") or "")
+    callback = mapping.get(operator_action)
+    if not callback:
+        return None
+
+    execution_state = decision.get("execution_state") or {}
+    if operator_action == "approve" and isinstance(execution_state, dict) and execution_state.get("already_published"):
+        return {
+            "ok": True,
+            "status": "already_scheduled",
+            "message": "DuckAgent already shows this post as scheduled or published.",
+        }
+
+    result = invoke_duckagent_mail_event(
+        flow=str(callback.get("flow") or flow),
+        run_id=str(decision.get("run_id") or "").strip() or None,
+        title=str(decision.get("title") or flow).strip() or flow,
+        action=str(callback.get("action") or "").strip() or operator_action,
+        note=str(operator_resolution.get("note") or "").strip() or None,
+    )
+    attempts = list(decision.get("execution_attempts") or [])
+    attempts.append(
+        {
+            "action": str(callback.get("action") or "").strip() or operator_action,
+            "callback_flow": str(callback.get("flow") or flow),
+            "requested_via": "openclaw_operator_review",
+            "recorded_at": now_iso(),
+            "ok": result["ok"],
+            "returncode": result["returncode"],
+            "stdout_tail": result["stdout"][-1200:],
+            "stderr_tail": result["stderr"][-1200:],
+        }
+    )
+    decision["execution_mode"] = "duckagent_mail_event"
+    decision["execution_attempts"] = attempts
+    decision["execution_state"] = "publish_requested" if result["ok"] and operator_action == "approve" else (
+        "revise_requested" if result["ok"] else "handoff_failed"
+    )
+    if result["ok"]:
+        message = (
+            "DuckAgent publish was requested."
+            if operator_action == "approve"
+            else "DuckAgent revise was requested. A refreshed draft should come back through the normal review flow."
+        )
+        status = "running" if operator_action == "approve" else "revising"
+    else:
+        message = "DuckAgent handoff failed closed."
+        if result["stderr"]:
+            message = f"{message} {result['stderr']}"
+        elif result["stdout"]:
+            message = f"{message} {result['stdout']}"
+        status = "handoff_failed"
+    return {
+        "ok": result["ok"],
+        "status": status,
+        "message": message,
+        "updated_decision": decision,
+    }
+
+
 def operator_help(current_item: dict[str, Any] | None = None) -> str:
     lines = [
         "OpenClaw operator commands:",
@@ -2027,17 +2348,27 @@ def operator_help(current_item: dict[str, Any] | None = None) -> str:
         "why [id]",
         "suggest changes [id]",
         "rewrite [id] [shorter|warmer]",
+        "Weekly sale shortcut: rewrite [id], then needs changes [id] use rewrite",
+        "Jeep Fact shortcut: rewrite [id] new ducks same facts",
         "show review [id]",
         "show reply [id]",
         "show asset [id]",
         "same as [id] <your product name>",
         "status",
         "status all",
+        "health",
+        "health bad",
         "next",
         "",
         "Customer lane commands:",
         "customer status",
+        "customer threads",
+        "customer followups",
         "customer next",
+        "customer drafted C301 <reply text>",
+        "customer waiting C301 <what we are waiting on>",
+        "customer resolved C301 <resolution note>",
+        "customer taskready C301 <brief summary>",
         "replacement C301 because ...",
         "refund C301 because ...",
         "wait C301 because ...",
@@ -2051,6 +2382,7 @@ def operator_help(current_item: dict[str, Any] | None = None) -> str:
         "desk show packing",
         "desk show stock",
         "desk show reviews",
+        "desk show workflow",
     ]
     if current_item:
         lines.extend(["", "Current review:", "", render_operator_card(current_item)])
@@ -2145,6 +2477,10 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
                 status_text += f"\n- {item['short_id']} | {resolution_label(recommended_action(item))} | {item.get('freshness_label')} | {item.get('title') or item.get('artifact_id')}"
         return status_text
 
+    if command == "health":
+        write_review_queue(state_bundle, operator_state)
+        return render_system_health_summary(note)
+
     if command == "next":
         target = next_item(items, current_item)
         operator_state["current_artifact_id"] = target.get("artifact_id") if target else None
@@ -2176,7 +2512,10 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
     if command == "rewrite":
         rewrite_text = build_rewrite_suggestion_text(target_item, hint=note)
         rewrite_cache = operator_state.setdefault("rewrite_suggestions", {})
-        if rewrite_text and target_item.get("artifact_type") == "review_reply":
+        if rewrite_text and (
+            target_item.get("artifact_type") == "review_reply"
+            or str(target_item.get("flow") or "") == "weekly_sale"
+        ):
             rewrite_cache[target_item["artifact_id"]] = {
                 "text": rewrite_text,
                 "generated_at": now_iso(),
@@ -2240,19 +2579,26 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
         )
 
     approved_reply_override: str | None = None
+    note_override: str | None = None
     if desired_resolution == "approve" and note_requests_cached_rewrite(note):
         cached_rewrite = (
             (operator_state.get("rewrite_suggestions") or {}).get(target_item["artifact_id"], {}).get("text")
         )
         if cached_rewrite:
             approved_reply_override = cached_rewrite
+    if desired_resolution == "needs_changes" and note_requests_cached_rewrite(note):
+        cached_rewrite = (
+            (operator_state.get("rewrite_suggestions") or {}).get(target_item["artifact_id"], {}).get("text")
+        )
+        if cached_rewrite:
+            note_override = cached_rewrite
 
     internal_action = "approve" if desired_resolution == recommended else "override"
     _, source_name = record_action(
         state_bundle,
         target_item["artifact_id"],
         internal_action,
-        note=note or None,
+        note=note_override or note or None,
         resolution=desired_resolution,
         approved_reply_text=approved_reply_override,
     )
@@ -2261,6 +2607,12 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
         ((state_bundle.get(source_name) or {}).get("artifacts") or {}).get(target_item["artifact_id"], {}).get("decision") or {}
     )
     execution_handoff = maybe_queue_review_reply_after_operator_approval(target_item["artifact_id"], recorded_decision)
+    duckagent_handoff = maybe_handoff_duckagent_publish_after_operator_action(recorded_decision)
+    if duckagent_handoff:
+        artifact_record = ((state_bundle.get(source_name) or {}).get("artifacts") or {}).get(target_item["artifact_id"], {})
+        artifact_record["decision"] = recorded_decision
+        artifact_record["output_paths"] = write_decision(recorded_decision)
+        write_state_source(source_name, state_bundle[source_name])
     write_review_queue(state_bundle, operator_state)
 
     remaining_items = build_review_items(state_bundle)
@@ -2280,6 +2632,17 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
                 ack += f"\n{handoff_message}"
         elif handoff_message:
             ack += f"\nExecution handoff failed closed: {handoff_message}"
+    if duckagent_handoff:
+        handoff_message = str(duckagent_handoff.get("message") or "").strip()
+        if duckagent_handoff.get("ok"):
+            if duckagent_handoff.get("status") == "running":
+                ack += "\nDuckAgent publish was requested."
+            elif duckagent_handoff.get("status") == "revising":
+                ack += "\nDuckAgent revise was requested."
+            elif handoff_message:
+                ack += f"\n{handoff_message}"
+        elif handoff_message:
+            ack += f"\nDuckAgent handoff failed closed: {handoff_message}"
 
     if next_pending:
         operator_state["current_artifact_id"] = next_pending["artifact_id"]

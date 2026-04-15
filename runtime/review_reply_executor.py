@@ -16,6 +16,7 @@ This script currently supports:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -40,6 +41,8 @@ from review_reply_discovery import (
     run_pw_command,
     session_is_open,
 )
+from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
+from workflow_control import record_workflow_transition
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +56,7 @@ EXECUTION_QUEUE_STATE_PATH = STATE_DIR / "review_reply_execution_queue.json"
 EXECUTION_SESSION_STATE_PATH = STATE_DIR / "review_reply_execution_sessions.json"
 EXECUTION_AUTH_STATE_PATH = STATE_DIR / "review_reply_execution_auth.json"
 AUTH_STORAGE_DIR = STATE_DIR / "review_reply_execution_auth_storage"
+DISCOVERY_SESSION_STATE_PATH = STATE_DIR / "review_reply_discovery_sessions.json"
 DISCOVERY_APPROVALS_PATH = STATE_DIR / "review_reply_discovery_approvals.json"
 DISCOVERY_OUTPUT_DIR = OUTPUT_DIR / "discovery"
 EXECUTION_POLICY_PATH = CONFIG_DIR / "review_reply_execution.json"
@@ -63,7 +67,7 @@ DEFAULT_EXECUTION_POLICY: dict[str, Any] = {
     "auto_queue_requires_browser_approval": True,
     "auto_drain_enabled": True,
     "auto_drain_max_submits_per_run": 3,
-    "auto_drain_close_browser_after_run": False,
+    "auto_drain_close_browser_after_run": True,
     "auto_drain_send_session_summary": True,
     "stop_after_first_failure": True,
     "review_page_max_probe": 10,
@@ -77,6 +81,57 @@ DEFAULT_EXECUTION_POLICY: dict[str, Any] = {
     "auth_storage_restore_on_auth_failure": True,
     "auth_storage_save_on_healthy": True,
 }
+
+
+def _review_execution_workflow_id(artifact_id: str) -> str:
+    return f"review_execution::{artifact_id}"
+
+
+def _review_execution_metadata(artifact_id: str, decision: dict[str, Any]) -> dict[str, Any]:
+    target = decision.get("review_target") or {}
+    preview = decision.get("preview") or {}
+    return {
+        "artifact_id": artifact_id,
+        "flow": decision.get("flow"),
+        "review_status": decision.get("review_status"),
+        "execution_mode": decision.get("execution_mode"),
+        "decision": decision.get("decision"),
+        "transaction_id": target.get("transaction_id"),
+        "listing_id": target.get("listing_id"),
+        "context_excerpt": _reply_excerpt(str(preview.get("context_text") or ""), limit=180),
+    }
+
+
+def _record_review_execution_transition(
+    artifact_id: str,
+    decision: dict[str, Any],
+    *,
+    state: str,
+    state_reason: str,
+    requires_confirmation: bool | None = None,
+    last_side_effect: dict[str, Any] | None = None,
+    last_verification: dict[str, Any] | None = None,
+    next_action: str | None = None,
+    receipt_kind: str | None = None,
+    receipt_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return record_workflow_transition(
+        workflow_id=_review_execution_workflow_id(artifact_id),
+        lane="review_execution",
+        display_label=f"Review Execution {artifact_id}",
+        entity_id=artifact_id,
+        run_id=str(decision.get("run_id") or artifact_id),
+        state=state,
+        state_reason=state_reason,
+        requires_confirmation=requires_confirmation,
+        last_side_effect=last_side_effect,
+        last_verification=last_verification,
+        next_action=next_action,
+        metadata=_review_execution_metadata(artifact_id, decision),
+        receipt_kind=receipt_kind,
+        receipt_payload=receipt_payload,
+        history_summary=state_reason.replace("_", " "),
+    )
 
 
 def now_iso() -> str:
@@ -285,6 +340,79 @@ def current_open_session(session_state: dict[str, Any]) -> dict[str, Any] | None
     return None
 
 
+def _known_review_reply_browser_sessions() -> list[str]:
+    names: list[str] = []
+    session_name, _ = choose_session()
+    if session_name:
+        names.append(session_name)
+
+    discovery_state = load_json(DISCOVERY_SESSION_STATE_PATH, {"sessions": {}})
+    for name in (discovery_state.get("sessions") or {}).keys():
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    return names
+
+
+def cleanup_review_reply_browsers(*, force_kill_temp_profiles: bool = False) -> dict[str, Any]:
+    attempted: list[dict[str, Any]] = []
+    closed_count = 0
+    open_before_count = 0
+
+    for session_name in _known_review_reply_browser_sessions():
+        was_open = session_is_open(session_name)
+        if was_open:
+            open_before_count += 1
+        try:
+            run_pw_command(session_name, "close")
+            closed = was_open or not session_is_open(session_name)
+            attempted.append(
+                {
+                    "session_name": session_name,
+                    "was_open": was_open,
+                    "closed": closed,
+                }
+            )
+            if closed and was_open:
+                closed_count += 1
+        except subprocess.CalledProcessError as exc:
+            attempted.append(
+                {
+                    "session_name": session_name,
+                    "was_open": was_open,
+                    "closed": False,
+                    "error": _pw_error_text(exc),
+                }
+            )
+
+    forced_cleanup = None
+    if force_kill_temp_profiles:
+        kill = subprocess.run(
+            ["pkill", "-f", "playwright_chromiumdev_profile"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        forced_cleanup = {
+            "returncode": kill.returncode,
+            "stdout": (kill.stdout or "").strip() or None,
+            "stderr": (kill.stderr or "").strip() or None,
+        }
+
+    return {
+        "ok": True,
+        "status": "completed",
+        "message": (
+            f"Closed {closed_count} review-reply automation browser session"
+            f"{'' if closed_count == 1 else 's'}"
+            + (" and force-cleaned temp Playwright Chrome profiles." if force_kill_temp_profiles else ".")
+        ),
+        "open_before_count": open_before_count,
+        "closed_count": closed_count,
+        "attempted": attempted,
+        "forced_cleanup": forced_cleanup,
+    }
+
+
 def backfill_session_from_queue(
     session_state: dict[str, Any],
     quality_state: dict[str, Any],
@@ -449,7 +577,16 @@ def _load_send_email():
     duck_agent_path = str(DUCK_AGENT_ROOT)
     if duck_agent_path not in sys.path:
         sys.path.insert(0, duck_agent_path)
-    from helpers.email_helper import send_email  # type: ignore
+    try:
+        from helpers.email_helper import send_email  # type: ignore
+    except ModuleNotFoundError:
+        helper_path = DUCK_AGENT_ROOT / "helpers" / "email_helper.py"
+        spec = importlib.util.spec_from_file_location("duckagent_email_helper", helper_path)
+        if spec is None or spec.loader is None:
+            raise
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        send_email = module.send_email  # type: ignore[attr-defined]
 
     return send_email
 
@@ -725,6 +862,26 @@ def queue_review_reply(
 
     save_quality_gate_state(quality_state)
     save_queue_state(queue_state)
+    _record_review_execution_transition(
+        artifact_id,
+        decision,
+        state="approved",
+        state_reason="queued_for_execution",
+        requires_confirmation=False,
+        last_side_effect={
+            "kind": "queue",
+            "queued_at": queued_at,
+            "queued_by": queued_by,
+            "execution_mode": decision.get("execution_mode"),
+        },
+        next_action="Run dry-run fill before any live Etsy submit.",
+        receipt_kind="queue",
+        receipt_payload={
+            "queue_status": queue_item.get("status"),
+            "approval_scope": queue_item.get("approval_scope"),
+            "packet_path": queue_item.get("packet_path"),
+        },
+    )
     return {
         "ok": True,
         "artifact_id": artifact_id,
@@ -1483,6 +1640,30 @@ def handle_auth_blocked_attempt(
             session_item["auth_alert_sent_at"] = alert.get("sent_at")
             session_item["auth_alert_subject"] = alert.get("subject")
     save_session_state(session_state)
+    _record_review_execution_transition(
+        artifact_id,
+        decision,
+        state="blocked",
+        state_reason="auth_blocked",
+        requires_confirmation=False,
+        last_side_effect={
+            "kind": "auth_blocked",
+            "attempt_id": attempt.get("attempt_id"),
+            "next_retry_after": auth_state.get("next_retry_after"),
+        },
+        last_verification={
+            "auth_status": auth_state.get("auth_status"),
+            "blocked_at": auth_state.get("blocked_at"),
+        },
+        next_action="Reauthenticate the Etsy seller session, then retry the queued execution.",
+        receipt_kind="auth_blocked",
+        receipt_payload={
+            "error": attempt.get("error"),
+            "auth_status": auth_state.get("auth_status"),
+            "next_retry_after": auth_state.get("next_retry_after"),
+            "alert_sent": bool(alert),
+        },
+    )
     return queue_item, auth_state, alert
 
 
@@ -1643,6 +1824,7 @@ def maybe_reschedule_retryable_failure(
     quality_state: dict[str, Any],
     queue_state: dict[str, Any],
     artifact_id: str,
+    decision: dict[str, Any],
     attempt: dict[str, Any],
     policy: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -1673,18 +1855,38 @@ def maybe_reschedule_retryable_failure(
     queue_state.setdefault("items", {})[artifact_id] = queue_item
 
     record = artifact_record(quality_state, artifact_id)
-    decision = record.get("decision") or {}
-    decision["execution_state"] = "queued"
-    record["decision"] = decision
+    updated_decision = record.get("decision") or {}
+    updated_decision["execution_state"] = "queued"
+    record["decision"] = updated_decision
     save_quality_gate_state(quality_state)
     save_queue_state(queue_state)
+    _record_review_execution_transition(
+        artifact_id,
+        updated_decision if isinstance(updated_decision, dict) else decision,
+        state="blocked",
+        state_reason="blocked_by_upstream",
+        requires_confirmation=False,
+        last_side_effect={
+            "kind": "retry_scheduled",
+            "attempt_id": attempt.get("attempt_id"),
+            "next_attempt_after": next_attempt_after,
+        },
+        next_action=f"Retry after {next_attempt_after} once Etsy surfaces the review row.",
+        receipt_kind="retry_scheduled",
+        receipt_payload={
+            "attempt_outcome": attempt.get("outcome"),
+            "error": attempt.get("error"),
+            "retry_reason": "exact_review_row_not_found",
+            "next_attempt_after": next_attempt_after,
+        },
+    )
     return queue_item
 
 
 def run_dry_run_fill(
     artifact_id: str,
     *,
-    keep_browser_open: bool = True,
+    keep_browser_open: bool = False,
     notify_on_failure: bool = False,
 ) -> dict[str, Any]:
     policy = load_execution_policy()
@@ -1751,6 +1953,30 @@ def run_dry_run_fill(
             final_execution_state="queued",
             last_preflight_status="dry_run_filled",
         )
+        _record_review_execution_transition(
+            artifact_id,
+            decision,
+            state="proposed",
+            state_reason="reply_preview_staged",
+            requires_confirmation=True,
+            last_side_effect={
+                "kind": "dry_run_fill",
+                "attempt_id": attempt.get("attempt_id"),
+                "screenshot_path": attempt.get("screenshot_path"),
+            },
+            last_verification={
+                "fill_result": fill_result,
+                "queue_status": queue_item.get("status"),
+                "last_preflight_status": queue_item.get("last_preflight_status"),
+            },
+            next_action="Review the dry-run reply in Etsy, then run live submit only after explicit confirmation.",
+            receipt_kind="dry_run_fill",
+            receipt_payload={
+                "attempt_id": attempt.get("attempt_id"),
+                "screenshot_path": attempt.get("screenshot_path"),
+                "queue_status": queue_item.get("status"),
+            },
+        )
         return {
             "ok": True,
             "artifact_id": artifact_id,
@@ -1787,6 +2013,7 @@ def run_dry_run_fill(
             quality_state=quality_state,
             queue_state=queue_state,
             artifact_id=artifact_id,
+            decision=decision,
             attempt=attempt,
             policy=policy,
         )
@@ -1806,6 +2033,25 @@ def run_dry_run_fill(
             attempt,
             final_queue_status="failed",
             final_execution_state="failed",
+        )
+        _record_review_execution_transition(
+            artifact_id,
+            decision,
+            state="blocked",
+            state_reason="execution_failed",
+            requires_confirmation=False,
+            last_side_effect={
+                "kind": "dry_run_fill",
+                "attempt_id": attempt.get("attempt_id"),
+            },
+            last_verification={"queue_status": queue_item.get("status")},
+            next_action="Inspect the execution attempt, fix the blocker, then requeue or rerun the dry-run fill.",
+            receipt_kind="execution_failed",
+            receipt_payload={
+                "attempt_id": attempt.get("attempt_id"),
+                "error": attempt.get("error"),
+                "queue_status": queue_item.get("status"),
+            },
         )
         failure_email = None
         if notify_on_failure:
@@ -1848,7 +2094,7 @@ def run_dry_run_fill(
                 pass
 
 
-def run_live_submit(artifact_id: str, *, keep_browser_open: bool = True) -> dict[str, Any]:
+def run_live_submit(artifact_id: str, *, keep_browser_open: bool = False) -> dict[str, Any]:
     policy = load_execution_policy()
     quality_state = load_quality_gate_state()
     queue_state = load_queue_state()
@@ -1922,6 +2168,24 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = True) -> dict
                     artifact_paths=attempt.get("artifact_paths"),
                 )
                 save_session_state(session_state)
+                _record_review_execution_transition(
+                    artifact_id,
+                    decision,
+                    state="resolved",
+                    state_reason="already_replied",
+                    requires_confirmation=False,
+                    last_side_effect={
+                        "kind": "live_submit_skipped",
+                        "attempt_id": attempt.get("attempt_id"),
+                    },
+                    last_verification=row_state,
+                    next_action="No execution needed because Etsy already shows the expected public reply.",
+                    receipt_kind="already_replied",
+                    receipt_payload={
+                        "attempt_id": attempt.get("attempt_id"),
+                        "queue_status": queue_item.get("status"),
+                    },
+                )
                 return {
                     "ok": True,
                     "artifact_id": artifact_id,
@@ -1941,6 +2205,27 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = True) -> dict
             raise RuntimeError("The submit control is not visible on the matched Etsy review row.")
         if row_state.get("submitDisabled"):
             raise RuntimeError("The submit control is disabled; execution is failing closed.")
+
+        _record_review_execution_transition(
+            artifact_id,
+            decision,
+            state="approved",
+            state_reason="submit_confirmed",
+            requires_confirmation=False,
+            last_side_effect={
+                "kind": "live_submit_confirmed",
+                "attempt_id": attempt.get("attempt_id"),
+                "submit_performed": False,
+            },
+            last_verification=row_state,
+            next_action="Submit the verified Etsy reply and confirm the post-submit state before clearing the queue item.",
+            receipt_kind="submit_confirmed",
+            receipt_payload={
+                "attempt_id": attempt.get("attempt_id"),
+                "queue_status": queue_item.get("status"),
+                "last_preflight_status": queue_item.get("last_preflight_status"),
+            },
+        )
 
         click_result = submit_reply_after_verification(session_name, expected_transaction_id)
         attempt["submit_click"] = click_result
@@ -1987,6 +2272,27 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = True) -> dict
             artifact_paths=attempt.get("artifact_paths"),
         )
         save_session_state(session_state)
+        _record_review_execution_transition(
+            artifact_id,
+            decision,
+            state="verified",
+            state_reason="reply_posted",
+            requires_confirmation=False,
+            last_side_effect={
+                "kind": "live_submit",
+                "attempt_id": attempt.get("attempt_id"),
+                "submit_performed": attempt.get("submit_performed"),
+                "screenshot_path": attempt.get("screenshot_path"),
+            },
+            last_verification=post_submit_state,
+            next_action="No further action is needed unless Etsy or the customer indicates a new issue.",
+            receipt_kind="live_submit",
+            receipt_payload={
+                "attempt_id": attempt.get("attempt_id"),
+                "queue_status": queue_item.get("status"),
+                "session_id": session.get("session_id"),
+            },
+        )
         return {
             "ok": True,
             "artifact_id": artifact_id,
@@ -2031,6 +2337,7 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = True) -> dict
             quality_state=quality_state,
             queue_state=queue_state,
             artifact_id=artifact_id,
+            decision=decision,
             attempt=attempt,
             policy=policy,
         )
@@ -2062,6 +2369,26 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = True) -> dict
             attempt,
             final_queue_status="failed",
             final_execution_state="failed",
+        )
+        _record_review_execution_transition(
+            artifact_id,
+            decision,
+            state="blocked",
+            state_reason="execution_failed",
+            requires_confirmation=False,
+            last_side_effect={
+                "kind": "live_submit",
+                "attempt_id": attempt.get("attempt_id"),
+                "submit_performed": attempt.get("submit_performed"),
+            },
+            last_verification=attempt.get("post_submit_state") or attempt.get("pre_submit_state"),
+            next_action="Inspect the failed live submit attempt before retrying the Etsy reply.",
+            receipt_kind="execution_failed",
+            receipt_payload={
+                "attempt_id": attempt.get("attempt_id"),
+                "error": attempt.get("error"),
+                "queue_status": queue_item.get("status"),
+            },
         )
         session = record_session_event(
             session_state,
@@ -2259,10 +2586,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     dry_run_parser = subparsers.add_parser("dry-run-fill", help="Fill the exact approved reply text without submitting.")
     dry_run_parser.add_argument("--artifact-id", required=True)
+    dry_run_parser.add_argument("--keep-browser-open", action="store_true")
     dry_run_parser.add_argument("--close-browser", action="store_true")
 
     submit_parser = subparsers.add_parser("submit", help="Submit the exact approved reply text after pre-submit verification.")
     submit_parser.add_argument("--artifact-id", required=True)
+    submit_parser.add_argument("--keep-browser-open", action="store_true")
     submit_parser.add_argument("--close-browser", action="store_true")
 
     auto_queue_parser = subparsers.add_parser("auto-queue-publish-ready", help="Auto-queue publish-ready Etsy public review replies when policy allows it.")
@@ -2274,6 +2603,8 @@ def build_parser() -> argparse.ArgumentParser:
     drain_parser.add_argument("--skip-session-summary", action="store_true")
 
     subparsers.add_parser("send-session-summary", help="Send one email summarizing the current review-reply execution session.")
+    cleanup_parser = subparsers.add_parser("cleanup-browsers", help="Close any known review-reply automation browser sessions.")
+    cleanup_parser.add_argument("--force-kill-temp-profiles", action="store_true")
 
     return parser
 
@@ -2281,13 +2612,32 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    browser_commands = {"dry-run-fill", "submit", "drain-queue"}
+    if args.command in browser_commands:
+        blocked = etsy_browser_blocked_status()
+        if blocked.get("blocked"):
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "status": "blocked",
+                        "reason": blocked.get("block_reason"),
+                        "blocked_until": blocked.get("blocked_until"),
+                        "command": args.command,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
 
     if args.command == "queue":
         result = queue_review_reply(args.artifact_id, queued_by=args.queued_by)
     elif args.command == "dry-run-fill":
-        result = run_dry_run_fill(args.artifact_id, keep_browser_open=not args.close_browser)
+        keep_browser_open = bool(args.keep_browser_open and not args.close_browser)
+        result = run_dry_run_fill(args.artifact_id, keep_browser_open=keep_browser_open)
     elif args.command == "submit":
-        result = run_live_submit(args.artifact_id, keep_browser_open=not args.close_browser)
+        keep_browser_open = bool(args.keep_browser_open and not args.close_browser)
+        result = run_live_submit(args.artifact_id, keep_browser_open=keep_browser_open)
     elif args.command == "auto-queue-publish-ready":
         result = auto_enqueue_publish_ready(queued_by=args.queued_by)
     elif args.command == "drain-queue":
@@ -2298,6 +2648,8 @@ def main() -> int:
         )
     elif args.command == "send-session-summary":
         result = send_session_summary_email()
+    elif args.command == "cleanup-browsers":
+        result = cleanup_review_reply_browsers(force_kill_temp_profiles=args.force_kill_temp_profiles)
     else:
         raise SystemExit(f"Unknown command: {args.command}")
 

@@ -30,6 +30,11 @@ RECOVERY_REVIEW_ACTIONS = {
     "replacement_review",
     "refund_or_replacement_review",
 }
+SUPPRESSED_BROWSER_FOLLOW_UP_STATES = {
+    "reply_drafted",
+    "waiting_on_customer",
+    "resolved",
+}
 
 
 def _slugify(value: str) -> str:
@@ -51,12 +56,52 @@ def _is_custom_product(order: dict[str, Any]) -> bool:
     return "custom" in title or "build your custom" in title
 
 
+def _tracking_live_context(packet: dict[str, Any]) -> tuple[str | None, str | None]:
+    tracking = packet.get("tracking_enrichment") or {}
+    label = str(tracking.get("live_status_label") or "").strip() or None
+    action = str(tracking.get("live_status_recommended_action") or "").strip() or None
+    return label, action
+
+
 def _suggested_customer_reply(packet: dict[str, Any]) -> str | None:
     packet_type = str(packet.get("packet_type") or "").strip()
     order = packet.get("order_enrichment") or {}
     tracking = packet.get("tracking_enrichment") or {}
     tracking_number = str(tracking.get("tracking_number") or "").strip()
     tracking_line = f" I found tracking `{tracking_number}` on the order." if tracking_number else ""
+    live_status_label, live_action = _tracking_live_context(packet)
+    if packet_type == "reply" and live_action == "reply_with_delivery_context":
+        return (
+            "Hi, thanks for reaching out."
+            f"{tracking_line} USPS currently shows the package as delivered."
+            " Please double-check around the mailbox, porch, side door, and with anyone at the address who may have brought it in."
+            " If it still does not turn up, reply here and I’ll help with the next step."
+        )
+    if packet_type == "reply" and live_action == "wait_same_day":
+        return (
+            "Hi, thanks for reaching out."
+            f"{tracking_line} USPS shows the package is out for delivery today."
+            " I would give it until the end of the day, and if it still does not arrive, message me again and I’ll help right away."
+        )
+    if packet_type == "reply" and live_action == "reply_with_pickup_context":
+        return (
+            "Hi, thanks for reaching out."
+            f"{tracking_line} USPS shows the package is available for pickup."
+            " Please check your pickup notice or local post office, and if anything looks wrong, let me know so I can help."
+        )
+    if packet_type == "reply" and live_action == "wait_for_tracking":
+        return (
+            "Hi, thanks for reaching out."
+            f"{tracking_line} USPS still shows the package moving through the network."
+            " I’m keeping an eye on it, and I’d give it a little more time before we replace it."
+            " If it stops moving or the delivery window passes, message me again and I’ll take the next step."
+        )
+    if packet_type == "reply" and live_action == "review_replacement_or_refund":
+        return (
+            "Hi, thanks for reaching out."
+            f"{tracking_line} USPS is showing an exception on the shipment."
+            " Please confirm the delivery address and whether you would prefer a replacement or refund if the package does not recover."
+        )
     if packet_type == "replacement":
         return (
             "Hi, I’m sorry this arrived damaged or wasn’t right."
@@ -88,18 +133,46 @@ def _suggested_customer_reply(packet: dict[str, Any]) -> str | None:
 def _operator_guidance(packet: dict[str, Any]) -> str:
     packet_type = str(packet.get("packet_type") or "").strip()
     approved_recovery_action = str(packet.get("approved_recovery_action") or "").strip().lower()
+    live_status_label, live_action = _tracking_live_context(packet)
     if packet_type == "replacement":
         if approved_recovery_action in {"replacement", "resend"}:
             return "Buy the replacement label and reply that a replacement is being sent."
+        if live_action == "reply_with_delivery_context":
+            return "Reply with delivered-context first. Do not buy a replacement label until the delivered scan has been checked with the customer."
+        if live_action == "wait_same_day":
+            return "USPS shows out for delivery today. Wait until tonight before replacing anything."
+        if live_action == "wait_for_tracking":
+            return "USPS still shows movement. Do not buy a replacement label yet."
+        if live_action == "review_replacement_or_refund":
+            return "USPS shows an exception. Confirm address and decide whether this should become a refund or replacement."
         return "Decide whether you want to replace or refund before replying."
     if packet_type == "refund":
         if approved_recovery_action == "refund":
             return "Process the refund, then reply that you refunded the order."
         return "Decide whether you want to refund before replying."
     if packet_type == "wait_for_tracking":
+        if live_action == "reply_with_delivery_context":
+            return "USPS now shows delivered. Reply with delivery context instead of keeping this as a generic watch item."
+        if live_action == "wait_same_day":
+            return "USPS shows out for delivery today. Wait until the end of the day before taking any recovery action."
+        if live_action == "reply_with_pickup_context":
+            return "Reply that USPS is holding the package for pickup and ask the customer to check the local post office."
+        if live_action == "review_replacement_or_refund":
+            return "Tracking shows an exception. Move this out of watch mode and review replacement or refund."
         return "Do not resend yet. Recheck tracking first, then reply only if the package stops moving."
     if packet_type == "reply" and _is_custom_product(packet.get("order_enrichment") or {}):
         return "Read the thread and answer the custom-design question. Ask for reference photos, colors, and deadline if they are missing."
+    if packet_type == "reply" and live_status_label:
+        if live_action == "reply_with_delivery_context":
+            return "Reply with the delivered scan context and ask the customer to recheck the delivery spot before escalating."
+        if live_action == "wait_same_day":
+            return "Reply that USPS still has it out for delivery today and set the expectation to check back tonight."
+        if live_action == "reply_with_pickup_context":
+            return "Reply that USPS is holding the package for pickup and ask the customer to confirm with the post office."
+        if live_action == "wait_for_tracking":
+            return "Reply with current tracking context and do not escalate into resend/refund yet."
+        if live_action == "review_replacement_or_refund":
+            return "Reply with the USPS exception context, confirm the address, and decide whether to replace or refund."
     if packet_type == "reply":
         return "Open the thread and send a same-day reply with context or a clarifying question."
     return "Review the case and decide the next customer-facing move."
@@ -183,6 +256,50 @@ def _replacement_resolution_override(case: dict[str, Any]) -> dict[str, str] | N
             "reason": "The Etsy receipt already shows multiple shipments, so Duck Ops should confirm whether a resend already went out before buying another label.",
         }
     return {}
+
+
+def _browser_capture_index(
+    browser_captures: dict[str, Any] | list[dict[str, Any]] | None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    payload_items = browser_captures
+    if isinstance(browser_captures, dict):
+        payload_items = browser_captures.get("items") or []
+    items = list(payload_items or [])
+    by_thread_key: dict[str, dict[str, Any]] = {}
+    by_source_artifact_id: dict[str, dict[str, Any]] = {}
+    for item in items:
+        thread_key = str(item.get("conversation_thread_key") or "").strip()
+        source_artifact_id = str(item.get("source_artifact_id") or "").strip()
+        if thread_key and thread_key not in by_thread_key:
+            by_thread_key[thread_key] = item
+        if source_artifact_id and source_artifact_id not in by_source_artifact_id:
+            by_source_artifact_id[source_artifact_id] = item
+    return by_thread_key, by_source_artifact_id
+
+
+def _normalized_browser_follow_up_state(capture: dict[str, Any] | None) -> str | None:
+    if not capture:
+        return None
+    follow_up = str(capture.get("follow_up_state") or "").strip().lower().replace(" ", "_")
+    draft_reply = str(capture.get("draft_reply") or "").strip()
+    if follow_up in {"resolved", "done"}:
+        return "resolved"
+    if follow_up == "needs_reply" and draft_reply:
+        return "reply_drafted"
+    if draft_reply and not follow_up:
+        return "reply_drafted"
+    return follow_up or None
+
+
+def _browser_capture_for_case(
+    case: dict[str, Any],
+    by_thread_key: dict[str, dict[str, Any]],
+    by_source_artifact_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    normalized = _normalized_case(case)
+    thread_key = str(normalized.get("conversation_thread_key") or "").strip()
+    source_artifact_id = str(normalized.get("artifact_id") or "").strip()
+    return by_thread_key.get(thread_key) or by_source_artifact_id.get(source_artifact_id) or {}
 
 
 def _base_packet(case: dict[str, Any], packet_type: str) -> dict[str, Any]:
@@ -277,10 +394,22 @@ def _merge_thread_packets(packets: list[dict[str, Any]]) -> list[dict[str, Any]]
     return merged
 
 
-def build_customer_action_packets(customer_cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_customer_action_packets(
+    customer_cases: list[dict[str, Any]],
+    browser_captures: dict[str, Any] | list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    captures_by_thread_key, captures_by_source_artifact_id = _browser_capture_index(browser_captures)
     packets: list[dict[str, Any]] = []
     for raw_case in customer_cases:
         case = _normalized_case(raw_case)
+        browser_capture = _browser_capture_for_case(case, captures_by_thread_key, captures_by_source_artifact_id)
+        browser_follow_up_state = _normalized_browser_follow_up_state(browser_capture)
+        browser_review_status = str(browser_capture.get("browser_review_status") or "").strip() or None
+        browser_draft_reply = str(browser_capture.get("draft_reply") or "").strip() or None
+
+        if browser_follow_up_state in SUPPRESSED_BROWSER_FOLLOW_UP_STATES:
+            continue
+
         action = str(case.get("recommended_action") or "").strip()
         approved_recovery_action = str(case.get("approved_recovery_action") or "").strip().lower()
         response_recommendation = case.get("response_recommendation") or {}
@@ -296,6 +425,14 @@ def build_customer_action_packets(customer_cases: list[dict[str, Any]]) -> list[
             reply_packet = _base_packet(case, "reply")
             reply_packet.update(
                 {
+                    "browser_review_status": browser_review_status,
+                    "follow_up_state": browser_follow_up_state,
+                    "draft_reply": browser_draft_reply,
+                    "browser_captured_at": browser_capture.get("captured_at"),
+                }
+            )
+            reply_packet.update(
+                {
                     "status": "reply_needed",
                     "next_operator_action": "review_customer_reply_path",
                     "next_physical_action": "none",
@@ -308,6 +445,14 @@ def build_customer_action_packets(customer_cases: list[dict[str, Any]]) -> list[
 
         if action in {"refund_review", "refund_or_replacement_review"} and not _suppress_refund_packet(case):
             refund_packet = _base_packet(case, "refund")
+            refund_packet.update(
+                {
+                    "browser_review_status": browser_review_status,
+                    "follow_up_state": browser_follow_up_state,
+                    "draft_reply": browser_draft_reply,
+                    "browser_captured_at": browser_capture.get("captured_at"),
+                }
+            )
             if approved_recovery_action == "refund":
                 refund_packet.update(
                     {
@@ -335,6 +480,14 @@ def build_customer_action_packets(customer_cases: list[dict[str, Any]]) -> list[
             if replacement_override is None:
                 continue
             replacement_packet = _base_packet(case, "replacement")
+            replacement_packet.update(
+                {
+                    "browser_review_status": browser_review_status,
+                    "follow_up_state": browser_follow_up_state,
+                    "draft_reply": browser_draft_reply,
+                    "browser_captured_at": browser_capture.get("captured_at"),
+                }
+            )
             if replacement_override:
                 replacement_packet.update(replacement_override)
             else:
@@ -362,6 +515,14 @@ def build_customer_action_packets(customer_cases: list[dict[str, Any]]) -> list[
         ) and action not in {"refund_review", "replacement_review", "refund_or_replacement_review", "escalate"}
         if should_stage_wait_packet:
             wait_packet = _base_packet(case, "wait_for_tracking")
+            wait_packet.update(
+                {
+                    "browser_review_status": browser_review_status,
+                    "follow_up_state": browser_follow_up_state,
+                    "draft_reply": browser_draft_reply,
+                    "browser_captured_at": browser_capture.get("captured_at"),
+                }
+            )
             wait_packet.update(
                 {
                     "status": "watch" if approved_recovery_action != "wait" else "waiting_by_operator_decision",

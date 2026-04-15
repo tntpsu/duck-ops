@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, slugify, write_decision
+from workflow_control import record_workflow_transition
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +61,21 @@ def append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             handle.write(json.dumps(row))
             handle.write("\n")
+
+
+def parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        if len(str(value).strip()) == 10:
+            parsed = datetime.strptime(str(value).strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        else:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone()
+    except ValueError:
+        return None
 
 
 def canonical_hash(payload: Any) -> str:
@@ -110,6 +126,8 @@ def carry_forward_review_resolution(
     material_hash: str,
 ) -> dict[str, Any]:
     if not previous_record:
+        return {}
+    if str(previous_record.get("material_hash") or "") != str(material_hash or ""):
         return {}
 
     previous_decision = previous_record.get("decision") or {}
@@ -255,6 +273,16 @@ def default_suggestions(flow: str) -> list[str]:
         return [
             "Keep the final campaign summary concise enough that the publish recommendation is readable without parsing email scaffolding.",
             "Preserve the exact sale actions in a deterministic summary so the operator can approve the plan without opening the raw email.",
+        ]
+    if flow == "meme":
+        return [
+            "Keep the meme text, caption, and final image together in one structured artifact so approval can happen without opening the raw email.",
+            "Preserve the final scheduled-platform payload so the operator can approve or revise this post directly from WhatsApp.",
+        ]
+    if flow == "jeepfact":
+        return [
+            "Keep the final Jeep Fact caption and cover image together so the operator can review the actual post package instead of a partial summary.",
+            "Preserve the carousel image set and posting notes so the operator can approve or revise the scheduled post without reopening DuckAgent.",
         ]
     return [
         "Preserve the sale playbook as a structured state artifact so the gate can inspect the actual recommended actions instead of email formatting.",
@@ -639,6 +667,8 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
         support = 12 + min(6, len(trend_refs)) + min(2, max(0, len(source_refs) - 1))
         if "[PUBLISH:" in body:
             support += 1
+    elif flow in {"meme", "jeepfact"}:
+        support = 10 + min(4, len(source_refs)) + min(4, len(summary.get("images") or [])) + min(2, len(trend_refs))
     else:
         support = 4 + min(8, len(trend_refs) * 4)
         if source_refs:
@@ -651,6 +681,8 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
         brand_fit = 19 if "duck" in title.lower() else 13
     elif flow == "weekly_sale":
         brand_fit = 18
+    elif flow in {"meme", "jeepfact"}:
+        brand_fit = 18 if ("duck" in title.lower() or "jeep" in body.lower()) else 15
     else:
         brand_fit = 14
     reasoning.append(f"Brand-fit score {brand_fit}/20 based on flow `{flow}` and candidate framing.")
@@ -663,6 +695,8 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
         clarity += 3
     if summary.get("platform_variants"):
         clarity += 2
+    if flow in {"meme", "jeepfact"} and summary.get("images"):
+        clarity += 3
     if "[PUBLISH:" in body:
         clarity += 1
     if flow == "weekly_sale" and source_mode == "state_file" and publish_token:
@@ -680,6 +714,10 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
             suggestions.append("Explain how this duck differs from the existing catalog entry before publishing.")
         else:
             differentiation = 12
+    elif flow == "meme":
+        differentiation = 9 + min(3, len(trend_refs))
+    elif flow == "jeepfact":
+        differentiation = 10 + min(3, max(0, len(summary.get("images") or []) - 1))
     else:
         differentiation = 10 + min(3, len(trend_refs) // 2)
     differentiation = int(clamp(differentiation, 0, 15))
@@ -693,6 +731,10 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
         conversion += 3
     if flow == "weekly_sale" and "strategic summary" in body.lower():
         conversion += 4
+    if flow == "meme" and any(token in body.lower() for token in ("meme monday", "pov:", "tag your", "#mememonday")):
+        conversion += 4
+    if flow == "jeepfact":
+        conversion += min(4, len(summary.get("images") or []))
     if flow == "weekly_sale":
         sale_action_markers = [
             "theme of the week:",
@@ -723,6 +765,15 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
             timing = 5
         else:
             timing = 2
+    elif flow in {"meme", "jeepfact"}:
+        if age_days is None:
+            timing = 5
+        elif age_days <= 2:
+            timing = 10
+        elif age_days <= 7:
+            timing = 7
+        else:
+            timing = 3
     elif flow == "newduck":
         timing = 8 if age_days is not None and age_days <= 3 and trend_refs else 6
     reasoning.append(f"Timing score {timing}/10 based on candidate age and whether the supporting signals still look current.")
@@ -732,6 +783,8 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
     if notes.get("completeness") == "partial_email":
         risk_penalty += 2
     if catalog_overlap and flow == "newduck":
+        risk_penalty += 2
+    if flow in {"meme", "jeepfact"} and not summary.get("images"):
         risk_penalty += 2
     if body_has_css_noise(body):
         risk_penalty += 1
@@ -747,6 +800,8 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
         fail_closed.append("Existing catalog already covers this duck theme without enough new evidence to justify another publish.")
     if flow == "weekly_sale" and age_days is not None and age_days >= 7:
         fail_closed.append("Weekly sale playbook is stale for a publish decision and should not be acted on as-is.")
+    if flow in {"meme", "jeepfact"} and not summary.get("images"):
+        fail_closed.append("Social post candidate does not include a preview image for approval.")
     if clarity < 6:
         fail_closed.append("Artifact is too unclear to mark publish-ready.")
 
@@ -756,6 +811,10 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
         suggestions.append("Preserve or attach the final review images so the gate can verify the full listing package next time.")
     if flow == "weekly_sale" and "[PUBLISH:" not in body and not publish_token:
         suggestions.append("Ensure the final review artifact carries a publish token so approval can be traced back to the exact run.")
+    if flow == "meme" and not summary.get("images"):
+        suggestions.append("Preserve the final meme image URL so the operator can approve the actual post package in WhatsApp.")
+    if flow == "jeepfact" and len(summary.get("images") or []) < 2:
+        suggestions.append("Preserve the Jeep Fact image set so the operator can review more than a single cover image.")
 
     if fail_closed:
         if flow == "weekly_sale" and age_days is not None and age_days >= 7:
@@ -816,8 +875,10 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
         "created_at": now_iso(),
         "title": title,
         "preview": {
-            "proposed_label": "Draft body",
+            "proposed_label": "Draft body" if flow not in {"meme", "jeepfact"} else "Draft caption",
             "proposed_text": preview_text(body),
+            "asset_url": ((summary.get("images") or [None])[0]),
+            "asset_urls": summary.get("images") or [],
         },
         "quality_gate_metadata": {
             "age_days": age_days,
@@ -848,7 +909,109 @@ def load_state() -> dict[str, Any]:
     )
 
 
+def sync_quality_gate_control(state: dict[str, Any]) -> dict[str, Any]:
+    artifacts = state.get("artifacts") or {}
+    alerts = state.get("alerts") or {}
+    reviewed_count = 0
+    needs_revision_count = 0
+    pending_count = 0
+    latest_artifact_dt: datetime | None = None
+
+    for artifact in artifacts.values():
+        if not isinstance(artifact, dict):
+            continue
+        decision = artifact.get("decision") or {}
+        review_status = str(
+            decision.get("review_status")
+            or artifact.get("review_status")
+            or artifact.get("status")
+            or ""
+        ).strip().lower()
+        if review_status == "approved":
+            reviewed_count += 1
+        elif review_status == "needs_revision":
+            needs_revision_count += 1
+        elif review_status:
+            pending_count += 1
+        artifact_dt = parse_timestamp(
+            artifact.get("evaluated_at")
+            or artifact.get("reviewed_at")
+            or decision.get("created_at")
+        )
+        if artifact_dt and (latest_artifact_dt is None or artifact_dt > latest_artifact_dt):
+            latest_artifact_dt = artifact_dt
+
+    digest_dt = parse_timestamp(state.get("last_digest_date"))
+    reference_dt = latest_artifact_dt if latest_artifact_dt and (digest_dt is None or latest_artifact_dt >= digest_dt) else digest_dt
+    age_hours = None
+    if reference_dt is not None:
+        age_hours = round((datetime.now(timezone.utc).astimezone() - reference_dt).total_seconds() / 3600.0, 2)
+
+    if age_hours is not None and age_hours >= 96:
+        control_state = "blocked"
+        reason = "stale_input"
+        next_action = "Rebuild the quality gate so approvals and alerts reflect the current operator queue."
+    elif alerts:
+        control_state = "observed"
+        reason = "alerts_pending"
+        next_action = "Review the urgent quality gate alerts and clear or archive them."
+    elif pending_count:
+        control_state = "observed"
+        reason = "awaiting_operator_resolution"
+        next_action = "Review the pending quality-gate items and approve, revise, or discard them."
+    elif needs_revision_count:
+        control_state = "observed"
+        reason = "revision_pressure"
+        next_action = "Clear the needs-revision backlog so the gate reflects real operator progress."
+    elif artifacts:
+        control_state = "verified"
+        reason = "gating_ready"
+        next_action = "Use the quality gate output as the current review source of truth."
+    else:
+        control_state = "observed"
+        reason = "idle"
+        next_action = "No quality-gate artifacts are available yet."
+
+    control = record_workflow_transition(
+        workflow_id="quality_gate",
+        lane="quality_gate",
+        display_label="Quality Gate",
+        entity_id="quality_gate",
+        state=control_state,
+        state_reason=reason,
+        input_freshness={
+            "source": str(QUALITY_GATE_STATE_PATH),
+            "age_hours": age_hours,
+        },
+        next_action=next_action,
+        metadata={
+            "tracked_artifacts": len(artifacts),
+            "alert_count": len(alerts),
+            "pending_count": pending_count,
+            "needs_revision_count": needs_revision_count,
+            "reviewed_count": reviewed_count,
+        },
+        receipt_kind="state_sync",
+        receipt_payload={
+            "tracked_artifacts": len(artifacts),
+            "alert_count": len(alerts),
+            "pending_count": pending_count,
+            "needs_revision_count": needs_revision_count,
+            "reviewed_count": reviewed_count,
+        },
+        history_summary=reason.replace("_", " "),
+    )
+    state["workflow_control"] = {
+        "state": control_state,
+        "state_reason": reason,
+        "age_hours": age_hours,
+        "path": str((control or {}).get("latest_receipt", {}).get("path") or ""),
+    }
+    return state
+
+
 def save_state(state: dict[str, Any]) -> None:
+    state = sync_quality_gate_control(state)
     write_json(QUALITY_GATE_STATE_PATH, state)
 
 

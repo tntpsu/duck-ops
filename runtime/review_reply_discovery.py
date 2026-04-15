@@ -21,8 +21,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, slugify
+from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
+from etsy_browser_guard import after_command as guard_after_command
+from etsy_browser_guard import before_command as guard_before_command
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -198,9 +202,12 @@ def write_packet(packet: dict[str, Any]) -> dict[str, str]:
 def run_pw_command(session: str, *args: str) -> str:
     if not PWCLI_PATH.exists():
         raise SystemExit(f"Playwright wrapper not found at {PWCLI_PATH}")
+    guard_before_command(session, args)
     cmd = [str(PWCLI_PATH), "--session", session, *args]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return result.stdout.strip()
+    stdout = result.stdout.strip()
+    guard_after_command(session, args, stdout)
+    return stdout
 
 
 def session_is_open(session: str) -> bool:
@@ -304,20 +311,37 @@ def extract_eval_result(output: str) -> str:
 def parse_eval_json(output: str) -> Any:
     body = extract_eval_result(output)
     try:
-        return json.loads(body)
+        parsed = json.loads(body)
     except json.JSONDecodeError:
         return body
+    for _ in range(2):
+        if not isinstance(parsed, str):
+            return parsed
+        candidate = parsed.strip()
+        if not candidate or candidate[0] not in "[{\"" and candidate not in {"true", "false", "null"}:
+            return parsed
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            return parsed
+    return parsed
 
 
 def review_surface_url(current_url: str | None) -> str | None:
     if not current_url:
         return None
-    if "/shop/" in current_url and "/reviews" in current_url:
-        return current_url
-    if "/shop/" in current_url and "#reviews" in current_url:
-        return current_url
-    if "/shop/" in current_url:
-        return current_url.split("#", 1)[0] + "#reviews"
+    parsed = urlparse(current_url)
+    path = parsed.path or ""
+    if "/shop/" not in path:
+        return None
+    if "/reviews" in path:
+        query = parse_qs(parsed.query)
+        query.setdefault("ref", ["pagination"])
+        query.setdefault("page", ["1"])
+        return urlunparse(parsed._replace(query=urlencode(query, doseq=True), fragment=""))
+    canonical_path = path.rstrip("/") + "/reviews"
+    query = {"ref": ["pagination"], "page": ["1"]}
+    return urlunparse(parsed._replace(path=canonical_path, query=urlencode(query, doseq=True), fragment=""))
     return None
 
 
@@ -337,11 +361,20 @@ def navigate_to_reviews_surface(session: str) -> dict[str, Any]:
     current_url, page_title = parse_page_metadata(snapshot_output)
     current_surface = review_surface_url(current_url)
     if current_surface:
+        if current_url == current_surface:
+            return {
+                "strategy": "already_on_shop_reviews_surface",
+                "start_url": current_url,
+                "landed_url": current_surface,
+                "page_title": page_title,
+            }
+        landed_url, landed_title = navigate_within_session(session, current_surface)
         return {
-            "strategy": "already_on_shop_reviews_surface",
+            "strategy": "navigate_via_canonical_shop_reviews_page",
             "start_url": current_url,
-            "landed_url": current_surface,
-            "page_title": page_title,
+            "navigated_to": current_surface,
+            "landed_url": landed_url or current_surface,
+            "page_title": landed_title or page_title,
         }
 
     href_output = run_pw_command(
@@ -366,12 +399,13 @@ def navigate_to_reviews_surface(session: str) -> dict[str, Any]:
             "page_title": page_title,
         }
 
-    landed_url, landed_title = navigate_within_session(session, href)
+    canonical_href = review_surface_url(href) or href
+    landed_url, landed_title = navigate_within_session(session, canonical_href)
     return {
-        "strategy": "navigate_via_shop_reviews_page" if "/reviews" in href and "#reviews" not in href else "navigate_via_shop_reviews_anchor",
+        "strategy": "navigate_via_shop_reviews_page" if "/reviews" in canonical_href else "navigate_via_shop_reviews_anchor",
         "start_url": current_url,
-        "navigated_to": href,
-        "landed_url": landed_url,
+        "navigated_to": canonical_href,
+        "landed_url": landed_url or canonical_href,
         "page_title": landed_title,
     }
 
@@ -392,12 +426,26 @@ def locate_review_block(
             f"const needle = {json.dumps(customer_review)}; "
             f"const expectedListingId = {json.dumps(str(expected_listing_id) if expected_listing_id else None)}; "
             f"const expectedTransactionId = {json.dumps(str(expected_transaction_id) if expected_transaction_id else None)}; "
-            "const byTransaction = expectedTransactionId "
-            "  ? document.querySelector(`li[data-review-region=\"${expectedTransactionId}\"]`) "
-            "    || document.querySelector(`[data-transaction-id=\"${expectedTransactionId}\"]`)?.closest('li, article, section, [data-review-id], [data-review]') "
+            "const normalizeText = value => (value || '').toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu, ' ').replace(/\\s+/g, ' ').trim(); "
+            "const needleNorm = normalizeText(needle); "
+            "const reviewScopeFor = node => node.closest('li, article, section, [data-review-id], [data-review], .review-card') || node.parentElement || node; "
+            "const reviewSelectors = 'li[data-review-region], [data-transaction-id], article, section, [data-review-id], [data-review], .review-card'; "
+            "const byTransactionSeed = expectedTransactionId "
+            "  ? document.querySelector(`[data-review-region=\"${expectedTransactionId}\"], [data-transaction-id=\"${expectedTransactionId}\"]`) "
             "  : null; "
-            "const candidates = Array.from(document.querySelectorAll('body *')).filter(node => (node.innerText || '').includes(needle)); "
-            "if (!candidates.length && !byTransaction) return {found:false}; "
+            "const byTransaction = byTransactionSeed ? reviewScopeFor(byTransactionSeed) : null; "
+            "const textCandidates = Array.from(document.querySelectorAll('body *')).filter(node => { "
+            "  const text = (node.innerText || '').trim(); "
+            "  if (!text) return false; "
+            "  if (needle && text.includes(needle)) return true; "
+            "  return Boolean(needleNorm) && normalizeText(text).includes(needleNorm); "
+            "}); "
+            "const scopeSet = new Set(); "
+            "Array.from(document.querySelectorAll(reviewSelectors)).forEach(node => scopeSet.add(reviewScopeFor(node))); "
+            "textCandidates.forEach(node => scopeSet.add(reviewScopeFor(node))); "
+            "if (byTransaction) scopeSet.add(byTransaction); "
+            "const allScopes = Array.from(scopeSet).filter(Boolean); "
+            "if (!allScopes.length) return {found:false}; "
             "const listingInfoFor = scope => { "
             "  const link = Array.from(scope.querySelectorAll('a[href]')).find(node => /\\/listing\\/(\\d+)/.test(node.href || '')); "
             "  const href = link ? (link.href || null) : null; "
@@ -408,14 +456,19 @@ def locate_review_block(
             "    listingTitle: link ? ((link.innerText || '').trim() || (link.getAttribute('aria-label') || '').trim() || null) : null "
             "  }; "
             "}; "
-            "const ranked = candidates.map(node => { "
-            "  const scope = node.closest('li, article, section, [data-review-id], [data-review], .review-card') || node.parentElement || node; "
+            "const ranked = allScopes.map(scope => { "
             "  const listing = listingInfoFor(scope); "
             "  const scopeText = (scope.innerText || '').trim(); "
-            "  const reviewText = (node.innerText || '').trim(); "
-            "  const reviewRegion = scope.getAttribute('data-review-region') || null; "
+            "  const reviewText = scopeText; "
+            "  const txNode = scope.matches('[data-review-region], [data-transaction-id]') "
+            "    ? scope "
+            "    : scope.querySelector('[data-review-region], [data-transaction-id]'); "
+            "  const reviewRegion = txNode ? (txNode.getAttribute('data-review-region') || txNode.getAttribute('data-transaction-id') || null) : null; "
+            "  const normalizedScopeText = normalizeText(scopeText); "
+            "  const normalizedNeedleMatch = Boolean(needleNorm) && normalizedScopeText.includes(needleNorm); "
+            "  const tokenHits = needleNorm ? needleNorm.split(' ').filter(token => token.length >= 4 && normalizedScopeText.includes(token)).length : 0; "
             "  return { "
-            "    node, "
+            "    node: scope, "
             "    scope, "
             "    scopeLen: scopeText.length, "
             "    reviewText, "
@@ -423,26 +476,34 @@ def locate_review_block(
             "    reviewRegion, "
             "    transactionMatch: expectedTransactionId ? reviewRegion === expectedTransactionId : false, "
             "    exactText: reviewText === needle || scopeText.includes(needle), "
+            "    normalizedNeedleMatch, "
+            "    tokenHits, "
             "    listingMatch: expectedListingId ? listing.listingId === expectedListingId : false "
             "  }; "
             "}).sort((a, b) => "
             "  (Number(b.transactionMatch) - Number(a.transactionMatch)) || "
             "  (Number(b.listingMatch) - Number(a.listingMatch)) || "
             "  (Number(b.exactText) - Number(a.exactText)) || "
+            "  (Number(b.normalizedNeedleMatch) - Number(a.normalizedNeedleMatch)) || "
+            "  (b.tokenHits - a.tokenHits) || "
             "  (a.scopeLen - b.scopeLen)"
             "); "
             "const chosen = byTransaction ? (() => { "
             "  const scope = byTransaction.closest('li, article, section, [data-review-id], [data-review], .review-card') || byTransaction; "
             "  const listing = listingInfoFor(scope); "
+            "  const scopeText = (scope.innerText || '').trim(); "
+            "  const normalizedScopeText = normalizeText(scopeText); "
             "  return { "
             "    node: scope, "
             "    scope, "
-            "    scopeLen: ((scope.innerText || '').trim().length), "
-            "    reviewText: (scope.innerText || '').trim(), "
+            "    scopeLen: scopeText.length, "
+            "    reviewText: scopeText, "
             "    listing, "
             "    reviewRegion: scope.getAttribute('data-review-region') || null, "
             "    transactionMatch: true, "
-            "    exactText: needle ? (scope.innerText || '').includes(needle) : false, "
+            "    exactText: needle ? scopeText.includes(needle) : false, "
+            "    normalizedNeedleMatch: Boolean(needleNorm) && normalizedScopeText.includes(needleNorm), "
+            "    tokenHits: needleNorm ? needleNorm.split(' ').filter(token => token.length >= 4 && normalizedScopeText.includes(token)).length : 0, "
             "    listingMatch: expectedListingId ? listing.listingId === expectedListingId : false "
             "  }; "
             "})() : ranked[0]; "
@@ -476,6 +537,8 @@ def locate_review_block(
             "matchedListingId: chosen.listing.listingId,"
             "matchedListingTitle: chosen.listing.listingTitle,"
             "listingIdVerified: expectedListingId ? chosen.listing.listingId === expectedListingId : null,"
+            "normalizedNeedleMatch: chosen.normalizedNeedleMatch,"
+            "tokenHits: chosen.tokenHits,"
             "replyBoxVisible: fields.some(field => field.tag === 'TEXTAREA'),"
             "replyTextareaPlaceholder: (fields.find(field => field.tag === 'TEXTAREA') || {}).placeholder || null,"
             "submitVisible: controls.some(control => /post a public response/i.test(control.text || control.ariaLabel || '')),"
@@ -778,6 +841,19 @@ def main() -> int:
         help="Launch a persistent Etsy seller browser session for manual sign-in and exit.",
     )
     args = parser.parse_args()
+    blocked = etsy_browser_blocked_status()
+    if blocked.get("blocked") and (args.capture_browser or args.launch_auth_browser):
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "reason": blocked.get("block_reason"),
+                    "blocked_until": blocked.get("blocked_until"),
+                },
+                indent=2,
+            )
+        )
+        return 0
 
     discovery_config = load_discovery_config()
     configured_entries = discovery_config.get("entry_points") or []

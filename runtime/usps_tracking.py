@@ -11,7 +11,6 @@ This module is intentionally conservative:
 
 from __future__ import annotations
 
-import base64
 from datetime import datetime
 import json
 import urllib.error
@@ -104,17 +103,17 @@ def _http_json(url: str, *, method: str = "GET", headers: dict[str, str] | None 
 
 
 def fetch_usps_access_token(config: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
-    body = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode("utf-8")
+    body = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credentials",
+            "client_id": str(config.get("client_id") or ""),
+            "client_secret": str(config.get("client_secret") or ""),
+        }
+    ).encode("utf-8")
     status, payload = _http_json(
         str(config.get("token_url") or ""),
         method="POST",
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Authorization": "Basic "
-            + base64.b64encode(
-                f"{config.get('client_id') or ''}:{config.get('client_secret') or ''}".encode("utf-8")
-            ).decode("ascii"),
-        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
         body=body,
     )
     if status not in {200, 201}:
@@ -134,6 +133,64 @@ def lookup_usps_tracking(tracking_number: str, config: dict[str, Any]) -> tuple[
     if status != 200:
         return None, {"ok": False, "stage": "tracking", "status_code": status, "response": payload}
     return payload, {"ok": True, "stage": "tracking"}
+
+
+def _resolution_signals(case: dict[str, Any]) -> set[str]:
+    return {
+        str(signal).strip()
+        for signal in (((case.get("resolution_enrichment") or {}).get("signals")) or [])
+        if str(signal).strip()
+    }
+
+
+def _live_status_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    text = json.dumps(payload).lower()
+    status_label = "usps_update_available"
+    recommended_action = "review_tracking_context"
+    if "delivered" in text:
+        status_label = "delivered"
+        recommended_action = "reply_with_delivery_context"
+    elif "out for delivery" in text:
+        status_label = "out_for_delivery"
+        recommended_action = "wait_same_day"
+    elif "available for pickup" in text:
+        status_label = "available_for_pickup"
+        recommended_action = "reply_with_pickup_context"
+    elif any(term in text for term in ["in transit", "moving through network", "arrived at", "departed", "accepted"]):
+        status_label = "in_transit"
+        recommended_action = "wait_for_tracking"
+    elif any(term in text for term in ["alert", "exception", "no access", "return to sender", "forwarded"]):
+        status_label = "exception"
+        recommended_action = "review_replacement_or_refund"
+    return {
+        "status_label": status_label,
+        "recommended_action": recommended_action,
+    }
+
+
+def _should_lookup_case(case: dict[str, Any], tracking: dict[str, Any]) -> bool:
+    carrier = str(tracking.get("carrier") or "").strip().lower()
+    tracking_number = str(tracking.get("tracking_number") or "").strip()
+    if carrier != "usps" or not tracking_number:
+        return False
+
+    if "refund_detected" in _resolution_signals(case):
+        return False
+
+    issue_type = str(case.get("issue_type") or "").strip().lower()
+    action = str(case.get("recommended_action") or "").strip().lower()
+    approved_recovery_action = str(case.get("approved_recovery_action") or "").strip().lower()
+    grouped_message_count = int(case.get("grouped_message_count") or 0)
+
+    if approved_recovery_action == "wait":
+        return True
+    if issue_type == "shipping":
+        return True
+    if action in {"replacement_review", "refund_review", "refund_or_replacement_review", "escalate"}:
+        return True
+    if action == "reply_with_context" and grouped_message_count > 0:
+        return True
+    return False
 
 
 def enrich_cases_with_usps_tracking(customer_cases: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -167,21 +224,24 @@ def enrich_cases_with_usps_tracking(customer_cases: list[dict[str, Any]]) -> tup
     for case in customer_cases:
         enriched = dict(case)
         tracking = dict(case.get("tracking_enrichment") or {})
-        carrier = str(tracking.get("carrier") or "").strip().lower()
         tracking_number = str(tracking.get("tracking_number") or "").strip()
-        if carrier != "usps" or not tracking_number:
+        if not _should_lookup_case(case, tracking):
             rows.append(enriched)
             continue
         tracked_cases += 1
         payload, result = lookup_usps_tracking(tracking_number, config)
         if payload:
+            status_summary = _live_status_summary(payload)
             tracking["live_status"] = payload
             tracking["live_status_source"] = "usps_api"
             tracking["live_status_checked_at"] = now_iso()
+            tracking["live_status_label"] = status_summary["status_label"]
+            tracking["live_status_recommended_action"] = status_summary["recommended_action"]
             lookups_succeeded += 1
             snapshot["items"][tracking_number] = {
                 "checked_at": tracking["live_status_checked_at"],
                 "status": "ok",
+                "live_status_label": tracking["live_status_label"],
                 "payload": payload,
             }
         else:

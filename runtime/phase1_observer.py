@@ -56,7 +56,13 @@ from open_order_intelligence import (
     build_packing_summary,
     build_shopify_open_orders_snapshot,
 )
+from ops_control import sync_ops_control
 from usps_tracking import enrich_cases_with_usps_tracking
+from weekly_sale_monitor import (
+    build_weekly_sale_monitor,
+    render_weekly_sale_monitor_markdown,
+    sync_weekly_sale_monitor_control,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,11 +94,16 @@ CUSTOM_BUILD_TASK_CANDIDATES_PATH = STATE_DIR / "custom_build_task_candidates.js
 CUSTOM_BUILD_TASK_CANDIDATES_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "custom_build_task_candidates.json"
 CUSTOM_BUILD_TASK_CANDIDATES_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "custom_build_task_candidates.md"
 ETSY_CONVERSATION_BROWSER_SYNC_PATH = STATE_DIR / "etsy_conversation_browser_sync.json"
+ETSY_CONVERSATION_BROWSER_CAPTURES_PATH = STATE_DIR / "etsy_conversation_browser_captures.json"
 ETSY_CONVERSATION_BROWSER_SYNC_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "etsy_conversation_browser_sync.json"
 ETSY_CONVERSATION_BROWSER_SYNC_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "etsy_conversation_browser_sync.md"
 REVIEW_QUEUE_STATE_PATH = STATE_DIR / "review_queue.json"
+WEEKLY_SALE_MONITOR_PATH = STATE_DIR / "weekly_sale_monitor.json"
+WEEKLY_SALE_MONITOR_HISTORY_PATH = STATE_DIR / "weekly_sale_monitor_history.jsonl"
+WEEKLY_SALE_MONITOR_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "weekly_sale_monitor.json"
+WEEKLY_SALE_MONITOR_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "weekly_sale_monitor.md"
 
-PILOT_PUBLISH_FLOWS = {"newduck", "weekly_sale"}
+PILOT_PUBLISH_FLOWS = {"newduck", "weekly_sale", "meme", "jeepfact"}
 INITIAL_MAILBOX_BOOTSTRAP_LIMIT = 75
 SECONDARY_FOLDER_BOOTSTRAP_LIMIT = 25
 
@@ -143,7 +154,9 @@ def trim_text(value: str | None, limit: int = 2000) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
-def load_json(path: Path) -> Any:
+def load_json(path: Path, default: Any | None = None) -> Any:
+    if not path.exists():
+        return default if default is not None else {}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -414,6 +427,10 @@ def looks_like_customer_issue_email(email_item: dict[str, Any]) -> bool:
     normalized_subject = normalize_text(subject)
     normalized_body = normalize_text(body_text)
     normalized_from = normalize_text(from_line)
+    is_etsy_conversation = "etsy conversation with" in normalized_subject or "sent you a message" in normalized_body
+
+    if is_etsy_conversation:
+        return True
 
     excluded_subject_terms = [
         "daily etsy review summary",
@@ -475,8 +492,25 @@ def looks_like_customer_issue_email(email_item: dict[str, Any]) -> bool:
     if any(term in normalized_body for term in excluded_body_terms):
         return False
 
-    if "etsy conversation with" in normalized_subject or "sent you a message" in normalized_body:
-        return True
+    support_sender_markers = [
+        "support@",
+        "no-reply@",
+        "noreply@",
+        "googleaistudio",
+        "3daistudio",
+        "support team",
+    ]
+    operator_originated_quote_markers = [
+        "from: tullaipsu@gmail.com",
+        "from tullaipsu gmail com",
+        "sent: ",
+        "subject: ",
+    ]
+    if (
+        any(marker in from_line.lower() for marker in support_sender_markers)
+        and any(marker in body_text.lower() for marker in operator_originated_quote_markers)
+    ):
+        return False
 
     customer_problem_signals = [
         "i received",
@@ -1490,6 +1524,46 @@ def extract_publish_execution_state(flow: str, payload: dict[str, Any], run_dir:
             "published_at": str(published_at) if published_at else None,
             "state_source": str(run_dir / "state_weekly.json"),
         }
+    if flow == "meme":
+        publish_result = payload.get("meme_publish_result") or {}
+        platform_results = publish_result.get("platform_results") or {}
+        published_channels = [
+            channel
+            for channel, result in platform_results.items()
+            if str((result or {}).get("status") or "").lower() in {"scheduled", "published", "success"}
+        ]
+        scheduled_at = payload.get("meme_scheduled_at") or publish_result.get("scheduled_for")
+        already_published = bool(
+            published_channels
+            or scheduled_at
+            or str(payload.get("meme_publish_status") or "").lower() in {"scheduled", "published", "success"}
+        )
+        return {
+            "already_published": already_published,
+            "state": "published" if already_published else "draft",
+            "published_channels": published_channels,
+            "published_at": str(scheduled_at) if scheduled_at else None,
+            "state_source": str(run_dir / "state_meme.json"),
+        }
+    if flow == "jeepfact":
+        published_channels: list[str] = []
+        if payload.get("jeepfact_fb_id"):
+            published_channels.append("facebook")
+        ig_result = payload.get("jeepfact_ig_result") or {}
+        if ((ig_result.get("publish") or {}).get("id")):
+            published_channels.append("instagram")
+        scheduled_at = payload.get("jeepfact_scheduled_at")
+        publish_status = str(payload.get("jeepfact_publish_status") or "").lower()
+        already_published = bool(
+            published_channels or scheduled_at or publish_status in {"scheduled", "published", "success"}
+        )
+        return {
+            "already_published": already_published,
+            "state": "published" if already_published else "draft",
+            "published_channels": published_channels,
+            "published_at": str(scheduled_at) if scheduled_at else None,
+            "state_source": str(run_dir / "state_jeepfact.json"),
+        }
     return {
         "already_published": False,
         "state": "draft",
@@ -1582,6 +1656,121 @@ def normalize_publish_candidates(
                     "input_confidence_cap": 0.85,
                 },
                 "execution_state": extract_publish_execution_state("weekly_sale", payload, path.parent),
+            },
+        )
+
+    for path in sorted(Path("/Users/philtullai/ai-agents/duckAgent/runs").glob("*/state_meme.json")):
+        payload = load_json(path)
+        data = payload.get("meme") or {}
+        product = data.get("product") or {}
+        title = str(product.get("title") or "Meme Monday").strip()
+        if not title:
+            continue
+        theme = extract_theme(title)
+        catalog_match = match_catalog(theme, products, publications)
+        hashtags = data.get("hashtags") or []
+        caption_parts = [
+            str(data.get("meme_text") or "").strip(),
+            str(data.get("caption") or "").strip(),
+            " ".join(f"#{str(tag).lstrip('#')}" for tag in hashtags if str(tag).strip()),
+        ]
+        body = "\n\n".join(part for part in caption_parts if part)
+        image_candidates: list[str] = []
+        cdn_url = str(payload.get("meme_cdn_url") or "").strip()
+        if cdn_url:
+            image_candidates.append(cdn_url)
+        image_path = str(payload.get("meme_image_path") or "").strip()
+        if image_path:
+            absolute_path = (Path("/Users/philtullai/ai-agents/duckAgent") / image_path).resolve()
+            image_candidates.append(str(absolute_path))
+        merge_publish_candidate(
+            candidates,
+            {
+                "artifact_id": f"publish::meme::{path.parent.name}::{slugify(title)}",
+                "artifact_type": "social_post",
+                "flow": "meme",
+                "run_id": path.parent.name,
+                "source_refs": [{"path": str(path), "source_type": "state_meme"}],
+                "candidate_summary": {
+                    "title": f"Meme Monday: {title}",
+                    "body": body,
+                    "images": list(dict.fromkeys(image_candidates)),
+                    "platform_targets": ["instagram", "facebook"],
+                    "publish_token": path.parent.name,
+                    "platform_variants": {
+                        "instagram": {"caption": body},
+                        "facebook": {"caption": body},
+                    },
+                },
+                "supporting_context": {
+                    "brand_family": "social_post",
+                    "catalog_overlap": catalog_match.matching_products,
+                    "publication_coverage": catalog_match.publication_coverage,
+                    "trend_refs": match_related_trends(theme, trend_candidates),
+                },
+                "normalization_notes": {
+                    "source_mode": "state_file",
+                    "completeness": "high",
+                    "input_confidence_cap": 0.85,
+                },
+                "execution_state": extract_publish_execution_state("meme", payload, path.parent),
+            },
+        )
+
+    for path in sorted(Path("/Users/philtullai/ai-agents/duckAgent/runs").glob("*/state_jeepfact.json")):
+        payload = load_json(path)
+        data = payload.get("jeepfact") or {}
+        post_content = data.get("post_content") or {}
+        images = payload.get("jeepfact_images") or []
+        if not post_content and not images:
+            continue
+        featured_title = (
+            str(((images[0].get("product") or {}).get("title")) or "").strip()
+            if images
+            else "Jeep Fact Wednesday"
+        )
+        theme = extract_theme(featured_title or "Jeep Fact Wednesday")
+        catalog_match = match_catalog(theme, products, publications)
+        image_candidates: list[str] = []
+        for image in images:
+            cdn_url = str(image.get("cdn_url") or "").strip()
+            if cdn_url:
+                image_candidates.append(cdn_url)
+                continue
+            local_path = str(image.get("local_path") or "").strip()
+            if local_path:
+                image_candidates.append(str((Path("/Users/philtullai/ai-agents/duckAgent") / local_path).resolve()))
+        merge_publish_candidate(
+            candidates,
+            {
+                "artifact_id": f"publish::jeepfact::{path.parent.name}::jeep-fact-wednesday",
+                "artifact_type": "social_post",
+                "flow": "jeepfact",
+                "run_id": path.parent.name,
+                "source_refs": [{"path": str(path), "source_type": "state_jeepfact"}],
+                "candidate_summary": {
+                    "title": "Jeep Fact Wednesday",
+                    "body": str(post_content.get("full_caption") or "").strip(),
+                    "images": list(dict.fromkeys(image_candidates)),
+                    "platform_targets": ["instagram", "facebook"],
+                    "publish_token": path.parent.name,
+                    "platform_variants": {
+                        "instagram": {"caption": str(post_content.get("short_caption") or "").strip()},
+                        "facebook": {"caption": str(post_content.get("full_caption") or "").strip()},
+                    },
+                },
+                "supporting_context": {
+                    "brand_family": "social_post",
+                    "catalog_overlap": catalog_match.matching_products,
+                    "publication_coverage": catalog_match.publication_coverage,
+                    "trend_refs": match_related_trends(theme, trend_candidates),
+                },
+                "normalization_notes": {
+                    "source_mode": "state_file",
+                    "completeness": "high",
+                    "input_confidence_cap": 0.85,
+                },
+                "execution_state": extract_publish_execution_state("jeepfact", payload, path.parent),
             },
         )
 
@@ -1684,8 +1873,7 @@ def extract_etsy_conversation_signal(email_item: dict[str, Any]) -> dict[str, An
     if url_match:
         browser_url_candidates.append(url_match.group("url").strip())
     for url in (
-        "https://www.etsy.com/your/messages",
-        "https://www.etsy.com/your/account/messages",
+        "https://www.etsy.com/messages?ref=hdr_user_menu-messages",
     ):
         if url not in browser_url_candidates:
             browser_url_candidates.append(url)
@@ -1813,6 +2001,8 @@ def write_customer_interaction_queue_outputs(queue_payload: dict[str, Any]) -> N
     write_json(CUSTOMER_INTERACTION_OPERATOR_JSON_PATH, queue_payload)
     snapshot_md.write_text(markdown + "\n", encoding="utf-8")
     CUSTOMER_INTERACTION_OPERATOR_MD_PATH.write_text(markdown + "\n", encoding="utf-8")
+    review_queue = load_json(REVIEW_QUEUE_STATE_PATH, {})
+    sync_ops_control(queue_payload, review_queue if isinstance(review_queue, dict) else {})
 
 
 def write_customer_action_packet_outputs(packet_payload: dict[str, Any]) -> None:
@@ -1866,6 +2056,25 @@ def write_business_operator_desk_outputs(payload: dict[str, Any]) -> None:
     write_json(BUSINESS_OPERATOR_DESK_PATH, payload)
     write_json(BUSINESS_OPERATOR_DESK_OPERATOR_JSON_PATH, payload)
     BUSINESS_OPERATOR_DESK_OPERATOR_MD_PATH.write_text(markdown + "\n", encoding="utf-8")
+
+
+def write_weekly_sale_monitor_outputs(payload: dict[str, Any]) -> None:
+    OUTPUT_DIR.joinpath("operator").mkdir(parents=True, exist_ok=True)
+    payload = sync_weekly_sale_monitor_control(payload)
+    markdown = render_weekly_sale_monitor_markdown(payload)
+    write_json(WEEKLY_SALE_MONITOR_PATH, payload)
+    write_json(WEEKLY_SALE_MONITOR_OPERATOR_JSON_PATH, payload)
+    WEEKLY_SALE_MONITOR_OPERATOR_MD_PATH.write_text(markdown, encoding="utf-8")
+    WEEKLY_SALE_MONITOR_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    history_row = {
+        "generated_at": payload.get("generated_at"),
+        "counts": payload.get("counts") or {},
+        "top_keep_titles": list((payload.get("summary") or {}).get("top_keep_titles") or []),
+        "top_rotate_titles": list((payload.get("summary") or {}).get("top_rotate_titles") or []),
+    }
+    with WEEKLY_SALE_MONITOR_HISTORY_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(history_row, sort_keys=False))
+        handle.write("\n")
 
 
 def observe_mailbox(
@@ -2128,6 +2337,7 @@ def main() -> int:
     customer_cases, customer_recovery_summary = apply_customer_recovery_decisions(customer_cases)
     custom_design_cases = build_custom_design_cases(mailbox_items)
     print_queue_candidates = build_print_queue_candidates(weekly_insights, products)
+    weekly_sale_monitor = build_weekly_sale_monitor()
     etsy_open_orders = build_etsy_open_orders_snapshot()
     shopify_open_orders = build_shopify_open_orders_snapshot()
     packing_summary = build_packing_summary(etsy_open_orders, shopify_open_orders)
@@ -2148,6 +2358,7 @@ def main() -> int:
         custom_design_cases,
         print_queue_candidates,
     )
+    etsy_browser_captures = load_json(ETSY_CONVERSATION_BROWSER_CAPTURES_PATH, {"generated_at": now_iso(), "items": []})
     customer_issue_queue_items = [
         item
         for item in customer_interaction_queue.get("items") or []
@@ -2156,7 +2367,7 @@ def main() -> int:
     customer_action_packets = {
         "generated_at": now_iso(),
         "counts": {},
-        "items": build_customer_action_packets(customer_issue_queue_items),
+        "items": build_customer_action_packets(customer_issue_queue_items, browser_captures=etsy_browser_captures),
     }
     customer_action_packets["counts"] = {
         "packets_total": len(customer_action_packets["items"]),
@@ -2169,11 +2380,15 @@ def main() -> int:
     etsy_conversation_browser_sync = build_etsy_conversation_browser_sync(
         customer_issue_queue_items,
         customer_packets=customer_operator_payload,
+        custom_build_candidates=custom_build_task_candidates,
+        browser_captures=etsy_browser_captures,
     )
     nightly_action_summary = build_nightly_action_summary(
         customer_action_packets,
         custom_design_cases,
         packing_summary,
+        custom_build_task_candidates=custom_build_task_candidates,
+        etsy_browser_sync=etsy_conversation_browser_sync,
     )
     review_queue = load_json(REVIEW_QUEUE_STATE_PATH)
     business_operator_desk = build_business_operator_desk(
@@ -2182,6 +2397,7 @@ def main() -> int:
         etsy_browser_sync=etsy_conversation_browser_sync,
         custom_build_candidates=custom_build_task_candidates,
         print_queue_candidates=print_queue_candidates,
+        weekly_sale_monitor=weekly_sale_monitor,
         review_queue=review_queue if isinstance(review_queue, dict) else {},
     )
     write_json(NORMALIZED_DIR / "customer_cases.json", {"generated_at": now_iso(), "items": customer_cases})
@@ -2193,6 +2409,7 @@ def main() -> int:
     write_custom_build_task_candidate_outputs(custom_build_task_candidates)
     write_etsy_conversation_browser_sync_outputs(etsy_conversation_browser_sync)
     write_nightly_action_summary_outputs(nightly_action_summary)
+    write_weekly_sale_monitor_outputs(weekly_sale_monitor)
     write_business_operator_desk_outputs(business_operator_desk)
 
     summary = {
@@ -2231,6 +2448,7 @@ def main() -> int:
             "business_operator_sections": len((business_operator_desk.get("sections") or {})),
             "google_tasks_created": (google_tasks_summary.get("counts") or {}).get("created_tasks", 0),
             "print_queue_candidates": len(print_queue_candidates),
+            "weekly_sale_monitor_items": len(weekly_sale_monitor.get("items") or []),
             "customer_interaction_queue_items": len(customer_interaction_queue.get("items") or []),
             "etsy_open_orders": len(etsy_open_orders.get("items") or []),
             "shopify_open_orders": len(shopify_open_orders.get("items") or []),

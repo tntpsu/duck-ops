@@ -83,6 +83,7 @@ Examples:
 - `rewrite shorter`
 - `customer status`
 - `customer next`
+- `customer capture C301 customer wants patriotic Afroman duck and is waiting on first concept`
 - `replacement C301 because resend approved`
 - `refund C301 because customer only wants refund`
 - `wait C301 because USPS is still moving`
@@ -127,6 +128,7 @@ python3 /home/node/.duck-ops/runtime/review_loop.py message
 - Customer action packets now have their own operator lane with short ids like `C301`.
 - `replacement C301 ...`, `refund C301 ...`, `wait C301 ...`, and `reply only C301 ...` persist business recovery decisions into Duck Ops so nightly summaries stop resurfacing the same unresolved path.
 - `customer status` and `customer next` are the lightweight navigation commands for that lane.
+- `customer capture C301 ...` lets you save what you learned in the Etsy browser thread so Duck Ops can stop depending only on the thin notification email.
 - `desk status` and `desk next` now expose the broader business desk, including customer work, custom builds, packing, stock-print candidates, and pending creative reviews.
 - Review surfacing is freshness-first now. `message` and the current review card prioritize only new or materially changed items, while `status all` is the explicit way to inspect older unresolved backlog.
 

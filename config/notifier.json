@@ -29,6 +29,13 @@
     "urgent": "[OpenClaw Urgent] <artifact_id>",
     "phase_readiness": "[OpenClaw Phase Readiness] <week>"
   },
+  "auto_approval": {
+    "weekly_sale": {
+      "enabled": true,
+      "min_score": 82,
+      "min_confidence": 0.72
+    }
+  },
   "whatsapp": {
     "enabled": true,
     "target": "+18148124112",

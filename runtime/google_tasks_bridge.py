@@ -12,6 +12,7 @@ This bridge stays fail-closed:
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 import json
 import urllib.error
 import urllib.parse
@@ -29,6 +30,7 @@ TASKS_STATE_PATH = STATE_DIR / "google_tasks_custom_design_tasks.json"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_TASKLISTS_URL = "https://tasks.googleapis.com/tasks/v1/users/@me/lists"
 GOOGLE_TASKS_URL_TEMPLATE = "https://tasks.googleapis.com/tasks/v1/lists/{tasklist_id}/tasks"
+GOOGLE_TASK_URL_TEMPLATE = "https://tasks.googleapis.com/tasks/v1/lists/{tasklist_id}/tasks/{task_id}"
 
 
 def now_iso() -> str:
@@ -87,7 +89,8 @@ def google_tasks_config(env: dict[str, str] | None = None) -> dict[str, Any]:
         "refresh_token": refresh_token,
         "tasklist_id": tasklist_id,
         "tasklist_title": tasklist_title,
-        "credentials_ready": bool(client_id and client_secret and refresh_token),
+        "credentials_ready": bool(client_id and refresh_token),
+        "secret_optional": True,
     }
 
 
@@ -112,14 +115,15 @@ def _http_json(url: str, *, method: str = "GET", headers: dict[str, str] | None 
 
 
 def fetch_google_access_token(config: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
-    data = urllib.parse.urlencode(
-        {
-            "client_id": config.get("client_id") or "",
-            "client_secret": config.get("client_secret") or "",
-            "refresh_token": config.get("refresh_token") or "",
-            "grant_type": "refresh_token",
-        }
-    ).encode("utf-8")
+    token_payload = {
+        "client_id": config.get("client_id") or "",
+        "refresh_token": config.get("refresh_token") or "",
+        "grant_type": "refresh_token",
+    }
+    client_secret = str(config.get("client_secret") or "").strip()
+    if client_secret:
+        token_payload["client_secret"] = client_secret
+    data = urllib.parse.urlencode(token_payload).encode("utf-8")
     request = urllib.request.Request(
         GOOGLE_TOKEN_URL,
         data=data,
@@ -190,7 +194,29 @@ def _task_notes_for_custom_build_candidate(candidate: dict[str, Any]) -> str:
         f"Product: {candidate.get('product_title') or '(none)'}",
         f"Quantity: {candidate.get('quantity') or 0}",
         f"Build details: {candidate.get('custom_design_summary') or '(none)'}",
+        f"Workflow stage: {candidate.get('design_workflow_stage') or '(none)'}",
+        f"Next design action: {candidate.get('next_design_action') or '(none)'}",
     ]
+    if candidate.get("browser_follow_up_state") or candidate.get("browser_review_status"):
+        lines.extend(
+            [
+                "",
+                "Etsy thread:",
+                f"- Browser review status: {candidate.get('browser_review_status') or 'not_captured'}",
+                f"- Follow-up state: {candidate.get('browser_follow_up_state') or 'not_set'}",
+            ]
+        )
+    if candidate.get("browser_capture_summary"):
+        lines.append(f"- Browser summary: {candidate.get('browser_capture_summary')}")
+    if candidate.get("browser_draft_reply"):
+        lines.append(f"- Draft reply: {candidate.get('browser_draft_reply')}")
+    missing_details = candidate.get("browser_missing_details") or []
+    if missing_details:
+        lines.append("- Missing details:")
+        for item in missing_details:
+            lines.append(f"  - {item}")
+    if candidate.get("browser_task_progress_note"):
+        lines.append(f"- Task progress note: {candidate.get('browser_task_progress_note')}")
     tx_ids = candidate.get("transaction_ids") or []
     if tx_ids:
         lines.extend(["", "Transaction ids:"])
@@ -202,6 +228,10 @@ def _task_notes_for_custom_build_candidate(candidate: dict[str, Any]) -> str:
         for ref in refs[:5]:
             lines.append(f"- {ref}")
     return "\n".join(lines)
+
+
+def _task_fingerprint(title: str, notes: str) -> str:
+    return hashlib.sha256(f"{title}\n\n{notes}".encode("utf-8")).hexdigest()
 
 
 def create_google_task(access_token: str, tasklist_id: str, *, title: str, notes: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -216,6 +246,22 @@ def create_google_task(access_token: str, tasklist_id: str, *, title: str, notes
         payload=payload,
     )
     if status not in {200, 201}:
+        return None, {"ok": False, "status_code": status, "response": response}
+    return response, {"ok": True, "status_code": status}
+
+
+def update_google_task(access_token: str, tasklist_id: str, task_id: str, *, title: str, notes: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    payload = {
+        "title": title.strip() or "Duck Ops task",
+        "notes": notes,
+    }
+    status, response = _http_json(
+        GOOGLE_TASK_URL_TEMPLATE.format(tasklist_id=tasklist_id, task_id=task_id),
+        method="PATCH",
+        headers={"Authorization": f"Bearer {access_token}"},
+        payload=payload,
+    )
+    if status != 200:
         return None, {"ok": False, "status_code": status, "response": response}
     return response, {"ok": True, "status_code": status}
 
@@ -236,18 +282,6 @@ def _sync_item_batch(
         artifact_id = str(item.get("artifact_id") or "")
         existing = (state.get("items") or {}).get(artifact_id) or {}
         ready = bool(item.get("ready_for_manual_design")) if kind == "custom_design_case" else bool(item.get("ready_for_task"))
-        if existing.get("task_id"):
-            enriched["google_task_status"] = "created"
-            enriched["google_task_id"] = existing.get("task_id")
-            enriched["google_task_web_view_link"] = existing.get("web_view_link")
-            summary["counts"]["matched_existing_tasks"] += 1
-            rows.append(enriched)
-            continue
-        if not ready:
-            enriched["google_task_status"] = "not_ready"
-            rows.append(enriched)
-            continue
-
         if kind == "custom_design_case":
             title = str(item.get("request_summary") or "Custom duck design task").strip() or "Custom duck design task"
             notes = _task_notes_for_custom_design_case(item)
@@ -259,6 +293,45 @@ def _sync_item_batch(
             owner_prefix = f"{buyer}: " if buyer else ""
             title = f"{owner_prefix}{qty_prefix}{build_summary}"
             notes = _task_notes_for_custom_build_candidate(item)
+        fingerprint = _task_fingerprint(title, notes)
+        if existing.get("task_id"):
+            enriched["google_task_status"] = "created"
+            enriched["google_task_id"] = existing.get("task_id")
+            enriched["google_task_web_view_link"] = existing.get("web_view_link")
+            enriched["google_task_sync_status"] = "unchanged"
+            summary["counts"]["matched_existing_tasks"] += 1
+            if ready and existing.get("payload_fingerprint") != fingerprint:
+                task_response, task_result = update_google_task(
+                    access_token,
+                    tasklist_id,
+                    str(existing.get("task_id") or ""),
+                    title=title,
+                    notes=notes,
+                )
+                if task_response:
+                    updated_row = {
+                        **existing,
+                        "task_id": task_response.get("id") or existing.get("task_id"),
+                        "title": task_response.get("title") or title,
+                        "web_view_link": task_response.get("webViewLink") or existing.get("web_view_link"),
+                        "updated": task_response.get("updated"),
+                        "updated_at": now_iso(),
+                        "payload_fingerprint": fingerprint,
+                    }
+                    state["items"][artifact_id] = updated_row
+                    enriched["google_task_web_view_link"] = updated_row.get("web_view_link")
+                    enriched["google_task_sync_status"] = "updated"
+                    summary["counts"]["updated_tasks"] += 1
+                else:
+                    enriched["google_task_sync_status"] = "update_failed"
+                    enriched["google_task_error"] = task_result
+            rows.append(enriched)
+            continue
+        if not ready:
+            enriched["google_task_status"] = "not_ready"
+            enriched["google_task_sync_status"] = "skipped_not_ready"
+            rows.append(enriched)
+            continue
 
         task_response, task_result = create_google_task(
             access_token,
@@ -274,14 +347,17 @@ def _sync_item_batch(
                 "web_view_link": task_response.get("webViewLink"),
                 "updated": task_response.get("updated"),
                 "created_at": now_iso(),
+                "payload_fingerprint": fingerprint,
             }
             state["items"][artifact_id] = task_row
             enriched["google_task_status"] = "created"
             enriched["google_task_id"] = task_row.get("task_id")
             enriched["google_task_web_view_link"] = task_row.get("web_view_link")
+            enriched["google_task_sync_status"] = "created"
             summary["counts"]["created_tasks"] += 1
         else:
             enriched["google_task_status"] = "create_failed"
+            enriched["google_task_sync_status"] = "create_failed"
             enriched["google_task_error"] = task_result
         rows.append(enriched)
     return rows
@@ -312,6 +388,7 @@ def sync_custom_work_items(
             "ready_custom_build_candidates": sum(1 for item in custom_build_task_candidates if item.get("ready_for_task")),
             "matched_existing_tasks": 0,
             "created_tasks": 0,
+            "updated_tasks": 0,
         },
         "state_path": str(TASKS_STATE_PATH),
     }

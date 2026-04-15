@@ -557,6 +557,22 @@ def _extract_etsy_conversation_name(summary: str | None) -> str | None:
     return None
 
 
+def _extract_etsy_conversation_name_from_refs(source_refs: list[dict[str, Any]] | None) -> str | None:
+    for ref in source_refs or []:
+        subject = str((ref or {}).get("subject") or "").strip()
+        if not subject:
+            continue
+        match = re.search(r"etsy conversation with\s+(?P<name>.+)$", subject, re.IGNORECASE)
+        if match:
+            name = re.sub(r"\s+from\s+.+$", "", match.group("name").strip(), flags=re.IGNORECASE).strip()
+            if name:
+                return name
+        match = re.search(r"^(?P<name>.+?)\s+needs help with an order they placed$", subject, re.IGNORECASE)
+        if match:
+            return match.group("name").strip()
+    return None
+
+
 def _conversation_group_key(case: dict[str, Any]) -> str | None:
     thread_key = str(case.get("conversation_thread_key") or "").strip()
     if thread_key:
@@ -567,6 +583,9 @@ def _conversation_group_key(case: dict[str, Any]) -> str | None:
     conversation_name = _extract_etsy_conversation_name(case.get("customer_summary"))
     if conversation_name:
         return conversation_name.lower()
+    source_ref_name = _extract_etsy_conversation_name_from_refs(case.get("source_refs") or [])
+    if source_ref_name:
+        return source_ref_name.lower()
     return None
 
 
@@ -591,7 +610,11 @@ def _representative_action(cases: list[dict[str, Any]]) -> str:
 def _collapse_customer_case_group(cases: list[dict[str, Any]]) -> dict[str, Any]:
     cases = sorted(cases, key=_source_uid, reverse=True)
     representative = cases[0]
-    name = _extract_etsy_conversation_name(representative.get("customer_summary")) or "Customer"
+    name = (
+        _extract_etsy_conversation_name(representative.get("customer_summary"))
+        or _extract_etsy_conversation_name_from_refs(representative.get("source_refs") or [])
+        or "Customer"
+    )
     priority = sorted(
         {str(case.get("priority") or "medium").strip() for case in cases},
         key=lambda level: PRIORITY_ORDER.get(level, 99),

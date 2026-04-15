@@ -79,6 +79,23 @@ Unified desk commands now run through the main operator loop too:
 - `python3 runtime/review_loop.py handle --text 'desk show reviews'`
 - `python3 runtime/review_loop.py handle --text 'status all'`
 
+Etsy inbox truth-sync is now available as a dedicated OpenClaw lane:
+
+- `python3 runtime/customer_inbox_refresh.py --limit 8 --skip-outside-hours --start-hour 7 --start-minute 30 --end-hour 23 --end-minute 59`
+
+Recommended local scheduling for that lane:
+
+- every 2 hours during the day/evening
+- one guaranteed `6:30 PM` run before nightly review
+- no runs between midnight and `7:30 AM`
+
+This lane is intentionally read-only against Etsy:
+
+- it reuses the trusted Etsy seller session
+- verifies direct `/messages/<id>` links when safe
+- updates customer thread truth and operator outputs
+- never types or sends customer replies
+
 Publish review reconciliation is now fail-closed in Duck Ops:
 
 - if DuckAgent already shows a `newduck` listing as published to Shopify/Etsy, or a weekly sale as already published, OpenClaw reconciles the pending review state back to handled instead of resurfacing the old review item

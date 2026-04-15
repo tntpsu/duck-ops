@@ -592,6 +592,7 @@ Implemented on April 6, 2026:
 Next implementation slice:
 
 1. upgrade staged Etsy conversation threads into real browser-reviewed thread captures with latest thread text and read/unread state
+   - first live slice now exists through `customer capture C301 ...`, which records thread context into `etsy_conversation_browser_captures.json` and lets the browser-review lane show captured thread state instead of only `needs_browser_review`
 2. add real USPS credentials / endpoint config so live carrier lookups can start
 3. add real Google Tasks credentials / task-list config so ready custom briefs and custom build candidates can create tasks
 4. expose customer packets and the staged business desk more proactively in the operator push / WhatsApp flow instead of only the manual `customer status` lane

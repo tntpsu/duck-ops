@@ -11,6 +11,8 @@ Reads only generated output artifacts and sends or previews:
 from __future__ import annotations
 
 import argparse
+import copy
+import html
 import hashlib
 import json
 import smtplib
@@ -23,12 +25,16 @@ from typing import Any
 
 from customer_action_packets import build_customer_action_packets
 from customer_interaction_cases import build_customer_interaction_queue
-from nightly_action_summary import build_nightly_action_summary, render_nightly_action_summary_markdown
-from open_order_intelligence import (
-    build_etsy_open_orders_snapshot,
-    build_packing_summary,
-    build_shopify_open_orders_snapshot,
+from etsy_conversation_browser_sync import build_etsy_conversation_browser_sync
+from nightly_action_summary import (
+    build_nightly_action_summary,
+    render_nightly_action_summary_html,
+    render_nightly_action_summary_markdown,
 )
+from open_order_intelligence import (
+    refresh_order_snapshots,
+)
+from workflow_control import record_workflow_transition
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "notifier.json"
@@ -43,14 +49,59 @@ CUSTOMER_ACTION_PACKETS_PATH = ROOT / "state" / "customer_action_packets.json"
 CUSTOMER_CASES_PATH = ROOT / "state" / "normalized" / "customer_cases.json"
 CUSTOM_DESIGN_CASES_PATH = ROOT / "state" / "normalized" / "custom_design_cases.json"
 PRINT_QUEUE_CANDIDATES_PATH = ROOT / "state" / "normalized" / "print_queue_candidates.json"
+ETSY_BROWSER_CAPTURES_PATH = ROOT / "state" / "etsy_conversation_browser_captures.json"
 NIGHTLY_ACTION_SUMMARY_STATE_PATH = ROOT / "state" / "nightly_action_summary.json"
 NIGHTLY_ACTION_SUMMARY_OPERATOR_JSON_PATH = ROOT / "output" / "operator" / "nightly_action_summary.json"
 NIGHTLY_ACTION_SUMMARY_OPERATOR_MD_PATH = ROOT / "output" / "operator" / "nightly_action_summary.md"
 SOURCE_OBSERVER_CONFIG_PATH = ROOT / "config" / "source_observer.json"
+WHATSAPP_COLLAGE_DIR = ROOT / "output" / "operator" / "whatsapp_collages"
+WHATSAPP_COLLAGE_HELPER = ROOT / "runtime" / "whatsapp_collage_helper.py"
+WHATSAPP_COLLAGE_VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+WHATSAPP_CONTAINER_MEDIA_DIR = "/home/node/.openclaw/media/outbound"
+
+
+def _run_customer_inbox_refresh_preflight(limit: int = 3, timeout_seconds: int = 150) -> dict[str, Any] | None:
+    script_path = ROOT / "runtime" / "customer_inbox_refresh.py"
+    if not script_path.exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script_path),
+                "--limit",
+                str(limit),
+                "--skip-outside-hours",
+                "--start-hour",
+                "7",
+                "--start-minute",
+                "30",
+                "--end-hour",
+                "23",
+                "--end-minute",
+                "59",
+                "--json",
+            ],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0 or not (proc.stdout or "").strip():
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def refresh_nightly_action_summary_sources() -> None:
     now_local = datetime.now().astimezone()
+    customer_refresh_preflight = _run_customer_inbox_refresh_preflight()
     customer_cases_payload = load_json(CUSTOMER_CASES_PATH, {"items": []})
     custom_design_payload = load_json(CUSTOM_DESIGN_CASES_PATH, {"items": []})
     print_queue_payload = load_json(PRINT_QUEUE_CANDIDATES_PATH, {"items": []})
@@ -64,7 +115,8 @@ def refresh_nightly_action_summary_sources() -> None:
         for item in customer_queue.get("items") or []
         if item.get("item_type") == "customer_case"
     ]
-    packet_items = build_customer_action_packets(customer_issue_items)
+    etsy_browser_captures = load_json(ETSY_BROWSER_CAPTURES_PATH, {"generated_at": now_local.isoformat(), "items": []})
+    packet_items = build_customer_action_packets(customer_issue_items, browser_captures=etsy_browser_captures)
     packet_payload = {
         "generated_at": now_local.isoformat(),
         "counts": {
@@ -77,15 +129,24 @@ def refresh_nightly_action_summary_sources() -> None:
         "items": packet_items,
     }
     CUSTOMER_ACTION_PACKETS_PATH.write_text(json.dumps(packet_payload, indent=2), encoding="utf-8")
-    etsy_open_orders = build_etsy_open_orders_snapshot()
-    shopify_open_orders = build_shopify_open_orders_snapshot()
-    packing_summary = build_packing_summary(etsy_open_orders, shopify_open_orders)
+    order_refresh = refresh_order_snapshots()
+    packing_summary = order_refresh.get("packing_summary") or {"orders_to_pack": [], "custom_orders_to_make": []}
+    etsy_browser_sync = build_etsy_conversation_browser_sync(
+        customer_issue_items,
+        customer_packets=packet_payload,
+        custom_build_candidates={"items": []},
+        browser_captures=etsy_browser_captures,
+    )
     summary_payload = build_nightly_action_summary(
         packet_payload,
         custom_design_payload.get("items") or [],
         packing_summary,
+        etsy_browser_sync=etsy_browser_sync,
         now_local=now_local,
     )
+    summary_payload["order_snapshot_refresh"] = order_refresh.get("refresh_state") or {}
+    if customer_refresh_preflight:
+        summary_payload["customer_inbox_refresh_preflight"] = customer_refresh_preflight
     markdown = render_nightly_action_summary_markdown(summary_payload)
     NIGHTLY_ACTION_SUMMARY_STATE_PATH.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
     NIGHTLY_ACTION_SUMMARY_OPERATOR_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +211,7 @@ def notifier_settings() -> dict[str, Any]:
         "to": first_present(env, smtp_cfg.get("to_env_precedence", ["EMAIL_TO", "SMTP_USER"])),
         "use_starttls": bool(smtp_cfg.get("use_starttls", True)),
         "subjects": config.get("subjects", {}),
+        "auto_approval": config.get("auto_approval", {}),
         "whatsapp": config.get("whatsapp", {}),
     }
 
@@ -159,6 +221,253 @@ def render_subject(template: str, replacements: dict[str, str]) -> str:
     for key, value in replacements.items():
         subject = subject.replace(f"<{key}>", value)
     return subject
+
+
+def _html_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return html.escape(str(value))
+
+
+def _notifier_stat(label: str, value: Any) -> str:
+    return (
+        "<div style=\"background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:12px;\">"
+        f"<div style=\"font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em;\">{_html_text(label)}</div>"
+        f"<div style=\"font-size:22px;font-weight:700;color:#111827;margin-top:4px;\">{_html_text(value)}</div>"
+        "</div>"
+    )
+
+
+def _notifier_card(title: str, body: str) -> str:
+    return (
+        "<div style=\"background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px 18px;margin:0 0 12px 0;\">"
+        f"<div style=\"font-size:16px;font-weight:700;color:#111827;margin:0 0 8px 0;\">{_html_text(title)}</div>"
+        f"{body}</div>"
+    )
+
+
+def _notifier_shell(label: str, subject: str, subtitle: str, stats_html: str, body_html: str) -> str:
+    stats_block = (
+        f"<div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px;\">{stats_html}</div>"
+        if stats_html
+        else ""
+    )
+    return (
+        "<html><body style=\"margin:0;padding:0;background:#f3f4f6;color:#111827;\">"
+        "<div style=\"max-width:860px;margin:0 auto;padding:24px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;line-height:1.5;\">"
+        "<div style=\"background:linear-gradient(135deg,#111827,#1f2937);color:#fff;border-radius:18px;padding:24px;margin-bottom:18px;\">"
+        f"<div style=\"font-size:13px;letter-spacing:.05em;text-transform:uppercase;color:#d1d5db;\">{_html_text(label)}</div>"
+        f"<div style=\"font-size:26px;font-weight:800;margin-top:6px;\">{_html_text(subject)}</div>"
+        f"<div style=\"font-size:14px;color:#d1d5db;margin-top:8px;\">{_html_text(subtitle)}</div>"
+        "</div>"
+        f"{stats_block}"
+        f"{body_html}"
+        "</div></body></html>"
+    )
+
+
+def _render_decision_card(item: dict[str, Any]) -> str:
+    preview = item.get("preview") or {}
+    details = [
+        f"<div style=\"font-size:13px;color:#6b7280;margin-bottom:8px;\">{_html_text(item.get('flow') or item.get('artifact_type') or 'artifact')} | {_html_text(item.get('review_status') or 'pending')}</div>",
+        (
+            "<div style=\"display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;\">"
+            f"<span style=\"background:#eef2ff;color:#3730a3;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">{_html_text(item.get('decision') or 'review')}</span>"
+            f"<span style=\"background:#f8fafc;color:#374151;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">priority {_html_text(item.get('priority') or 'medium')}</span>"
+            f"<span style=\"background:#f8fafc;color:#374151;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">score {_html_text(item.get('score') or 0)}</span>"
+            f"<span style=\"background:#f8fafc;color:#374151;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">confidence {_html_text(item.get('confidence') or 0)}</span>"
+            "</div>"
+        ),
+    ]
+    context_text = str(preview.get("context_text") or "").strip()
+    proposed_text = str(preview.get("proposed_text") or "").strip()
+    if context_text:
+        details.append(
+            "<div style=\"margin-bottom:8px;\">"
+            f"<strong>{_html_text(preview.get('context_label') or 'Context')}:</strong> {_html_text(context_text[:260])}"
+            "</div>"
+        )
+    if proposed_text:
+        details.append(
+            "<div style=\"margin-bottom:8px;background:#f8fafc;border-radius:10px;padding:10px 12px;\">"
+            f"<strong>{_html_text(preview.get('proposed_label') or 'Proposed')}:</strong><br>{_html_text(proposed_text[:280])}"
+            "</div>"
+        )
+    suggestions = item.get("improvement_suggestions") or []
+    if suggestions:
+        details.append(f"<div><strong>Next improvement:</strong> {_html_text(suggestions[0])}</div>")
+    return _notifier_card(str(item.get("title") or item.get("artifact_id") or "Review item"), "".join(details))
+
+
+def _render_digest_html(subject: str, payload: dict[str, Any]) -> str:
+    active = payload.get("active_counts") or {}
+    stats = "".join(
+        [
+            _notifier_stat("Pending review", payload.get("pending_review_count", 0)),
+            _notifier_stat("Publish ready", active.get("publish_ready", 0)),
+            _notifier_stat("Needs revision", active.get("needs_revision", 0)),
+            _notifier_stat("Discard", active.get("discard", 0)),
+        ]
+    )
+    pending_items = list(payload.get("pending_items") or [])
+    new_items = list(payload.get("new_items") or [])
+    sections: list[str] = []
+    if pending_items:
+        sections.append("<div style=\"font-size:20px;font-weight:800;margin:8px 0 12px 0;\">Pending review</div>")
+        sections.extend(_render_decision_card(item) for item in pending_items[:8])
+    if new_items:
+        sections.append("<div style=\"font-size:20px;font-weight:800;margin:18px 0 12px 0;\">New decisions</div>")
+        sections.extend(_render_decision_card(item) for item in new_items[:6])
+    if not sections:
+        sections.append(_notifier_card("No review items", "<div style=\"color:#4b5563;\">Nothing new is waiting right now.</div>"))
+    subtitle = (
+        f"Generated {payload.get('generated_at')} | "
+        f"{int(payload.get('pending_review_count', 0))} pending review item(s)"
+    )
+    return _notifier_shell("OpenClaw Digest", subject, subtitle, stats, "".join(sections))
+
+
+def _render_trend_card(item: dict[str, Any]) -> str:
+    metadata = item.get("trend_metadata") or {}
+    matching = metadata.get("matching_products") or []
+    matching_text = str((matching[0] or {}).get("title") or "").strip() if matching else ""
+    body = [
+        f"<div style=\"font-size:13px;color:#6b7280;margin-bottom:8px;\">{_html_text(item.get('action_frame') or 'watch')} | {_html_text(item.get('review_status') or 'pending')}</div>",
+        (
+            "<div style=\"display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;\">"
+            f"<span style=\"background:#ecfeff;color:#155e75;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">{_html_text(item.get('decision') or 'watch')}</span>"
+            f"<span style=\"background:#f8fafc;color:#374151;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">score {_html_text(item.get('score') or 0)}</span>"
+            f"<span style=\"background:#f8fafc;color:#374151;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">confidence {_html_text(item.get('confidence') or 0)}</span>"
+            f"<span style=\"background:#f8fafc;color:#374151;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">catalog {_html_text(metadata.get('catalog_status') or 'unknown')}</span>"
+            "</div>"
+        ),
+    ]
+    reasoning = item.get("reasoning") or []
+    if reasoning:
+        body.append(f"<div style=\"margin-bottom:8px;\"><strong>Signal:</strong> {_html_text(reasoning[0])}</div>")
+    suggestions = item.get("improvement_suggestions") or []
+    if suggestions:
+        body.append(f"<div style=\"margin-bottom:8px;\"><strong>Recommendation:</strong> {_html_text(suggestions[0])}</div>")
+    if matching_text:
+        body.append(f"<div><strong>Closest catalog match:</strong> {_html_text(matching_text)}</div>")
+    return _notifier_card(str(item.get("title") or item.get("artifact_id") or "Trend"), "".join(body))
+
+
+def _render_trend_digest_html(subject: str, payload: dict[str, Any]) -> str:
+    active = payload.get("active_counts") or {}
+    stats = "".join(
+        [
+            _notifier_stat("Worth acting on", active.get("worth_acting_on", 0)),
+            _notifier_stat("Background watch", payload.get("background_watch_count", 0)),
+            _notifier_stat("New background watch", payload.get("new_background_watch_count", 0)),
+            _notifier_stat("Ignored", active.get("ignore", 0)),
+        ]
+    )
+    action_items = list(payload.get("items") or [])
+    background_items = list(payload.get("background_watch_items") or [])
+    sections: list[str] = []
+    if action_items:
+        sections.append("<div style=\"font-size:20px;font-weight:800;margin:8px 0 12px 0;\">Worth acting on</div>")
+        sections.extend(_render_trend_card(item) for item in action_items[:8])
+    if background_items:
+        sections.append("<div style=\"font-size:20px;font-weight:800;margin:18px 0 12px 0;\">Background watch</div>")
+        sections.extend(_render_trend_card(item) for item in background_items[:8])
+    if not sections:
+        sections.append(_notifier_card("No active trend items", "<div style=\"color:#4b5563;\">No trend candidates need action right now.</div>"))
+    subtitle = (
+        f"Generated {payload.get('generated_at')} | "
+        f"{int(payload.get('background_watch_count', 0))} background-watch item(s)"
+    )
+    return _notifier_shell("OpenClaw Trends", subject, subtitle, stats, "".join(sections))
+
+
+def _render_urgent_html(subject: str, payload: dict[str, Any]) -> str:
+    decision = payload.get("decision") or {}
+    stats = "".join(
+        [
+            _notifier_stat("Priority", decision.get("priority") or "high"),
+            _notifier_stat("Score", decision.get("score") or 0),
+            _notifier_stat("Confidence", decision.get("confidence") or 0),
+            _notifier_stat("Decision", decision.get("decision") or "review"),
+        ]
+    )
+    body_parts = [
+        f"<div style=\"font-size:13px;color:#6b7280;margin-bottom:8px;\">{_html_text(decision.get('flow') or decision.get('artifact_type') or 'artifact')} | run {_html_text(decision.get('run_id') or '')}</div>"
+    ]
+    reasoning = decision.get("reasoning") or []
+    if reasoning:
+        body_parts.append(f"<div style=\"margin-bottom:8px;\"><strong>Why this fired:</strong> {_html_text(reasoning[0])}</div>")
+    suggestions = decision.get("improvement_suggestions") or []
+    if suggestions:
+        body_parts.append(f"<div style=\"margin-bottom:8px;\"><strong>What to fix:</strong> {_html_text(suggestions[0])}</div>")
+    evidence = decision.get("evidence_refs") or []
+    if evidence:
+        body_parts.append(f"<div><strong>Evidence refs:</strong> {_html_text(', '.join(str(item) for item in evidence[:3]))}</div>")
+    body = _notifier_card(str(decision.get("title") or decision.get("artifact_id") or "Urgent alert"), "".join(body_parts))
+    subtitle = f"Generated {payload.get('generated_at')} | immediate operator attention"
+    return _notifier_shell("OpenClaw Urgent", subject, subtitle, stats, body)
+
+
+def _render_phase_readiness_html(subject: str, payload: dict[str, Any]) -> str:
+    metrics = payload.get("metrics") or {}
+    stats = "".join(
+        [
+            _notifier_stat("Decision", payload.get("readiness_decision") or "unknown"),
+            _notifier_stat("Confidence", payload.get("confidence") or 0),
+            _notifier_stat("Pending items", metrics.get("pending_items", 0)),
+            _notifier_stat("Urgent alerts", metrics.get("urgent_alert_count", 0)),
+        ]
+    )
+    evidence_html = "".join(
+        f"<li style=\"margin-bottom:6px;\">{_html_text(item)}</li>" for item in (payload.get('evidence') or [])
+    ) or "<li>No evidence captured.</li>"
+    blockers = payload.get("blockers") or []
+    blockers_html = "".join(
+        f"<li style=\"margin-bottom:6px;\">{_html_text(item)}</li>" for item in blockers
+    ) or "<li>No active blockers were detected.</li>"
+    body = (
+        _notifier_card(
+            "Phase recommendation",
+            f"<div style=\"margin-bottom:8px;\"><strong>Current phase:</strong> {_html_text(payload.get('current_phase'))}</div>"
+            f"<div><strong>Recommended next phase:</strong> {_html_text(payload.get('recommended_next_phase'))}</div>",
+        )
+        + _notifier_card("Evidence", f"<ul style=\"margin:0;padding-left:18px;color:#111827;\">{evidence_html}</ul>")
+        + _notifier_card("Blockers", f"<ul style=\"margin:0;padding-left:18px;color:#111827;\">{blockers_html}</ul>")
+    )
+    subtitle = f"Generated {payload.get('generated_at')} | weekly readiness review"
+    return _notifier_shell("OpenClaw Phase Readiness", subject, subtitle, stats, body)
+
+
+def render_notifier_html(kind: str, subject: str, body: str, payload: dict[str, Any]) -> str:
+    if kind == "nightly_action_summary":
+        return render_nightly_action_summary_html(payload)
+    if kind == "digest":
+        return _render_digest_html(subject, payload)
+    if kind == "trend_digest":
+        return _render_trend_digest_html(subject, payload)
+    if kind == "urgent":
+        return _render_urgent_html(subject, payload)
+    if kind == "phase_readiness":
+        return _render_phase_readiness_html(subject, payload)
+    escaped_body = html.escape(body)
+    label = {
+        "digest": "OpenClaw Digest",
+        "trend_digest": "OpenClaw Trends",
+        "urgent": "OpenClaw Urgent",
+        "phase_readiness": "OpenClaw Phase Readiness",
+    }.get(kind, "OpenClaw Notification")
+    return (
+        "<html><body style=\"margin:0;padding:0;background:#f3f4f6;color:#111827;\">"
+        "<div style=\"max-width:860px;margin:0 auto;padding:24px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;line-height:1.5;\">"
+        "<div style=\"background:linear-gradient(135deg,#111827,#1f2937);color:#fff;border-radius:18px;padding:24px;margin-bottom:18px;\">"
+        f"<div style=\"font-size:13px;letter-spacing:.05em;text-transform:uppercase;color:#d1d5db;\">{html.escape(label)}</div>"
+        f"<div style=\"font-size:26px;font-weight:800;margin-top:6px;\">{html.escape(subject)}</div>"
+        "</div>"
+        "<div style=\"background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:18px;\">"
+        f"<pre style=\"margin:0;white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:1.55;color:#111827;\">{escaped_body}</pre>"
+        "</div>"
+        "</div></body></html>"
+    )
 
 
 def md_for_json(path: Path) -> Path:
@@ -185,6 +494,92 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
         if isinstance(payload, dict):
             rows.append(payload)
     return rows
+
+
+def unique_media_urls(urls: list[str] | None) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in urls or []:
+        candidate = str(value).strip()
+        if not candidate or candidate in seen:
+            continue
+        unique.append(candidate)
+        seen.add(candidate)
+    return unique
+
+
+def build_whatsapp_collage(
+    media_urls: list[str],
+    media_title: str | None = None,
+) -> Path | None:
+    if len(media_urls) < 2:
+        return None
+    if not WHATSAPP_COLLAGE_VENV_PYTHON.exists() or not WHATSAPP_COLLAGE_HELPER.exists():
+        return None
+    signature = canonical_hash({"title": media_title or "", "media_urls": media_urls[:6]})[:16]
+    output_path = WHATSAPP_COLLAGE_DIR / f"operator_collage_{signature}.png"
+    if output_path.exists():
+        return output_path
+    cmd = [
+        str(WHATSAPP_COLLAGE_VENV_PYTHON),
+        str(WHATSAPP_COLLAGE_HELPER),
+        "--output",
+        str(output_path),
+    ]
+    if media_title:
+        cmd.extend(["--title", media_title])
+    for media_url in media_urls[:6]:
+        cmd.extend(["--url", media_url])
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except Exception:
+        return None
+    return output_path if output_path.exists() else None
+
+
+def prepare_whatsapp_media_urls(
+    settings: dict[str, Any],
+    media_urls: list[str] | None = None,
+    media_title: str | None = None,
+) -> list[str]:
+    unique_urls = unique_media_urls(media_urls)
+    whatsapp_cfg = settings.get("whatsapp") or {}
+    collage_cfg = whatsapp_cfg.get("collage") or {}
+    collage_enabled = collage_cfg.get("enabled", True)
+    send_originals = collage_cfg.get("send_originals", False)
+    if collage_enabled:
+        collage_path = build_whatsapp_collage(unique_urls, media_title=media_title)
+        if collage_path:
+            if send_originals:
+                return [str(collage_path), *unique_urls]
+            return [str(collage_path)]
+    return unique_urls
+
+
+def stage_whatsapp_media_for_container(settings: dict[str, Any], media_url: str) -> str:
+    trimmed = str(media_url).strip()
+    if not trimmed or trimmed.startswith(("http://", "https://")):
+        return trimmed
+    docker_path = (settings.get("whatsapp") or {}).get("docker_path") or "/usr/local/bin/docker"
+    gateway_container = (settings.get("whatsapp") or {}).get("gateway_container") or "openclaw-openclaw-gateway-1"
+    source_path = Path(trimmed[7:]) if trimmed.startswith("file://") else Path(trimmed)
+    if not source_path.exists():
+        return trimmed
+    container_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{source_path.name}"
+    container_path = f"{WHATSAPP_CONTAINER_MEDIA_DIR}/{container_name}"
+    subprocess.run(
+        [docker_path, "exec", gateway_container, "mkdir", "-p", WHATSAPP_CONTAINER_MEDIA_DIR],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [docker_path, "cp", str(source_path), f"{gateway_container}:{container_path}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return container_path
 
 
 def parse_iso_datetime(value: str | None) -> datetime | None:
@@ -580,6 +975,104 @@ def load_sendable_artifacts(state: dict[str, Any]) -> list[dict[str, Any]]:
     return artifacts
 
 
+def _latest_file_mtime(path: Path) -> datetime | None:
+    if not path.exists():
+        return None
+    candidates = [item for item in path.rglob("*") if item.is_file()]
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda item: item.stat().st_mtime)
+    return datetime.fromtimestamp(latest.stat().st_mtime).astimezone()
+
+
+def sync_notifier_control(
+    state: dict[str, Any],
+    *,
+    pending_artifacts: list[dict[str, Any]] | None = None,
+    whatsapp_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if pending_artifacts is None:
+        pending_artifacts = load_sendable_artifacts(state)
+
+    last_delivery_dt = parse_iso_datetime(state.get("last_reviews_whatsapp_sent_at"))
+    last_delivery_dt = max(
+        [dt for dt in [
+            last_delivery_dt,
+            parse_iso_datetime(state.get("last_digest_sent_at")),
+            parse_iso_datetime(state.get("last_trend_digest_sent_at")),
+            _latest_file_mtime(OUTPUT_DIGESTS),
+            _latest_file_mtime(ROOT / "output" / "operator"),
+        ] if dt is not None],
+        default=None,
+    )
+    age_hours = None
+    if last_delivery_dt is not None:
+        age_hours = round((datetime.now().astimezone() - last_delivery_dt).total_seconds() / 3600.0, 2)
+
+    pending_count = len(pending_artifacts or [])
+    has_whatsapp = bool(state.get("last_operator_whatsapp_signature") or (whatsapp_summary or {}).get("signature"))
+    has_recent_digest = bool(state.get("last_digest_sent_at") or state.get("last_trend_digest_sent_at"))
+    sent_count = len(state.get("sent") or {})
+
+    if age_hours is not None and age_hours >= 72 and not pending_count:
+        control_state = "blocked"
+        reason = "stale_input"
+        next_action = "Run the notifier so digests and operator pushes reflect the current live queue."
+    elif pending_count:
+        control_state = "observed"
+        reason = "pending_delivery"
+        next_action = "Send or clear the queued notifier artifacts."
+    elif has_whatsapp:
+        control_state = "verified"
+        reason = "operator_push_sent"
+        next_action = "No notifier action needed unless new review items arrive."
+    elif has_recent_digest:
+        control_state = "verified"
+        reason = "digest_sent"
+        next_action = "No notifier action needed unless new digest content appears."
+    elif sent_count:
+        control_state = "observed"
+        reason = "artifacts_ready"
+        next_action = "Review notifier outputs and send any missing summaries if needed."
+    else:
+        control_state = "observed"
+        reason = "idle"
+        next_action = "No notifier artifacts are ready right now."
+
+    control = record_workflow_transition(
+        workflow_id="notifier",
+        lane="notifier",
+        display_label="Notifier",
+        entity_id="notifier",
+        state=control_state,
+        state_reason=reason,
+        input_freshness={
+            "source": str(STATE_PATH),
+            "age_hours": age_hours,
+        },
+        next_action=next_action,
+        metadata={
+            "pending_count": pending_count,
+            "sent_count": sent_count,
+            "has_whatsapp": has_whatsapp,
+            "has_recent_digest": has_recent_digest,
+        },
+        receipt_kind="state_sync",
+        receipt_payload={
+            "pending_kinds": [str(item.get("kind") or "") for item in pending_artifacts[:10]],
+            "pending_count": pending_count,
+        },
+        history_summary=reason.replace("_", " "),
+    )
+    state["workflow_control"] = {
+        "state": control_state,
+        "state_reason": reason,
+        "age_hours": age_hours,
+        "path": str((control or {}).get("latest_receipt", {}).get("path") or ""),
+    }
+    return state
+
+
 def build_reviews_whatsapp_summary(state: dict[str, Any]) -> dict[str, Any] | None:
     quality_gate = load_json(QUALITY_GATE_STATE_PATH, {"artifacts": {}})
     artifacts = quality_gate.get("artifacts", {})
@@ -668,14 +1161,41 @@ def build_reviews_whatsapp_summary(state: dict[str, Any]) -> dict[str, Any] | No
 
 
 def build_reviews_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any] | None:
+    operator_current = load_json(OPERATOR_CURRENT_PATH, {})
+    current = operator_current.get("current") or {}
+    current_flow = current.get("flow") or ""
+    current_message = (operator_current.get("message") or "").strip()
+    if current and str(current.get("review_status") or "") in {"", "pending"} and current_message:
+        preview = current.get("preview") or {}
+        media_urls = [
+            str(url).strip()
+            for url in ([preview.get("asset_url")] + list(preview.get("asset_urls") or []))
+            if str(url or "").strip()
+        ]
+        signature_payload = {
+            "artifact_id": current.get("artifact_id"),
+            "input_hash": current.get("input_hash"),
+            "review_status": current.get("review_status"),
+            "message": current_message,
+            "media_urls": media_urls,
+        }
+        signature = canonical_hash(signature_payload)
+        if state.get("last_operator_whatsapp_signature") == signature or state.get("last_reviews_whatsapp_signature") == signature:
+            return None
+        return {
+            "kind": "operator_whatsapp",
+            "run_id": current.get("run_id"),
+            "signature": signature,
+            "message": f"{WHATSAPP_PUSH_SENTINEL}\n{current_message}",
+            "media_urls": list(dict.fromkeys(media_urls)),
+            "media_title": current.get("title") or current.get("artifact_id") or "OpenClaw Review",
+        }
+
     quality_gate = load_json(QUALITY_GATE_STATE_PATH, {"artifacts": {}})
     artifacts = quality_gate.get("artifacts", {})
     review_items: list[dict[str, Any]] = []
     for record in artifacts.values():
         decision = record.get("decision") or {}
-        flow = decision.get("flow") or ""
-        if not flow.startswith("reviews_"):
-            continue
         review_status = decision.get("review_status")
         if review_status not in {None, "pending"}:
             continue
@@ -683,11 +1203,6 @@ def build_reviews_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any
 
     if not review_items:
         return None
-
-    operator_current = load_json(OPERATOR_CURRENT_PATH, {})
-    current = operator_current.get("current") or {}
-    current_flow = current.get("flow") or ""
-    current_message = (operator_current.get("message") or "").strip()
 
     latest_run_id = max(item.get("run_id") or "" for item in review_items)
     latest_items = [item for item in review_items if (item.get("run_id") or "") == latest_run_id]
@@ -722,7 +1237,7 @@ def build_reviews_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any
         "message": current_message if current_flow.startswith("reviews_") and current.get("artifact_id") == artifact_id else None,
     }
     signature = canonical_hash(signature_payload)
-    if state.get("last_reviews_whatsapp_signature") == signature:
+    if state.get("last_operator_whatsapp_signature") == signature or state.get("last_reviews_whatsapp_signature") == signature:
         return None
 
     if current_flow.startswith("reviews_") and current_message and current.get("artifact_id") == artifact_id:
@@ -732,6 +1247,7 @@ def build_reviews_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any
         title = selected.get("title") or artifact_id
         decision = selected.get("decision") or "pending"
         reasons = selected.get("reasoning") or ["No reasoning captured."]
+        flow = str(selected.get("flow") or "")
         lines = [
             f"{WHATSAPP_PUSH_SENTINEL}",
             f"OpenClaw Review {short_id}" if short_id is not None else "OpenClaw Review",
@@ -744,23 +1260,182 @@ def build_reviews_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any
         ]
         for index, reason in enumerate(reasons[:3], start=1):
             lines.append(f"{index}. {reason}")
-        lines.extend(
-            [
-                "",
-                "Reply:",
-                "agree",
-                "publish <short reason>",
-                "hold",
-                "discard <short reason>",
-                "why",
-            ]
-        )
+        lines.extend(["", "Reply:", "agree"])
+        if flow == "weekly_sale":
+            lines.extend(
+                [
+                    "approve <short reason>",
+                    "needs changes <short reason>",
+                    "rewrite",
+                    "discard <short reason>",
+                    "why",
+                ]
+            )
+        elif flow in {"meme", "jeepfact"}:
+            lines.extend(
+                [
+                    "approve <short reason>",
+                    "needs changes <short reason>",
+                    "rewrite",
+                    "discard <short reason>",
+                    "why",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "publish <short reason>",
+                    "hold",
+                    "discard <short reason>",
+                    "why",
+                ]
+            )
     return {
-        "kind": "reviews_whatsapp",
+        "kind": "operator_whatsapp",
         "run_id": selected.get("run_id"),
         "signature": signature,
         "message": "\n".join(lines),
+        "media_urls": unique_media_urls(
+            [
+                str(url).strip()
+                for url in ([((selected.get("preview") or {}).get("asset_url"))] + list(((selected.get("preview") or {}).get("asset_urls") or [])))
+                if str(url or "").strip()
+            ]
+        ),
+        "media_title": selected.get("title") or selected.get("artifact_id") or "OpenClaw Review",
     }
+
+
+def maybe_auto_approve_weekly_sales(
+    settings: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    weekly_cfg = ((settings.get("auto_approval") or {}).get("weekly_sale") or {})
+    if not weekly_cfg.get("enabled"):
+        return {"enabled": False, "changed": False, "results": []}
+
+    min_score = int(weekly_cfg.get("min_score") or 82)
+    min_confidence = float(weekly_cfg.get("min_confidence") or 0.72)
+
+    from review_loop import (
+        build_review_items,
+        load_operator_state,
+        load_state_bundle,
+        maybe_handoff_duckagent_publish_after_operator_action,
+        record_action,
+        write_review_queue,
+        write_state_source,
+    )
+
+    state_bundle = load_state_bundle()
+    operator_state = load_operator_state()
+    items = build_review_items(state_bundle)
+    eligible = sorted(
+        [
+            item
+            for item in items
+            if str(item.get("flow") or "") == "weekly_sale"
+            and str(item.get("review_status") or "") in {"", "pending"}
+            and str(item.get("decision") or "") == "publish_ready"
+            and int(item.get("score") or 0) >= min_score
+            and float(item.get("confidence") or 0.0) >= min_confidence
+        ],
+        key=lambda item: (
+            str(item.get("run_id") or ""),
+            int(item.get("score") or 0),
+            float(item.get("confidence") or 0.0),
+        ),
+        reverse=True,
+    )
+
+    results: list[dict[str, Any]] = []
+    changed = False
+    for item in eligible:
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        if not artifact_id:
+            continue
+        source_name = ""
+        for candidate_source, source_state in state_bundle.items():
+            if artifact_id in ((source_state.get("artifacts") or {}).keys()):
+                source_name = candidate_source
+                break
+        if not source_name:
+            results.append(
+                {
+                    "artifact_id": artifact_id,
+                    "run_id": item.get("run_id"),
+                    "status": "missing_source",
+                    "message": "Could not find the weekly-sale item in the review state bundle.",
+                }
+            )
+            continue
+
+        source_snapshot = copy.deepcopy(state_bundle[source_name])
+        approval_note = (
+            "Auto-approved by OpenClaw because this weekly sale was publish-ready "
+            f"with score {int(item.get('score') or 0)} and confidence {float(item.get('confidence') or 0.0):.2f}."
+        )
+        record, resolved_source = record_action(
+            state_bundle,
+            artifact_id,
+            "approve",
+            note=approval_note,
+            resolution="approve",
+        )
+        handoff = maybe_handoff_duckagent_publish_after_operator_action(record.get("decision") or {})
+        handoff_ok = bool(handoff and handoff.get("ok"))
+        if dry_run:
+            state_bundle[source_name] = source_snapshot
+            results.append(
+                {
+                    "artifact_id": artifact_id,
+                    "run_id": item.get("run_id"),
+                    "status": "would_auto_approve" if handoff_ok else "would_fail_closed",
+                    "message": (handoff or {}).get("message") or "Dry run only.",
+                    "score": item.get("score"),
+                    "confidence": item.get("confidence"),
+                }
+            )
+            continue
+        if not handoff_ok:
+            state_bundle[source_name] = source_snapshot
+            results.append(
+                {
+                    "artifact_id": artifact_id,
+                    "run_id": item.get("run_id"),
+                    "status": "failed_closed",
+                    "message": (handoff or {}).get("message") or "DuckAgent publish handoff did not succeed.",
+                    "score": item.get("score"),
+                    "confidence": item.get("confidence"),
+                }
+            )
+            continue
+
+        write_state_source(resolved_source, state_bundle[resolved_source])
+        changed = True
+        results.append(
+            {
+                "artifact_id": artifact_id,
+                "run_id": item.get("run_id"),
+                "status": "auto_approved",
+                "message": (handoff or {}).get("message") or "DuckAgent publish was requested.",
+                "score": item.get("score"),
+                "confidence": item.get("confidence"),
+            }
+        )
+
+    if changed and not dry_run:
+        write_review_queue(state_bundle, operator_state)
+
+    state["weekly_sale_auto_approval"] = {
+        "last_run_at": datetime.now().astimezone().isoformat(),
+        "enabled": True,
+        "thresholds": {"min_score": min_score, "min_confidence": min_confidence},
+        "results": results[-10:],
+    }
+    return {"enabled": True, "changed": changed, "results": results}
 
 
 def build_message(settings: dict[str, Any], artifact: dict[str, Any]) -> EmailMessage:
@@ -775,12 +1450,14 @@ def build_message(settings: dict[str, Any], artifact: dict[str, Any]) -> EmailMe
     subject_template = subjects.get(kind, "[OpenClaw] Notification")
     subject = render_subject(subject_template, replacements)
     body = artifact["md_path"].read_text(encoding="utf-8") if artifact["md_path"].exists() else json.dumps(payload, indent=2)
+    html_body = render_notifier_html(kind, subject, body, payload)
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings["user"]
     msg["To"] = settings["to"]
     msg.set_content(body)
+    msg.add_alternative(html_body, subtype="html")
     return msg
 
 
@@ -792,29 +1469,39 @@ def send_message(settings: dict[str, Any], msg: EmailMessage) -> None:
         server.send_message(msg)
 
 
-def send_whatsapp_message(settings: dict[str, Any], message: str) -> None:
+def send_whatsapp_message(
+    settings: dict[str, Any],
+    message: str,
+    media_urls: list[str] | None = None,
+    media_title: str | None = None,
+) -> None:
     whatsapp_cfg = settings.get("whatsapp") or {}
     target = whatsapp_cfg.get("target")
     docker_path = whatsapp_cfg.get("docker_path") or "/usr/local/bin/docker"
     gateway_container = whatsapp_cfg.get("gateway_container") or "openclaw-openclaw-gateway-1"
     if not target:
         raise SystemExit("Notifier WhatsApp target is missing.")
-    cmd = [
-        docker_path,
-        "exec",
-        gateway_container,
-        "/usr/local/bin/node",
-        "/app/dist/index.js",
-        "message",
-        "send",
-        "--channel",
-        "whatsapp",
-        "--target",
-        str(target),
-        "--message",
-        message,
-    ]
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    media_list = prepare_whatsapp_media_urls(settings, media_urls=media_urls, media_title=media_title)
+    for index, media_url in enumerate(media_list or [None]):
+        cmd = [
+            docker_path,
+            "exec",
+            gateway_container,
+            "/usr/local/bin/node",
+            "/app/dist/index.js",
+            "message",
+            "send",
+            "--channel",
+            "whatsapp",
+            "--target",
+            str(target),
+        ]
+        text_payload = message if index == 0 else ""
+        if text_payload:
+            cmd.extend(["--message", text_payload])
+        if media_url:
+            cmd.extend(["--media", stage_whatsapp_media_for_container(settings, media_url)])
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
 def main() -> int:
@@ -833,13 +1520,24 @@ def main() -> int:
         refresh_phase_readiness_artifact()
     except Exception as exc:
         print(f"[notifier] Warning: could not refresh phase readiness artifact: {exc}", file=sys.stderr)
+    auto_approval_result = maybe_auto_approve_weekly_sales(settings, state, dry_run=args.dry_run)
     state_changed = hydrate_digest_signature(state)
     state_changed = hydrate_trend_digest_signature(state) or state_changed
+    state_changed = bool(auto_approval_result.get("changed")) or state_changed
     artifacts = load_sendable_artifacts(state)
     whatsapp_summary = build_reviews_whatsapp_operator_push(state)
 
+    if args.dry_run and auto_approval_result.get("results"):
+        for result in auto_approval_result.get("results") or []:
+            print(
+                "DRY RUN :: weekly_sale_auto_approval :: "
+                f"{result.get('run_id')} :: {result.get('status')} :: {result.get('message')}"
+            )
+
     if not artifacts and not whatsapp_summary:
-        if state_changed and not args.dry_run:
+        if not args.dry_run:
+            state = sync_notifier_control(state, pending_artifacts=[], whatsapp_summary=None)
+        if not args.dry_run and (state_changed or state.get("workflow_control")):
             write_json(STATE_PATH, state)
         return 0
 
@@ -878,20 +1576,29 @@ def main() -> int:
 
     if whatsapp_summary:
         if args.dry_run:
-            print(f"DRY RUN :: reviews_whatsapp :: {whatsapp_summary['run_id']}")
+            print(f"DRY RUN :: operator_whatsapp :: {whatsapp_summary['run_id']}")
             print("---")
             print(whatsapp_summary["message"])
             print("===")
         else:
             whatsapp_cfg = settings.get("whatsapp") or {}
             if whatsapp_cfg.get("enabled"):
-                send_whatsapp_message(settings, whatsapp_summary["message"])
+                send_whatsapp_message(
+                    settings,
+                    whatsapp_summary["message"],
+                    media_urls=whatsapp_summary.get("media_urls"),
+                    media_title=whatsapp_summary.get("media_title"),
+                )
+                state["last_operator_whatsapp_signature"] = whatsapp_summary["signature"]
                 state["last_reviews_whatsapp_signature"] = whatsapp_summary["signature"]
                 state["last_reviews_whatsapp_run_id"] = whatsapp_summary["run_id"]
                 state["last_reviews_whatsapp_sent_at"] = datetime.now().astimezone().isoformat()
                 state_changed = True
 
-    if not args.dry_run and state_changed:
+    if not args.dry_run:
+        state = sync_notifier_control(state, pending_artifacts=load_sendable_artifacts(state), whatsapp_summary=whatsapp_summary)
+
+    if not args.dry_run and (state_changed or state.get("workflow_control")):
         write_json(STATE_PATH, state)
     return 0
 
