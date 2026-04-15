@@ -65,11 +65,11 @@
     {
       "brand_key": "mattmademe",
       "display_name": "MattMadeMe",
-      "instagram_handle": "MattMadeMe.com",
+      "instagram_handle": "mattmade.me",
       "verification_status": "confirmed",
-      "confidence": "high",
+      "confidence": "medium_high",
       "category": "direct_product_competitor",
-      "reason": "Dedicated custom/funny duck brand with strong overlap in collectible and giftable ducks."
+      "reason": "Dedicated custom/funny duck brand with strong overlap in collectible and giftable ducks. Brand site still links a stale Instagram path (`MattMadeMe.com`), but the current account handle is `mattmade.me`."
     },
     {
       "brand_key": "duckduck3d",

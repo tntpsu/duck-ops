@@ -577,6 +577,8 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
         for profile in profiles
         if _compact_text(profile.get("snapshot_source")) not in {"", "live"}
     )
+    degraded_account_count = len(failures)
+    hard_failure_count = sum(1 for item in failures if not bool((item or {}).get("fallback_used")))
 
     payload = {
         "generated_at": now_local_iso(),
@@ -584,7 +586,8 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
             "headline": "Public Instagram competitor snapshots collected through bounded observe-only reads.",
             "seed_account_count": len(seed_accounts),
             "collected_account_count": len(profiles),
-            "failed_account_count": len(failures),
+            "failed_account_count": hard_failure_count,
+            "degraded_account_count": degraded_account_count,
             "cached_account_count": cached_account_count,
             "live_account_count": max(0, len(profiles) - cached_account_count),
             "post_count": len(posts),
@@ -625,7 +628,8 @@ def render_competitor_social_snapshots_markdown(payload: dict[str, Any]) -> str:
         f"- Generated: `{payload.get('generated_at') or ''}`",
         f"- Seed accounts: `{summary.get('seed_account_count') or 0}`",
         f"- Accounts collected: `{summary.get('collected_account_count') or 0}`",
-        f"- Accounts failed: `{summary.get('failed_account_count') or 0}`",
+        f"- Accounts with degraded fetches: `{summary.get('degraded_account_count') or 0}`",
+        f"- Accounts hard failed: `{summary.get('failed_account_count') or 0}`",
         f"- Accounts using cached fallback: `{summary.get('cached_account_count') or 0}`",
         f"- Posts observed: `{summary.get('post_count') or 0}`",
         "",

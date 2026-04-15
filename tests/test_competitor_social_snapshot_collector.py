@@ -133,6 +133,8 @@ class CompetitorSocialSnapshotCollectorTests(unittest.TestCase):
                 self.assertTrue(markdown_path.exists())
 
         self.assertEqual(payload["summary"]["collected_account_count"], 1)
+        self.assertEqual(payload["summary"]["failed_account_count"], 0)
+        self.assertEqual(payload["summary"]["degraded_account_count"], 0)
         self.assertEqual(payload["summary"]["post_count"], 1)
         self.assertEqual(payload["profiles"][0]["account_handle"], "wilderkind.studio")
         self.assertEqual(payload["posts"][0]["post_format"], "reel")
@@ -229,6 +231,8 @@ class CompetitorSocialSnapshotCollectorTests(unittest.TestCase):
                 payload = competitor_social_snapshot_collector.build_competitor_social_snapshots()
 
         self.assertEqual(payload["summary"]["collected_account_count"], 1)
+        self.assertEqual(payload["summary"]["failed_account_count"], 0)
+        self.assertEqual(payload["summary"]["degraded_account_count"], 1)
         self.assertEqual(payload["summary"]["cached_account_count"], 1)
         self.assertEqual(payload["summary"]["post_count"], 1)
         self.assertEqual(payload["profiles"][0]["snapshot_source"], "live_profile_cached_posts")
