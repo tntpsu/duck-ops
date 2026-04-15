@@ -16,6 +16,62 @@ import engineering_governance_digest
 
 
 class EngineeringGovernanceDigestTests(unittest.TestCase):
+    def test_competitor_snapshot_status_classifies_live_cached_and_hard_failing(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "state" / "competitor_social_snapshots.json"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+
+            live_payload = {
+                "generated_at": "2026-04-15T10:00:00-04:00",
+                "summary": {
+                    "collected_account_count": 3,
+                    "live_account_count": 3,
+                    "cached_account_count": 0,
+                    "failed_account_count": 0,
+                    "degraded_account_count": 0,
+                },
+            }
+            cached_payload = {
+                "generated_at": "2026-04-15T10:00:00-04:00",
+                "summary": {
+                    "collected_account_count": 3,
+                    "live_account_count": 2,
+                    "cached_account_count": 1,
+                    "failed_account_count": 0,
+                    "degraded_account_count": 1,
+                },
+            }
+            hard_failed_payload = {
+                "generated_at": "2026-04-15T10:00:00-04:00",
+                "summary": {
+                    "collected_account_count": 0,
+                    "live_account_count": 0,
+                    "cached_account_count": 0,
+                    "failed_account_count": 2,
+                    "degraded_account_count": 2,
+                },
+            }
+
+            with patch.object(engineering_governance_digest, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", state_path), patch.object(
+                engineering_governance_digest, "age_hours", return_value=1.5
+            ):
+                for payload, expected_key, expected_label in [
+                    (live_payload, "healthy_live", "HEALTHY LIVE"),
+                    (cached_payload, "degraded_cached_fallback", "DEGRADED CACHED FALLBACK"),
+                    (hard_failed_payload, "hard_failing", "HARD FAILING"),
+                ]:
+                    state_path.write_text(json.dumps(payload), encoding="utf-8")
+                    status = engineering_governance_digest._competitor_social_snapshot_status()
+                    self.assertEqual(status["status_key"], expected_key)
+                    self.assertEqual(status["status_label"], expected_label)
+                    self.assertIn("generated 1.5h ago", status["summary"])
+
+                state_path.unlink()
+                missing_status = engineering_governance_digest._competitor_social_snapshot_status()
+                self.assertEqual(missing_status["status_key"], "hard_failing")
+                self.assertFalse(missing_status["present"])
+
     def test_build_digest_captures_missing_skills_and_repo_status(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -67,6 +123,62 @@ class EngineeringGovernanceDigestTests(unittest.TestCase):
             self.assertTrue(any("degraded" in item["summary"].lower() for item in payload["findings"]))
             self.assertTrue(state_path.exists())
             self.assertTrue(output_path.exists())
+
+    def test_build_digest_surfaces_competitor_snapshot_status(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            digest_state_path = root / "state" / "engineering_governance_digest.json"
+            output_path = root / "output" / "operator" / "engineering_governance_digest.md"
+            competitor_state_path = root / "state" / "competitor_social_snapshots.json"
+            competitor_state_path.parent.mkdir(parents=True, exist_ok=True)
+            competitor_state_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": "2026-04-15T10:00:00-04:00",
+                        "summary": {
+                            "collected_account_count": 2,
+                            "live_account_count": 2,
+                            "cached_account_count": 0,
+                            "failed_account_count": 0,
+                            "degraded_account_count": 0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(engineering_governance_digest, "DIGEST_STATE_PATH", digest_state_path), patch.object(
+                engineering_governance_digest, "DIGEST_OUTPUT_PATH", output_path
+            ), patch.object(
+                engineering_governance_digest, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", competitor_state_path
+            ), patch.object(
+                engineering_governance_digest,
+                "_skill_statuses",
+                return_value=[
+                    {"name": "duck-change-planner", "present": True},
+                    {"name": "duck-reliability-review", "present": True},
+                ],
+            ), patch.object(
+                engineering_governance_digest,
+                "_repo_status",
+                side_effect=[
+                    {"repo": "duckAgent", "modified_count": 0, "untracked_count": 0, "status_lines": []},
+                    {"repo": "duck-ops", "modified_count": 0, "untracked_count": 0, "status_lines": []},
+                ],
+            ), patch.object(
+                engineering_governance_digest, "_top_health_findings", return_value=({"overall_status": "ok"}, [])
+            ):
+                payload = engineering_governance_digest.build_engineering_governance_digest()
+
+            competitor_review = next(
+                item for item in payload["observe_review_statuses"] if item["name"] == "competitor_social_snapshots"
+            )
+            self.assertEqual(competitor_review["status_key"], "healthy_live")
+            self.assertEqual(competitor_review["status_label"], "HEALTHY LIVE")
+            self.assertIn("Collector is live", competitor_review["summary"])
+            self.assertTrue(digest_state_path.exists())
+            self.assertTrue(output_path.exists())
+            self.assertIn("HEALTHY LIVE", output_path.read_text(encoding="utf-8"))
 
     def test_email_render_includes_findings(self) -> None:
         subject, text_body, html_body = engineering_governance_digest.render_engineering_governance_email(

@@ -93,6 +93,12 @@ SURFACES = [
         "operator_json": OUTPUT_OPERATOR_DIR / "competitor_social_benchmark.json",
         "markdown": OUTPUT_OPERATOR_DIR / "competitor_social_benchmark.md",
     },
+    {
+        "surface": "weekly_strategy_recommendation_packet",
+        "state_json": STATE_DIR / "weekly_strategy_recommendation_packet.json",
+        "operator_json": OUTPUT_OPERATOR_DIR / "weekly_strategy_recommendation_packet.json",
+        "markdown": OUTPUT_OPERATOR_DIR / "weekly_strategy_recommendation_packet.md",
+    },
 ]
 
 

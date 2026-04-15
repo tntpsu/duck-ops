@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from governance_review_common import age_hours
+
 
 DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
 DUCK_AGENT_ROOT = DUCK_OPS_ROOT.parent / "duckAgent"
@@ -25,6 +27,7 @@ SKILLS_ROOT = Path("/Users/philtullai/.codex/skills")
 TECH_DEBT_TRIAGE_PATH = STATE_DIR / "tech_debt_triage.json"
 RELIABILITY_REVIEW_PATH = STATE_DIR / "reliability_review.json"
 DATA_MODEL_GOVERNANCE_REVIEW_PATH = STATE_DIR / "data_model_governance_review.json"
+COMPETITOR_SOCIAL_SNAPSHOTS_PATH = STATE_DIR / "competitor_social_snapshots.json"
 
 REQUIRED_SKILLS = [
     "duck-change-planner",
@@ -194,7 +197,112 @@ def _observe_review_statuses() -> list[dict[str, Any]]:
     return items
 
 
-def _build_findings(skill_statuses: list[dict[str, Any]], repo_statuses: list[dict[str, Any]], health_summary: dict[str, Any], health_findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _competitor_social_snapshot_status() -> dict[str, Any]:
+    if not COMPETITOR_SOCIAL_SNAPSHOTS_PATH.exists():
+        return {
+            "name": "competitor_social_snapshots",
+            "path": str(COMPETITOR_SOCIAL_SNAPSHOTS_PATH),
+            "present": False,
+            "generated_at": None,
+            "age_hours": None,
+            "status_key": "hard_failing",
+            "status_label": "HARD FAILING",
+            "item_count": 0,
+            "top_label": "Snapshot artifact is missing.",
+            "summary": "No competitor snapshot state file exists yet.",
+        }
+
+    try:
+        payload = _load_json(COMPETITOR_SOCIAL_SNAPSHOTS_PATH, {})
+    except Exception as exc:
+        return {
+            "name": "competitor_social_snapshots",
+            "path": str(COMPETITOR_SOCIAL_SNAPSHOTS_PATH),
+            "present": False,
+            "generated_at": None,
+            "age_hours": None,
+            "status_key": "hard_failing",
+            "status_label": "HARD FAILING",
+            "item_count": 0,
+            "top_label": "Snapshot artifact could not be parsed.",
+            "summary": f"Competitor snapshot state could not be parsed: {exc}",
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "name": "competitor_social_snapshots",
+            "path": str(COMPETITOR_SOCIAL_SNAPSHOTS_PATH),
+            "present": False,
+            "generated_at": None,
+            "age_hours": None,
+            "status_key": "hard_failing",
+            "status_label": "HARD FAILING",
+            "item_count": 0,
+            "top_label": "Snapshot artifact is missing or malformed.",
+            "summary": "No usable competitor snapshot state was found.",
+        }
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    generated_at = payload.get("generated_at")
+    live_count = int(summary.get("live_account_count") or 0) if isinstance(summary, dict) else 0
+    cached_count = int(summary.get("cached_account_count") or 0) if isinstance(summary, dict) else 0
+    failed_count = int(summary.get("failed_account_count") or 0) if isinstance(summary, dict) else 0
+    degraded_count = int(summary.get("degraded_account_count") or 0) if isinstance(summary, dict) else 0
+    collected_count = int(summary.get("collected_account_count") or 0) if isinstance(summary, dict) else 0
+    freshness_hours = age_hours(generated_at)
+
+    if failed_count > 0:
+        status_key = "hard_failing"
+        status_label = "HARD FAILING"
+        top_label = f"{failed_count} hard failure(s)"
+        summary_text = (
+            f"{failed_count} hard failure(s) recorded; {cached_count} cached fallback account(s) and {live_count} live account(s) in the latest snapshot."
+            if cached_count or live_count
+            else f"{failed_count} hard failure(s) recorded and the collector could not provide a live snapshot."
+        )
+    elif cached_count > 0 or degraded_count > 0:
+        status_key = "degraded_cached_fallback"
+        status_label = "DEGRADED CACHED FALLBACK"
+        top_label = f"{cached_count} cached fallback account(s)"
+        summary_text = (
+            f"Collector is alive but using cached fallback for {cached_count} account(s) with {live_count} live account(s) and {degraded_count} degraded fetches."
+        )
+    else:
+        status_key = "healthy_live"
+        status_label = "HEALTHY LIVE"
+        top_label = f"{live_count} live account(s)"
+        summary_text = f"Collector is live with {live_count} account(s) and no cached fallback or hard failures."
+
+    if freshness_hours is None:
+        freshness_note = "freshness unknown"
+    else:
+        freshness_note = f"generated {freshness_hours}h ago"
+
+    return {
+        "name": "competitor_social_snapshots",
+        "path": str(COMPETITOR_SOCIAL_SNAPSHOTS_PATH),
+        "present": True,
+        "generated_at": generated_at,
+        "age_hours": freshness_hours,
+        "status_key": status_key,
+        "status_label": status_label,
+        "item_count": collected_count,
+        "top_label": top_label,
+        "summary": f"{summary_text} {freshness_note}.",
+        "live_account_count": live_count,
+        "cached_account_count": cached_count,
+        "failed_account_count": failed_count,
+        "degraded_account_count": degraded_count,
+    }
+
+
+def _build_findings(
+    skill_statuses: list[dict[str, Any]],
+    repo_statuses: list[dict[str, Any]],
+    health_summary: dict[str, Any],
+    health_findings: list[dict[str, Any]],
+    competitor_snapshot_status: dict[str, Any],
+) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     missing_skills = [skill["name"] for skill in skill_statuses if not skill.get("present")]
     if missing_skills:
@@ -227,6 +335,27 @@ def _build_findings(skill_statuses: list[dict[str, Any]], repo_statuses: list[di
                 "title": f"{item.get('label')} is {item.get('status')}",
                 "summary": f"{item.get('last_run_state') or 'unknown state'} | {item.get('success_rate_label') or 'no rate label'}",
                 "next_action": "Review the lane and decide whether it needs a reliability pass, stale-input fix, or clearer operator handling.",
+            }
+        )
+
+    if competitor_snapshot_status.get("status_key") == "hard_failing":
+        findings.append(
+            {
+                "priority": "P1",
+                "kind": "observe",
+                "title": "Competitor snapshot collection is hard failing",
+                "summary": str(competitor_snapshot_status.get("summary") or "The collector is missing live truth and has no usable fallback."),
+                "next_action": "Fix the observe-only collector before treating competitor social data as current.",
+            }
+        )
+    elif competitor_snapshot_status.get("status_key") == "degraded_cached_fallback":
+        findings.append(
+            {
+                "priority": "P2",
+                "kind": "observe",
+                "title": "Competitor snapshot collection is using cached fallback",
+                "summary": str(competitor_snapshot_status.get("summary") or "The collector is serving cached fallback data."),
+                "next_action": "Re-run the observe-only collector to restore live competitor snapshot coverage.",
             }
         )
 
@@ -265,8 +394,10 @@ def build_engineering_governance_digest() -> dict[str, Any]:
     missing_skills = [skill["name"] for skill in skill_statuses if not skill.get("present")]
     repo_statuses = [_repo_status(name, path) for name, path in REPOS.items()]
     health_summary, health_findings = _top_health_findings()
+    competitor_snapshot_status = _competitor_social_snapshot_status()
     observe_review_statuses = _observe_review_statuses()
-    findings = _build_findings(skill_statuses, repo_statuses, health_summary, health_findings)
+    observe_review_statuses.append(competitor_snapshot_status)
+    findings = _build_findings(skill_statuses, repo_statuses, health_summary, health_findings, competitor_snapshot_status)
     if missing_skills:
         next_step = "Build the remaining governance/learning skills and keep scheduled skill-backed work at Tier 0/Tier 1 until the digest lane is trusted."
     else:
@@ -327,10 +458,12 @@ def render_engineering_governance_markdown(payload: dict[str, Any]) -> str:
 
     lines.extend(["## Observe-Only Reviews", ""])
     for review in payload.get("observe_review_statuses") or []:
-        status = "READY" if review.get("present") else "MISSING"
+        status = str(review.get("status_label") or ("READY" if review.get("present") else "MISSING"))
         detail = f"{review.get('item_count', 0)} item(s)"
         if review.get("top_label"):
             detail += f" | top: {review.get('top_label')}"
+        if review.get("age_hours") is not None:
+            detail += f" | freshness: {review.get('age_hours')}h"
         lines.append(f"- {status}: `{review.get('name')}` — {detail}")
     lines.append("")
 

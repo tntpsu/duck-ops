@@ -22,6 +22,7 @@ class CurrentLearningsTests(unittest.TestCase):
             social_path = root / "state" / "social_performance_rollups.json"
             competitor_path = root / "state" / "social_competitor_benchmark.json"
             competitor_social_path = root / "state" / "competitor_social_benchmark.json"
+            competitor_snapshots_path = root / "state" / "competitor_social_snapshots.json"
             social_path.parent.mkdir(parents=True, exist_ok=True)
             social_path.write_text(
                 json.dumps(
@@ -69,6 +70,23 @@ class CurrentLearningsTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            competitor_snapshots_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": "2026-04-15T09:00:00-04:00",
+                        "summary": {
+                            "post_count": 12,
+                            "collected_account_count": 4,
+                            "live_account_count": 2,
+                            "cached_account_count": 1,
+                            "degraded_account_count": 1,
+                            "failed_account_count": 1,
+                            "data_quality_note": "Snapshot collector reused cache for one account and hard-failed on another.",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
             state_path = root / "state" / "current_learnings.json"
             operator_json_path = root / "output" / "operator" / "current_learnings.json"
             markdown_path = root / "output" / "operator" / "current_learnings.md"
@@ -77,6 +95,8 @@ class CurrentLearningsTests(unittest.TestCase):
                 current_learnings, "COMPETITOR_BENCHMARK_PATH", competitor_path
             ), patch.object(
                 current_learnings, "COMPETITOR_SOCIAL_BENCHMARK_PATH", competitor_social_path
+            ), patch.object(
+                current_learnings, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", competitor_snapshots_path
             ), patch.object(
                 current_learnings, "CURRENT_LEARNINGS_STATE_PATH", state_path
             ), patch.object(
@@ -90,9 +110,19 @@ class CurrentLearningsTests(unittest.TestCase):
             self.assertEqual(len(payload["changes_since_previous"]), 3)
             self.assertTrue(payload["ideas_to_test"])
             self.assertEqual(payload["summary"]["competitor_social_post_count"], 12)
+            self.assertEqual(payload["summary"]["competitor_social_snapshot_generated_at"], "2026-04-15T09:00:00-04:00")
+            self.assertEqual(payload["summary"]["competitor_social_freshness_label"], "hard_failure")
+            self.assertEqual(payload["summary"]["competitor_social_live_account_count"], 2)
+            self.assertEqual(payload["summary"]["competitor_social_cached_account_count"], 1)
+            self.assertEqual(payload["summary"]["competitor_social_degraded_account_count"], 1)
+            self.assertEqual(payload["summary"]["competitor_social_failed_account_count"], 1)
             self.assertTrue(state_path.exists())
             self.assertTrue(operator_json_path.exists())
             self.assertTrue(markdown_path.exists())
+            markdown = markdown_path.read_text(encoding="utf-8")
+            self.assertIn("## Competitor Social Freshness", markdown)
+            self.assertIn("Hard failure truth", markdown)
+            self.assertIn("Cached fallback accounts", markdown)
 
 
 if __name__ == "__main__":
