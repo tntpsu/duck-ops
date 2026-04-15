@@ -481,6 +481,170 @@ def _reply_excerpt(value: str, limit: int = 120) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def _page_label_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        parsed = urlparse(str(url))
+        raw = (parse_qs(parsed.query).get("page") or [None])[0]
+        if raw is None:
+            return None
+        return str(raw)
+    except Exception:
+        return None
+
+
+def build_attempt_breadcrumbs(attempt: dict[str, Any]) -> dict[str, Any]:
+    session = attempt.get("session") if isinstance(attempt.get("session"), dict) else {}
+    navigation = attempt.get("navigation") if isinstance(attempt.get("navigation"), dict) else {}
+    initial_match = attempt.get("initial_match") if isinstance(attempt.get("initial_match"), dict) else {}
+    post_click_match = attempt.get("post_click_match") if isinstance(attempt.get("post_click_match"), dict) else {}
+    refresh = attempt.get("surface_refresh") if isinstance(attempt.get("surface_refresh"), dict) else {}
+    probes = attempt.get("review_page_probes") if isinstance(attempt.get("review_page_probes"), list) else []
+
+    simplified_probes: list[dict[str, Any]] = []
+    for probe in probes[:6]:
+        if not isinstance(probe, dict):
+            continue
+        simplified_probes.append(
+            {
+                "page": _page_label_from_url(str(probe.get("url") or "")),
+                "found": bool(probe.get("found")),
+                "matched_transaction_id": probe.get("matched_transaction_id"),
+                "matched_listing_id": probe.get("matched_listing_id"),
+            }
+        )
+
+    return {
+        "session_url": str(session.get("current_url") or ""),
+        "auth_probe": session.get("auth_probe") if isinstance(session.get("auth_probe"), dict) else {},
+        "navigation_strategy": str(navigation.get("strategy") or ""),
+        "landed_url": str(navigation.get("landed_url") or ""),
+        "initial_match_found": bool(initial_match.get("found")),
+        "initial_candidate_count": initial_match.get("candidateCount"),
+        "initial_transaction_match": initial_match.get("matchedTransactionId"),
+        "initial_listing_match": initial_match.get("matchedListingId"),
+        "page_probes": simplified_probes,
+        "surface_refresh_attempted": bool(refresh),
+        "surface_refresh_found": bool(refresh.get("found")) if refresh else False,
+        "surface_refresh_url": str(refresh.get("landed_url") or ""),
+        "post_click_found": bool(post_click_match.get("found")) if post_click_match else False,
+        "post_click_reply_box_visible": bool(post_click_match.get("replyBoxVisible")) if post_click_match else False,
+    }
+
+
+def summarize_attempt_breadcrumbs(breadcrumbs: dict[str, Any]) -> str:
+    parts: list[str] = []
+    session_url = str(breadcrumbs.get("session_url") or "")
+    if session_url:
+        parts.append(f"session {session_url}")
+    auth_probe = breadcrumbs.get("auth_probe") if isinstance(breadcrumbs.get("auth_probe"), dict) else {}
+    if auth_probe:
+        parts.append(
+            "auth sign_in_visible="
+            f"{bool(auth_probe.get('signInVisible'))}"
+            f" seller_controls_visible={bool(auth_probe.get('sellerControlsVisible'))}"
+        )
+    if breadcrumbs.get("navigation_strategy"):
+        parts.append(f"nav {breadcrumbs.get('navigation_strategy')}")
+    if breadcrumbs.get("initial_match_found"):
+        parts.append(
+            "initial match"
+            f" tx={breadcrumbs.get('initial_transaction_match') or 'n/a'}"
+            f" listing={breadcrumbs.get('initial_listing_match') or 'n/a'}"
+        )
+    else:
+        parts.append(f"initial match not found (candidates={breadcrumbs.get('initial_candidate_count') or 0})")
+    probes = breadcrumbs.get("page_probes") if isinstance(breadcrumbs.get("page_probes"), list) else []
+    if probes:
+        probe_bits = []
+        for probe in probes:
+            if not isinstance(probe, dict):
+                continue
+            label = probe.get("page") or "?"
+            probe_bits.append(f"p{label}:{'hit' if probe.get('found') else 'miss'}")
+        if probe_bits:
+            parts.append("probe pages " + ", ".join(probe_bits))
+    if breadcrumbs.get("surface_refresh_attempted"):
+        parts.append(
+            "surface refresh "
+            + ("found row" if breadcrumbs.get("surface_refresh_found") else "still missing row")
+        )
+    if breadcrumbs.get("post_click_found"):
+        parts.append(
+            "post-click "
+            + ("reply box visible" if breadcrumbs.get("post_click_reply_box_visible") else "reply box missing")
+        )
+    return " | ".join(parts) or "No breadcrumbs captured."
+
+
+def classify_attempt_failure(attempt: dict[str, Any], error_text: str) -> dict[str, Any]:
+    lowered = str(error_text or "").lower()
+    failure_class = "unexpected_executor_failure"
+    phase = "unknown"
+    retryable = False
+
+    if is_retryable_row_not_found(error_text):
+        failure_class = "review_row_not_found"
+        phase = "preflight"
+        retryable = True
+    elif "sign in again" in lowered or "signed-out view" in lowered or "etsy auth is required" in lowered:
+        failure_class = "auth_required"
+        phase = "auth"
+    elif "did not keep the expected transaction_id" in lowered:
+        failure_class = "review_row_transaction_mismatch"
+        phase = "preflight"
+    elif "did not keep the expected listing_id" in lowered:
+        failure_class = "review_row_listing_mismatch"
+        phase = "preflight"
+    elif "could not open the reply box" in lowered:
+        failure_class = "reply_box_open_failed"
+        phase = "preflight"
+    elif "reply textarea did not appear" in lowered:
+        failure_class = "reply_box_not_visible"
+        phase = "preflight"
+    elif "textarea fill verification failed" in lowered or "could not stage the exact approved reply text" in lowered:
+        failure_class = "textarea_fill_failed"
+        phase = "fill"
+    elif "could not inspect the target review row before submit" in lowered:
+        failure_class = "pre_submit_inspection_failed"
+        phase = "pre_submit"
+    elif "reply textarea disappeared before submit" in lowered:
+        failure_class = "reply_box_disappeared"
+        phase = "pre_submit"
+    elif "textarea no longer matches" in lowered:
+        failure_class = "pre_submit_text_mismatch"
+        phase = "pre_submit"
+    elif "submit control is not visible" in lowered or "submit control is disabled" in lowered:
+        failure_class = "submit_control_unavailable"
+        phase = "pre_submit"
+    elif "could not click the etsy submit control" in lowered:
+        failure_class = "submit_click_failed"
+        phase = "submit"
+    elif "did not show a clear post-submit success state" in lowered:
+        failure_class = "post_submit_verification_failed"
+        phase = "post_submit"
+
+    blocked = etsy_browser_blocked_status()
+    return {
+        "failure_class": failure_class,
+        "phase": phase,
+        "retryable": retryable,
+        "browser_guard_active": bool(blocked.get("blocked")),
+        "browser_guard_reason": blocked.get("block_reason"),
+        "browser_guard_until": blocked.get("blocked_until"),
+    }
+
+
+def annotate_attempt_failure(attempt: dict[str, Any], error_text: str) -> dict[str, Any]:
+    breadcrumbs = build_attempt_breadcrumbs(attempt)
+    failure = classify_attempt_failure(attempt, error_text)
+    failure["breadcrumb_summary"] = summarize_attempt_breadcrumbs(breadcrumbs)
+    attempt["breadcrumbs"] = breadcrumbs
+    attempt["failure"] = failure
+    return failure
+
+
 def _pw_error_text(exc: subprocess.CalledProcessError) -> str:
     return re.sub(r"\s+", " ", f"{exc.stdout}\n{exc.stderr}".strip()).strip()
 
@@ -1210,22 +1374,36 @@ def write_attempt_artifact(decision: dict[str, Any], attempt: dict[str, Any]) ->
         f"- Finished at: `{attempt.get('finished_at')}`",
         f"- Session: `{attempt.get('session_name')}`",
         f"- Submit performed: `{attempt.get('submit_performed')}`",
-        "",
-        "## Review Target",
-        "",
-        f"- Transaction ID: `{((decision.get('review_target') or {}).get('transaction_id'))}`",
-        f"- Listing ID: `{((decision.get('review_target') or {}).get('listing_id'))}`",
-        "",
-        "## Approved Reply Text",
-        "",
-        decision.get("approved_reply_text") or "",
-        "",
-        "## Attempt Detail",
-        "",
-        "```json",
-        json.dumps(attempt, indent=2),
-        "```",
     ]
+    failure = attempt.get("failure") if isinstance(attempt.get("failure"), dict) else {}
+    if failure:
+        lines.extend(
+            [
+                f"- Failure class: `{failure.get('failure_class') or 'unknown'}`",
+                f"- Failure phase: `{failure.get('phase') or 'unknown'}`",
+                f"- Retryable: `{failure.get('retryable')}`",
+                f"- Breadcrumbs: {failure.get('breadcrumb_summary') or 'n/a'}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Review Target",
+            "",
+            f"- Transaction ID: `{((decision.get('review_target') or {}).get('transaction_id'))}`",
+            f"- Listing ID: `{((decision.get('review_target') or {}).get('listing_id'))}`",
+            "",
+            "## Approved Reply Text",
+            "",
+            decision.get("approved_reply_text") or "",
+            "",
+            "## Attempt Detail",
+            "",
+            "```json",
+            json.dumps(attempt, indent=2),
+            "```",
+        ]
+    )
     ensure_parent(md_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"json_path": str(json_path), "md_path": str(md_path)}
 
@@ -1285,6 +1463,10 @@ def write_session_artifact(session: dict[str, Any]) -> dict[str, str]:
         )
         if item.get("error"):
             lines.extend(["Error:", "", str(item.get("error")), ""])
+        if item.get("failure_class"):
+            lines.extend(["Failure class:", "", str(item.get("failure_class")), ""])
+        if item.get("breadcrumb_summary"):
+            lines.extend(["Breadcrumbs:", "", str(item.get("breadcrumb_summary")), ""])
     ensure_parent(md_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"json_path": str(json_path), "md_path": str(md_path)}
 
@@ -1315,6 +1497,9 @@ def record_session_event(
         "approved_reply_text": decision.get("approved_reply_text") or "",
         "error": attempt.get("error"),
         "attempt_outcome": attempt.get("outcome"),
+        "failure_class": ((attempt.get("failure") or {}).get("failure_class") if isinstance(attempt.get("failure"), dict) else None),
+        "failure_phase": ((attempt.get("failure") or {}).get("phase") if isinstance(attempt.get("failure"), dict) else None),
+        "breadcrumb_summary": ((attempt.get("failure") or {}).get("breadcrumb_summary") if isinstance(attempt.get("failure"), dict) else None),
         "attempt_paths": artifact_paths,
     }
     session["last_activity_at"] = attempt.get("finished_at") or attempt.get("started_at") or now_iso()
@@ -1328,6 +1513,7 @@ def send_failure_alert(decision: dict[str, Any], attempt: dict[str, Any], *, art
     customer_review = ((decision.get("preview") or {}).get("context_text")) or ""
     approved_reply_text = decision.get("approved_reply_text") or ""
     error_text = str(attempt.get("error") or "Unknown execution failure")
+    failure = attempt.get("failure") if isinstance(attempt.get("failure"), dict) else {}
     subject = f"OpenClaw Review Reply Failure: {artifact_id}"
     text = "\n".join(
         [
@@ -1347,6 +1533,13 @@ def send_failure_alert(decision: dict[str, Any], attempt: dict[str, Any], *, art
             "Error:",
             error_text,
             "",
+            "Failure classification:",
+            f"- Class: {failure.get('failure_class') or 'n/a'}",
+            f"- Phase: {failure.get('phase') or 'n/a'}",
+            f"- Retryable: {failure.get('retryable')}",
+            f"- Browser guard active: {failure.get('browser_guard_active')}",
+            f"- Breadcrumbs: {failure.get('breadcrumb_summary') or 'n/a'}",
+            "",
             "Attempt artifacts:",
             f"- JSON: {(artifact_paths or {}).get('json_path') or 'n/a'}",
             f"- Markdown: {(artifact_paths or {}).get('md_path') or 'n/a'}",
@@ -1362,6 +1555,11 @@ def send_failure_alert(decision: dict[str, Any], attempt: dict[str, Any], *, art
         f"<p><strong>Customer review:</strong><br>{customer_review}</p>"
         f"<p><strong>Approved reply text:</strong><br>{approved_reply_text}</p>"
         f"<p><strong>Error:</strong><br>{error_text}</p>"
+        f"<p><strong>Failure class:</strong> {failure.get('failure_class') or 'n/a'}<br>"
+        f"<strong>Phase:</strong> {failure.get('phase') or 'n/a'}<br>"
+        f"<strong>Retryable:</strong> {failure.get('retryable')}<br>"
+        f"<strong>Browser guard active:</strong> {failure.get('browser_guard_active')}<br>"
+        f"<strong>Breadcrumbs:</strong> {failure.get('breadcrumb_summary') or 'n/a'}</p>"
         f"<p><strong>Attempt JSON:</strong> {(artifact_paths or {}).get('json_path') or 'n/a'}<br>"
         f"<strong>Attempt Markdown:</strong> {(artifact_paths or {}).get('md_path') or 'n/a'}</p>"
         "</div>"
@@ -1511,6 +1709,10 @@ def send_session_summary_email() -> dict[str, Any]:
         )
         if item.get("error"):
             lines.append(f"- Error: {item.get('error')}")
+        if item.get("failure_class"):
+            lines.append(f"- Failure class: {item.get('failure_class')}")
+        if item.get("breadcrumb_summary"):
+            lines.append(f"- Breadcrumbs: {item.get('breadcrumb_summary')}")
         if (item.get("attempt_paths") or {}).get("json_path"):
             lines.append(f"- Attempt JSON: {item.get('attempt_paths').get('json_path')}")
         lines.append("")
@@ -1526,6 +1728,10 @@ def send_session_summary_email() -> dict[str, Any]:
         )
         if item.get("error"):
             html_parts.append(f"<p><strong>Error:</strong> {item.get('error')}</p>")
+        if item.get("failure_class"):
+            html_parts.append(f"<p><strong>Failure class:</strong> {item.get('failure_class')}</p>")
+        if item.get("breadcrumb_summary"):
+            html_parts.append(f"<p><strong>Breadcrumbs:</strong> {item.get('breadcrumb_summary')}</p>")
     html_parts.append("</div>")
 
     send_email = _load_send_email()
@@ -1574,6 +1780,15 @@ def record_attempt(
     queue_item["last_attempt_id"] = attempt.get("attempt_id")
     queue_item["last_attempt_at"] = attempt.get("finished_at") or attempt.get("started_at")
     queue_item["last_attempt_outcome"] = attempt.get("outcome")
+    failure = attempt.get("failure") if isinstance(attempt.get("failure"), dict) else {}
+    if failure:
+        queue_item["last_failure_class"] = failure.get("failure_class")
+        queue_item["last_failure_phase"] = failure.get("phase")
+        queue_item["last_breadcrumb_summary"] = failure.get("breadcrumb_summary")
+    else:
+        queue_item.pop("last_failure_class", None)
+        queue_item.pop("last_failure_phase", None)
+        queue_item.pop("last_breadcrumb_summary", None)
     if last_preflight_status is not None:
         queue_item["last_preflight_status"] = last_preflight_status
     if final_queue_status != "queued":
@@ -1662,6 +1877,9 @@ def handle_auth_blocked_attempt(
             "auth_status": auth_state.get("auth_status"),
             "next_retry_after": auth_state.get("next_retry_after"),
             "alert_sent": bool(alert),
+            "failure_class": (((attempt.get("failure") or {}).get("failure_class")) if isinstance(attempt.get("failure"), dict) else None),
+            "failure_phase": (((attempt.get("failure") or {}).get("phase")) if isinstance(attempt.get("failure"), dict) else None),
+            "breadcrumb_summary": (((attempt.get("failure") or {}).get("breadcrumb_summary")) if isinstance(attempt.get("failure"), dict) else None),
         },
     )
     return queue_item, auth_state, alert
@@ -1789,6 +2007,23 @@ def prepare_review_row_for_execution(
         if review_page_probes:
             attempt["review_page_probes"] = review_page_probes
         if not initial_block.get("found"):
+            refresh_url = str(navigation.get("landed_url") or session_meta.get("current_url") or DEFAULT_ETSY_REVIEWS_URL)
+            refresh_landed_url, refresh_title = navigate_within_session(session_name, refresh_url, wait_seconds=2.0)
+            refreshed_block = locate_current_page()
+            attempt["surface_refresh"] = {
+                "url": refresh_url,
+                "landed_url": refresh_landed_url or refresh_url,
+                "page_title": refresh_title,
+                "found": bool(refreshed_block.get("found")),
+                "matched_transaction_id": refreshed_block.get("matchedTransactionId"),
+                "matched_listing_id": refreshed_block.get("matchedListingId"),
+            }
+            if refreshed_block.get("found"):
+                initial_block = refreshed_block
+                navigation["strategy"] = "review_page_surface_refresh"
+                navigation["landed_url"] = refresh_landed_url or refresh_url
+                navigation["page_title"] = refresh_title
+        if not initial_block.get("found"):
             raise RuntimeError("Exact review row could not be found in the signed-in Etsy session.")
     if expected_transaction_id and str(initial_block.get("matchedTransactionId") or "") != expected_transaction_id:
         raise RuntimeError("Matched Etsy review row did not keep the expected transaction_id.")
@@ -1878,6 +2113,9 @@ def maybe_reschedule_retryable_failure(
             "error": attempt.get("error"),
             "retry_reason": "exact_review_row_not_found",
             "next_attempt_after": next_attempt_after,
+            "failure_class": (((attempt.get("failure") or {}).get("failure_class")) if isinstance(attempt.get("failure"), dict) else None),
+            "failure_phase": (((attempt.get("failure") or {}).get("phase")) if isinstance(attempt.get("failure"), dict) else None),
+            "breadcrumb_summary": (((attempt.get("failure") or {}).get("breadcrumb_summary")) if isinstance(attempt.get("failure"), dict) else None),
         },
     )
     return queue_item
@@ -1989,6 +2227,7 @@ def run_dry_run_fill(
         attempt["finished_at"] = now_iso()
         attempt["outcome"] = "failed"
         attempt["error"] = str(exc)
+        failure = annotate_attempt_failure(attempt, str(exc))
         if is_auth_error(exc):
             queue_item, auth_state, alert = handle_auth_blocked_attempt(
                 quality_state=quality_state,
@@ -2051,6 +2290,9 @@ def run_dry_run_fill(
                 "attempt_id": attempt.get("attempt_id"),
                 "error": attempt.get("error"),
                 "queue_status": queue_item.get("status"),
+                "failure_class": failure.get("failure_class"),
+                "failure_phase": failure.get("phase"),
+                "breadcrumb_summary": failure.get("breadcrumb_summary"),
             },
         )
         failure_email = None
@@ -2309,6 +2551,7 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = False) -> dic
         attempt["finished_at"] = now_iso()
         attempt["outcome"] = "failed"
         attempt["error"] = str(exc)
+        failure = annotate_attempt_failure(attempt, str(exc))
         if is_auth_error(exc):
             queue_item, auth_state, alert = handle_auth_blocked_attempt(
                 quality_state=quality_state,
@@ -2388,6 +2631,9 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = False) -> dic
                 "attempt_id": attempt.get("attempt_id"),
                 "error": attempt.get("error"),
                 "queue_status": queue_item.get("status"),
+                "failure_class": failure.get("failure_class"),
+                "failure_phase": failure.get("phase"),
+                "breadcrumb_summary": failure.get("breadcrumb_summary"),
             },
         )
         session = record_session_event(

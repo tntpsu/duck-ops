@@ -15,6 +15,91 @@ import review_reply_executor
 
 
 class ReviewReplyExecutorWorkflowTests(unittest.TestCase):
+    def test_annotate_attempt_failure_captures_row_not_found_breadcrumbs(self) -> None:
+        attempt = {
+            "session": {
+                "current_url": "https://www.etsy.com/your/shops/me/reviews?page=1",
+                "auth_probe": {"signInVisible": False, "sellerControlsVisible": True},
+            },
+            "navigation": {
+                "strategy": "review_page_probe_search",
+                "landed_url": "https://www.etsy.com/your/shops/me/reviews?page=1",
+            },
+            "initial_match": {"found": False, "candidateCount": 0},
+            "review_page_probes": [
+                {"url": "https://www.etsy.com/your/shops/me/reviews?page=2", "found": False},
+                {"url": "https://www.etsy.com/your/shops/me/reviews?page=3", "found": False},
+            ],
+            "surface_refresh": {
+                "landed_url": "https://www.etsy.com/your/shops/me/reviews?page=1",
+                "found": False,
+            },
+        }
+        with patch.object(
+            review_reply_executor,
+            "etsy_browser_blocked_status",
+            return_value={
+                "blocked": True,
+                "block_reason": "unusual activity",
+                "blocked_until": "2026-04-15T07:44:21-04:00",
+            },
+        ):
+            failure = review_reply_executor.annotate_attempt_failure(
+                attempt,
+                "Exact review row could not be found in the signed-in Etsy session.",
+            )
+
+        self.assertEqual(failure["failure_class"], "review_row_not_found")
+        self.assertEqual(failure["phase"], "preflight")
+        self.assertTrue(failure["retryable"])
+        self.assertTrue(failure["browser_guard_active"])
+        self.assertIn("probe pages", failure["breadcrumb_summary"])
+        self.assertTrue(attempt["breadcrumbs"]["surface_refresh_attempted"])
+
+    def test_record_attempt_persists_failure_metadata_to_queue_item(self) -> None:
+        quality_state = {
+            "artifacts": {
+                "artifact-1": {
+                    "decision": {
+                        "artifact_id": "artifact-1",
+                        "run_id": "run-1",
+                        "execution_attempts": [],
+                    }
+                }
+            }
+        }
+        queue_state = {"items": {"artifact-1": {}}}
+        attempt = {
+            "attempt_id": "dry-run-1",
+            "started_at": "2026-04-15T01:00:00-04:00",
+            "finished_at": "2026-04-15T01:01:00-04:00",
+            "outcome": "failed",
+            "failure": {
+                "failure_class": "review_row_not_found",
+                "phase": "preflight",
+                "breadcrumb_summary": "initial match not found | probe pages p2:miss, p3:miss",
+            },
+        }
+        with (
+            patch.object(review_reply_executor, "write_decision", return_value={}),
+            patch.object(review_reply_executor, "write_attempt_artifact", return_value={"json_path": "/tmp/a.json"}),
+            patch.object(review_reply_executor, "save_quality_gate_state"),
+            patch.object(review_reply_executor, "save_queue_state"),
+        ):
+            queue_item = review_reply_executor.record_attempt(
+                quality_state,
+                queue_state,
+                "artifact-1",
+                attempt,
+                final_queue_status="queued",
+                final_execution_state="queued",
+                last_preflight_status="waiting_for_review_row",
+            )
+
+        self.assertEqual(queue_item["last_failure_class"], "review_row_not_found")
+        self.assertEqual(queue_item["last_failure_phase"], "preflight")
+        self.assertIn("probe pages", queue_item["last_breadcrumb_summary"])
+
     def test_queue_review_reply_records_workflow_control_state(self) -> None:
         quality_state = {
             "artifacts": {
@@ -163,6 +248,7 @@ class ReviewReplyExecutorWorkflowTests(unittest.TestCase):
             stack.enter_context(patch.object(review_reply_executor, "save_session_state"))
             stack.enter_context(patch.object(review_reply_executor, "save_quality_gate_state"))
             stack.enter_context(patch.object(review_reply_executor, "save_queue_state"))
+            stack.enter_context(patch.object(review_reply_executor, "run_pw_command"))
             time_mock = stack.enter_context(patch.object(review_reply_executor, "time"))
             control_mock = stack.enter_context(patch.object(review_reply_executor, "record_workflow_transition"))
             time_mock.sleep.return_value = None
