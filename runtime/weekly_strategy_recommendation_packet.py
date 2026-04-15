@@ -46,8 +46,12 @@ def _competitor_signal_quality(benchmark_payload: dict[str, Any], snapshot_paylo
     live_accounts = int(snapshot_summary.get("live_account_count") or 0)
     cached_accounts = int(snapshot_summary.get("cached_account_count") or 0)
     hard_failures = int(snapshot_summary.get("failed_account_count") or 0)
+    degraded_fetches = int(snapshot_summary.get("degraded_account_count") or 0)
+    scheduled_skip_accounts = int(snapshot_summary.get("scheduled_skip_account_count") or snapshot_summary.get("scheduled_skip_count") or 0)
     if post_count >= 40 and live_accounts >= 4 and hard_failures == 0:
         return "medium", "Competitor social coverage is healthy enough to influence what we test next."
+    if hard_failures == 0 and degraded_fetches == 0 and scheduled_skip_accounts > 0 and post_count >= 24:
+        return "medium", "Competitor social coverage is on a staggered cadence, but the snapshot remains healthy enough for bounded weekly tests."
     if post_count >= 24 and (live_accounts >= 2 or cached_accounts >= 2):
         return "low_medium", "Competitor social coverage is useful, but some of it is coming from cached fallback rather than fresh pulls."
     return "low", "Competitor social coverage is too degraded to drive more than one or two bounded experiments."

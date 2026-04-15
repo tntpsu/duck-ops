@@ -344,6 +344,157 @@ class CompetitorSocialSnapshotCollectorTests(unittest.TestCase):
         self.assertTrue(payload["failures"][0]["fallback_used"])
         self.assertEqual(payload["failures"][0]["failure_class"], "profile_api_rate_limited_html_profile_cached_posts")
 
+    def test_build_competitor_social_snapshots_reuses_scheduled_skip_cache_without_failure(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "competitor_social_sources.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "collection_boundary": {
+                            "max_accounts_per_run": 10,
+                            "latest_posts_per_account": 2,
+                            "refresh_bucket_count": 8,
+                            "force_refresh_after_hours": 96,
+                        },
+                        "seed_accounts": [
+                            {
+                                "brand_key": "wilder",
+                                "display_name": "Wilderkind Studio",
+                                "instagram_handle": "wilderkind.studio",
+                                "verification_status": "confirmed",
+                                "confidence": "high",
+                                "category": "direct",
+                                "reason": "Overlap",
+                            },
+                            {
+                                "brand_key": "duck3d",
+                                "display_name": "Duck3DPrint",
+                                "instagram_handle": "duck3dprint.shop",
+                                "verification_status": "confirmed",
+                                "confidence": "medium",
+                                "category": "direct",
+                                "reason": "Overlap",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            state_path = root / "state" / "competitor_social_snapshots.json"
+            history_path = root / "state" / "competitor_social_snapshot_history.json"
+            operator_json_path = root / "output" / "operator" / "competitor_social_snapshots.json"
+            markdown_path = root / "output" / "operator" / "competitor_social_snapshots.md"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": "2026-04-15T08:00:00-04:00",
+                        "profiles": [
+                            {
+                                "account_handle": "wilderkind.studio",
+                                "full_name": "Wilderkind Studio",
+                                "snapshot_source": "live",
+                                "observed_at": "2026-04-15T08:00:00-04:00",
+                            },
+                            {
+                                "account_handle": "duck3dprint.shop",
+                                "full_name": "Duck3DPrint",
+                                "snapshot_source": "live",
+                                "observed_at": "2026-04-15T08:00:00-04:00",
+                            },
+                        ],
+                        "posts": [
+                            {
+                                "account_handle": "wilderkind.studio",
+                                "post_url": "https://www.instagram.com/p/WILDER1/",
+                                "observed_at": "2026-04-15T08:00:00-04:00",
+                                "post_format": "image",
+                                "hook_family": "statement_showcase",
+                                "theme": "wedding",
+                                "engagement_visible": {"likes": 5, "comments": 1},
+                                "engagement_score": 9.0,
+                            },
+                            {
+                                "account_handle": "duck3dprint.shop",
+                                "post_url": "https://www.instagram.com/p/DUCK31/",
+                                "observed_at": "2026-04-15T08:00:00-04:00",
+                                "post_format": "image",
+                                "hook_family": "statement_showcase",
+                                "theme": "dashboard",
+                                "engagement_visible": {"likes": 4, "comments": 1},
+                                "engagement_score": 8.0,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            profile_payload = {
+                "data": {
+                    "user": {
+                        "full_name": "Duck3DPrint",
+                        "biography": "Dashboard ducks",
+                        "edge_followed_by": {"count": 10},
+                        "edge_follow": {"count": 20},
+                        "edge_owner_to_timeline_media": {"count": 5},
+                    }
+                }
+            }
+            timeline_payload = {
+                "items": [
+                    {
+                        "pk": "2",
+                        "code": "DUCK32",
+                        "taken_at": 1759797656,
+                        "media_type": 1,
+                        "like_count": 3,
+                        "comment_count": 1,
+                        "caption": {"text": "Dashboard duck refresh #dashboard #duck"},
+                    }
+                ]
+            }
+
+            def fake_request_json(url: str, *, referer_handle: str | None = None) -> dict:
+                if "duck3dprint.shop" not in url:
+                    raise AssertionError(f"Unexpected live request for skipped account: {url}")
+                if "web_profile_info" in url:
+                    return profile_payload
+                return timeline_payload
+
+            with patch.object(competitor_social_snapshot_collector, "CONFIG_PATH", config_path), patch.object(
+                competitor_social_snapshot_collector, "STATE_PATH", state_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "HISTORY_PATH", history_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "OPERATOR_JSON_PATH", operator_json_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "OUTPUT_MD_PATH", markdown_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "_request_json", side_effect=fake_request_json
+            ), patch.object(
+                competitor_social_snapshot_collector, "_refresh_bucket_index", return_value=1
+            ), patch.object(
+                competitor_social_snapshot_collector.time, "sleep", lambda *_args, **_kwargs: None
+            ):
+                payload = competitor_social_snapshot_collector.build_competitor_social_snapshots()
+
+        self.assertEqual(payload["summary"]["collected_account_count"], 2)
+        self.assertEqual(payload["summary"]["failed_account_count"], 0)
+        self.assertEqual(payload["summary"]["degraded_account_count"], 0)
+        self.assertEqual(payload["summary"]["scheduled_skip_account_count"], 1)
+        self.assertEqual(payload["summary"]["active_refresh_target_count"], 1)
+        self.assertEqual(payload["summary"]["forced_refresh_account_count"], 0)
+        skipped_profile = next(item for item in payload["profiles"] if item["account_handle"] == "wilderkind.studio")
+        skipped_post = next(item for item in payload["posts"] if item["account_handle"] == "wilderkind.studio")
+        self.assertEqual(skipped_profile["snapshot_source"], "scheduled_skip_cached_profile_and_posts")
+        self.assertEqual(skipped_post["snapshot_source"], "scheduled_skip_cached")
+        self.assertEqual(payload["scheduled_skips"][0]["account_handle"], "wilderkind.studio")
+        self.assertEqual(payload["failures"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

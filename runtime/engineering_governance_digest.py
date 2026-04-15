@@ -248,6 +248,8 @@ def _competitor_social_snapshot_status() -> dict[str, Any]:
     cached_count = int(summary.get("cached_account_count") or 0) if isinstance(summary, dict) else 0
     failed_count = int(summary.get("failed_account_count") or 0) if isinstance(summary, dict) else 0
     degraded_count = int(summary.get("degraded_account_count") or 0) if isinstance(summary, dict) else 0
+    scheduled_skip_count = int(summary.get("scheduled_skip_account_count") or summary.get("scheduled_skip_count") or 0) if isinstance(summary, dict) else 0
+    active_refresh_target_count = int(summary.get("active_refresh_target_count") or 0) if isinstance(summary, dict) else 0
     collected_count = int(summary.get("collected_account_count") or 0) if isinstance(summary, dict) else 0
     freshness_hours = age_hours(generated_at)
 
@@ -261,12 +263,25 @@ def _competitor_social_snapshot_status() -> dict[str, Any]:
             else f"{failed_count} hard failure(s) recorded and the collector could not provide a live snapshot."
         )
     elif cached_count > 0 or degraded_count > 0:
-        status_key = "degraded_cached_fallback"
-        status_label = "DEGRADED CACHED FALLBACK"
-        top_label = f"{cached_count} cached fallback account(s)"
-        summary_text = (
-            f"Collector is alive but using cached fallback for {cached_count} account(s) with {live_count} live account(s) and {degraded_count} degraded fetches."
-        )
+        if degraded_count > 0:
+            status_key = "degraded_cached_fallback"
+            status_label = "DEGRADED CACHED FALLBACK"
+            top_label = f"{cached_count} cached fallback account(s)"
+            summary_text = (
+                f"Collector is alive but using cached fallback for {cached_count} account(s) with {live_count} live account(s) and {degraded_count} degraded fetches."
+            )
+        elif scheduled_skip_count > 0:
+            status_key = "healthy_staggered"
+            status_label = "HEALTHY STAGGERED"
+            top_label = f"{scheduled_skip_count} scheduled skip account(s)"
+            summary_text = (
+                f"Collector is rotating refreshes intentionally: {scheduled_skip_count} account(s) reused recent cache while {active_refresh_target_count} account(s) were targeted live this run."
+            )
+        else:
+            status_key = "degraded_cached_fallback"
+            status_label = "DEGRADED CACHED FALLBACK"
+            top_label = f"{cached_count} cached fallback account(s)"
+            summary_text = f"Collector is alive but using cached fallback for {cached_count} account(s)."
     else:
         status_key = "healthy_live"
         status_label = "HEALTHY LIVE"
@@ -293,6 +308,8 @@ def _competitor_social_snapshot_status() -> dict[str, Any]:
         "cached_account_count": cached_count,
         "failed_account_count": failed_count,
         "degraded_account_count": degraded_count,
+        "scheduled_skip_account_count": scheduled_skip_count,
+        "active_refresh_target_count": active_refresh_target_count,
     }
 
 
@@ -356,6 +373,16 @@ def _build_findings(
                 "title": "Competitor snapshot collection is using cached fallback",
                 "summary": str(competitor_snapshot_status.get("summary") or "The collector is serving cached fallback data."),
                 "next_action": "Re-run the observe-only collector to restore live competitor snapshot coverage.",
+            }
+        )
+    elif competitor_snapshot_status.get("status_key") == "healthy_staggered":
+        findings.append(
+            {
+                "priority": "P3",
+                "kind": "observe",
+                "title": "Competitor snapshot collection is on staggered cadence",
+                "summary": str(competitor_snapshot_status.get("summary") or "The collector intentionally reused recent cache to reduce rate-limit pressure."),
+                "next_action": "Watch whether the staggered cadence restores more live account pulls over the next few runs.",
             }
         )
 

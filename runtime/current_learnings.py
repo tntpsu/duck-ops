@@ -35,6 +35,8 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
         summary.get("failed_account_count")
         or sum(1 for item in failures if isinstance(item, dict) and not bool(item.get("fallback_used")))
     )
+    scheduled_skip_account_count = int(summary.get("scheduled_skip_account_count") or summary.get("scheduled_skip_count") or 0)
+    active_refresh_target_count = int(summary.get("active_refresh_target_count") or 0)
     post_count = int(summary.get("post_count") or len(snapshot_payload.get("posts") or []))
     generated_at = _compact_text(snapshot_payload.get("generated_at"))
     snapshot_age_hours = age_hours(generated_at) if generated_at else None
@@ -49,11 +51,21 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
             f"so this snapshot is not fully live."
         )
     elif cached_account_count > 0 or degraded_account_count > 0:
-        freshness_label = "cached"
-        freshness_note = (
-            f"Cached fallback truth: {cached_account_count} account(s) used cached data and "
-            f"{degraded_account_count} account(s) had degraded fetches."
-        )
+        if degraded_account_count > 0:
+            freshness_label = "cached"
+            freshness_note = (
+                f"Cached fallback truth: {cached_account_count} account(s) used cached data and "
+                f"{degraded_account_count} account(s) had degraded fetches."
+            )
+        elif scheduled_skip_account_count > 0:
+            freshness_label = "staggered"
+            freshness_note = (
+                f"Staggered refresh truth: {scheduled_skip_account_count} account(s) were intentionally reused from recent cache "
+                f"while {active_refresh_target_count} account(s) were targeted for refresh this run."
+            )
+        else:
+            freshness_label = "cached"
+            freshness_note = f"Cached fallback truth: {cached_account_count} account(s) used cached data."
     elif collected_account_count > 0:
         freshness_label = "live"
         freshness_note = f"Live truth: {collected_account_count} account(s) were collected without cached fallback."
@@ -70,6 +82,8 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
         "competitor_social_cached_account_count": cached_account_count,
         "competitor_social_degraded_account_count": degraded_account_count,
         "competitor_social_failed_account_count": failed_account_count,
+        "competitor_social_scheduled_skip_account_count": scheduled_skip_account_count,
+        "competitor_social_active_refresh_target_count": active_refresh_target_count,
         "competitor_social_freshness_label": freshness_label,
         "competitor_social_freshness_note": freshness_note,
     }
@@ -194,6 +208,8 @@ def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
         f"- Cached fallback accounts: `{summary.get('competitor_social_cached_account_count') or 0}`",
         f"- Degraded fetches: `{summary.get('competitor_social_degraded_account_count') or 0}`",
         f"- Hard failures: `{summary.get('competitor_social_failed_account_count') or 0}`",
+        f"- Scheduled skip accounts: `{summary.get('competitor_social_scheduled_skip_account_count') or 0}`",
+        f"- Active refresh targets: `{summary.get('competitor_social_active_refresh_target_count') or 0}`",
         f"- Truth: {summary.get('competitor_social_freshness_note') or 'No competitor social snapshot is available yet.'}",
         "",
         "## What Changed",

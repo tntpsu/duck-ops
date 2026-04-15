@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from governance_review_common import DUCK_OPS_ROOT, OUTPUT_OPERATOR_DIR, load_json, now_local_iso, write_json, write_markdown
+from governance_review_common import DUCK_OPS_ROOT, OUTPUT_OPERATOR_DIR, age_hours, load_json, now_local_iso, write_json, write_markdown
 
 
 CONFIG_PATH = DUCK_OPS_ROOT / "config" / "competitor_social_sources.json"
@@ -157,6 +157,18 @@ def _load_existing_snapshot() -> dict[str, Any]:
 def _load_config() -> dict[str, Any]:
     payload = load_json(CONFIG_PATH, {})
     return payload if isinstance(payload, dict) else {}
+
+
+def _refresh_bucket_index(bucket_count: int, *, generated_at: str | None = None) -> int:
+    if bucket_count <= 1:
+        return 0
+    if generated_at:
+        try:
+            dt = datetime.fromisoformat(generated_at)
+            return dt.date().toordinal() % bucket_count
+        except Exception:
+            pass
+    return datetime.now().astimezone().date().toordinal() % bucket_count
 
 
 def _request_json(url: str, *, referer_handle: str | None = None) -> dict[str, Any]:
@@ -384,17 +396,70 @@ def _clone_cached_profile(profile: dict[str, Any], *, snapshot_source: str, refr
     return cloned
 
 
-def _clone_cached_posts(posts: list[dict[str, Any]], *, refreshed_at: str, limit: int) -> list[dict[str, Any]]:
+def _clone_cached_posts(
+    posts: list[dict[str, Any]],
+    *,
+    refreshed_at: str,
+    limit: int,
+    snapshot_source: str = "cached",
+) -> list[dict[str, Any]]:
     cloned_rows: list[dict[str, Any]] = []
     for row in list(posts or [])[:limit]:
         if not isinstance(row, dict):
             continue
         cloned = dict(row)
-        cloned["snapshot_source"] = "cached"
+        cloned["snapshot_source"] = snapshot_source
         cloned["cache_refreshed_at"] = refreshed_at
         cloned["original_observed_at"] = _compact_text(cloned.get("observed_at")) or None
         cloned_rows.append(cloned)
     return cloned_rows
+
+
+def _cached_snapshot_age_hours(cached_profile: dict[str, Any] | None, existing_snapshot_generated_at: str | None) -> float | None:
+    observed_at = _compact_text((cached_profile or {}).get("observed_at")) or _compact_text(existing_snapshot_generated_at)
+    return age_hours(observed_at) if observed_at else None
+
+
+def _should_force_refresh(
+    *,
+    cached_profile: dict[str, Any] | None,
+    cached_posts: list[dict[str, Any]] | None,
+    existing_snapshot_generated_at: str | None,
+    force_refresh_after_hours: int,
+) -> bool:
+    if not cached_profile or not cached_posts:
+        return True
+    snapshot_age = _cached_snapshot_age_hours(cached_profile, existing_snapshot_generated_at)
+    if snapshot_age is not None and snapshot_age >= force_refresh_after_hours:
+        return True
+    return False
+
+
+def _scheduled_skip_reuse(
+    *,
+    seed: dict[str, Any],
+    cached_profile: dict[str, Any],
+    cached_posts: list[dict[str, Any]],
+    refreshed_at: str,
+    limit: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    profile = _clone_cached_profile(
+        cached_profile,
+        snapshot_source="scheduled_skip_cached_profile_and_posts",
+        refreshed_at=refreshed_at,
+    )
+    posts = _clone_cached_posts(
+        cached_posts,
+        refreshed_at=refreshed_at,
+        limit=limit,
+        snapshot_source="scheduled_skip_cached",
+    )
+    skip_record = {
+        "account_handle": _compact_text(seed.get("instagram_handle")),
+        "skip_reason": "scheduled_bucket_skip",
+        "message": "Refresh was intentionally skipped this run to reduce Instagram rate-limit pressure; recent cached data was reused.",
+    }
+    return profile, posts, skip_record
 
 
 def _html_meta_content(html_text: str, key: str) -> str | None:
@@ -423,6 +488,7 @@ def _profile_summary_from_html(seed: dict[str, Any], html_text: str) -> dict[str
         "follower_count": _safe_count_int(counts_match.group("followers")) if counts_match else None,
         "following_count": _safe_count_int(counts_match.group("following")) if counts_match else None,
         "media_count": _safe_count_int(counts_match.group("posts")) if counts_match else None,
+        "observed_at": now_local_iso(),
         "is_private": False,
         "is_verified": None,
         "profile_pic_url": None,
@@ -447,6 +513,7 @@ def _profile_summary(profile_payload: dict[str, Any], seed: dict[str, Any]) -> d
         "follower_count": _safe_int((user.get("edge_followed_by") or {}).get("count")) or _safe_int(user.get("follower_count")),
         "following_count": _safe_int((user.get("edge_follow") or {}).get("count")) or _safe_int(user.get("following_count")),
         "media_count": _safe_int((user.get("edge_owner_to_timeline_media") or {}).get("count")) or _safe_int(user.get("media_count")),
+        "observed_at": now_local_iso(),
         "is_private": bool(user.get("is_private")),
         "is_verified": bool(user.get("is_verified")),
         "profile_pic_url": _compact_text(user.get("profile_pic_url_hd")) or _compact_text(user.get("profile_pic_url")) or None,
@@ -686,6 +753,7 @@ def _account_rollups(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = None) -> dict[str, Any]:
     config = _load_config()
     existing_snapshot = _load_existing_snapshot()
+    existing_snapshot_generated_at = _compact_text(existing_snapshot.get("generated_at")) or None
     cached_profiles_by_handle = {
         _compact_text(item.get("account_handle")): item
         for item in (existing_snapshot.get("profiles") or [])
@@ -700,23 +768,58 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
             continue
         cached_posts_by_handle.setdefault(handle, []).append(row)
     seed_accounts = [item for item in (config.get("seed_accounts") or []) if isinstance(item, dict)]
-    target_count = latest_posts_per_account or int(((config.get("collection_boundary") or {}).get("latest_posts_per_account")) or 12)
+    collection_boundary = config.get("collection_boundary") or {}
+    target_count = latest_posts_per_account or int((collection_boundary.get("latest_posts_per_account")) or 12)
+    bucket_count = max(1, int(collection_boundary.get("refresh_bucket_count") or 1))
+    active_bucket_index = _refresh_bucket_index(bucket_count, generated_at=now_local_iso())
+    force_refresh_after_hours = int(collection_boundary.get("force_refresh_after_hours") or max(24, bucket_count * 24))
 
     profiles: list[dict[str, Any]] = []
     posts: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    scheduled_skips: list[dict[str, Any]] = []
     consecutive_profile_rate_limits = 0
     rate_limit_circuit_breaker_used = False
+    active_refresh_target_count = 0
+    attempted_refresh_account_count = 0
+    forced_refresh_account_count = 0
 
-    for seed in seed_accounts[: int(((config.get("collection_boundary") or {}).get("max_accounts_per_run")) or 10)]:
+    for index, seed in enumerate(seed_accounts[: int((collection_boundary.get("max_accounts_per_run")) or 10)]):
         handle = _compact_text(seed.get("instagram_handle"))
+        cached_profile = cached_profiles_by_handle.get(handle)
+        cached_posts = cached_posts_by_handle.get(handle)
+        force_refresh = _should_force_refresh(
+            cached_profile=cached_profile,
+            cached_posts=cached_posts,
+            existing_snapshot_generated_at=existing_snapshot_generated_at,
+            force_refresh_after_hours=force_refresh_after_hours,
+        )
+        in_active_bucket = bucket_count <= 1 or (index % bucket_count) == active_bucket_index
+        should_attempt_refresh = force_refresh or in_active_bucket
+        if not should_attempt_refresh and cached_profile and cached_posts:
+            profile, account_posts, skip_record = _scheduled_skip_reuse(
+                seed=seed,
+                cached_profile=cached_profile,
+                cached_posts=cached_posts,
+                refreshed_at=now_local_iso(),
+                limit=target_count,
+            )
+            profiles.append(profile)
+            posts.extend(account_posts)
+            scheduled_skips.append(skip_record)
+            continue
+
+        active_refresh_target_count += 1
+        if force_refresh:
+            forced_refresh_account_count += 1
         profile, account_posts, failure = _collect_account(
             seed,
             latest_posts_per_account=target_count,
             force_html_profile_only=consecutive_profile_rate_limits >= PROFILE_RATE_LIMIT_CIRCUIT_BREAKER_THRESHOLD,
-            cached_profile=cached_profiles_by_handle.get(handle),
-            cached_posts=cached_posts_by_handle.get(handle),
+            cached_profile=cached_profile,
+            cached_posts=cached_posts,
         )
+        attempted_refresh_account_count += 1
         if profile:
             profiles.append(profile)
         posts.extend(account_posts)
@@ -743,6 +846,11 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
         for profile in profiles
         if _compact_text(profile.get("snapshot_source")) not in {"", "live"}
     )
+    scheduled_skip_account_count = sum(
+        1
+        for profile in profiles
+        if "scheduled_skip" in _compact_text(profile.get("snapshot_source"))
+    )
     html_profile_account_count = sum(
         1
         for profile in profiles
@@ -766,18 +874,26 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
             "failed_account_count": hard_failure_count,
             "degraded_account_count": degraded_account_count,
             "cached_account_count": cached_account_count,
+            "scheduled_skip_account_count": scheduled_skip_account_count,
             "html_profile_account_count": html_profile_account_count,
             "profile_only_account_count": profile_only_account_count,
             "live_account_count": max(0, len(profiles) - cached_account_count),
             "post_count": len(posts),
             "latest_posts_per_account": target_count,
+            "refresh_bucket_count": bucket_count,
+            "active_refresh_bucket_index": active_bucket_index,
+            "active_refresh_target_count": active_refresh_target_count,
+            "attempted_refresh_account_count": attempted_refresh_account_count,
+            "forced_refresh_account_count": forced_refresh_account_count,
+            "scheduled_skip_count": len(scheduled_skips),
             "rate_limit_circuit_breaker_used": rate_limit_circuit_breaker_used,
             "data_quality_note": "Visible metrics vary by post type and account. Treat this as directional benchmark data, not first-party truth.",
         },
-        "collection_boundary": config.get("collection_boundary") or {},
+        "collection_boundary": collection_boundary,
         "profiles": profiles,
         "posts": posts,
         "failures": failures,
+        "scheduled_skips": scheduled_skips,
         "rollups": {
             "top_accounts": _account_rollups(posts),
             "top_themes": _counter_rows(theme_counter),
@@ -811,8 +927,12 @@ def render_competitor_social_snapshots_markdown(payload: dict[str, Any]) -> str:
         f"- Accounts with degraded fetches: `{summary.get('degraded_account_count') or 0}`",
         f"- Accounts hard failed: `{summary.get('failed_account_count') or 0}`",
         f"- Accounts using cached fallback: `{summary.get('cached_account_count') or 0}`",
+        f"- Accounts intentionally skipped on this refresh bucket: `{summary.get('scheduled_skip_account_count') or 0}`",
         f"- Accounts recovered from HTML profile fallback: `{summary.get('html_profile_account_count') or 0}`",
         f"- Accounts with profile-only fallback: `{summary.get('profile_only_account_count') or 0}`",
+        f"- Active refresh targets this run: `{summary.get('active_refresh_target_count') or 0}`",
+        f"- Forced refresh targets this run: `{summary.get('forced_refresh_account_count') or 0}`",
+        f"- Refresh bucket: `{summary.get('active_refresh_bucket_index') or 0}` of `{summary.get('refresh_bucket_count') or 1}`",
         f"- Posts observed: `{summary.get('post_count') or 0}`",
         f"- Rate-limit circuit breaker used: `{bool(summary.get('rate_limit_circuit_breaker_used'))}`",
         "",
@@ -856,6 +976,16 @@ def render_competitor_social_snapshots_markdown(payload: dict[str, Any]) -> str:
     else:
         for item in failures:
             lines.append(f"- `{item.get('account_handle')}`: `{item.get('failure_class')}` | {item.get('message')}")
+        lines.append("")
+
+    lines.extend(["## Scheduled Skips", ""])
+    scheduled_skips = payload.get("scheduled_skips") or []
+    if not scheduled_skips:
+        lines.append("No accounts were intentionally skipped on this run.")
+        lines.append("")
+    else:
+        for item in scheduled_skips:
+            lines.append(f"- `{item.get('account_handle')}`: {item.get('message')}")
         lines.append("")
 
     lines.extend(["## What Changed", ""])
