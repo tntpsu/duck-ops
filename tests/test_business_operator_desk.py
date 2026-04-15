@@ -10,7 +10,11 @@ RUNTIME_DIR = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
-from business_operator_desk import build_business_operator_desk, render_business_operator_desk_markdown
+from business_operator_desk import (
+    build_business_operator_desk,
+    render_business_operator_desk_markdown,
+    render_business_section,
+)
 
 
 class BusinessOperatorDeskTests(unittest.TestCase):
@@ -257,6 +261,137 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertEqual(payload["counts"]["learning_beliefs"], 1)
         self.assertIn("## Learning Surface", markdown)
         self.assertIn("Evening is the current best-performing posting window.", markdown)
+
+    def test_operator_desk_surfaces_weekly_strategy_packet(self) -> None:
+        with patch(
+            "business_operator_desk._load_learning_surface",
+            return_value={
+                "available": False,
+                "path": "/tmp/current_learnings.md",
+                "items": [],
+                "change_count": 0,
+                "idea_count": 0,
+            },
+        ), patch(
+            "business_operator_desk._load_weekly_strategy_packet",
+            return_value={
+                "available": True,
+                "path": "/tmp/weekly_strategy_recommendation_packet.md",
+                "own_signal_confidence": "low",
+                "competitor_signal_confidence": "low_medium",
+                "own_signal_note": "Own-post coverage is still sparse.",
+                "competitor_signal_note": "Competitor coverage is relying on cached fallback.",
+                "recommendation_count": 2,
+                "watchout_count": 1,
+                "recommendations": [{"title": "Keep testing the `evening` posting window"}],
+                "watchouts": ["Competitor coverage relied on cached fallback."],
+            },
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        self.assertEqual(payload["counts"]["strategy_recommendations"], 1)
+        self.assertEqual(payload["counts"]["strategy_watchouts"], 1)
+        self.assertIn("## Weekly Strategy Packet", markdown)
+        self.assertIn("Keep testing the `evening` posting window", markdown)
+        self.assertIn("Competitor coverage relied on cached fallback.", markdown)
+
+    def test_render_business_section_learning_uses_payload_items_without_crashing(self) -> None:
+        output = render_business_section(
+            {
+                "learning_surface": {
+                    "available": True,
+                    "path": "/tmp/current_learnings.md",
+                    "change_count": 2,
+                    "idea_count": 3,
+                    "items": [{"headline": "Fallback belief should not be used."}],
+                },
+                "sections": {
+                    "learning_surface": [
+                        {"headline": "Evening posts still outperform midday posts."},
+                    ]
+                },
+            },
+            "learning",
+        )
+
+        self.assertIn("Duck Ops Current Learnings", output)
+        self.assertIn("Evening posts still outperform midday posts.", output)
+        self.assertNotIn("Fallback belief should not be used.", output)
+
+    def test_render_business_section_strategy_packet_includes_recommendations_and_watchouts(self) -> None:
+        output = render_business_section(
+            {
+                "weekly_strategy_packet": {
+                    "available": True,
+                    "path": "/tmp/weekly_strategy_recommendation_packet.md",
+                    "own_signal_confidence": "low",
+                    "competitor_signal_confidence": "low_medium",
+                    "recommendation_count": 1,
+                    "watchout_count": 1,
+                    "own_signal_note": "Own-post coverage is still sparse.",
+                    "competitor_signal_note": "Competitor coverage is relying on cached fallback.",
+                    "recommendations": [
+                        {
+                            "priority": "P1",
+                            "category": "timing",
+                            "title": "Keep testing the `evening` posting window",
+                            "recommendation": "Schedule one more evening post this week.",
+                            "evidence": "2 observed posts with the best current score.",
+                        }
+                    ],
+                    "watchouts": ["Competitor coverage relied on cached fallback."],
+                },
+                "sections": {
+                    "weekly_strategy_packet": [
+                        {
+                            "priority": "P1",
+                            "category": "timing",
+                            "title": "Keep testing the `evening` posting window",
+                            "recommendation": "Schedule one more evening post this week.",
+                            "evidence": "2 observed posts with the best current score.",
+                        }
+                    ]
+                },
+            },
+            "packet",
+        )
+
+        self.assertIn("Duck Ops Weekly Strategy Packet", output)
+        self.assertIn("Keep testing the `evening` posting window", output)
+        self.assertIn("Watchouts:", output)
+        self.assertIn("Competitor coverage relied on cached fallback.", output)
+
+    def test_render_business_section_reviews_includes_decision_command(self) -> None:
+        output = render_business_section(
+            {
+                "counts": {"review_queue_backlog": 1},
+                "sections": {
+                    "review_queue": [
+                        {
+                            "short_id": "221",
+                            "decision": "publish_ready",
+                            "title": "Review carousel for spring buyers",
+                            "detail_command": "why 221",
+                            "approve_command": "approve 221 because ...",
+                        }
+                    ]
+                },
+            },
+            "reviews",
+        )
+
+        self.assertIn("Detail: why 221", output)
+        self.assertIn("Decide: approve 221 because ...", output)
 
 
 if __name__ == "__main__":

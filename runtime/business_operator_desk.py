@@ -18,6 +18,8 @@ from workflow_operator_summary import build_workflow_followthrough_items
 
 CURRENT_LEARNINGS_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/current_learnings.json")
 CURRENT_LEARNINGS_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/current_learnings.md")
+WEEKLY_STRATEGY_PACKET_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/weekly_strategy_recommendation_packet.json")
+WEEKLY_STRATEGY_PACKET_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/weekly_strategy_recommendation_packet.md")
 
 
 def _trim_text(value: str | None, limit: int = 160) -> str:
@@ -48,6 +50,35 @@ def _load_learning_surface() -> dict[str, Any]:
         "items": items[:4],
         "change_count": len(payload.get("changes_since_previous") or []),
         "idea_count": len(payload.get("ideas_to_test") or []),
+    }
+
+
+def _load_weekly_strategy_packet() -> dict[str, Any]:
+    if not WEEKLY_STRATEGY_PACKET_PATH.exists():
+        return {"available": False, "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH), "recommendations": [], "watchouts": []}
+    try:
+        payload = json.loads(WEEKLY_STRATEGY_PACKET_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": False, "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH), "recommendations": [], "watchouts": []}
+    if not isinstance(payload, dict):
+        return {"available": False, "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH), "recommendations": [], "watchouts": []}
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    recommendations = list(payload.get("recommendations") or [])
+    watchouts = list(payload.get("watchouts") or [])
+    return {
+        "available": True,
+        "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH),
+        "generated_at": payload.get("generated_at"),
+        "headline": summary.get("headline"),
+        "own_signal_confidence": summary.get("own_signal_confidence"),
+        "own_signal_note": summary.get("own_signal_note"),
+        "competitor_signal_confidence": summary.get("competitor_signal_confidence"),
+        "competitor_signal_note": summary.get("competitor_signal_note"),
+        "recommendation_count": len(recommendations),
+        "watchout_count": len(watchouts),
+        "recommendations": recommendations[:4],
+        "watchouts": watchouts[:3],
     }
 
 
@@ -312,6 +343,7 @@ def build_business_operator_desk(
     weekly_sale_items = _weekly_sale_items(weekly_sale_monitor)
     workflow_items = list(workflow_followthrough or build_workflow_followthrough_items(limit=6))
     learning_surface = _load_learning_surface()
+    weekly_strategy_packet = _load_weekly_strategy_packet()
     counts = (nightly_summary or {}).get("counts") or {}
     pack_items = list(((nightly_summary or {}).get("sections") or {}).get("orders_to_pack") or [])
     review_queue_backlog = int((review_queue or {}).get("pending_count_all") or len((review_queue or {}).get("items") or []))
@@ -319,6 +351,7 @@ def build_business_operator_desk(
         "generated_at": datetime.now().astimezone().isoformat(),
         "strategy_focus": load_master_roadmap_focus(),
         "learning_surface": learning_surface,
+        "weekly_strategy_packet": weekly_strategy_packet,
         "counts": {
             "customer_packets": len(customer_items),
             "customer_attention_items": int(counts.get("customer_attention_items") or 0),
@@ -337,6 +370,8 @@ def build_business_operator_desk(
             "usps_live_customer_items": sum(1 for item in customer_items if str(item.get("tracking_live_label") or "").strip()),
             "workflow_followthrough_items": len(workflow_items),
             "learning_beliefs": len(learning_surface.get("items") or []),
+            "strategy_recommendations": len(weekly_strategy_packet.get("recommendations") or []),
+            "strategy_watchouts": len(weekly_strategy_packet.get("watchouts") or []),
         },
         "next_actions": _build_next_actions(
             customer_items=customer_items,
@@ -358,6 +393,7 @@ def build_business_operator_desk(
             "review_queue": review_items[:6],
             "workflow_followthrough": workflow_items[:6],
             "learning_surface": list(learning_surface.get("items") or [])[:4],
+            "weekly_strategy_packet": list(weekly_strategy_packet.get("recommendations") or [])[:4],
         },
     }
 
@@ -367,9 +403,13 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     sections = payload.get("sections") or {}
     strategy_focus = payload.get("strategy_focus") or {}
     learning_surface = payload.get("learning_surface") or {}
+    weekly_strategy_packet = payload.get("weekly_strategy_packet") or {}
     if not learning_surface.get("available"):
         learning_surface = _load_learning_surface()
     learning_items = (sections.get("learning_surface") or []) or list(learning_surface.get("items") or [])
+    if not weekly_strategy_packet.get("available"):
+        weekly_strategy_packet = _load_weekly_strategy_packet()
+    strategy_items = (sections.get("weekly_strategy_packet") or []) or list(weekly_strategy_packet.get("recommendations") or [])
     lines = [
         "# Duck Ops Business Desk",
         "",
@@ -390,6 +430,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Customer cases with live USPS context: `{counts.get('usps_live_customer_items', 0)}`",
         f"- Workflow follow-through items: `{counts.get('workflow_followthrough_items', 0)}`",
         f"- Learning beliefs surfaced: `{counts.get('learning_beliefs') or len(learning_items)}`",
+        f"- Strategy recommendations surfaced: `{counts.get('strategy_recommendations') or len(strategy_items)}`",
+        f"- Strategy watchouts surfaced: `{counts.get('strategy_watchouts') or len(weekly_strategy_packet.get('watchouts') or [])}`",
         "",
         "## Strategic Focus",
         "",
@@ -418,6 +460,32 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append("- Top beliefs:")
             for item in learning_items:
                 lines.append(f"  - {_trim_text(item.get('headline'), 150)}")
+    lines.extend([
+        "",
+        "## Weekly Strategy Packet",
+        "",
+    ])
+    if not weekly_strategy_packet.get("available"):
+        lines.append("Weekly strategy packet is not available yet.")
+    else:
+        lines.append(f"- Page: `{weekly_strategy_packet.get('path')}`")
+        lines.append(f"- Own signal confidence: `{weekly_strategy_packet.get('own_signal_confidence') or 'unknown'}`")
+        lines.append(f"- Competitor signal confidence: `{weekly_strategy_packet.get('competitor_signal_confidence') or 'unknown'}`")
+        lines.append(f"- Recommendations: `{weekly_strategy_packet.get('recommendation_count', len(strategy_items))}`")
+        lines.append(f"- Watchouts: `{weekly_strategy_packet.get('watchout_count', len(weekly_strategy_packet.get('watchouts') or []))}`")
+        if weekly_strategy_packet.get("own_signal_note"):
+            lines.append(f"- Own-signal note: {_trim_text(weekly_strategy_packet.get('own_signal_note'), 180)}")
+        if weekly_strategy_packet.get("competitor_signal_note"):
+            lines.append(f"- Competitor-signal note: {_trim_text(weekly_strategy_packet.get('competitor_signal_note'), 180)}")
+        if strategy_items:
+            lines.append("- Top recommendations:")
+            for item in strategy_items:
+                lines.append(f"  - {_trim_text(item.get('title'), 120)}")
+        watchouts = weekly_strategy_packet.get("watchouts") or []
+        if watchouts:
+            lines.append("- Watchouts:")
+            for item in watchouts[:3]:
+                lines.append(f"  - {_trim_text(item, 160)}")
     lines.extend([
         "",
         "## Do Next",
@@ -572,6 +640,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
 
 def render_business_section(payload: dict[str, Any], section: str) -> str:
     section_key = section.strip().lower()
+    sections = payload.get("sections") or {}
     if section_key in {"status", "all", ""}:
         return render_business_operator_desk_markdown(payload)
 
@@ -598,6 +667,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "strategy": "strategy_focus",
         "learning": "learning_surface",
         "learnings": "learning_surface",
+        "packet": "weekly_strategy_packet",
+        "weekly_strategy": "weekly_strategy_packet",
+        "strategy_packet": "weekly_strategy_packet",
+        "recommendations": "weekly_strategy_packet",
     }
     normalized = aliases.get(section_key, section_key)
     if normalized == "next_actions":
@@ -643,7 +716,37 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append(f"- {_trim_text(item.get('headline'), 150)}")
         return "\n".join(lines)
 
-    sections = payload.get("sections") or {}
+    if normalized == "weekly_strategy_packet":
+        lines = ["Duck Ops Weekly Strategy Packet", ""]
+        weekly_strategy_packet = payload.get("weekly_strategy_packet") or {}
+        if not weekly_strategy_packet.get("available"):
+            weekly_strategy_packet = _load_weekly_strategy_packet()
+        strategy_items = (sections.get("weekly_strategy_packet") or []) or list(weekly_strategy_packet.get("recommendations") or [])
+        if not weekly_strategy_packet.get("available"):
+            lines.append("Weekly strategy packet is not available yet.")
+        else:
+            lines.append(f"Page: {weekly_strategy_packet.get('path')}")
+            lines.append(f"Own signal confidence: {weekly_strategy_packet.get('own_signal_confidence') or 'unknown'}")
+            lines.append(f"Competitor signal confidence: {weekly_strategy_packet.get('competitor_signal_confidence') or 'unknown'}")
+            lines.append(f"Recommendations: {weekly_strategy_packet.get('recommendation_count', len(strategy_items))}")
+            lines.append(f"Watchouts: {weekly_strategy_packet.get('watchout_count', len(weekly_strategy_packet.get('watchouts') or []))}")
+            if weekly_strategy_packet.get("own_signal_note"):
+                lines.append(f"Own-signal note: {_trim_text(weekly_strategy_packet.get('own_signal_note'), 180)}")
+            if weekly_strategy_packet.get("competitor_signal_note"):
+                lines.append(f"Competitor-signal note: {_trim_text(weekly_strategy_packet.get('competitor_signal_note'), 180)}")
+            for item in strategy_items:
+                lines.append(f"- {item.get('priority')} | {item.get('category')} | {_trim_text(item.get('title'), 140)}")
+                if item.get("recommendation"):
+                    lines.append(f"  Recommendation: {_trim_text(item.get('recommendation'), 180)}")
+                if item.get("evidence"):
+                    lines.append(f"  Evidence: {_trim_text(item.get('evidence'), 180)}")
+            watchouts = weekly_strategy_packet.get("watchouts") or []
+            if watchouts:
+                lines.append("Watchouts:")
+                for item in watchouts[:3]:
+                    lines.append(f"- {_trim_text(item, 180)}")
+        return "\n".join(lines)
+
     items = sections.get(normalized) or []
     title_map = {
         "customer_packets": "Customer Queue",
@@ -708,6 +811,8 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             lines.append(f"- {item.get('short_id')} | {item.get('decision')} | {item.get('title')}")
             if item.get("detail_command"):
                 lines.append(f"  Detail: {item.get('detail_command')}")
+            if item.get("approve_command"):
+                lines.append(f"  Decide: {item.get('approve_command')}")
         elif normalized == "workflow_followthrough":
             lines.append(
                 f"- {item.get('lane')}: {item.get('title')} | {_trim_text(item.get('summary'), 120)}"
