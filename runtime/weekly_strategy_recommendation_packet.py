@@ -48,11 +48,17 @@ def _competitor_signal_quality(benchmark_payload: dict[str, Any], snapshot_paylo
     hard_failures = int(snapshot_summary.get("failed_account_count") or 0)
     degraded_fetches = int(snapshot_summary.get("degraded_account_count") or 0)
     scheduled_skip_accounts = int(snapshot_summary.get("scheduled_skip_account_count") or snapshot_summary.get("scheduled_skip_count") or 0)
+    profile_only_backoff_accounts = int(snapshot_summary.get("profile_only_backoff_account_count") or 0)
     if post_count >= 40 and live_accounts >= 4 and hard_failures == 0:
         return "medium", "Competitor social coverage is healthy enough to influence what we test next."
-    if hard_failures == 0 and degraded_fetches == 0 and scheduled_skip_accounts > 0 and post_count >= 24:
+    if hard_failures == 0 and degraded_fetches == 0 and profile_only_backoff_accounts == 0 and scheduled_skip_accounts > 0 and post_count >= 24:
         return "medium", "Competitor social coverage is on a staggered cadence, but the snapshot remains healthy enough for bounded weekly tests."
     if post_count >= 24 and (live_accounts >= 2 or cached_accounts >= 2):
+        if profile_only_backoff_accounts > 0:
+            return (
+                "low_medium",
+                f"Competitor social coverage is usable, but {profile_only_backoff_accounts} account(s) are on profile-only backoff because recent public refreshes still could not recover post timelines.",
+            )
         return "low_medium", "Competitor social coverage is useful, but some of it is coming from cached fallback rather than fresh pulls."
     return "low", "Competitor social coverage is too degraded to drive more than one or two bounded experiments."
 
@@ -106,14 +112,18 @@ def _recommendations(
 
     degraded_accounts = int((snapshot_payload.get("summary") or {}).get("degraded_account_count") or 0)
     hard_failures = int((snapshot_payload.get("summary") or {}).get("failed_account_count") or 0)
-    if degraded_accounts or hard_failures:
+    profile_only_backoff_accounts = int((snapshot_payload.get("summary") or {}).get("profile_only_backoff_account_count") or 0)
+    if degraded_accounts or hard_failures or profile_only_backoff_accounts:
         recommendations.append(
             {
                 "priority": "P2",
                 "category": "data_quality",
                 "title": "Treat competitor learnings as directional this week",
                 "recommendation": "Use competitor social patterns to guide small tests only; do not make big strategy changes until fresh live pulls improve again.",
-                "evidence": f"{degraded_accounts} degraded competitor account fetches and {hard_failures} hard failures in the latest snapshot.",
+                "evidence": (
+                    f"{degraded_accounts} degraded competitor account fetches, {hard_failures} hard failures, and "
+                    f"{profile_only_backoff_accounts} profile-only backoff account(s) in the latest snapshot."
+                ),
                 "confidence": "high",
             }
         )
@@ -136,6 +146,11 @@ def _recommendations(
 
 def _watchouts(snapshot_payload: dict[str, Any], social_payload: dict[str, Any]) -> list[str]:
     items: list[str] = []
+    profile_only_backoff_accounts = int(((snapshot_payload.get("summary") or {}).get("profile_only_backoff_account_count")) or 0)
+    if profile_only_backoff_accounts > 0:
+        items.append(
+            f"{profile_only_backoff_accounts} competitor account(s) are on profile-only backoff, which means some benchmark patterns are being held on older profile-only state until public timelines become recoverable again."
+        )
     if int(((snapshot_payload.get("summary") or {}).get("cached_account_count")) or 0) > 0:
         items.append("Competitor coverage relied on cached fallback for part of the snapshot, so use it to shape tests rather than major strategy pivots.")
     if int(((social_payload.get("summary") or {}).get("post_count")) or 0) < 4:

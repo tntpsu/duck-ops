@@ -495,6 +495,92 @@ class CompetitorSocialSnapshotCollectorTests(unittest.TestCase):
         self.assertEqual(payload["scheduled_skips"][0]["account_handle"], "wilderkind.studio")
         self.assertEqual(payload["failures"], [])
 
+    def test_build_competitor_social_snapshots_backs_off_profile_only_accounts_without_retrying_daily(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "competitor_social_sources.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "collection_boundary": {
+                            "max_accounts_per_run": 10,
+                            "latest_posts_per_account": 2,
+                            "refresh_bucket_count": 1,
+                            "force_refresh_after_hours": 96,
+                            "profile_only_backoff_hours": 168,
+                        },
+                        "seed_accounts": [
+                            {
+                                "brand_key": "matt",
+                                "display_name": "MattMadeMe",
+                                "instagram_handle": "mattmade.me",
+                                "verification_status": "confirmed",
+                                "confidence": "high",
+                                "category": "direct",
+                                "reason": "Overlap",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            state_path = root / "state" / "competitor_social_snapshots.json"
+            history_path = root / "state" / "competitor_social_snapshot_history.json"
+            operator_json_path = root / "output" / "operator" / "competitor_social_snapshots.json"
+            markdown_path = root / "output" / "operator" / "competitor_social_snapshots.md"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": "2026-04-15T08:00:00-04:00",
+                        "profiles": [
+                            {
+                                "account_handle": "mattmade.me",
+                                "full_name": "MattMadeMe",
+                                "snapshot_source": "html_profile",
+                                "observed_at": "2026-04-15T08:00:00-04:00",
+                            }
+                        ],
+                        "posts": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def unexpected_request(url: str, *, referer_handle: str | None = None) -> dict:
+                raise AssertionError(f"Profile-only backoff should not hit live endpoints: {url}")
+
+            with patch.object(competitor_social_snapshot_collector, "CONFIG_PATH", config_path), patch.object(
+                competitor_social_snapshot_collector, "STATE_PATH", state_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "HISTORY_PATH", history_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "OPERATOR_JSON_PATH", operator_json_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "OUTPUT_MD_PATH", markdown_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "_request_json", side_effect=unexpected_request
+            ), patch.object(
+                competitor_social_snapshot_collector, "age_hours", return_value=12
+            ), patch.object(
+                competitor_social_snapshot_collector.time, "sleep", lambda *_args, **_kwargs: None
+            ):
+                payload = competitor_social_snapshot_collector.build_competitor_social_snapshots()
+
+        self.assertEqual(payload["summary"]["collected_account_count"], 1)
+        self.assertEqual(payload["summary"]["failed_account_count"], 0)
+        self.assertEqual(payload["summary"]["degraded_account_count"], 0)
+        self.assertEqual(payload["summary"]["post_count"], 0)
+        self.assertEqual(payload["summary"]["scheduled_skip_account_count"], 1)
+        self.assertEqual(payload["summary"]["profile_only_account_count"], 1)
+        self.assertEqual(payload["summary"]["profile_only_backoff_account_count"], 1)
+        self.assertEqual(payload["summary"]["active_refresh_target_count"], 0)
+        self.assertEqual(payload["profiles"][0]["snapshot_source"], "scheduled_skip_html_profile_only_backoff")
+        self.assertEqual(payload["scheduled_skips"][0]["skip_reason"], "profile_only_backoff")
+        self.assertEqual(payload["failures"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

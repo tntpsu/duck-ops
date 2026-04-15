@@ -36,6 +36,7 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
         or sum(1 for item in failures if isinstance(item, dict) and not bool(item.get("fallback_used")))
     )
     scheduled_skip_account_count = int(summary.get("scheduled_skip_account_count") or summary.get("scheduled_skip_count") or 0)
+    profile_only_backoff_account_count = int(summary.get("profile_only_backoff_account_count") or 0)
     active_refresh_target_count = int(summary.get("active_refresh_target_count") or 0)
     post_count = int(summary.get("post_count") or len(snapshot_payload.get("posts") or []))
     generated_at = _compact_text(snapshot_payload.get("generated_at"))
@@ -50,12 +51,21 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
             f"Hard failure truth: {failed_account_count} account(s) could not be refreshed cleanly, "
             f"so this snapshot is not fully live."
         )
-    elif cached_account_count > 0 or degraded_account_count > 0:
+    elif cached_account_count > 0 or degraded_account_count > 0 or profile_only_backoff_account_count > 0:
         if degraded_account_count > 0:
             freshness_label = "cached"
             freshness_note = (
                 f"Cached fallback truth: {cached_account_count} account(s) used cached data and "
                 f"{degraded_account_count} account(s) had degraded fetches."
+            )
+            if profile_only_backoff_account_count > 0:
+                freshness_note += f" `{profile_only_backoff_account_count}` profile-only account(s) were held on backoff."
+        elif profile_only_backoff_account_count > 0:
+            freshness_label = "cached"
+            freshness_note = (
+                f"Profile-only backoff truth: {profile_only_backoff_account_count} account(s) reused cached profile-only state "
+                f"because recent public refreshes still could not recover post timelines; {active_refresh_target_count} account(s) "
+                f"were still targeted live this run."
             )
         elif scheduled_skip_account_count > 0:
             freshness_label = "staggered"
@@ -83,6 +93,7 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
         "competitor_social_degraded_account_count": degraded_account_count,
         "competitor_social_failed_account_count": failed_account_count,
         "competitor_social_scheduled_skip_account_count": scheduled_skip_account_count,
+        "competitor_social_profile_only_backoff_account_count": profile_only_backoff_account_count,
         "competitor_social_active_refresh_target_count": active_refresh_target_count,
         "competitor_social_freshness_label": freshness_label,
         "competitor_social_freshness_note": freshness_note,
@@ -209,6 +220,7 @@ def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
         f"- Degraded fetches: `{summary.get('competitor_social_degraded_account_count') or 0}`",
         f"- Hard failures: `{summary.get('competitor_social_failed_account_count') or 0}`",
         f"- Scheduled skip accounts: `{summary.get('competitor_social_scheduled_skip_account_count') or 0}`",
+        f"- Profile-only backoff accounts: `{summary.get('competitor_social_profile_only_backoff_account_count') or 0}`",
         f"- Active refresh targets: `{summary.get('competitor_social_active_refresh_target_count') or 0}`",
         f"- Truth: {summary.get('competitor_social_freshness_note') or 'No competitor social snapshot is available yet.'}",
         "",

@@ -249,6 +249,7 @@ def _competitor_social_snapshot_status() -> dict[str, Any]:
     failed_count = int(summary.get("failed_account_count") or 0) if isinstance(summary, dict) else 0
     degraded_count = int(summary.get("degraded_account_count") or 0) if isinstance(summary, dict) else 0
     scheduled_skip_count = int(summary.get("scheduled_skip_account_count") or summary.get("scheduled_skip_count") or 0) if isinstance(summary, dict) else 0
+    profile_only_backoff_count = int(summary.get("profile_only_backoff_account_count") or 0) if isinstance(summary, dict) else 0
     active_refresh_target_count = int(summary.get("active_refresh_target_count") or 0) if isinstance(summary, dict) else 0
     collected_count = int(summary.get("collected_account_count") or 0) if isinstance(summary, dict) else 0
     freshness_hours = age_hours(generated_at)
@@ -262,13 +263,23 @@ def _competitor_social_snapshot_status() -> dict[str, Any]:
             if cached_count or live_count
             else f"{failed_count} hard failure(s) recorded and the collector could not provide a live snapshot."
         )
-    elif cached_count > 0 or degraded_count > 0:
+    elif cached_count > 0 or degraded_count > 0 or profile_only_backoff_count > 0:
         if degraded_count > 0:
             status_key = "degraded_cached_fallback"
             status_label = "DEGRADED CACHED FALLBACK"
             top_label = f"{cached_count} cached fallback account(s)"
             summary_text = (
                 f"Collector is alive but using cached fallback for {cached_count} account(s) with {live_count} live account(s) and {degraded_count} degraded fetches."
+            )
+            if profile_only_backoff_count > 0:
+                summary_text += f" `{profile_only_backoff_count}` profile-only account(s) are also on backoff."
+        elif profile_only_backoff_count > 0:
+            status_key = "degraded_cached_fallback"
+            status_label = "DEGRADED CACHED FALLBACK"
+            top_label = f"{profile_only_backoff_count} profile-only backoff account(s)"
+            summary_text = (
+                f"Collector is stable, but {profile_only_backoff_count} profile-only account(s) are on cooldown because recent public refreshes "
+                f"could not recover post timelines; {scheduled_skip_count} account(s) reused cache and {active_refresh_target_count} account(s) were targeted live."
             )
         elif scheduled_skip_count > 0:
             status_key = "healthy_staggered"
@@ -309,6 +320,7 @@ def _competitor_social_snapshot_status() -> dict[str, Any]:
         "failed_account_count": failed_count,
         "degraded_account_count": degraded_count,
         "scheduled_skip_account_count": scheduled_skip_count,
+        "profile_only_backoff_account_count": profile_only_backoff_count,
         "active_refresh_target_count": active_refresh_target_count,
     }
 

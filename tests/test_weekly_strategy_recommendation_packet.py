@@ -60,6 +60,7 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                             "cached_account_count": 2,
                             "failed_account_count": 1,
                             "degraded_account_count": 3,
+                            "profile_only_backoff_account_count": 1,
                         }
                     }
                 ),
@@ -91,6 +92,7 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertTrue(any(item["category"] == "competitor_test" for item in payload["recommendations"]))
                 self.assertTrue(any(item["category"] == "data_quality" for item in payload["recommendations"]))
                 self.assertTrue(any("cached fallback" in item for item in payload["watchouts"]))
+                self.assertTrue(any("profile-only backoff" in item.lower() for item in payload["watchouts"]))
                 self.assertTrue(state_path.exists())
                 self.assertTrue(operator_json_path.exists())
                 self.assertTrue(md_path.exists())

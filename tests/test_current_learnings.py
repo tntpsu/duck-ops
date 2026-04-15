@@ -178,6 +178,61 @@ class CurrentLearningsTests(unittest.TestCase):
             markdown = markdown_path.read_text(encoding="utf-8")
             self.assertIn("Staggered refresh truth", markdown)
 
+    def test_build_current_learnings_marks_profile_only_backoff_truth(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            social_path = root / "state" / "social_performance_rollups.json"
+            competitor_path = root / "state" / "social_competitor_benchmark.json"
+            competitor_social_path = root / "state" / "competitor_social_benchmark.json"
+            competitor_snapshots_path = root / "state" / "competitor_social_snapshots.json"
+            social_path.parent.mkdir(parents=True, exist_ok=True)
+            social_path.write_text(json.dumps({"summary": {"post_count": 2, "metrics_coverage_pct": 100.0}}), encoding="utf-8")
+            competitor_path.write_text(json.dumps({"summary": {}}), encoding="utf-8")
+            competitor_social_path.write_text(json.dumps({"summary": {"post_count": 10}}), encoding="utf-8")
+            competitor_snapshots_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": "2026-04-15T09:00:00-04:00",
+                        "summary": {
+                            "post_count": 10,
+                            "collected_account_count": 4,
+                            "live_account_count": 1,
+                            "cached_account_count": 3,
+                            "degraded_account_count": 0,
+                            "failed_account_count": 0,
+                            "scheduled_skip_account_count": 3,
+                            "profile_only_backoff_account_count": 2,
+                            "active_refresh_target_count": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path = root / "state" / "current_learnings.json"
+            operator_json_path = root / "output" / "operator" / "current_learnings.json"
+            markdown_path = root / "output" / "operator" / "current_learnings.md"
+
+            with patch.object(current_learnings, "SOCIAL_ROLLUPS_PATH", social_path), patch.object(
+                current_learnings, "COMPETITOR_BENCHMARK_PATH", competitor_path
+            ), patch.object(
+                current_learnings, "COMPETITOR_SOCIAL_BENCHMARK_PATH", competitor_social_path
+            ), patch.object(
+                current_learnings, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", competitor_snapshots_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_STATE_PATH", state_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_OPERATOR_JSON_PATH", operator_json_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_MD_PATH", markdown_path
+            ):
+                payload = current_learnings.build_current_learnings()
+
+            self.assertEqual(payload["summary"]["competitor_social_freshness_label"], "cached")
+            self.assertEqual(payload["summary"]["competitor_social_profile_only_backoff_account_count"], 2)
+            markdown = markdown_path.read_text(encoding="utf-8")
+            self.assertIn("Profile-only backoff truth", markdown)
+            self.assertIn("Profile-only backoff accounts", markdown)
+
 
 if __name__ == "__main__":
     unittest.main()

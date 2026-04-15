@@ -420,6 +420,13 @@ def _cached_snapshot_age_hours(cached_profile: dict[str, Any] | None, existing_s
     return age_hours(observed_at) if observed_at else None
 
 
+def _is_profile_only_cached(cached_profile: dict[str, Any] | None, cached_posts: list[dict[str, Any]] | None) -> bool:
+    if not cached_profile or cached_posts:
+        return False
+    snapshot_source = _compact_text(cached_profile.get("snapshot_source"))
+    return "html_profile" in snapshot_source or "profile_only" in snapshot_source
+
+
 def _should_force_refresh(
     *,
     cached_profile: dict[str, Any] | None,
@@ -433,6 +440,21 @@ def _should_force_refresh(
     if snapshot_age is not None and snapshot_age >= force_refresh_after_hours:
         return True
     return False
+
+
+def _should_backoff_profile_only_refresh(
+    *,
+    cached_profile: dict[str, Any] | None,
+    cached_posts: list[dict[str, Any]] | None,
+    existing_snapshot_generated_at: str | None,
+    profile_only_backoff_hours: int,
+) -> bool:
+    if not _is_profile_only_cached(cached_profile, cached_posts):
+        return False
+    snapshot_age = _cached_snapshot_age_hours(cached_profile, existing_snapshot_generated_at)
+    if snapshot_age is None:
+        return False
+    return snapshot_age < profile_only_backoff_hours
 
 
 def _scheduled_skip_reuse(
@@ -460,6 +482,29 @@ def _scheduled_skip_reuse(
         "message": "Refresh was intentionally skipped this run to reduce Instagram rate-limit pressure; recent cached data was reused.",
     }
     return profile, posts, skip_record
+
+
+def _scheduled_skip_profile_only_reuse(
+    *,
+    seed: dict[str, Any],
+    cached_profile: dict[str, Any],
+    refreshed_at: str,
+    profile_only_backoff_hours: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    profile = _clone_cached_profile(
+        cached_profile,
+        snapshot_source="scheduled_skip_html_profile_only_backoff",
+        refreshed_at=refreshed_at,
+    )
+    skip_record = {
+        "account_handle": _compact_text(seed.get("instagram_handle")),
+        "skip_reason": "profile_only_backoff",
+        "message": (
+            "Refresh was intentionally deferred because recent public refreshes could not recover post timelines; "
+            f"cached profile-only state will stay on backoff for `{profile_only_backoff_hours}` hour(s) before we try again."
+        ),
+    }
+    return profile, [], skip_record
 
 
 def _html_meta_content(html_text: str, key: str) -> str | None:
@@ -773,6 +818,7 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
     bucket_count = max(1, int(collection_boundary.get("refresh_bucket_count") or 1))
     active_bucket_index = _refresh_bucket_index(bucket_count, generated_at=now_local_iso())
     force_refresh_after_hours = int(collection_boundary.get("force_refresh_after_hours") or max(24, bucket_count * 24))
+    profile_only_backoff_hours = int(collection_boundary.get("profile_only_backoff_hours") or max(force_refresh_after_hours, 168))
 
     profiles: list[dict[str, Any]] = []
     posts: list[dict[str, Any]] = []
@@ -794,8 +840,14 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
             existing_snapshot_generated_at=existing_snapshot_generated_at,
             force_refresh_after_hours=force_refresh_after_hours,
         )
+        profile_only_backoff = _should_backoff_profile_only_refresh(
+            cached_profile=cached_profile,
+            cached_posts=cached_posts,
+            existing_snapshot_generated_at=existing_snapshot_generated_at,
+            profile_only_backoff_hours=profile_only_backoff_hours,
+        )
         in_active_bucket = bucket_count <= 1 or (index % bucket_count) == active_bucket_index
-        should_attempt_refresh = force_refresh or in_active_bucket
+        should_attempt_refresh = (force_refresh or in_active_bucket) and not profile_only_backoff
         if not should_attempt_refresh and cached_profile and cached_posts:
             profile, account_posts, skip_record = _scheduled_skip_reuse(
                 seed=seed,
@@ -803,6 +855,17 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
                 cached_posts=cached_posts,
                 refreshed_at=now_local_iso(),
                 limit=target_count,
+            )
+            profiles.append(profile)
+            posts.extend(account_posts)
+            scheduled_skips.append(skip_record)
+            continue
+        if not should_attempt_refresh and profile_only_backoff and cached_profile and not cached_posts:
+            profile, account_posts, skip_record = _scheduled_skip_profile_only_reuse(
+                seed=seed,
+                cached_profile=cached_profile,
+                refreshed_at=now_local_iso(),
+                profile_only_backoff_hours=profile_only_backoff_hours,
             )
             profiles.append(profile)
             posts.extend(account_posts)
@@ -862,6 +925,11 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
         if "html_profile" in _compact_text(profile.get("snapshot_source"))
         and not any(_compact_text(row.get("account_handle")) == _compact_text(profile.get("account_handle")) for row in posts)
     )
+    profile_only_backoff_account_count = sum(
+        1
+        for profile in profiles
+        if "scheduled_skip_html_profile_only_backoff" in _compact_text(profile.get("snapshot_source"))
+    )
     degraded_account_count = len(failures)
     hard_failure_count = sum(1 for item in failures if not bool((item or {}).get("fallback_used")))
 
@@ -877,6 +945,7 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
             "scheduled_skip_account_count": scheduled_skip_account_count,
             "html_profile_account_count": html_profile_account_count,
             "profile_only_account_count": profile_only_account_count,
+            "profile_only_backoff_account_count": profile_only_backoff_account_count,
             "live_account_count": max(0, len(profiles) - cached_account_count),
             "post_count": len(posts),
             "latest_posts_per_account": target_count,
@@ -886,6 +955,7 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
             "attempted_refresh_account_count": attempted_refresh_account_count,
             "forced_refresh_account_count": forced_refresh_account_count,
             "scheduled_skip_count": len(scheduled_skips),
+            "profile_only_backoff_hours": profile_only_backoff_hours,
             "rate_limit_circuit_breaker_used": rate_limit_circuit_breaker_used,
             "data_quality_note": "Visible metrics vary by post type and account. Treat this as directional benchmark data, not first-party truth.",
         },
@@ -930,6 +1000,7 @@ def render_competitor_social_snapshots_markdown(payload: dict[str, Any]) -> str:
         f"- Accounts intentionally skipped on this refresh bucket: `{summary.get('scheduled_skip_account_count') or 0}`",
         f"- Accounts recovered from HTML profile fallback: `{summary.get('html_profile_account_count') or 0}`",
         f"- Accounts with profile-only fallback: `{summary.get('profile_only_account_count') or 0}`",
+        f"- Accounts on profile-only backoff: `{summary.get('profile_only_backoff_account_count') or 0}`",
         f"- Active refresh targets this run: `{summary.get('active_refresh_target_count') or 0}`",
         f"- Forced refresh targets this run: `{summary.get('forced_refresh_account_count') or 0}`",
         f"- Refresh bucket: `{summary.get('active_refresh_bucket_index') or 0}` of `{summary.get('refresh_bucket_count') or 1}`",

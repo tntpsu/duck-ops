@@ -54,6 +54,19 @@ class EngineeringGovernanceDigestTests(unittest.TestCase):
                     "active_refresh_target_count": 1,
                 },
             }
+            profile_only_backoff_payload = {
+                "generated_at": "2026-04-15T10:00:00-04:00",
+                "summary": {
+                    "collected_account_count": 3,
+                    "live_account_count": 1,
+                    "cached_account_count": 2,
+                    "failed_account_count": 0,
+                    "degraded_account_count": 0,
+                    "scheduled_skip_account_count": 2,
+                    "profile_only_backoff_account_count": 1,
+                    "active_refresh_target_count": 1,
+                },
+            }
             hard_failed_payload = {
                 "generated_at": "2026-04-15T10:00:00-04:00",
                 "summary": {
@@ -72,6 +85,7 @@ class EngineeringGovernanceDigestTests(unittest.TestCase):
                     (live_payload, "healthy_live", "HEALTHY LIVE"),
                     (cached_payload, "degraded_cached_fallback", "DEGRADED CACHED FALLBACK"),
                     (staggered_payload, "healthy_staggered", "HEALTHY STAGGERED"),
+                    (profile_only_backoff_payload, "degraded_cached_fallback", "DEGRADED CACHED FALLBACK"),
                     (hard_failed_payload, "hard_failing", "HARD FAILING"),
                 ]:
                     state_path.write_text(json.dumps(payload), encoding="utf-8")
