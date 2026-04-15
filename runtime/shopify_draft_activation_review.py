@@ -426,6 +426,7 @@ def render_shopify_draft_activation_email(payload: dict[str, Any], *, render_rep
                 (
                     "<div style=\"color:#374151;margin-bottom:8px;\">DuckAgent checked every current Shopify draft product for listing completeness.</div>"
                     "<div style=\"color:#374151;margin-bottom:8px;\">Reply <strong>\"publish\"</strong> or <strong>\"apply\"</strong> to activate all drafts in the <strong>ready</strong> bucket. Blocked drafts will be left alone.</div>"
+                    "<div style=\"color:#374151;margin-bottom:8px;\">Before activation, DuckAgent will safely backfill missing Shopify image alt text and ensure <strong>New Duck Arrivals</strong> membership/rotation when needed.</div>"
                     "<div style=\"color:#6b7280;\">Quality suggestions are advisory only. They help us tighten the listing, but they do not block activation.</div>"
                     "<div style=\"color:#6b7280;margin-top:6px;\">Shopify tag advice is about distinct browse phrases and overlap cleanup, not simply maximizing the raw tag count.</div>"
                 ),
@@ -457,6 +458,7 @@ def render_shopify_draft_activation_email(payload: dict[str, Any], *, render_rep
         f"Ready with suggestions: {payload.get('suggestion_count', 0)}",
         "",
         'Reply "publish" or "apply" to activate all ready Shopify drafts. Blocked drafts will be left alone.',
+        "Before activation, DuckAgent will safely backfill missing Shopify image alt text and ensure New Duck Arrivals membership/rotation when needed.",
         "Quality suggestions are advisory only and do not block activation.",
         "Shopify tag suggestions are about better phrase coverage and less overlap, not just using the maximum number of tags.",
         "",

@@ -131,9 +131,11 @@ class ShopifyDraftActivationReviewTests(unittest.TestCase):
 
         self.assertIn("FLOW:shopify_draft_activation", subject)
         self.assertIn('Reply "publish" or "apply"', text_body)
+        self.assertIn("backfill missing Shopify image alt text", text_body)
         self.assertIn("Quality suggestions are advisory only", text_body)
         self.assertIn("not just using the maximum number of tags", text_body)
         self.assertIn("Reply <strong>\"publish\"</strong> or <strong>\"apply\"</strong>", html_body)
+        self.assertIn("backfill missing Shopify image alt text", html_body)
         self.assertIn("Quality suggestions are advisory only", html_body)
         self.assertIn("not simply maximizing the raw tag count", html_body)
 
