@@ -1,9 +1,10 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-04-14
+Last updated: 2026-04-15
 
 Detailed execution sequence:
 - [ROADMAP_EXECUTION_SEQUENCE.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/ROADMAP_EXECUTION_SEQUENCE.md)
+- [SOCIAL_PERFORMANCE_EXECUTION_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/SOCIAL_PERFORMANCE_EXECUTION_PLAN.md)
 
 ## Completed Major Work
 
@@ -166,16 +167,25 @@ Why this matters:
 
 ## Recommended Next 3 Steps
 
-### 1. Build the Social Performance Collector
+### 1. Finish Phase 2A Health Stabilization
+- Clean up or honestly relabel the biggest degraded lanes first:
+  - `Review Execution`
+  - `Weekly Coordination`
+  - `Gtdf`
+  - `Gtdf Winner`
+- This keeps the operator surface trustworthy before we add a new insights layer.
+
+### 2. Build the Own-Post Social Performance Foundation
+- Reuse existing DuckAgent post receipts in `runs/*/*_posts.json`.
 - Pull performance back from Instagram/Facebook after posts go live.
 - Normalize by post type, duck family, caption, hashtags, and publish time.
-- Include competitor-post snapshots so we can benchmark what is winning outside our own account.
+- The concrete phase plan now lives in [SOCIAL_PERFORMANCE_EXECUTION_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/SOCIAL_PERFORMANCE_EXECUTION_PLAN.md).
 
-### 2. Build Weekly Social And Competitor Reports
+### 3. Build Weekly Social And Competitor Reports
 - Turn the new `duck-social-insights` and `duck-competitor-benchmark` skills into real weekly output lanes.
 - Keep them observe/propose only at first and route findings into the governance/operator surfaces.
 
-### 3. Add Smarter SEO Heuristics
+### 4. Add Smarter SEO Heuristics
 - Expand beyond missing/length/duplicate checks.
 - Keep the same category email + apply workflow.
 
