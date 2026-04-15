@@ -53,6 +53,7 @@ Detailed execution sequence:
 - GTDF winner now reports upstream blockers honestly instead of fake failures.
 - Review execution and trend/health reporting were cleaned up to reduce false bad states.
 - Weekly/workflow health is more root-cause-aware than before.
+- Blog and ops health now treat healthy idle/backlog states as operator truth instead of fake warnings.
 
 ### 7. Shopify Draft Activation Controls
 - Newduck is now a two-step Shopify flow:
@@ -111,6 +112,7 @@ Why this is high value:
 - Facebook page/token wiring is now fixed enough for scheduled-post smoke testing.
 - The remaining gap is not auth anymore; it is collecting post outcomes reliably from both Instagram and Facebook after publish.
 - Best next step is to turn cross-channel posting truth into a normalized performance warehouse instead of waiting on manual inspection.
+- First substep: improve durable receipt coverage across the highest-value publish lanes so the collector has one stable source of truth.
 
 ### Priority 3: Expand SEO Audit Intelligence
 Current audit checks:
@@ -170,13 +172,11 @@ Why this matters:
 ### 1. Finish Phase 2A Health Stabilization
 - Clean up or honestly relabel the biggest degraded lanes first:
   - `Review Execution`
-  - `Weekly Coordination`
-  - `Gtdf`
-  - `Gtdf Winner`
 - This keeps the operator surface trustworthy before we add a new insights layer.
 
 ### 2. Build the Own-Post Social Performance Foundation
 - Reuse existing DuckAgent post receipts in `runs/*/*_posts.json`.
+- First patch the highest-value publish lanes that still do not emit durable post receipts.
 - Pull performance back from Instagram/Facebook after posts go live.
 - Normalize by post type, duck family, caption, hashtags, and publish time.
 - The concrete phase plan now lives in [SOCIAL_PERFORMANCE_EXECUTION_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/SOCIAL_PERFORMANCE_EXECUTION_PLAN.md).
