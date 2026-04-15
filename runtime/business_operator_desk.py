@@ -9,10 +9,15 @@ specialized queues that already exist.
 from __future__ import annotations
 
 from datetime import datetime
+import json
+from pathlib import Path
 from typing import Any
 
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
 from workflow_operator_summary import build_workflow_followthrough_items
+
+CURRENT_LEARNINGS_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/current_learnings.json")
+CURRENT_LEARNINGS_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/current_learnings.md")
 
 
 def _trim_text(value: str | None, limit: int = 160) -> str:
@@ -24,6 +29,26 @@ def _trim_text(value: str | None, limit: int = 160) -> str:
 
 def _display_duck_name(title: str | None, limit: int = 36) -> str:
     return format_operator_duck_name(title, limit=limit)
+
+
+def _load_learning_surface() -> dict[str, Any]:
+    if not CURRENT_LEARNINGS_PATH.exists():
+        return {"available": False, "path": str(CURRENT_LEARNINGS_MD_PATH), "items": []}
+    try:
+        payload = json.loads(CURRENT_LEARNINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": False, "path": str(CURRENT_LEARNINGS_MD_PATH), "items": []}
+    if not isinstance(payload, dict):
+        return {"available": False, "path": str(CURRENT_LEARNINGS_MD_PATH), "items": []}
+    items = list(payload.get("current_beliefs") or [])
+    return {
+        "available": True,
+        "path": str(CURRENT_LEARNINGS_MD_PATH),
+        "generated_at": payload.get("generated_at"),
+        "items": items[:4],
+        "change_count": len(payload.get("changes_since_previous") or []),
+        "idea_count": len(payload.get("ideas_to_test") or []),
+    }
 
 
 def _customer_action_items(customer_packets: dict[str, Any]) -> list[dict[str, Any]]:
@@ -286,12 +311,14 @@ def build_business_operator_desk(
     stock_items = _print_queue_items(print_queue_candidates)
     weekly_sale_items = _weekly_sale_items(weekly_sale_monitor)
     workflow_items = list(workflow_followthrough or build_workflow_followthrough_items(limit=6))
+    learning_surface = _load_learning_surface()
     counts = (nightly_summary or {}).get("counts") or {}
     pack_items = list(((nightly_summary or {}).get("sections") or {}).get("orders_to_pack") or [])
     review_queue_backlog = int((review_queue or {}).get("pending_count_all") or len((review_queue or {}).get("items") or []))
     return {
         "generated_at": datetime.now().astimezone().isoformat(),
         "strategy_focus": load_master_roadmap_focus(),
+        "learning_surface": learning_surface,
         "counts": {
             "customer_packets": len(customer_items),
             "customer_attention_items": int(counts.get("customer_attention_items") or 0),
@@ -309,6 +336,7 @@ def build_business_operator_desk(
             "review_queue_backlog": review_queue_backlog,
             "usps_live_customer_items": sum(1 for item in customer_items if str(item.get("tracking_live_label") or "").strip()),
             "workflow_followthrough_items": len(workflow_items),
+            "learning_beliefs": len(learning_surface.get("items") or []),
         },
         "next_actions": _build_next_actions(
             customer_items=customer_items,
@@ -329,6 +357,7 @@ def build_business_operator_desk(
             "weekly_sale_monitor": weekly_sale_items[:6],
             "review_queue": review_items[:6],
             "workflow_followthrough": workflow_items[:6],
+            "learning_surface": list(learning_surface.get("items") or [])[:4],
         },
     }
 
@@ -337,6 +366,10 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     counts = payload.get("counts") or {}
     sections = payload.get("sections") or {}
     strategy_focus = payload.get("strategy_focus") or {}
+    learning_surface = payload.get("learning_surface") or {}
+    if not learning_surface.get("available"):
+        learning_surface = _load_learning_surface()
+    learning_items = (sections.get("learning_surface") or []) or list(learning_surface.get("items") or [])
     lines = [
         "# Duck Ops Business Desk",
         "",
@@ -356,6 +389,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Older creative/operator backlog: `{max(0, int(counts.get('review_queue_backlog', 0)) - int(counts.get('review_queue_items', 0)))}`",
         f"- Customer cases with live USPS context: `{counts.get('usps_live_customer_items', 0)}`",
         f"- Workflow follow-through items: `{counts.get('workflow_followthrough_items', 0)}`",
+        f"- Learning beliefs surfaced: `{counts.get('learning_beliefs') or len(learning_items)}`",
         "",
         "## Strategic Focus",
         "",
@@ -369,6 +403,21 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append("- Next major steps:")
             for step in next_steps:
                 lines.append(f"  - {step.get('title')}: {_trim_text(step.get('summary'), 160)}")
+    lines.extend([
+        "",
+        "## Learning Surface",
+        "",
+    ])
+    if not learning_surface.get("available"):
+        lines.append("Current learnings page is not available yet.")
+    else:
+        lines.append(f"- Page: `{learning_surface.get('path')}`")
+        lines.append(f"- Changes since previous snapshot: `{learning_surface.get('change_count', 0)}`")
+        lines.append(f"- Ideas worth testing: `{learning_surface.get('idea_count', 0)}`")
+        if learning_items:
+            lines.append("- Top beliefs:")
+            for item in learning_items:
+                lines.append(f"  - {_trim_text(item.get('headline'), 150)}")
     lines.extend([
         "",
         "## Do Next",
@@ -547,6 +596,8 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "workflows": "workflow_followthrough",
         "roadmap": "strategy_focus",
         "strategy": "strategy_focus",
+        "learning": "learning_surface",
+        "learnings": "learning_surface",
     }
     normalized = aliases.get(section_key, section_key)
     if normalized == "next_actions":
@@ -574,6 +625,22 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append("")
                 for step in next_steps:
                     lines.append(f"- {step.get('title')}: {_trim_text(step.get('summary'), 160)}")
+        return "\n".join(lines)
+    if normalized == "learning_surface":
+        lines = ["Duck Ops Current Learnings", ""]
+        learning_surface = payload.get("learning_surface") or {}
+        if not learning_surface.get("available"):
+            learning_surface = _load_learning_surface()
+        learning_items = (sections.get("learning_surface") or []) or list(learning_surface.get("items") or [])
+        if not learning_surface.get("available"):
+            lines.append("Current learnings page is not available yet.")
+        else:
+            lines.append(f"Page: {learning_surface.get('path')}")
+            lines.append(f"Changes since previous snapshot: {learning_surface.get('change_count', 0)}")
+            lines.append(f"Ideas worth testing: {learning_surface.get('idea_count', 0)}")
+            lines.append("")
+            for item in learning_items:
+                lines.append(f"- {_trim_text(item.get('headline'), 150)}")
         return "\n".join(lines)
 
     sections = payload.get("sections") or {}

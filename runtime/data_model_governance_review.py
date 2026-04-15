@@ -57,6 +57,24 @@ SURFACES = [
         "operator_json": None,
         "markdown": OUTPUT_OPERATOR_DIR / "shopify_seo_audit.md",
     },
+    {
+        "surface": "social_insights",
+        "state_json": STATE_DIR / "social_performance_rollups.json",
+        "operator_json": OUTPUT_OPERATOR_DIR / "social_insights.json",
+        "markdown": OUTPUT_OPERATOR_DIR / "social_insights.md",
+    },
+    {
+        "surface": "competitor_benchmark",
+        "state_json": STATE_DIR / "social_competitor_benchmark.json",
+        "operator_json": OUTPUT_OPERATOR_DIR / "competitor_benchmark.json",
+        "markdown": OUTPUT_OPERATOR_DIR / "competitor_benchmark.md",
+    },
+    {
+        "surface": "current_learnings",
+        "state_json": STATE_DIR / "current_learnings.json",
+        "operator_json": OUTPUT_OPERATOR_DIR / "current_learnings.json",
+        "markdown": OUTPUT_OPERATOR_DIR / "current_learnings.md",
+    },
 ]
 
 

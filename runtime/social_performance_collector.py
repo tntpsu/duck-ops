@@ -25,6 +25,8 @@ DUCK_AGENT_VENV_PY = DUCK_AGENT_ROOT / ".venv" / "bin" / "python3"
 DUCK_AGENT_RUNS_DIR = DUCK_AGENT_ROOT / "runs"
 STATE_PATH = DUCK_OPS_ROOT / "state" / "social_performance_posts.json"
 ROLLUPS_PATH = DUCK_OPS_ROOT / "state" / "social_performance_rollups.json"
+HISTORY_PATH = DUCK_OPS_ROOT / "state" / "social_performance_history.json"
+OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "social_insights.json"
 OUTPUT_MD_PATH = OUTPUT_OPERATOR_DIR / "social_insights.md"
 HASHTAG_PATTERN = re.compile(r"(?<!\w)#([A-Za-z0-9_]+)")
 
@@ -457,6 +459,87 @@ class Learning:
         }
 
 
+def _social_snapshot(rollup_payload: dict[str, Any]) -> dict[str, Any]:
+    rollups = rollup_payload.get("rollups") or {}
+    top_workflow = ((rollups.get("by_workflow") or [{}])[0] or {})
+    top_window = ((rollups.get("by_time_window") or [{}])[0] or {})
+    top_theme = ((rollups.get("by_theme") or [{}])[0] or {})
+    top_post = ((rollup_payload.get("top_posts") or [{}])[0] or {})
+    summary = rollup_payload.get("summary") or {}
+    return {
+        "generated_at": rollup_payload.get("generated_at"),
+        "window_days": rollup_payload.get("window_days"),
+        "post_count": summary.get("post_count"),
+        "metrics_coverage_pct": summary.get("metrics_coverage_pct"),
+        "top_workflow": top_workflow.get("label"),
+        "top_time_window": top_window.get("label"),
+        "top_theme": top_theme.get("label"),
+        "top_post_id": top_post.get("post_id"),
+    }
+
+
+def _load_history(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        items = payload.get("snapshots")
+        return list(items) if isinstance(items, list) else []
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
+def _save_history(path: Path, snapshots: list[dict[str, Any]]) -> None:
+    write_json(path, {"generated_at": now_local_iso(), "snapshot_count": len(snapshots), "snapshots": snapshots})
+
+
+def _social_changes(previous: dict[str, Any] | None, current: dict[str, Any]) -> list[dict[str, Any]]:
+    if not previous:
+        return []
+    changes: list[dict[str, Any]] = []
+    if previous.get("top_workflow") != current.get("top_workflow"):
+        changes.append(
+            {
+                "kind": "top_workflow_changed",
+                "headline": f"Top workflow moved from `{previous.get('top_workflow')}` to `{current.get('top_workflow')}`.",
+            }
+        )
+    if previous.get("top_time_window") != current.get("top_time_window"):
+        changes.append(
+            {
+                "kind": "top_time_window_changed",
+                "headline": f"Best posting window moved from `{previous.get('top_time_window')}` to `{current.get('top_time_window')}`.",
+            }
+        )
+    previous_count = _safe_int(previous.get("post_count")) or 0
+    current_count = _safe_int(current.get("post_count")) or 0
+    if previous_count != current_count:
+        delta = current_count - previous_count
+        direction = "up" if delta > 0 else "down"
+        changes.append(
+            {
+                "kind": "post_count_changed",
+                "headline": f"Observed post count is {direction} by `{abs(delta)}` since the previous snapshot.",
+            }
+        )
+    previous_coverage = _safe_float(previous.get("metrics_coverage_pct")) or 0.0
+    current_coverage = _safe_float(current.get("metrics_coverage_pct")) or 0.0
+    if round(previous_coverage, 1) != round(current_coverage, 1):
+        delta = round(current_coverage - previous_coverage, 1)
+        direction = "up" if delta > 0 else "down"
+        changes.append(
+            {
+                "kind": "coverage_changed",
+                "headline": f"Metrics coverage is {direction} by `{abs(delta)}` point(s) since the previous snapshot.",
+            }
+        )
+    return changes
+
+
 def _derive_learnings(posts: list[dict[str, Any]], rollups: dict[str, list[dict[str, Any]]]) -> list[Learning]:
     learnings: list[Learning] = []
     if not posts:
@@ -588,6 +671,19 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
         "top_posts": top_posts,
         "rollups": rollups,
     }
+    history = _load_history(HISTORY_PATH)
+    current_snapshot = _social_snapshot(rollup_payload)
+    previous_snapshot = history[-1] if history else None
+    history.append(current_snapshot)
+    history = history[-60:]
+    _save_history(HISTORY_PATH, history)
+    rollup_payload["changes_since_previous"] = _social_changes(previous_snapshot, current_snapshot)
+    rollup_payload["history"] = {
+        "snapshot_count": len(history),
+        "latest_snapshot": current_snapshot,
+        "previous_snapshot": previous_snapshot,
+        "recent_snapshots": history[-8:],
+    }
     return post_payload, rollup_payload
 
 
@@ -600,12 +696,27 @@ def render_social_insights_markdown(post_payload: dict[str, Any], rollup_payload
         f"- Window: last `{rollup_payload.get('window_days') or 0}` days",
         f"- Posts analyzed: `{summary.get('post_count') or 0}`",
         f"- Metrics coverage: `{summary.get('metrics_coverage_pct') or 0}%`",
+        f"- Snapshot history: `{((rollup_payload.get('history') or {}).get('snapshot_count')) or 0}` runs",
         "",
         str(summary.get("data_quality_note") or ""),
         "",
-        "## Current Learnings",
+        "## What Changed",
         "",
     ]
+
+    changes = rollup_payload.get("changes_since_previous") or []
+    if not changes:
+        lines.append("No major learning change was detected since the previous snapshot.")
+        lines.append("")
+    else:
+        for item in changes:
+            lines.append(f"- {item.get('headline')}")
+        lines.append("")
+
+    lines.extend([
+        "## Current Learnings",
+        "",
+    ])
 
     learnings = rollup_payload.get("current_learnings") or []
     if not learnings:
@@ -674,6 +785,7 @@ def build_social_performance(*, window_days: int = 30, fetch_metrics: bool = Tru
     post_payload, rollup_payload = build_social_performance_payload(window_days=window_days, fetch_metrics=fetch_metrics)
     write_json(STATE_PATH, post_payload)
     write_json(ROLLUPS_PATH, rollup_payload)
+    write_json(OPERATOR_JSON_PATH, rollup_payload)
     write_markdown(OUTPUT_MD_PATH, render_social_insights_markdown(post_payload, rollup_payload))
     return post_payload, rollup_payload
 

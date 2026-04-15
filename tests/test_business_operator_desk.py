@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 RUNTIME_DIR = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
@@ -229,6 +230,33 @@ class BusinessOperatorDeskTests(unittest.TestCase):
 
         self.assertIn("Why: Facebook object id is invalid.", markdown)
         self.assertIn("Fix: Fix the Meta target.", markdown)
+
+    def test_operator_desk_surfaces_current_learnings(self) -> None:
+        with patch(
+            "business_operator_desk._load_learning_surface",
+            return_value={
+                "available": True,
+                "path": "/tmp/current_learnings.md",
+                "items": [{"headline": "Evening is the current best-performing posting window."}],
+                "change_count": 1,
+                "idea_count": 2,
+            },
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        self.assertEqual(payload["counts"]["learning_beliefs"], 1)
+        self.assertIn("## Learning Surface", markdown)
+        self.assertIn("Evening is the current best-performing posting window.", markdown)
 
 
 if __name__ == "__main__":

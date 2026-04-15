@@ -49,10 +49,16 @@ class SocialPerformanceCollectorTests(unittest.TestCase):
             )
             state_path = root / "state" / "social_performance_posts.json"
             rollups_path = root / "state" / "social_performance_rollups.json"
+            history_path = root / "state" / "social_performance_history.json"
+            operator_json_path = root / "output" / "operator" / "social_insights.json"
             output_path = root / "output" / "operator" / "social_insights.md"
 
             with patch.object(social_performance_collector, "STATE_PATH", state_path), patch.object(
                 social_performance_collector, "ROLLUPS_PATH", rollups_path
+            ), patch.object(
+                social_performance_collector, "HISTORY_PATH", history_path
+            ), patch.object(
+                social_performance_collector, "OPERATOR_JSON_PATH", operator_json_path
             ), patch.object(
                 social_performance_collector, "OUTPUT_MD_PATH", output_path
             ), patch.object(
@@ -80,6 +86,8 @@ class SocialPerformanceCollectorTests(unittest.TestCase):
             self.assertTrue(rollup_payload["current_learnings"])
             self.assertTrue(state_path.exists())
             self.assertTrue(rollups_path.exists())
+            self.assertTrue(history_path.exists())
+            self.assertTrue(operator_json_path.exists())
             self.assertTrue(output_path.exists())
 
     def test_future_posts_are_not_fetched(self) -> None:
