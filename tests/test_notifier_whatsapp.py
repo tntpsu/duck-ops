@@ -82,6 +82,44 @@ class NotifierWhatsAppTests(unittest.TestCase):
         self.assertIn("Duck Ops Tonight", html_part.get_content())
         self.assertEqual(msg["To"], "ops@example.com")
 
+    def test_business_desk_whatsapp_push_uses_business_operator_desk_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            desk_path = Path(tmpdir) / "business_operator_desk.json"
+            desk_path.write_text(
+                """
+                {
+                  "generated_at": "2026-04-15T07:20:00-04:00",
+                  "counts": {
+                    "customer_packets": 2,
+                    "etsy_browser_threads": 1,
+                    "custom_build_candidates": 0,
+                    "orders_to_pack_units": 3,
+                    "review_queue_items": 1,
+                    "workflow_followthrough_items": 2
+                  },
+                  "next_actions": [
+                    {
+                      "lane": "customer",
+                      "summary": "Answer a buyer question",
+                      "command": "desk show customer"
+                    }
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(notifier, "BUSINESS_OPERATOR_DESK_PATH", desk_path):
+                result = notifier.build_business_desk_whatsapp_operator_push({})
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["kind"], "operator_whatsapp")
+        self.assertEqual(result["media_title"], "Duck Ops Business Desk")
+        self.assertIn(notifier.WHATSAPP_PUSH_SENTINEL, result["message"])
+        self.assertIn("Customer actions: 2", result["message"])
+        self.assertIn("desk show customer", result["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

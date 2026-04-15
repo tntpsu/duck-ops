@@ -45,6 +45,7 @@ TREND_DIGEST_SIGNATURE_VERSION = 1
 QUALITY_GATE_STATE_PATH = ROOT / "state" / "quality_gate_state.json"
 OPERATOR_CURRENT_PATH = ROOT / "output" / "operator" / "current_review.json"
 WHATSAPP_PUSH_SENTINEL = "OPENCLAW_OPERATOR_PUSH"
+BUSINESS_OPERATOR_DESK_PATH = ROOT / "output" / "operator" / "business_operator_desk.json"
 CUSTOMER_ACTION_PACKETS_PATH = ROOT / "state" / "customer_action_packets.json"
 CUSTOMER_CASES_PATH = ROOT / "state" / "normalized" / "customer_cases.json"
 CUSTOM_DESIGN_CASES_PATH = ROOT / "state" / "normalized" / "custom_design_cases.json"
@@ -1306,6 +1307,72 @@ def build_reviews_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _business_desk_whatsapp_lines(payload: dict[str, Any]) -> list[str]:
+    counts = payload.get("counts") or {}
+    next_actions = list(payload.get("next_actions") or [])
+    lines = [
+        WHATSAPP_PUSH_SENTINEL,
+        "Duck Ops Business Desk",
+        f"Customer actions: {int(counts.get('customer_packets') or 0)}",
+        f"Etsy thread follow-ups: {int(counts.get('etsy_browser_threads') or 0)}",
+        f"Custom builds: {int(counts.get('custom_build_candidates') or 0)}",
+        f"Pack tonight units: {int(counts.get('orders_to_pack_units') or 0)}",
+        f"Creative reviews: {int(counts.get('review_queue_items') or 0)}",
+        f"Workflow follow-through: {int(counts.get('workflow_followthrough_items') or 0)}",
+    ]
+    if next_actions:
+        lines.extend(["", "Do next:"])
+        for item in next_actions[:3]:
+            summary = str(item.get("summary") or item.get("title") or "Next action").strip()
+            command = str(item.get("command") or "").strip()
+            secondary = str(item.get("secondary_command") or "").strip()
+            line = f"- {item.get('lane') or 'desk'}: {summary}"
+            if command:
+                line += f" | {command}"
+            if secondary:
+                line += f" -> {secondary}"
+            lines.append(line)
+    lines.extend(["", "Reply:", "desk next", "desk show customer", "desk show builds"])
+    return lines
+
+
+def build_business_desk_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any] | None:
+    payload = load_json(BUSINESS_OPERATOR_DESK_PATH, {})
+    if not isinstance(payload, dict) or not payload:
+        return None
+
+    counts = payload.get("counts") or {}
+    next_actions = list(payload.get("next_actions") or [])
+    actionable_count = (
+        int(counts.get("customer_packets") or 0)
+        + int(counts.get("etsy_browser_threads") or 0)
+        + int(counts.get("custom_build_candidates") or 0)
+        + int(counts.get("orders_to_pack_units") or 0)
+        + int(counts.get("review_queue_items") or 0)
+        + int(counts.get("workflow_followthrough_items") or 0)
+    )
+    if actionable_count <= 0 and not next_actions:
+        return None
+
+    signature_payload = {
+        "generated_at": payload.get("generated_at"),
+        "counts": counts,
+        "next_actions": next_actions[:3],
+    }
+    signature = canonical_hash(signature_payload)
+    if state.get("last_operator_whatsapp_signature") == signature or state.get("last_reviews_whatsapp_signature") == signature:
+        return None
+
+    return {
+        "kind": "operator_whatsapp",
+        "run_id": payload.get("generated_at"),
+        "signature": signature,
+        "message": "\n".join(_business_desk_whatsapp_lines(payload)),
+        "media_urls": [],
+        "media_title": "Duck Ops Business Desk",
+    }
+
+
 def maybe_auto_approve_weekly_sales(
     settings: dict[str, Any],
     state: dict[str, Any],
@@ -1526,6 +1593,8 @@ def main() -> int:
     state_changed = bool(auto_approval_result.get("changed")) or state_changed
     artifacts = load_sendable_artifacts(state)
     whatsapp_summary = build_reviews_whatsapp_operator_push(state)
+    if not whatsapp_summary:
+        whatsapp_summary = build_business_desk_whatsapp_operator_push(state)
 
     if args.dry_run and auto_approval_result.get("results"):
         for result in auto_approval_result.get("results") or []:
