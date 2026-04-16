@@ -127,6 +127,8 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertIn("Early week", payload["social_plan"]["slots"][0]["timing_hint"])
                 self.assertEqual(payload["social_plan"]["slots"][0]["suggested_lane"], "meme")
                 self.assertEqual(payload["social_plan"]["slots"][0]["content_family"], "meme")
+                self.assertEqual(payload["social_plan"]["slots"][0]["calendar_label"], "Monday evening")
+                self.assertEqual(payload["social_plan"]["slots"][3]["calendar_label"], "Saturday evening")
                 self.assertTrue(any(item["category"] == "stable_pattern" for item in payload["stable_patterns"]))
                 self.assertTrue(any(item["category"] == "experimental_idea" for item in payload["experimental_ideas"]))
                 self.assertTrue(any(item["category"] == "data_quality" for item in payload["recommendations"]))
@@ -143,6 +145,7 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertIn("## Do Not Copy", markdown)
                 self.assertIn("Slot 1", markdown)
                 self.assertIn("Lane: `meme`", markdown)
+                self.assertIn("Calendar: `Monday evening`", markdown)
 
 
 if __name__ == "__main__":

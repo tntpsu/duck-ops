@@ -402,6 +402,48 @@ def _preferred_slot_lane(
     return anchor_workflow, anchor_workflow, "standard_lane"
 
 
+def _calendar_target_for_slot(
+    *,
+    slot_label: str,
+    anchor_window: str,
+    suggested_lane: str,
+    execution_mode: str,
+) -> dict[str, str]:
+    day_by_slot = {
+        "Slot 1": "Monday",
+        "Slot 2": "Wednesday",
+        "Slot 3": "Thursday",
+        "Slot 4": "Saturday",
+        "Slot 5": "Sunday",
+    }
+    target_day = day_by_slot.get(slot_label, "This week")
+    if execution_mode == "review":
+        target_window = "review block"
+    else:
+        target_window = anchor_window or "best available window"
+    calendar_label = f"{target_day} {target_window}".strip()
+
+    if slot_label == "Slot 1" and suggested_lane == "meme":
+        cadence_reason = "This lines up with the recurring Meme Monday lane while keeping the stronger evening window in view."
+    elif slot_label == "Slot 2":
+        cadence_reason = "This is the midweek test slot, so it should not steal focus from the Monday anchor post."
+    elif slot_label == "Slot 3":
+        cadence_reason = "Late-week tests fit best after the anchor and midweek experiment have already landed."
+    elif slot_label == "Slot 4" and execution_mode == "manual_test":
+        cadence_reason = "Higher-risk format experiments are safer as bonus weekend tests than as core weekday commitments."
+    elif slot_label == "Slot 5":
+        cadence_reason = "End the week with a review block before changing the calendar or the lane mix."
+    else:
+        cadence_reason = "Use this as the suggested weekly rhythm unless a stronger operator reason changes the day."
+
+    return {
+        "target_day": target_day,
+        "target_window": target_window,
+        "calendar_label": calendar_label,
+        "cadence_reason": cadence_reason,
+    }
+
+
 def _social_plan_slots(
     *,
     anchor_window: str,
@@ -431,6 +473,14 @@ def _social_plan_slots(
             "source": "stable_pattern",
         }
     ]
+    slots[0].update(
+        _calendar_target_for_slot(
+            slot_label="Slot 1",
+            anchor_window=anchor_window,
+            suggested_lane=lane,
+            execution_mode=execution_mode,
+        )
+    )
 
     signal_to_slot = {
         "competitor_watch_account": ("Slot 2", f"Midweek · {anchor_window}", "Competitor-inspired hook test"),
@@ -469,6 +519,14 @@ def _social_plan_slots(
             "why": evidence,
             "source": signal_type,
         }
+        slot_payload.update(
+            _calendar_target_for_slot(
+                slot_label=slot_label,
+                anchor_window=anchor_window,
+                suggested_lane=lane,
+                execution_mode=execution_mode,
+            )
+        )
         if signal_type == "competitor_watch_account" and watch_account:
             slot_payload["watch_account"] = watch_account
         slots.append(slot_payload)
@@ -495,6 +553,14 @@ def _social_plan_slots(
                 "why": _compact_text(first_guardrail.get("evidence")),
                 "source": "guardrail",
             }
+        )
+        slots[-1].update(
+            _calendar_target_for_slot(
+                slot_label="Slot 5",
+                anchor_window=anchor_window,
+                suggested_lane=lane,
+                execution_mode=execution_mode,
+            )
         )
 
     deduped: list[dict[str, Any]] = []
@@ -741,6 +807,10 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                     lines.append(f"    Family: `{item.get('content_family')}`")
                 if item.get("execution_mode"):
                     lines.append(f"    Mode: `{item.get('execution_mode')}`")
+                if item.get("calendar_label"):
+                    lines.append(f"    Calendar: `{item.get('calendar_label')}`")
+                if item.get("cadence_reason"):
+                    lines.append(f"    Cadence: {item.get('cadence_reason')}")
                 if item.get("watch_account"):
                     lines.append(f"    Watch: `{item.get('watch_account')}`")
                 if item.get("why"):

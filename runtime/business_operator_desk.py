@@ -548,6 +548,10 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Family: `{item.get('content_family')}`")
                 if item.get("execution_mode"):
                     lines.append(f"    Mode: `{item.get('execution_mode')}`")
+                if item.get("calendar_label"):
+                    lines.append(f"    Calendar: `{item.get('calendar_label')}`")
+                if item.get("cadence_reason"):
+                    lines.append(f"    Cadence: {_trim_text(item.get('cadence_reason'), 160)}")
                 if item.get("watch_account"):
                     lines.append(f"    Watch: `{item.get('watch_account')}`")
         else:
@@ -856,6 +860,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Family: {item.get('content_family')}")
                     if item.get("execution_mode"):
                         lines.append(f"  Mode: {item.get('execution_mode')}")
+                    if item.get("calendar_label"):
+                        lines.append(f"  Calendar: {item.get('calendar_label')}")
+                    if item.get("cadence_reason"):
+                        lines.append(f"  Cadence: {_trim_text(item.get('cadence_reason'), 180)}")
                     if item.get("watch_account"):
                         lines.append(f"  Watch: {item.get('watch_account')}")
             else:
