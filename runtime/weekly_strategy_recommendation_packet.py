@@ -136,14 +136,22 @@ def _competitor_signal_quality(benchmark_payload: dict[str, Any], snapshot_paylo
     return "low", "Competitor social coverage is too degraded to drive more than one or two bounded experiments."
 
 
-def _recommendations(
+def _top_competitor_hook_row(competitor_social_payload: dict[str, Any]) -> dict[str, Any] | None:
+    for item in competitor_social_payload.get("by_hook_family") or []:
+        if not isinstance(item, dict):
+            continue
+        if _compact_text(item.get("label")):
+            return item
+    return None
+
+
+def _stable_patterns(
     social_payload: dict[str, Any],
     competitor_social_payload: dict[str, Any],
     snapshot_payload: dict[str, Any],
     snapshot_history_payload: dict[str, Any],
-    current_learnings_payload: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    recommendations: list[dict[str, Any]] = []
+    patterns: list[dict[str, Any]] = []
     competitor_signal = _competitor_signal_quality(competitor_social_payload, snapshot_payload)
     strongest_workflow = ((social_payload.get("rollups") or {}).get("by_workflow") or [{}])[0]
     strongest_workflow_label = _compact_text(strongest_workflow.get("label"))
@@ -151,24 +159,26 @@ def _recommendations(
 
     best_window = ((social_payload.get("rollups") or {}).get("by_time_window") or [{}])[0]
     if _compact_text(best_window.get("label")):
-        recommendations.append(
+        patterns.append(
             {
                 "priority": "P1",
-                "category": "timing",
-                "title": f"Keep testing the `{best_window.get('label')}` posting window",
-                "recommendation": f"Schedule at least one post in `{best_window.get('label')}` this week before changing the posting calendar broadly.",
+                "category": "stable_pattern",
+                "signal_type": "own_timing",
+                "title": f"`{best_window.get('label')}` is still the default test window",
+                "recommendation": f"Keep this as the default slot for this week unless a post-specific reason forces another time.",
                 "evidence": f"{best_window.get('post_count') or 0} observed posts with average score {best_window.get('avg_engagement_score') or 0}.",
                 "confidence": _own_signal_quality(social_payload)[0],
             }
         )
 
     if strongest_workflow_label:
-        recommendations.append(
+        patterns.append(
             {
                 "priority": "P1",
-                "category": "workflow",
-                "title": f"Keep `{strongest_workflow_label}` in the mix",
-                "recommendation": f"Use `{strongest_workflow_label}` as one of this week’s scheduled posts while receipt coverage is still growing.",
+                "category": "stable_pattern",
+                "signal_type": "own_workflow",
+                "title": f"`{strongest_workflow_label}` remains the safest anchor workflow",
+                "recommendation": f"Keep one `{strongest_workflow_label}` post in this week’s mix before changing the content split broadly.",
                 "evidence": f"{strongest_workflow.get('post_count') or 0} observed posts with average score {strongest_workflow.get('avg_engagement_score') or 0}.",
                 "confidence": _own_signal_quality(social_payload)[0],
             }
@@ -176,11 +186,44 @@ def _recommendations(
 
     stable_top_account = _compact_text(stability.get("stable_top_account"))
     if stable_top_account:
-        recommendations.append(
+        patterns.append(
             {
                 "priority": "P2",
-                "category": "competitor_watch",
-                "title": f"Use `{stable_top_account}` as the watch account for this week’s experiment",
+                "category": "stable_pattern",
+                "signal_type": "competitor_watch_account",
+                "title": f"`{stable_top_account}` is the current competitor watch account",
+                "recommendation": f"Use `{stable_top_account}` as the main reference account when we need fresh hook/style inspiration this week.",
+                "evidence": (
+                    f"`{stable_top_account}` held the top-account slot across "
+                    f"{stability.get('stable_top_account_count') or 0} of the last {stability.get('recent_snapshot_count') or 0} competitor snapshots."
+                ),
+                "confidence": competitor_signal[0],
+            }
+        )
+
+    return patterns[:4]
+
+
+def _experimental_ideas(
+    social_payload: dict[str, Any],
+    competitor_social_payload: dict[str, Any],
+    snapshot_payload: dict[str, Any],
+    snapshot_history_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    experiments: list[dict[str, Any]] = []
+    competitor_signal = _competitor_signal_quality(competitor_social_payload, snapshot_payload)
+    strongest_workflow = ((social_payload.get("rollups") or {}).get("by_workflow") or [{}])[0]
+    strongest_workflow_label = _compact_text(strongest_workflow.get("label"))
+    stability = _recent_snapshot_stability(snapshot_history_payload)
+    stable_top_account = _compact_text(stability.get("stable_top_account"))
+
+    if stable_top_account:
+        experiments.append(
+            {
+                "priority": "P2",
+                "category": "experimental_idea",
+                "signal_type": "competitor_watch_account",
+                "title": f"Borrow one bounded hook from `{stable_top_account}`",
                 "recommendation": (
                     f"Review the last few hooks and formats from `{stable_top_account}` before drafting one bounded post test. "
                     "Borrow structure and pacing, not exact copy."
@@ -196,10 +239,11 @@ def _recommendations(
     meaningful_theme = _meaningful_theme_row(competitor_social_payload, snapshot_payload)
     if meaningful_theme and strongest_workflow_label:
         theme_label = _compact_text(meaningful_theme.get("label"))
-        recommendations.append(
+        experiments.append(
             {
                 "priority": "P2",
-                "category": "competitor_theme",
+                "category": "experimental_idea",
+                "signal_type": "competitor_theme",
                 "title": f"Stage one `{theme_label}`-leaning test inside `{strongest_workflow_label}`",
                 "recommendation": (
                     f"Use `{theme_label}` as the concept input, but keep the execution in our existing `{strongest_workflow_label}` lane "
@@ -218,10 +262,11 @@ def _recommendations(
     dominant_format_label = _compact_text(top_format.get("label"))
     dominant_format_count = int(top_format.get("post_count") or 0)
     if dominant_format_label and total_competitor_posts > 0 and dominant_format_count / max(1, total_competitor_posts) >= 0.5:
-        recommendations.append(
+        experiments.append(
             {
                 "priority": "P2",
-                "category": "competitor_format",
+                "category": "experimental_idea",
+                "signal_type": "competitor_format",
                 "title": f"Keep one bounded `{dominant_format_label}` test on this week’s board",
                 "recommendation": (
                     f"Do one small `{dominant_format_label}` experiment this week, but keep it isolated to a single post until our own signal set gets bigger."
@@ -233,38 +278,138 @@ def _recommendations(
             }
         )
 
+    top_hook = _top_competitor_hook_row(competitor_social_payload)
+    if top_hook and _compact_text(top_hook.get("label")):
+        hook_label = _compact_text(top_hook.get("label"))
+        experiments.append(
+            {
+                "priority": "P3",
+                "category": "experimental_idea",
+                "signal_type": "competitor_hook",
+                "title": f"Test one `{hook_label}` hook without changing the whole caption style",
+                "recommendation": f"Use `{hook_label}` as a single caption-opening experiment this week, but keep the rest of the post in our usual voice.",
+                "evidence": f"`{hook_label}` appeared in {top_hook.get('post_count') or 0} competitor posts with average visible score {top_hook.get('avg_engagement_score') or 0}.",
+                "confidence": competitor_signal[0],
+            }
+        )
+
+    return experiments[:4]
+
+
+def _do_not_copy_patterns(
+    social_payload: dict[str, Any],
+    competitor_social_payload: dict[str, Any],
+    snapshot_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    guardrails: list[dict[str, Any]] = []
     degraded_accounts = int((snapshot_payload.get("summary") or {}).get("degraded_account_count") or 0)
     hard_failures = int((snapshot_payload.get("summary") or {}).get("failed_account_count") or 0)
     profile_only_backoff_accounts = int((snapshot_payload.get("summary") or {}).get("profile_only_backoff_account_count") or 0)
     live_canary_limited_accounts = int((snapshot_payload.get("summary") or {}).get("live_canary_limited_account_count") or 0)
-    if degraded_accounts or hard_failures or profile_only_backoff_accounts:
+    if degraded_accounts or hard_failures or profile_only_backoff_accounts or live_canary_limited_accounts:
+        guardrails.append(
+            {
+                "title": "Do not let competitor data rewrite the whole calendar this week",
+                "guidance": "Keep competitor learnings as bounded tests only until live own-post coverage and competitor freshness both improve further.",
+                "evidence": (
+                    f"{degraded_accounts} degraded fetches, {hard_failures} hard failures, "
+                    f"{profile_only_backoff_accounts} profile-only backoff accounts, and "
+                    f"{live_canary_limited_accounts} canary-limited accounts in the latest snapshot."
+                ),
+            }
+        )
+
+    top_format = ((competitor_social_payload.get("by_format") or [{}])[0])
+    total_competitor_posts = int((competitor_social_payload.get("summary") or {}).get("post_count") or 0)
+    dominant_format_label = _compact_text(top_format.get("label"))
+    dominant_format_count = int(top_format.get("post_count") or 0)
+    if dominant_format_label and total_competitor_posts > 0 and dominant_format_count / max(1, total_competitor_posts) >= 0.5:
+        guardrails.append(
+            {
+                "title": f"Do not pivot the whole mix to `{dominant_format_label}` just because competitors overuse it",
+                "guidance": "Run one controlled format test, but keep the rest of the schedule in the workflows we already execute well.",
+                "evidence": f"`{dominant_format_label}` accounts for {dominant_format_count} of {total_competitor_posts} competitor posts in the current benchmark.",
+            }
+        )
+
+    top_hook = _top_competitor_hook_row(competitor_social_payload)
+    if top_hook and _compact_text(top_hook.get("label")) == "statement_showcase":
+        guardrails.append(
+            {
+                "title": "Do not copy polished competitor showcase posts beat-for-beat",
+                "guidance": "Lift the pacing or framing, but keep our own tone, product mix, and merchandising boundaries intact.",
+                "evidence": f"`statement_showcase` is the most repeated competitor hook family with {top_hook.get('post_count') or 0} posts.",
+            }
+        )
+
+    best_window = ((social_payload.get("rollups") or {}).get("by_time_window") or [{}])[0]
+    if _compact_text(best_window.get("label")) and int(best_window.get("post_count") or 0) < 3:
+        guardrails.append(
+            {
+                "title": "Do not overfit to a tiny own-post sample",
+                "guidance": "Keep this week’s plan small because our own post history is still too thin for high-confidence calendar changes.",
+                "evidence": f"Current best own-post window `{best_window.get('label')}` is based on only {best_window.get('post_count') or 0} observed posts.",
+            }
+        )
+
+    return guardrails[:4]
+
+
+def _social_plan(
+    social_payload: dict[str, Any],
+    stable_patterns: list[dict[str, Any]],
+    experimental_ideas: list[dict[str, Any]],
+    do_not_copy_patterns: list[dict[str, Any]],
+) -> dict[str, Any]:
+    best_window = ((social_payload.get("rollups") or {}).get("by_time_window") or [{}])[0]
+    strongest_workflow = ((social_payload.get("rollups") or {}).get("by_workflow") or [{}])[0]
+    stable_account = next((item for item in stable_patterns if item.get("signal_type") == "competitor_watch_account"), None)
+    anchor_window = _compact_text(best_window.get("label")) or "best available window"
+    anchor_workflow = _compact_text(strongest_workflow.get("label")) or "best available workflow"
+    watch_account = None
+    if stable_account:
+        title = _compact_text(stable_account.get("title"))
+        if title.startswith("`") and "`" in title[1:]:
+            watch_account = title.split("`")[1]
+    items = [f"Anchor the week around `{anchor_workflow}` in the `{anchor_window}` window."]
+    if watch_account:
+        items.append(f"Use `{watch_account}` as the competitor account to watch before drafting one new post.")
+    for item in experimental_ideas[:2]:
+        items.append(_compact_text(item.get("recommendation")))
+    if do_not_copy_patterns:
+        items.append(_compact_text((do_not_copy_patterns[0] or {}).get("guidance")))
+    return {
+        "headline": f"Keep `{anchor_workflow}` anchored in `{anchor_window}`, run one or two bounded competitor-inspired tests, and avoid copying competitor styles directly.",
+        "anchor_window": anchor_window,
+        "anchor_workflow": anchor_workflow,
+        "watch_account": watch_account,
+        "items": items[:5],
+    }
+
+
+def _recommendations(
+    stable_patterns: list[dict[str, Any]],
+    experimental_ideas: list[dict[str, Any]],
+    do_not_copy_patterns: list[dict[str, Any]],
+    current_learnings_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    recommendations: list[dict[str, Any]] = []
+    recommendations.extend(stable_patterns[:2])
+    recommendations.extend(experimental_ideas[:3])
+    if do_not_copy_patterns:
+        first = do_not_copy_patterns[0]
         recommendations.append(
             {
                 "priority": "P2",
                 "category": "data_quality",
-                "title": "Treat competitor learnings as directional this week",
-                "recommendation": "Use competitor social patterns to guide small tests only; do not make big strategy changes until fresh live pulls improve again.",
-                "evidence": (
-                    f"{degraded_accounts} degraded competitor account fetches, {hard_failures} hard failures, and "
-                    f"{profile_only_backoff_accounts} profile-only backoff account(s) in the latest snapshot."
-                ),
+                "title": _compact_text(first.get("title")),
+                "recommendation": _compact_text(first.get("guidance")),
+                "evidence": _compact_text(first.get("evidence")),
                 "confidence": "high",
             }
         )
-    elif live_canary_limited_accounts:
-        recommendations.append(
-            {
-                "priority": "P3",
-                "category": "data_quality",
-                "title": "Trust the canary guardrail more than one-off competitor misses",
-                "recommendation": "Use the packet normally this week; the collector is intentionally limiting live pressure and preserving breadth with cache instead of over-polling competitors.",
-                "evidence": f"{live_canary_limited_accounts} account(s) were intentionally deferred by the live canary policy in the latest snapshot.",
-                "confidence": "high",
-            }
-        )
-
     change_count = len(current_learnings_payload.get("changes_since_previous") or [])
-    if change_count:
+    if change_count and len(recommendations) < 6:
         recommendations.append(
             {
                 "priority": "P3",
@@ -275,7 +420,6 @@ def _recommendations(
                 "confidence": "medium",
             }
         )
-
     return recommendations[:6]
 
 
@@ -320,6 +464,29 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
     own_signal = _own_signal_quality(social_payload)
     competitor_signal = _competitor_signal_quality(competitor_social_payload, snapshot_payload)
     stability = _recent_snapshot_stability(snapshot_history_payload)
+    stable_patterns = _stable_patterns(
+        social_payload,
+        competitor_social_payload,
+        snapshot_payload,
+        snapshot_history_payload,
+    )
+    experimental_ideas = _experimental_ideas(
+        social_payload,
+        competitor_social_payload,
+        snapshot_payload,
+        snapshot_history_payload,
+    )
+    do_not_copy_patterns = _do_not_copy_patterns(
+        social_payload,
+        competitor_social_payload,
+        snapshot_payload,
+    )
+    social_plan = _social_plan(
+        social_payload,
+        stable_patterns,
+        experimental_ideas,
+        do_not_copy_patterns,
+    )
     stability_note = "Competitor history is still too short to call any pattern stable."
     if _compact_text(stability.get("stable_top_account")):
         stability_note = (
@@ -335,14 +502,21 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
             "competitor_signal_confidence": competitor_signal[0],
             "competitor_signal_note": competitor_signal[1],
             "competitor_stability_note": stability_note,
+            "stable_pattern_count": len(stable_patterns),
+            "experimental_idea_count": len(experimental_ideas),
+            "do_not_copy_count": len(do_not_copy_patterns),
+            "social_plan_item_count": len(social_plan.get("items") or []),
             "recommendation_count": 0,
             "watchout_count": 0,
         },
+        "stable_patterns": stable_patterns,
+        "experimental_ideas": experimental_ideas,
+        "do_not_copy_patterns": do_not_copy_patterns,
+        "social_plan": social_plan,
         "recommendations": _recommendations(
-            social_payload,
-            competitor_social_payload,
-            snapshot_payload,
-            snapshot_history_payload,
+            stable_patterns,
+            experimental_ideas,
+            do_not_copy_patterns,
             current_learnings_payload,
         ),
         "watchouts": _watchouts(snapshot_payload, social_payload),
@@ -379,10 +553,78 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
         "",
         f"Competitor-stability note: {summary.get('competitor_stability_note') or ''}",
         "",
-        "## Recommended Moves",
+        "## This Week's Social Plan",
         "",
     ]
 
+    social_plan = payload.get("social_plan") or {}
+    if not social_plan:
+        lines.append("No weekly social plan is staged yet.")
+        lines.append("")
+    else:
+        lines.append(f"- Headline: {social_plan.get('headline')}")
+        lines.append(f"- Anchor window: `{social_plan.get('anchor_window') or 'unknown'}`")
+        lines.append(f"- Anchor workflow: `{social_plan.get('anchor_workflow') or 'unknown'}`")
+        if social_plan.get("watch_account"):
+            lines.append(f"- Watch account: `{social_plan.get('watch_account')}`")
+        items = social_plan.get("items") or []
+        if items:
+            lines.append("- Plan items:")
+            for item in items[:5]:
+                lines.append(f"  - {item}")
+        lines.append("")
+
+    lines.extend(["## Stable Competitor Patterns", ""])
+    stable_patterns = payload.get("stable_patterns") or []
+    if not stable_patterns:
+        lines.append("No stable patterns are available yet.")
+        lines.append("")
+    else:
+        for item in stable_patterns:
+            lines.extend(
+                [
+                    f"### {item.get('priority')} · {item.get('title')}",
+                    "",
+                    f"- Signal: `{item.get('signal_type')}`",
+                    f"- Confidence: `{item.get('confidence')}`",
+                    f"- Keep doing: {item.get('recommendation')}",
+                    f"- Evidence: {item.get('evidence')}",
+                    "",
+                ]
+            )
+
+    lines.extend(["## Experimental Ideas", ""])
+    experiments = payload.get("experimental_ideas") or []
+    if not experiments:
+        lines.append("No experimental ideas are staged yet.")
+        lines.append("")
+    else:
+        for item in experiments:
+            lines.extend(
+                [
+                    f"### {item.get('priority')} · {item.get('title')}",
+                    "",
+                    f"- Signal: `{item.get('signal_type')}`",
+                    f"- Confidence: `{item.get('confidence')}`",
+                    f"- Test: {item.get('recommendation')}",
+                    f"- Evidence: {item.get('evidence')}",
+                    "",
+                ]
+            )
+
+    lines.extend(["## Do Not Copy", ""])
+    guardrails = payload.get("do_not_copy_patterns") or []
+    if not guardrails:
+        lines.append("No explicit do-not-copy guardrails are staged yet.")
+        lines.append("")
+    else:
+        for item in guardrails:
+            lines.append(f"- {item.get('title')}")
+            lines.append(f"  Guidance: {item.get('guidance')}")
+            lines.append(f"  Evidence: {item.get('evidence')}")
+        lines.append("")
+
+    lines.extend(["## Recommended Moves", ""])
     recommendations = payload.get("recommendations") or []
     if not recommendations:
         lines.append("No weekly strategy moves are staged yet.")

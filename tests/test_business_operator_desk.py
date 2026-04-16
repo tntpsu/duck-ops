@@ -281,9 +281,23 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                 "competitor_signal_confidence": "low_medium",
                 "own_signal_note": "Own-post coverage is still sparse.",
                 "competitor_signal_note": "Competitor coverage is relying on cached fallback.",
+                "competitor_stability_note": "`f3dprinted` stayed on top.",
+                "stable_pattern_count": 1,
+                "experimental_idea_count": 1,
+                "do_not_copy_count": 1,
                 "recommendation_count": 2,
                 "watchout_count": 1,
                 "recommendations": [{"title": "Keep testing the `evening` posting window"}],
+                "social_plan": {
+                    "headline": "Keep meme in evening and run one bounded music test.",
+                    "anchor_window": "evening",
+                    "anchor_workflow": "meme",
+                    "watch_account": "f3dprinted",
+                    "items": [
+                        "Anchor the week around `meme` in the `evening` window.",
+                        "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
+                    ],
+                },
                 "watchouts": ["Competitor coverage relied on cached fallback."],
             },
         ):
@@ -301,9 +315,12 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         markdown = render_business_operator_desk_markdown(payload)
         self.assertEqual(payload["counts"]["strategy_recommendations"], 1)
         self.assertEqual(payload["counts"]["strategy_watchouts"], 1)
+        self.assertEqual(payload["counts"]["strategy_plan_items"], 2)
         self.assertIn("## Weekly Strategy Packet", markdown)
         self.assertIn("Keep testing the `evening` posting window", markdown)
         self.assertIn("Competitor coverage relied on cached fallback.", markdown)
+        self.assertIn("## This Week's Social Plan", markdown)
+        self.assertIn("Keep meme in evening and run one bounded music test.", markdown)
 
     def test_render_business_section_learning_uses_payload_items_without_crashing(self) -> None:
         output = render_business_section(
@@ -336,10 +353,14 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                     "path": "/tmp/weekly_strategy_recommendation_packet.md",
                     "own_signal_confidence": "low",
                     "competitor_signal_confidence": "low_medium",
+                    "stable_pattern_count": 1,
+                    "experimental_idea_count": 1,
+                    "do_not_copy_count": 1,
                     "recommendation_count": 1,
                     "watchout_count": 1,
                     "own_signal_note": "Own-post coverage is still sparse.",
                     "competitor_signal_note": "Competitor coverage is relying on cached fallback.",
+                    "competitor_stability_note": "`f3dprinted` stayed on top.",
                     "recommendations": [
                         {
                             "priority": "P1",
@@ -370,6 +391,40 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Keep testing the `evening` posting window", output)
         self.assertIn("Watchouts:", output)
         self.assertIn("Competitor coverage relied on cached fallback.", output)
+        self.assertIn("Stable patterns: 1", output)
+        self.assertIn("Experimental ideas: 1", output)
+        self.assertIn("Do-not-copy guardrails: 1", output)
+
+    def test_render_business_section_social_plan_includes_plan_items(self) -> None:
+        output = render_business_section(
+            {
+                "weekly_strategy_packet": {
+                    "available": True,
+                    "social_plan": {
+                        "headline": "Keep meme in evening and run one bounded music test.",
+                        "anchor_window": "evening",
+                        "anchor_workflow": "meme",
+                        "watch_account": "f3dprinted",
+                        "items": [
+                            "Anchor the week around `meme` in the `evening` window.",
+                            "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
+                        ],
+                    },
+                },
+                "sections": {
+                    "weekly_social_plan": [
+                        "Anchor the week around `meme` in the `evening` window.",
+                        "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
+                    ]
+                },
+            },
+            "social_plan",
+        )
+
+        self.assertIn("Duck Ops This Week's Social Plan", output)
+        self.assertIn("Keep meme in evening and run one bounded music test.", output)
+        self.assertIn("Anchor window: evening", output)
+        self.assertIn("Watch account: f3dprinted", output)
 
     def test_render_business_section_reviews_includes_decision_command(self) -> None:
         output = render_business_section(

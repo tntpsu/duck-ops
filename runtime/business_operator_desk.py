@@ -55,17 +55,21 @@ def _load_learning_surface() -> dict[str, Any]:
 
 def _load_weekly_strategy_packet() -> dict[str, Any]:
     if not WEEKLY_STRATEGY_PACKET_PATH.exists():
-        return {"available": False, "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH), "recommendations": [], "watchouts": []}
+        return {"available": False, "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH), "recommendations": [], "watchouts": [], "social_plan": {}}
     try:
         payload = json.loads(WEEKLY_STRATEGY_PACKET_PATH.read_text(encoding="utf-8"))
     except Exception:
-        return {"available": False, "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH), "recommendations": [], "watchouts": []}
+        return {"available": False, "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH), "recommendations": [], "watchouts": [], "social_plan": {}}
     if not isinstance(payload, dict):
-        return {"available": False, "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH), "recommendations": [], "watchouts": []}
+        return {"available": False, "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH), "recommendations": [], "watchouts": [], "social_plan": {}}
 
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     recommendations = list(payload.get("recommendations") or [])
     watchouts = list(payload.get("watchouts") or [])
+    social_plan = payload.get("social_plan") if isinstance(payload.get("social_plan"), dict) else {}
+    stable_patterns = list(payload.get("stable_patterns") or [])
+    experimental_ideas = list(payload.get("experimental_ideas") or [])
+    do_not_copy_patterns = list(payload.get("do_not_copy_patterns") or [])
     return {
         "available": True,
         "path": str(WEEKLY_STRATEGY_PACKET_MD_PATH),
@@ -75,9 +79,23 @@ def _load_weekly_strategy_packet() -> dict[str, Any]:
         "own_signal_note": summary.get("own_signal_note"),
         "competitor_signal_confidence": summary.get("competitor_signal_confidence"),
         "competitor_signal_note": summary.get("competitor_signal_note"),
+        "competitor_stability_note": summary.get("competitor_stability_note"),
+        "stable_pattern_count": len(stable_patterns),
+        "experimental_idea_count": len(experimental_ideas),
+        "do_not_copy_count": len(do_not_copy_patterns),
         "recommendation_count": len(recommendations),
         "watchout_count": len(watchouts),
         "recommendations": recommendations[:4],
+        "stable_patterns": stable_patterns[:4],
+        "experimental_ideas": experimental_ideas[:4],
+        "do_not_copy_patterns": do_not_copy_patterns[:4],
+        "social_plan": {
+            "headline": social_plan.get("headline"),
+            "anchor_window": social_plan.get("anchor_window"),
+            "anchor_workflow": social_plan.get("anchor_workflow"),
+            "watch_account": social_plan.get("watch_account"),
+            "items": list(social_plan.get("items") or [])[:5],
+        },
         "watchouts": watchouts[:3],
     }
 
@@ -372,6 +390,7 @@ def build_business_operator_desk(
             "learning_beliefs": len(learning_surface.get("items") or []),
             "strategy_recommendations": len(weekly_strategy_packet.get("recommendations") or []),
             "strategy_watchouts": len(weekly_strategy_packet.get("watchouts") or []),
+            "strategy_plan_items": len(((weekly_strategy_packet.get("social_plan") or {}).get("items") or [])),
         },
         "next_actions": _build_next_actions(
             customer_items=customer_items,
@@ -394,6 +413,7 @@ def build_business_operator_desk(
             "workflow_followthrough": workflow_items[:6],
             "learning_surface": list(learning_surface.get("items") or [])[:4],
             "weekly_strategy_packet": list(weekly_strategy_packet.get("recommendations") or [])[:4],
+            "weekly_social_plan": list(((weekly_strategy_packet.get("social_plan") or {}).get("items") or []))[:5],
         },
     }
 
@@ -432,6 +452,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Learning beliefs surfaced: `{counts.get('learning_beliefs') or len(learning_items)}`",
         f"- Strategy recommendations surfaced: `{counts.get('strategy_recommendations') or len(strategy_items)}`",
         f"- Strategy watchouts surfaced: `{counts.get('strategy_watchouts') or len(weekly_strategy_packet.get('watchouts') or [])}`",
+        f"- Social plan items surfaced: `{counts.get('strategy_plan_items') or len((weekly_strategy_packet.get('social_plan') or {}).get('items') or [])}`",
         "",
         "## Strategic Focus",
         "",
@@ -473,10 +494,15 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Competitor signal confidence: `{weekly_strategy_packet.get('competitor_signal_confidence') or 'unknown'}`")
         lines.append(f"- Recommendations: `{weekly_strategy_packet.get('recommendation_count', len(strategy_items))}`")
         lines.append(f"- Watchouts: `{weekly_strategy_packet.get('watchout_count', len(weekly_strategy_packet.get('watchouts') or []))}`")
+        lines.append(f"- Stable patterns: `{weekly_strategy_packet.get('stable_pattern_count', len(weekly_strategy_packet.get('stable_patterns') or []))}`")
+        lines.append(f"- Experimental ideas: `{weekly_strategy_packet.get('experimental_idea_count', len(weekly_strategy_packet.get('experimental_ideas') or []))}`")
+        lines.append(f"- Do-not-copy guardrails: `{weekly_strategy_packet.get('do_not_copy_count', len(weekly_strategy_packet.get('do_not_copy_patterns') or []))}`")
         if weekly_strategy_packet.get("own_signal_note"):
             lines.append(f"- Own-signal note: {_trim_text(weekly_strategy_packet.get('own_signal_note'), 180)}")
         if weekly_strategy_packet.get("competitor_signal_note"):
             lines.append(f"- Competitor-signal note: {_trim_text(weekly_strategy_packet.get('competitor_signal_note'), 180)}")
+        if weekly_strategy_packet.get("competitor_stability_note"):
+            lines.append(f"- Competitor-stability note: {_trim_text(weekly_strategy_packet.get('competitor_stability_note'), 180)}")
         if strategy_items:
             lines.append("- Top recommendations:")
             for item in strategy_items:
@@ -485,6 +511,28 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         if watchouts:
             lines.append("- Watchouts:")
             for item in watchouts[:3]:
+                lines.append(f"  - {_trim_text(item, 160)}")
+    lines.extend([
+        "",
+        "## This Week's Social Plan",
+        "",
+    ])
+    social_plan = weekly_strategy_packet.get("social_plan") or {}
+    if not social_plan:
+        lines.append("No weekly social plan is available yet.")
+    else:
+        if social_plan.get("headline"):
+            lines.append(f"- Headline: {_trim_text(social_plan.get('headline'), 180)}")
+        if social_plan.get("anchor_window"):
+            lines.append(f"- Anchor window: `{social_plan.get('anchor_window')}`")
+        if social_plan.get("anchor_workflow"):
+            lines.append(f"- Anchor workflow: `{social_plan.get('anchor_workflow')}`")
+        if social_plan.get("watch_account"):
+            lines.append(f"- Watch account: `{social_plan.get('watch_account')}`")
+        items = (sections.get("weekly_social_plan") or []) or list(social_plan.get("items") or [])
+        if items:
+            lines.append("- Plan:")
+            for item in items[:5]:
                 lines.append(f"  - {_trim_text(item, 160)}")
     lines.extend([
         "",
@@ -671,6 +719,8 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "weekly_strategy": "weekly_strategy_packet",
         "strategy_packet": "weekly_strategy_packet",
         "recommendations": "weekly_strategy_packet",
+        "social_plan": "social_plan",
+        "plan": "social_plan",
     }
     normalized = aliases.get(section_key, section_key)
     if normalized == "next_actions":
@@ -730,10 +780,15 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             lines.append(f"Competitor signal confidence: {weekly_strategy_packet.get('competitor_signal_confidence') or 'unknown'}")
             lines.append(f"Recommendations: {weekly_strategy_packet.get('recommendation_count', len(strategy_items))}")
             lines.append(f"Watchouts: {weekly_strategy_packet.get('watchout_count', len(weekly_strategy_packet.get('watchouts') or []))}")
+            lines.append(f"Stable patterns: {weekly_strategy_packet.get('stable_pattern_count', len(weekly_strategy_packet.get('stable_patterns') or []))}")
+            lines.append(f"Experimental ideas: {weekly_strategy_packet.get('experimental_idea_count', len(weekly_strategy_packet.get('experimental_ideas') or []))}")
+            lines.append(f"Do-not-copy guardrails: {weekly_strategy_packet.get('do_not_copy_count', len(weekly_strategy_packet.get('do_not_copy_patterns') or []))}")
             if weekly_strategy_packet.get("own_signal_note"):
                 lines.append(f"Own-signal note: {_trim_text(weekly_strategy_packet.get('own_signal_note'), 180)}")
             if weekly_strategy_packet.get("competitor_signal_note"):
                 lines.append(f"Competitor-signal note: {_trim_text(weekly_strategy_packet.get('competitor_signal_note'), 180)}")
+            if weekly_strategy_packet.get("competitor_stability_note"):
+                lines.append(f"Competitor-stability note: {_trim_text(weekly_strategy_packet.get('competitor_stability_note'), 180)}")
             for item in strategy_items:
                 lines.append(f"- {item.get('priority')} | {item.get('category')} | {_trim_text(item.get('title'), 140)}")
                 if item.get("recommendation"):
@@ -745,6 +800,29 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append("Watchouts:")
                 for item in watchouts[:3]:
                     lines.append(f"- {_trim_text(item, 180)}")
+        return "\n".join(lines)
+
+    if normalized == "social_plan":
+        lines = ["Duck Ops This Week's Social Plan", ""]
+        weekly_strategy_packet = payload.get("weekly_strategy_packet") or {}
+        if not weekly_strategy_packet.get("available"):
+            weekly_strategy_packet = _load_weekly_strategy_packet()
+        social_plan = weekly_strategy_packet.get("social_plan") or {}
+        items = (sections.get("weekly_social_plan") or []) or list(social_plan.get("items") or [])
+        if not weekly_strategy_packet.get("available") or not social_plan:
+            lines.append("Weekly social plan is not available yet.")
+        else:
+            if social_plan.get("headline"):
+                lines.append(f"Headline: {_trim_text(social_plan.get('headline'), 180)}")
+            if social_plan.get("anchor_window"):
+                lines.append(f"Anchor window: {social_plan.get('anchor_window')}")
+            if social_plan.get("anchor_workflow"):
+                lines.append(f"Anchor workflow: {social_plan.get('anchor_workflow')}")
+            if social_plan.get("watch_account"):
+                lines.append(f"Watch account: {social_plan.get('watch_account')}")
+            lines.append("")
+            for item in items:
+                lines.append(f"- {_trim_text(item, 180)}")
         return "\n".join(lines)
 
     items = sections.get(normalized) or []
