@@ -95,6 +95,8 @@ def _load_weekly_strategy_packet() -> dict[str, Any]:
             "anchor_workflow": social_plan.get("anchor_workflow"),
             "watch_account": social_plan.get("watch_account"),
             "slot_count": int(social_plan.get("slot_count") or len(social_plan.get("slots") or [])),
+            "readiness_counts": dict(social_plan.get("readiness_counts") or {}),
+            "ready_this_week": list(social_plan.get("ready_this_week") or [])[:5],
             "slots": list(social_plan.get("slots") or [])[:5],
             "items": list(social_plan.get("items") or [])[:5],
         },
@@ -531,6 +533,15 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- Anchor workflow: `{social_plan.get('anchor_workflow')}`")
         if social_plan.get("watch_account"):
             lines.append(f"- Watch account: `{social_plan.get('watch_account')}`")
+        readiness_counts = social_plan.get("readiness_counts") or {}
+        if readiness_counts:
+            lines.append(
+                "- Readiness: "
+                f"`ready_now={readiness_counts.get('ready_now', 0)}`, "
+                f"`ready_with_approval={readiness_counts.get('ready_with_approval', 0)}`, "
+                f"`manual_experiment={readiness_counts.get('manual_experiment', 0)}`, "
+                f"`not_supported_yet={readiness_counts.get('not_supported_yet', 0)}`"
+            )
         slots = (sections.get("weekly_social_plan") or []) or list(social_plan.get("slots") or [])
         if slots and isinstance(slots[0], dict):
             lines.append("- Suggested slots:")
@@ -552,6 +563,14 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Calendar: `{item.get('calendar_label')}`")
                 if item.get("cadence_reason"):
                     lines.append(f"    Cadence: {_trim_text(item.get('cadence_reason'), 160)}")
+                if item.get("execution_readiness"):
+                    lines.append(f"    Readiness: `{item.get('execution_readiness')}`")
+                if item.get("schedule_reference"):
+                    lines.append(f"    Schedule: {_trim_text(item.get('schedule_reference'), 140)}")
+                if item.get("command_hint"):
+                    lines.append(f"    Hint: `{item.get('command_hint')}`")
+                if item.get("next_step"):
+                    lines.append(f"    Next: {_trim_text(item.get('next_step'), 160)}")
                 if item.get("watch_account"):
                     lines.append(f"    Watch: `{item.get('watch_account')}`")
         else:
@@ -560,6 +579,13 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 lines.append("- Plan:")
                 for item in items[:5]:
                     lines.append(f"  - {_trim_text(item, 160)}")
+        ready_this_week = social_plan.get("ready_this_week") or []
+        if ready_this_week:
+            lines.append("- Ready this week:")
+            for item in ready_this_week[:5]:
+                lines.append(
+                    f"  - {item.get('slot')}: `{item.get('calendar_label') or 'this week'}` | `{item.get('suggested_lane') or 'unknown'}` | `{item.get('execution_readiness')}`"
+                )
     lines.extend([
         "",
         "## Do Next",
@@ -846,6 +872,15 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append(f"Anchor workflow: {social_plan.get('anchor_workflow')}")
             if social_plan.get("watch_account"):
                 lines.append(f"Watch account: {social_plan.get('watch_account')}")
+            readiness_counts = social_plan.get("readiness_counts") or {}
+            if readiness_counts:
+                lines.append(
+                    "Readiness: "
+                    f"ready_now={readiness_counts.get('ready_now', 0)}, "
+                    f"ready_with_approval={readiness_counts.get('ready_with_approval', 0)}, "
+                    f"manual_experiment={readiness_counts.get('manual_experiment', 0)}, "
+                    f"not_supported_yet={readiness_counts.get('not_supported_yet', 0)}"
+                )
             lines.append("")
             if items and isinstance(items[0], dict):
                 for item in items:
@@ -864,11 +899,27 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Calendar: {item.get('calendar_label')}")
                     if item.get("cadence_reason"):
                         lines.append(f"  Cadence: {_trim_text(item.get('cadence_reason'), 180)}")
+                    if item.get("execution_readiness"):
+                        lines.append(f"  Readiness: {item.get('execution_readiness')}")
+                    if item.get("schedule_reference"):
+                        lines.append(f"  Schedule: {_trim_text(item.get('schedule_reference'), 180)}")
+                    if item.get("command_hint"):
+                        lines.append(f"  Hint: {item.get('command_hint')}")
+                    if item.get("next_step"):
+                        lines.append(f"  Next: {_trim_text(item.get('next_step'), 180)}")
                     if item.get("watch_account"):
                         lines.append(f"  Watch: {item.get('watch_account')}")
             else:
                 for item in items:
                     lines.append(f"- {_trim_text(item, 180)}")
+            ready_this_week = social_plan.get("ready_this_week") or []
+            if ready_this_week:
+                lines.append("")
+                lines.append("Ready this week:")
+                for item in ready_this_week[:5]:
+                    lines.append(
+                        f"- {item.get('slot')}: {item.get('calendar_label') or 'this week'} | {item.get('suggested_lane') or 'unknown'} | {item.get('execution_readiness')}"
+                    )
         return "\n".join(lines)
 
     items = sections.get(normalized) or []

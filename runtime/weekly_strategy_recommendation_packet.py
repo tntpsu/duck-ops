@@ -398,8 +398,109 @@ def _preferred_slot_lane(
             return "manual_social_experiment", format_label or "format_test", "manual_test"
         return anchor_workflow, format_label or "format_test", "standard_lane"
     if signal_type == "guardrail":
-        return anchor_workflow, "review_guardrail", "review"
+        return "operator_review", "review_guardrail", "review"
     return anchor_workflow, anchor_workflow, "standard_lane"
+
+
+def _slot_execution_bridge(
+    *,
+    suggested_lane: str,
+    execution_mode: str,
+) -> dict[str, Any]:
+    scheduled_lanes = {
+        "meme": {
+            "schedule_reference": "Monday 09:00 scheduled flow",
+            "command_hint": "python src/main_agent.py --flow meme --all",
+            "next_step": "Run the meme flow or wait for the scheduled run, then use the normal review/publish reply loop.",
+        },
+        "jeepfact": {
+            "schedule_reference": "Wednesday 09:00 scheduled flow",
+            "command_hint": "python src/main_agent.py --flow jeepfact --all",
+            "next_step": "Run the Jeep Fact flow or wait for the scheduled run, then approve the publish step normally.",
+        },
+        "thursday": {
+            "schedule_reference": "Thursday 09:00 scheduled flow",
+            "command_hint": "python src/main_agent.py --flow thursday --all",
+            "next_step": "Use the Thursday flow and keep the publish step inside the normal approval lane.",
+        },
+        "gtdf": {
+            "schedule_reference": "Thursday 20:00 scheduled flow",
+            "command_hint": "python src/main_agent.py --flow gtdf --all",
+            "next_step": "Use the GTDF flow and keep the publish step approval-based.",
+        },
+        "gtdf_winner": {
+            "schedule_reference": "Sunday 08:00 scheduled flow",
+            "command_hint": "python src/main_agent.py --flow gtdf_winner --all --force",
+            "next_step": "Use the GTDF winner flow and keep the publish step approval-based.",
+        },
+        "review_carousel": {
+            "schedule_reference": "Approval-driven review carousel lane",
+            "command_hint": "approve review_carousel candidate, then reply publish",
+            "next_step": "Stage this through the review carousel approval loop rather than a timed scheduled run.",
+        },
+        "blog": {
+            "schedule_reference": "Approval-driven blog social publish lane",
+            "command_hint": "python src/main_agent.py --flow blog --all",
+            "next_step": "Use the blog flow and keep the publish step inside the existing approval loop.",
+        },
+    }
+    if execution_mode == "manual_test" or suggested_lane == "manual_social_experiment":
+        return {
+            "execution_readiness": "manual_experiment",
+            "approval_required": False,
+            "schedule_reference": "No first-class recurring lane",
+            "command_hint": None,
+            "readiness_reason": "This is a manual experiment idea, not a supported DuckAgent publishing lane yet.",
+            "next_step": "Treat this as a bounded manual social test if we choose to run it.",
+        }
+    if execution_mode == "review" or suggested_lane == "operator_review":
+        return {
+            "execution_readiness": "ready_now",
+            "approval_required": False,
+            "schedule_reference": "Weekly operator review block",
+            "command_hint": "review current_learnings + weekly_strategy_recommendation_packet",
+            "readiness_reason": "This slot is an operator review step and can be executed immediately with the current desk and learnings surfaces.",
+            "next_step": "Use the desk and current learnings to review the week before changing the calendar.",
+        }
+    if suggested_lane in scheduled_lanes:
+        lane = scheduled_lanes[suggested_lane]
+        return {
+            "execution_readiness": "ready_with_approval",
+            "approval_required": True,
+            "schedule_reference": lane["schedule_reference"],
+            "command_hint": lane["command_hint"],
+            "readiness_reason": "This slot maps to an existing DuckAgent lane, but the normal review/publish approval boundary still applies.",
+            "next_step": lane["next_step"],
+        }
+    return {
+        "execution_readiness": "not_supported_yet",
+        "approval_required": False,
+        "schedule_reference": "No mapped lane",
+        "command_hint": None,
+        "readiness_reason": "There is not a clean current DuckAgent flow for this slot yet.",
+        "next_step": "Keep this as a strategy note until we build a stronger execution bridge.",
+    }
+
+
+def _ready_this_week(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ready: list[dict[str, Any]] = []
+    for item in slots:
+        readiness = str(item.get("execution_readiness") or "").strip()
+        if readiness not in {"ready_now", "ready_with_approval"}:
+            continue
+        ready.append(
+            {
+                "slot": item.get("slot"),
+                "calendar_label": item.get("calendar_label"),
+                "suggested_lane": item.get("suggested_lane"),
+                "execution_readiness": readiness,
+                "approval_required": bool(item.get("approval_required")),
+                "next_step": item.get("next_step"),
+                "command_hint": item.get("command_hint"),
+                "schedule_reference": item.get("schedule_reference"),
+            }
+        )
+    return ready[:5]
 
 
 def _calendar_target_for_slot(
@@ -481,6 +582,7 @@ def _social_plan_slots(
             execution_mode=execution_mode,
         )
     )
+    slots[0].update(_slot_execution_bridge(suggested_lane=lane, execution_mode=execution_mode))
 
     signal_to_slot = {
         "competitor_watch_account": ("Slot 2", f"Midweek · {anchor_window}", "Competitor-inspired hook test"),
@@ -527,6 +629,7 @@ def _social_plan_slots(
                 execution_mode=execution_mode,
             )
         )
+        slot_payload.update(_slot_execution_bridge(suggested_lane=lane, execution_mode=execution_mode))
         if signal_type == "competitor_watch_account" and watch_account:
             slot_payload["watch_account"] = watch_account
         slots.append(slot_payload)
@@ -562,6 +665,7 @@ def _social_plan_slots(
                 execution_mode=execution_mode,
             )
         )
+        slots[-1].update(_slot_execution_bridge(suggested_lane=lane, execution_mode=execution_mode))
 
     deduped: list[dict[str, Any]] = []
     seen_slots: set[str] = set()
@@ -600,12 +704,21 @@ def _social_plan(
         do_not_copy_patterns=do_not_copy_patterns,
     )
     items = [item.get("action") for item in slots if _compact_text(item.get("action"))]
+    ready_this_week = _ready_this_week(slots)
+    readiness_counts = {
+        "ready_now": sum(1 for item in slots if str(item.get("execution_readiness") or "") == "ready_now"),
+        "ready_with_approval": sum(1 for item in slots if str(item.get("execution_readiness") or "") == "ready_with_approval"),
+        "manual_experiment": sum(1 for item in slots if str(item.get("execution_readiness") or "") == "manual_experiment"),
+        "not_supported_yet": sum(1 for item in slots if str(item.get("execution_readiness") or "") == "not_supported_yet"),
+    }
     return {
         "headline": f"Keep `{anchor_workflow}` anchored in `{anchor_window}`, run one or two bounded competitor-inspired tests, and avoid copying competitor styles directly.",
         "anchor_window": anchor_window,
         "anchor_workflow": anchor_workflow,
         "watch_account": watch_account,
         "slot_count": len(slots),
+        "readiness_counts": readiness_counts,
+        "ready_this_week": ready_this_week,
         "slots": slots,
         "items": items[:5],
     }
@@ -791,6 +904,14 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
         lines.append(f"- Anchor workflow: `{social_plan.get('anchor_workflow') or 'unknown'}`")
         if social_plan.get("watch_account"):
             lines.append(f"- Watch account: `{social_plan.get('watch_account')}`")
+        readiness_counts = social_plan.get("readiness_counts") or {}
+        lines.append(
+            "- Readiness: "
+            f"`ready_now={readiness_counts.get('ready_now', 0)}`, "
+            f"`ready_with_approval={readiness_counts.get('ready_with_approval', 0)}`, "
+            f"`manual_experiment={readiness_counts.get('manual_experiment', 0)}`, "
+            f"`not_supported_yet={readiness_counts.get('not_supported_yet', 0)}`"
+        )
         slots = social_plan.get("slots") or []
         if slots:
             lines.append("- Suggested slots:")
@@ -811,6 +932,14 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                     lines.append(f"    Calendar: `{item.get('calendar_label')}`")
                 if item.get("cadence_reason"):
                     lines.append(f"    Cadence: {item.get('cadence_reason')}")
+                if item.get("execution_readiness"):
+                    lines.append(f"    Readiness: `{item.get('execution_readiness')}`")
+                if item.get("schedule_reference"):
+                    lines.append(f"    Schedule: {item.get('schedule_reference')}")
+                if item.get("command_hint"):
+                    lines.append(f"    Hint: `{item.get('command_hint')}`")
+                if item.get("next_step"):
+                    lines.append(f"    Next: {item.get('next_step')}")
                 if item.get("watch_account"):
                     lines.append(f"    Watch: `{item.get('watch_account')}`")
                 if item.get("why"):
@@ -821,6 +950,24 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                 lines.append("- Plan items:")
                 for item in items[:5]:
                     lines.append(f"  - {item}")
+        lines.append("")
+
+    lines.extend(["## Ready This Week", ""])
+    ready_this_week = social_plan.get("ready_this_week") or []
+    if not ready_this_week:
+        lines.append("No slots map cleanly to current executable lanes this week.")
+        lines.append("")
+    else:
+        for item in ready_this_week[:5]:
+            lines.append(
+                f"- {item.get('slot')}: `{item.get('calendar_label') or 'this week'}` | `{item.get('suggested_lane') or 'unknown'}` | `{item.get('execution_readiness')}`"
+            )
+            if item.get("schedule_reference"):
+                lines.append(f"  Schedule: {item.get('schedule_reference')}")
+            if item.get("next_step"):
+                lines.append(f"  Next: {item.get('next_step')}")
+            if item.get("command_hint"):
+                lines.append(f"  Hint: `{item.get('command_hint')}`")
         lines.append("")
 
     lines.extend(["## Stable Competitor Patterns", ""])
