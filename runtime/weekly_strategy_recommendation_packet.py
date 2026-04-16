@@ -412,36 +412,50 @@ def _slot_execution_bridge(
             "schedule_reference": "Monday 09:00 scheduled flow",
             "command_hint": "python src/main_agent.py --flow meme --all",
             "next_step": "Run the meme flow or wait for the scheduled run, then use the normal review/publish reply loop.",
+            "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
+            "operator_action_label": "Run Meme Flow",
         },
         "jeepfact": {
             "schedule_reference": "Wednesday 09:00 scheduled flow",
             "command_hint": "python src/main_agent.py --flow jeepfact --all",
             "next_step": "Run the Jeep Fact flow or wait for the scheduled run, then approve the publish step normally.",
+            "approval_followthrough": "Reply `publish` to the Jeep Fact review email after the pack looks right.",
+            "operator_action_label": "Run Jeep Fact Flow",
         },
         "thursday": {
             "schedule_reference": "Thursday 09:00 scheduled flow",
             "command_hint": "python src/main_agent.py --flow thursday --all",
             "next_step": "Use the Thursday flow and keep the publish step inside the normal approval lane.",
+            "approval_followthrough": "Reply `publish` to the Thursday review email after choosing the winner.",
+            "operator_action_label": "Run Thursday Flow",
         },
         "gtdf": {
             "schedule_reference": "Thursday 20:00 scheduled flow",
             "command_hint": "python src/main_agent.py --flow gtdf --all",
             "next_step": "Use the GTDF flow and keep the publish step approval-based.",
+            "approval_followthrough": "Reply `publish` to the GTDF review email after the post looks right.",
+            "operator_action_label": "Run GTDF Flow",
         },
         "gtdf_winner": {
             "schedule_reference": "Sunday 08:00 scheduled flow",
             "command_hint": "python src/main_agent.py --flow gtdf_winner --all --force",
             "next_step": "Use the GTDF winner flow and keep the publish step approval-based.",
+            "approval_followthrough": "Reply `publish` to the GTDF winner email after the post looks right.",
+            "operator_action_label": "Run GTDF Winner Flow",
         },
         "review_carousel": {
             "schedule_reference": "Approval-driven review carousel lane",
             "command_hint": "approve review_carousel candidate, then reply publish",
             "next_step": "Stage this through the review carousel approval loop rather than a timed scheduled run.",
+            "approval_followthrough": "Approve the candidate, then reply `publish` to schedule it.",
+            "operator_action_label": "Use Review Carousel Lane",
         },
         "blog": {
             "schedule_reference": "Approval-driven blog social publish lane",
             "command_hint": "python src/main_agent.py --flow blog --all",
             "next_step": "Use the blog flow and keep the publish step inside the existing approval loop.",
+            "approval_followthrough": "Reply `publish` to the blog review email after the post looks right.",
+            "operator_action_label": "Run Blog Flow",
         },
     }
     if execution_mode == "manual_test" or suggested_lane == "manual_social_experiment":
@@ -452,6 +466,8 @@ def _slot_execution_bridge(
             "command_hint": None,
             "readiness_reason": "This is a manual experiment idea, not a supported DuckAgent publishing lane yet.",
             "next_step": "Treat this as a bounded manual social test if we choose to run it.",
+            "approval_followthrough": None,
+            "operator_action_label": "Run Manual Test",
         }
     if execution_mode == "review" or suggested_lane == "operator_review":
         return {
@@ -461,6 +477,8 @@ def _slot_execution_bridge(
             "command_hint": "review current_learnings + weekly_strategy_recommendation_packet",
             "readiness_reason": "This slot is an operator review step and can be executed immediately with the current desk and learnings surfaces.",
             "next_step": "Use the desk and current learnings to review the week before changing the calendar.",
+            "approval_followthrough": None,
+            "operator_action_label": "Review Weekly Learnings",
         }
     if suggested_lane in scheduled_lanes:
         lane = scheduled_lanes[suggested_lane]
@@ -471,6 +489,8 @@ def _slot_execution_bridge(
             "command_hint": lane["command_hint"],
             "readiness_reason": "This slot maps to an existing DuckAgent lane, but the normal review/publish approval boundary still applies.",
             "next_step": lane["next_step"],
+            "approval_followthrough": lane["approval_followthrough"],
+            "operator_action_label": lane["operator_action_label"],
         }
     return {
         "execution_readiness": "not_supported_yet",
@@ -479,6 +499,8 @@ def _slot_execution_bridge(
         "command_hint": None,
         "readiness_reason": "There is not a clean current DuckAgent flow for this slot yet.",
         "next_step": "Keep this as a strategy note until we build a stronger execution bridge.",
+        "approval_followthrough": None,
+        "operator_action_label": "Not Supported Yet",
     }
 
 
@@ -495,8 +517,10 @@ def _ready_this_week(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "suggested_lane": item.get("suggested_lane"),
                 "execution_readiness": readiness,
                 "approval_required": bool(item.get("approval_required")),
+                "operator_action_label": item.get("operator_action_label"),
                 "next_step": item.get("next_step"),
                 "command_hint": item.get("command_hint"),
+                "approval_followthrough": item.get("approval_followthrough"),
                 "schedule_reference": item.get("schedule_reference"),
             }
         )
@@ -936,8 +960,12 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                     lines.append(f"    Readiness: `{item.get('execution_readiness')}`")
                 if item.get("schedule_reference"):
                     lines.append(f"    Schedule: {item.get('schedule_reference')}")
+                if item.get("operator_action_label"):
+                    lines.append(f"    Use: {item.get('operator_action_label')}")
                 if item.get("command_hint"):
                     lines.append(f"    Hint: `{item.get('command_hint')}`")
+                if item.get("approval_followthrough"):
+                    lines.append(f"    Then: {item.get('approval_followthrough')}")
                 if item.get("next_step"):
                     lines.append(f"    Next: {item.get('next_step')}")
                 if item.get("watch_account"):
@@ -964,10 +992,14 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
             )
             if item.get("schedule_reference"):
                 lines.append(f"  Schedule: {item.get('schedule_reference')}")
+            if item.get("operator_action_label"):
+                lines.append(f"  Use: {item.get('operator_action_label')}")
             if item.get("next_step"):
                 lines.append(f"  Next: {item.get('next_step')}")
             if item.get("command_hint"):
                 lines.append(f"  Hint: `{item.get('command_hint')}`")
+            if item.get("approval_followthrough"):
+                lines.append(f"  Then: {item.get('approval_followthrough')}")
         lines.append("")
 
     lines.extend(["## Stable Competitor Patterns", ""])

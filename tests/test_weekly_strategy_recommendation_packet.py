@@ -136,6 +136,8 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertEqual(payload["social_plan"]["slots"][0]["execution_readiness"], "ready_with_approval")
                 self.assertEqual(payload["social_plan"]["slots"][3]["execution_readiness"], "manual_experiment")
                 self.assertEqual(payload["social_plan"]["slots"][4]["execution_readiness"], "ready_now")
+                self.assertEqual(payload["social_plan"]["slots"][0]["operator_action_label"], "Run Meme Flow")
+                self.assertIn("Reply `publish`", payload["social_plan"]["slots"][0]["approval_followthrough"])
                 self.assertTrue(any(item["category"] == "stable_pattern" for item in payload["stable_patterns"]))
                 self.assertTrue(any(item["category"] == "experimental_idea" for item in payload["experimental_ideas"]))
                 self.assertTrue(any(item["category"] == "data_quality" for item in payload["recommendations"]))
@@ -155,6 +157,8 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertIn("Calendar: `Monday evening`", markdown)
                 self.assertIn("## Ready This Week", markdown)
                 self.assertIn("ready_with_approval", markdown)
+                self.assertIn("Use: Run Meme Flow", markdown)
+                self.assertIn("Then: Reply `publish`", markdown)
 
 
 if __name__ == "__main__":

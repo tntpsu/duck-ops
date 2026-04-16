@@ -567,8 +567,12 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Readiness: `{item.get('execution_readiness')}`")
                 if item.get("schedule_reference"):
                     lines.append(f"    Schedule: {_trim_text(item.get('schedule_reference'), 140)}")
+                if item.get("operator_action_label"):
+                    lines.append(f"    Use: {_trim_text(item.get('operator_action_label'), 120)}")
                 if item.get("command_hint"):
                     lines.append(f"    Hint: `{item.get('command_hint')}`")
+                if item.get("approval_followthrough"):
+                    lines.append(f"    Then: {_trim_text(item.get('approval_followthrough'), 160)}")
                 if item.get("next_step"):
                     lines.append(f"    Next: {_trim_text(item.get('next_step'), 160)}")
                 if item.get("watch_account"):
@@ -586,6 +590,14 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 lines.append(
                     f"  - {item.get('slot')}: `{item.get('calendar_label') or 'this week'}` | `{item.get('suggested_lane') or 'unknown'}` | `{item.get('execution_readiness')}`"
                 )
+                if item.get("operator_action_label"):
+                    lines.append(f"    Use: {_trim_text(item.get('operator_action_label'), 120)}")
+                if item.get("schedule_reference"):
+                    lines.append(f"    Schedule: {_trim_text(item.get('schedule_reference'), 140)}")
+                if item.get("command_hint"):
+                    lines.append(f"    Hint: `{item.get('command_hint')}`")
+                if item.get("approval_followthrough"):
+                    lines.append(f"    Then: {_trim_text(item.get('approval_followthrough'), 160)}")
     lines.extend([
         "",
         "## Do Next",
@@ -903,8 +915,12 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Readiness: {item.get('execution_readiness')}")
                     if item.get("schedule_reference"):
                         lines.append(f"  Schedule: {_trim_text(item.get('schedule_reference'), 180)}")
+                    if item.get("operator_action_label"):
+                        lines.append(f"  Use: {_trim_text(item.get('operator_action_label'), 140)}")
                     if item.get("command_hint"):
                         lines.append(f"  Hint: {item.get('command_hint')}")
+                    if item.get("approval_followthrough"):
+                        lines.append(f"  Then: {_trim_text(item.get('approval_followthrough'), 180)}")
                     if item.get("next_step"):
                         lines.append(f"  Next: {_trim_text(item.get('next_step'), 180)}")
                     if item.get("watch_account"):
@@ -920,6 +936,14 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                     lines.append(
                         f"- {item.get('slot')}: {item.get('calendar_label') or 'this week'} | {item.get('suggested_lane') or 'unknown'} | {item.get('execution_readiness')}"
                     )
+                    if item.get("operator_action_label"):
+                        lines.append(f"  Use: {_trim_text(item.get('operator_action_label'), 140)}")
+                    if item.get("schedule_reference"):
+                        lines.append(f"  Schedule: {_trim_text(item.get('schedule_reference'), 180)}")
+                    if item.get("command_hint"):
+                        lines.append(f"  Hint: {item.get('command_hint')}")
+                    if item.get("approval_followthrough"):
+                        lines.append(f"  Then: {_trim_text(item.get('approval_followthrough'), 180)}")
         return "\n".join(lines)
 
     items = sections.get(normalized) or []

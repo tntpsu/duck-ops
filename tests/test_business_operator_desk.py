@@ -306,9 +306,11 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "calendar_label": "Monday evening",
                             "suggested_lane": "meme",
                             "execution_readiness": "ready_with_approval",
+                            "operator_action_label": "Run Meme Flow",
                             "schedule_reference": "Monday 09:00 scheduled flow",
                             "next_step": "Run the meme flow or wait for the scheduled run, then use the normal review/publish reply loop.",
                             "command_hint": "python src/main_agent.py --flow meme --all",
+                            "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
                         }
                     ],
                     "slots": [
@@ -322,9 +324,11 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "calendar_label": "Monday evening",
                             "cadence_reason": "This lines up with the recurring Meme Monday lane while keeping the stronger evening window in view.",
                             "execution_readiness": "ready_with_approval",
+                            "operator_action_label": "Run Meme Flow",
                             "schedule_reference": "Monday 09:00 scheduled flow",
                             "next_step": "Run the meme flow or wait for the scheduled run, then use the normal review/publish reply loop.",
                             "command_hint": "python src/main_agent.py --flow meme --all",
+                            "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
                             "goal": "Anchor with the strongest proven workflow",
                             "action": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
                         },
@@ -338,9 +342,11 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "calendar_label": "Wednesday evening",
                             "cadence_reason": "This is the midweek test slot, so it should not steal focus from the Monday anchor post.",
                             "execution_readiness": "ready_with_approval",
+                            "operator_action_label": "Run Meme Flow",
                             "schedule_reference": "Monday 09:00 scheduled flow",
                             "next_step": "Run the meme flow or wait for the scheduled run, then use the normal review/publish reply loop.",
                             "command_hint": "python src/main_agent.py --flow meme --all",
+                            "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
                             "goal": "Competitor-inspired hook test",
                             "action": "Review the last few hooks and formats from `f3dprinted` before drafting one bounded post test.",
                             "watch_account": "f3dprinted",
@@ -379,6 +385,8 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Calendar: `Monday evening`", markdown)
         self.assertIn("Readiness: `ready_with_approval`", markdown)
         self.assertIn("Ready this week:", markdown)
+        self.assertIn("Use: Run Meme Flow", markdown)
+        self.assertIn("Then: Reply `publish` to the review email", markdown)
 
     def test_render_business_section_learning_uses_payload_items_without_crashing(self) -> None:
         output = render_business_section(
@@ -475,6 +483,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                                 "calendar_label": "Monday evening",
                                 "suggested_lane": "meme",
                                 "execution_readiness": "ready_with_approval",
+                                "operator_action_label": "Run Meme Flow",
                             }
                         ],
                         "slots": [
@@ -488,9 +497,11 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                                 "calendar_label": "Monday evening",
                                 "cadence_reason": "This lines up with the recurring Meme Monday lane while keeping the stronger evening window in view.",
                                 "execution_readiness": "ready_with_approval",
+                                "operator_action_label": "Run Meme Flow",
                                 "schedule_reference": "Monday 09:00 scheduled flow",
                                 "next_step": "Run the meme flow or wait for the scheduled run, then use the normal review/publish reply loop.",
                                 "command_hint": "python src/main_agent.py --flow meme --all",
+                                "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
                                 "goal": "Anchor with the strongest proven workflow",
                                 "action": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
                             },
@@ -504,9 +515,11 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                                 "calendar_label": "Wednesday evening",
                                 "cadence_reason": "This is the midweek test slot, so it should not steal focus from the Monday anchor post.",
                                 "execution_readiness": "ready_with_approval",
+                                "operator_action_label": "Run Meme Flow",
                                 "schedule_reference": "Monday 09:00 scheduled flow",
                                 "next_step": "Run the meme flow or wait for the scheduled run, then use the normal review/publish reply loop.",
                                 "command_hint": "python src/main_agent.py --flow meme --all",
+                                "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
                                 "goal": "Competitor-inspired hook test",
                                 "action": "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
                                 "watch_account": "f3dprinted",
@@ -530,9 +543,11 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "calendar_label": "Monday evening",
                             "cadence_reason": "This lines up with the recurring Meme Monday lane while keeping the stronger evening window in view.",
                             "execution_readiness": "ready_with_approval",
+                            "operator_action_label": "Run Meme Flow",
                             "schedule_reference": "Monday 09:00 scheduled flow",
                             "next_step": "Run the meme flow or wait for the scheduled run, then use the normal review/publish reply loop.",
                             "command_hint": "python src/main_agent.py --flow meme --all",
+                            "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
                             "goal": "Anchor with the strongest proven workflow",
                             "action": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
                         },
@@ -546,9 +561,11 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "calendar_label": "Wednesday evening",
                             "cadence_reason": "This is the midweek test slot, so it should not steal focus from the Monday anchor post.",
                             "execution_readiness": "ready_with_approval",
+                            "operator_action_label": "Run Meme Flow",
                             "schedule_reference": "Monday 09:00 scheduled flow",
                             "next_step": "Run the meme flow or wait for the scheduled run, then use the normal review/publish reply loop.",
                             "command_hint": "python src/main_agent.py --flow meme --all",
+                            "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
                             "goal": "Competitor-inspired hook test",
                             "action": "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
                             "watch_account": "f3dprinted",
@@ -568,6 +585,8 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Calendar: Monday evening", output)
         self.assertIn("Readiness: ready_with_approval", output)
         self.assertIn("Ready this week:", output)
+        self.assertIn("Use: Run Meme Flow", output)
+        self.assertIn("Then: Reply `publish` to the review email", output)
 
     def test_render_business_section_reviews_includes_decision_command(self) -> None:
         output = render_business_section(
