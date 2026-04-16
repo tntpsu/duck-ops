@@ -11,6 +11,7 @@ SOCIAL_ROLLUPS_PATH = DUCK_OPS_ROOT / "state" / "social_performance_rollups.json
 COMPETITOR_BENCHMARK_PATH = DUCK_OPS_ROOT / "state" / "social_competitor_benchmark.json"
 COMPETITOR_SOCIAL_BENCHMARK_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_benchmark.json"
 COMPETITOR_SOCIAL_SNAPSHOTS_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_snapshots.json"
+WEEKLY_STRATEGY_PACKET_PATH = DUCK_OPS_ROOT / "state" / "weekly_strategy_recommendation_packet.json"
 CURRENT_LEARNINGS_STATE_PATH = DUCK_OPS_ROOT / "state" / "current_learnings.json"
 CURRENT_LEARNINGS_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "current_learnings.json"
 CURRENT_LEARNINGS_MD_PATH = OUTPUT_OPERATOR_DIR / "current_learnings.md"
@@ -116,6 +117,7 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
 
 def _current_beliefs(
     social_payload: dict[str, Any],
+    weekly_strategy_feedback: dict[str, Any],
     competitor_market_payload: dict[str, Any],
     competitor_social_payload: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -123,6 +125,8 @@ def _current_beliefs(
     for item in social_payload.get("current_learnings") or []:
         if isinstance(item, dict):
             beliefs.append({"source": "own_social", **item})
+    for item in _weekly_strategy_beliefs(weekly_strategy_feedback):
+        beliefs.append({"source": "weekly_strategy", **item})
     for item in competitor_market_payload.get("market_learnings") or []:
         if isinstance(item, dict):
             beliefs.append({"source": "competitor_market", **item})
@@ -142,6 +146,8 @@ def _strongest_workflows(social_payload: dict[str, Any]) -> list[dict[str, Any]]
 
 def _changes(
     social_payload: dict[str, Any],
+    weekly_strategy_feedback: dict[str, Any],
+    previous_current_learnings_payload: dict[str, Any],
     competitor_market_payload: dict[str, Any],
     competitor_social_payload: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -149,6 +155,8 @@ def _changes(
     for item in social_payload.get("changes_since_previous") or []:
         if isinstance(item, dict):
             changes.append({"source": "own_social", **item})
+    for item in _weekly_strategy_changes(weekly_strategy_feedback, previous_current_learnings_payload):
+        changes.append({"source": "weekly_strategy", **item})
     for item in competitor_market_payload.get("changes_since_previous") or []:
         if isinstance(item, dict):
             changes.append({"source": "competitor_market", **item})
@@ -158,11 +166,157 @@ def _changes(
     return changes
 
 
+def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
+    social_plan = packet_payload.get("social_plan") if isinstance(packet_payload.get("social_plan"), dict) else {}
+    if not social_plan:
+        return {"available": False, "execution_feedback": {}, "slot_outcomes": []}
+
+    slot_outcomes: list[dict[str, Any]] = []
+    for item in social_plan.get("slots") or []:
+        if not isinstance(item, dict):
+            continue
+        slot_outcomes.append(
+            {
+                "slot": _compact_text(item.get("slot")),
+                "calendar_date": _compact_text(item.get("calendar_date")) or None,
+                "calendar_label": _compact_text(item.get("calendar_label")) or None,
+                "suggested_lane": _compact_text(item.get("suggested_lane")) or None,
+                "alternate_lane": _compact_text(item.get("alternate_lane")) or None,
+                "tracking_status": _compact_text(item.get("tracking_status")) or None,
+                "tracking_note": _compact_text(item.get("tracking_note")) or None,
+                "actual_lane": _compact_text(item.get("actual_lane")) or None,
+                "performance_label": _compact_text(item.get("performance_label")) or None,
+                "performance_note": _compact_text(item.get("performance_note")) or None,
+            }
+        )
+
+    return {
+        "available": True,
+        "headline": _compact_text(social_plan.get("headline")) or None,
+        "execution_feedback": dict(social_plan.get("execution_feedback") or {}),
+        "slot_outcomes": slot_outcomes[:5],
+    }
+
+
+def _weekly_strategy_summary(feedback_payload: dict[str, Any]) -> dict[str, Any]:
+    counts = feedback_payload.get("execution_feedback") if isinstance(feedback_payload.get("execution_feedback"), dict) else {}
+    return {
+        "weekly_strategy_feedback_available": bool(feedback_payload.get("available")),
+        "weekly_strategy_recommended_lane_executed_count": int(counts.get("recommended_lane_executed") or 0),
+        "weekly_strategy_alternate_lane_executed_count": int(counts.get("alternate_lane_executed") or 0),
+        "weekly_strategy_different_lane_executed_count": int(counts.get("different_lane_executed") or 0),
+        "weekly_strategy_awaiting_slot_count": int(counts.get("awaiting_slot") or 0),
+        "weekly_strategy_no_post_observed_count": int(counts.get("no_post_observed") or 0),
+        "weekly_strategy_review_slot_count": int(counts.get("review_slot") or 0),
+    }
+
+
+def _weekly_strategy_beliefs(feedback_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    beliefs: list[dict[str, Any]] = []
+    for item in feedback_payload.get("slot_outcomes") or []:
+        slot = _compact_text(item.get("slot")) or "Weekly slot"
+        suggested = _compact_text(item.get("suggested_lane")) or "planned lane"
+        actual = _compact_text(item.get("actual_lane"))
+        status = _compact_text(item.get("tracking_status"))
+        performance = _compact_text(item.get("performance_label"))
+        if status == "recommended_lane_executed" and performance == "strong":
+            beliefs.append(
+                {
+                    "headline": f"{slot} validated planned `{suggested}` with a strong observed result.",
+                    "confidence": "medium",
+                    "evidence": _compact_text(item.get("performance_note")) or _compact_text(item.get("tracking_note")) or "Observed lane and performance both matched the plan.",
+                    "recommendation": f"Keep one more `{suggested}` slot in the weekly mix while this signal stays strong.",
+                }
+            )
+        elif status == "alternate_lane_executed" and actual:
+            beliefs.append(
+                {
+                    "headline": f"{slot} resolved into alternate `{actual}` instead of planned `{suggested}`.",
+                    "confidence": "medium",
+                    "evidence": _compact_text(item.get("tracking_note")) or "The fallback lane landed instead of the first recommendation.",
+                    "recommendation": f"Bias similar concepts toward `{actual}` until `{suggested}` proves it can carry them cleanly.",
+                }
+            )
+        elif status == "different_lane_executed" and actual:
+            beliefs.append(
+                {
+                    "headline": f"{slot} landed in `{actual}` instead of the planned social lane.",
+                    "confidence": "low",
+                    "evidence": _compact_text(item.get("tracking_note")) or "A different lane executed than the one recommended in the packet.",
+                    "recommendation": "Review whether the scheduling or lane-fit heuristic should be tightened before reusing this pattern.",
+                }
+            )
+    return beliefs[:3]
+
+
+def _weekly_strategy_changes(
+    feedback_payload: dict[str, Any],
+    previous_current_learnings_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    previous_feedback = (
+        previous_current_learnings_payload.get("weekly_strategy_feedback")
+        if isinstance(previous_current_learnings_payload.get("weekly_strategy_feedback"), dict)
+        else {}
+    )
+    previous_slots = {
+        _compact_text(item.get("slot")): item
+        for item in (previous_feedback.get("slot_outcomes") or [])
+        if isinstance(item, dict) and _compact_text(item.get("slot"))
+    }
+    changes: list[dict[str, Any]] = []
+    for item in feedback_payload.get("slot_outcomes") or []:
+        slot = _compact_text(item.get("slot"))
+        status = _compact_text(item.get("tracking_status"))
+        performance = _compact_text(item.get("performance_label"))
+        suggested = _compact_text(item.get("suggested_lane")) or "planned lane"
+        actual = _compact_text(item.get("actual_lane"))
+        previous_item = previous_slots.get(slot, {})
+        previous_status = _compact_text(previous_item.get("tracking_status"))
+        previous_performance = _compact_text(previous_item.get("performance_label"))
+        previous_actual = _compact_text(previous_item.get("actual_lane"))
+
+        if status == "recommended_lane_executed" and performance == "strong":
+            if previous_status != status or previous_performance != performance:
+                changes.append(
+                    {
+                        "kind": "weekly_strategy_planned_lane_validated",
+                        "headline": f"{slot} validated planned `{suggested}` with a strong result.",
+                    }
+                )
+        elif status == "alternate_lane_executed" and actual:
+            if previous_status != status or previous_actual != actual:
+                changes.append(
+                    {
+                        "kind": "weekly_strategy_alternate_lane_won",
+                        "headline": f"{slot} shifted into alternate `{actual}` instead of planned `{suggested}`.",
+                    }
+                )
+        elif status == "different_lane_executed" and actual:
+            if previous_status != status or previous_actual != actual:
+                changes.append(
+                    {
+                        "kind": "weekly_strategy_different_lane_won",
+                        "headline": f"{slot} landed in `{actual}` instead of the planned `{suggested}` lane.",
+                    }
+                )
+        elif status == "no_post_observed":
+            if previous_status != status:
+                changes.append(
+                    {
+                        "kind": "weekly_strategy_slot_missed",
+                        "headline": f"{slot} has no observed post yet for the planned `{suggested}` slot.",
+                    }
+                )
+    return changes[:4]
+
+
 def build_current_learnings_payload() -> dict[str, Any]:
     social_payload = load_json(SOCIAL_ROLLUPS_PATH, {})
     competitor_market_payload = load_json(COMPETITOR_BENCHMARK_PATH, {})
     competitor_social_payload = load_json(COMPETITOR_SOCIAL_BENCHMARK_PATH, {})
     competitor_social_snapshots_payload = load_json(COMPETITOR_SOCIAL_SNAPSHOTS_PATH, {})
+    weekly_strategy_packet_payload = load_json(WEEKLY_STRATEGY_PACKET_PATH, {})
+    previous_current_learnings_payload = load_json(CURRENT_LEARNINGS_STATE_PATH, {})
     if not isinstance(social_payload, dict):
         social_payload = {}
     if not isinstance(competitor_market_payload, dict):
@@ -171,8 +325,13 @@ def build_current_learnings_payload() -> dict[str, Any]:
         competitor_social_payload = {}
     if not isinstance(competitor_social_snapshots_payload, dict):
         competitor_social_snapshots_payload = {}
+    if not isinstance(weekly_strategy_packet_payload, dict):
+        weekly_strategy_packet_payload = {}
+    if not isinstance(previous_current_learnings_payload, dict):
+        previous_current_learnings_payload = {}
 
     competitor_social_freshness = _competitor_social_freshness(competitor_social_snapshots_payload)
+    weekly_strategy_feedback = _weekly_strategy_feedback(weekly_strategy_packet_payload)
 
     payload = {
         "generated_at": now_local_iso(),
@@ -183,13 +342,26 @@ def build_current_learnings_payload() -> dict[str, Any]:
             "competitor_observation_days": int(((competitor_market_payload.get("summary") or {}).get("observation_days")) or 0),
             "competitor_social_post_count": int(((competitor_social_payload.get("summary") or {}).get("post_count")) or 0),
             **competitor_social_freshness,
+            **_weekly_strategy_summary(weekly_strategy_feedback),
             "data_quality_note": _compact_text((social_payload.get("summary") or {}).get("data_quality_note"))
             or _compact_text((competitor_social_payload.get("summary") or {}).get("data_quality_note"))
             or _compact_text((competitor_social_snapshots_payload.get("summary") or {}).get("data_quality_note"))
             or _compact_text((competitor_market_payload.get("summary") or {}).get("data_quality_note")),
         },
-        "current_beliefs": _current_beliefs(social_payload, competitor_market_payload, competitor_social_payload),
-        "changes_since_previous": _changes(social_payload, competitor_market_payload, competitor_social_payload),
+        "current_beliefs": _current_beliefs(
+            social_payload,
+            weekly_strategy_feedback,
+            competitor_market_payload,
+            competitor_social_payload,
+        ),
+        "changes_since_previous": _changes(
+            social_payload,
+            weekly_strategy_feedback,
+            previous_current_learnings_payload,
+            competitor_market_payload,
+            competitor_social_payload,
+        ),
+        "weekly_strategy_feedback": weekly_strategy_feedback,
         "best_windows": _best_windows(social_payload),
         "strongest_workflows": _strongest_workflows(social_payload),
         "top_posts": list(social_payload.get("top_posts") or [])[:5],
@@ -204,6 +376,7 @@ def build_current_learnings_payload() -> dict[str, Any]:
             "competitor_benchmark": str(COMPETITOR_BENCHMARK_PATH),
             "competitor_social_benchmark": str(COMPETITOR_SOCIAL_BENCHMARK_PATH),
             "competitor_social_snapshots": str(COMPETITOR_SOCIAL_SNAPSHOTS_PATH),
+            "weekly_strategy_packet": str(WEEKLY_STRATEGY_PACKET_PATH),
         },
     }
     return payload
@@ -211,6 +384,7 @@ def build_current_learnings_payload() -> dict[str, Any]:
 
 def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
     summary = payload.get("summary") or {}
+    weekly_strategy_feedback = payload.get("weekly_strategy_feedback") if isinstance(payload.get("weekly_strategy_feedback"), dict) else {}
     lines = [
         "# Current Learnings",
         "",
@@ -240,9 +414,53 @@ def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
         f"- Active refresh targets: `{summary.get('competitor_social_active_refresh_target_count') or 0}`",
         f"- Truth: {summary.get('competitor_social_freshness_note') or 'No competitor social snapshot is available yet.'}",
         "",
-        "## What Changed",
+        "## Weekly Strategy Follow-Through",
         "",
     ]
+
+    if not weekly_strategy_feedback.get("available"):
+        lines.append("No weekly strategy follow-through is available yet.")
+        lines.append("")
+    else:
+        lines.extend(
+            [
+                str(weekly_strategy_feedback.get("headline") or "Weekly strategy follow-through is available."),
+                "",
+                f"- Planned lane wins: `{summary.get('weekly_strategy_recommended_lane_executed_count') or 0}`",
+                f"- Alternate lane wins: `{summary.get('weekly_strategy_alternate_lane_executed_count') or 0}`",
+                f"- Different lane wins: `{summary.get('weekly_strategy_different_lane_executed_count') or 0}`",
+                f"- Awaiting slots: `{summary.get('weekly_strategy_awaiting_slot_count') or 0}`",
+                f"- Missed slots: `{summary.get('weekly_strategy_no_post_observed_count') or 0}`",
+                f"- Review slots: `{summary.get('weekly_strategy_review_slot_count') or 0}`",
+                "",
+            ]
+        )
+        for item in weekly_strategy_feedback.get("slot_outcomes") or []:
+            slot = item.get("slot") or "Weekly slot"
+            calendar_parts = [item.get("calendar_label"), item.get("calendar_date")]
+            calendar_label = " | ".join(part for part in calendar_parts if part)
+            lines.append(f"### {slot}")
+            lines.append("")
+            if calendar_label:
+                lines.append(f"- Calendar: `{calendar_label}`")
+            lines.append(f"- Planned lane: `{item.get('suggested_lane') or 'unknown'}`")
+            lines.append(f"- Outcome: `{item.get('tracking_status') or 'unknown'}`")
+            if item.get("actual_lane"):
+                lines.append(f"- Actual lane: `{item.get('actual_lane')}`")
+            if item.get("performance_label"):
+                lines.append(f"- Performance: `{item.get('performance_label')}`")
+            if item.get("tracking_note"):
+                lines.append(f"- Note: {item.get('tracking_note')}")
+            if item.get("performance_note"):
+                lines.append(f"- Performance detail: {item.get('performance_note')}")
+            lines.append("")
+
+    lines.extend(
+        [
+        "## What Changed",
+        "",
+        ]
+    )
 
     changes = payload.get("changes_since_previous") or []
     if not changes:

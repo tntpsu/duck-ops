@@ -23,6 +23,7 @@ class CurrentLearningsTests(unittest.TestCase):
             competitor_path = root / "state" / "social_competitor_benchmark.json"
             competitor_social_path = root / "state" / "competitor_social_benchmark.json"
             competitor_snapshots_path = root / "state" / "competitor_social_snapshots.json"
+            weekly_strategy_path = root / "state" / "weekly_strategy_recommendation_packet.json"
             social_path.parent.mkdir(parents=True, exist_ok=True)
             social_path.write_text(
                 json.dumps(
@@ -87,6 +88,57 @@ class CurrentLearningsTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            weekly_strategy_path.write_text(
+                json.dumps(
+                    {
+                        "social_plan": {
+                            "headline": "Keep `meme` anchored, test one bounded alternate, and track whether the week stays on plan.",
+                            "execution_feedback": {
+                                "recommended_lane_executed": 1,
+                                "alternate_lane_executed": 1,
+                                "different_lane_executed": 0,
+                                "awaiting_slot": 1,
+                                "no_post_observed": 1,
+                                "review_slot": 1,
+                            },
+                            "slots": [
+                                {
+                                    "slot": "Slot 1",
+                                    "calendar_date": "2026-04-13",
+                                    "calendar_label": "Monday evening",
+                                    "suggested_lane": "meme",
+                                    "tracking_status": "recommended_lane_executed",
+                                    "tracking_note": "The recommended lane `meme` was observed on `2026-04-13`.",
+                                    "actual_lane": "meme",
+                                    "performance_label": "strong",
+                                    "performance_note": "This landed in the top third of the current social window.",
+                                },
+                                {
+                                    "slot": "Slot 2",
+                                    "calendar_date": "2026-04-15",
+                                    "calendar_label": "Wednesday evening",
+                                    "suggested_lane": "meme",
+                                    "alternate_lane": "jeepfact",
+                                    "tracking_status": "alternate_lane_executed",
+                                    "tracking_note": "The primary lane `meme` did not land, but the planned fallback `jeepfact` was observed on `2026-04-15`.",
+                                    "actual_lane": "jeepfact",
+                                    "performance_label": "watch",
+                                    "performance_note": "This landed in the middle of the current social window.",
+                                },
+                                {
+                                    "slot": "Slot 3",
+                                    "calendar_date": "2026-04-16",
+                                    "calendar_label": "Thursday evening",
+                                    "suggested_lane": "jeepfact",
+                                    "tracking_status": "no_post_observed",
+                                    "tracking_note": "No observed social post was found for the `2026-04-16` target date yet.",
+                                },
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             state_path = root / "state" / "current_learnings.json"
             operator_json_path = root / "output" / "operator" / "current_learnings.json"
             markdown_path = root / "output" / "operator" / "current_learnings.md"
@@ -98,6 +150,8 @@ class CurrentLearningsTests(unittest.TestCase):
             ), patch.object(
                 current_learnings, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", competitor_snapshots_path
             ), patch.object(
+                current_learnings, "WEEKLY_STRATEGY_PACKET_PATH", weekly_strategy_path
+            ), patch.object(
                 current_learnings, "CURRENT_LEARNINGS_STATE_PATH", state_path
             ), patch.object(
                 current_learnings, "CURRENT_LEARNINGS_OPERATOR_JSON_PATH", operator_json_path
@@ -106,8 +160,8 @@ class CurrentLearningsTests(unittest.TestCase):
             ):
                 payload = current_learnings.build_current_learnings()
 
-            self.assertEqual(len(payload["current_beliefs"]), 3)
-            self.assertEqual(len(payload["changes_since_previous"]), 3)
+            self.assertEqual(len(payload["current_beliefs"]), 5)
+            self.assertEqual(len(payload["changes_since_previous"]), 6)
             self.assertTrue(payload["ideas_to_test"])
             self.assertEqual(payload["summary"]["competitor_social_post_count"], 12)
             self.assertEqual(payload["summary"]["competitor_social_snapshot_generated_at"], "2026-04-15T09:00:00-04:00")
@@ -116,11 +170,19 @@ class CurrentLearningsTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["competitor_social_cached_account_count"], 1)
             self.assertEqual(payload["summary"]["competitor_social_degraded_account_count"], 1)
             self.assertEqual(payload["summary"]["competitor_social_failed_account_count"], 1)
+            self.assertEqual(payload["summary"]["weekly_strategy_recommended_lane_executed_count"], 1)
+            self.assertEqual(payload["summary"]["weekly_strategy_alternate_lane_executed_count"], 1)
+            self.assertEqual(payload["summary"]["weekly_strategy_no_post_observed_count"], 1)
+            self.assertTrue(payload["weekly_strategy_feedback"]["available"])
+            self.assertEqual(payload["paths"]["weekly_strategy_packet"], str(weekly_strategy_path))
             self.assertTrue(state_path.exists())
             self.assertTrue(operator_json_path.exists())
             self.assertTrue(markdown_path.exists())
             markdown = markdown_path.read_text(encoding="utf-8")
             self.assertIn("## Competitor Social Freshness", markdown)
+            self.assertIn("## Weekly Strategy Follow-Through", markdown)
+            self.assertIn("Planned lane wins", markdown)
+            self.assertIn("Slot 2 shifted into alternate `jeepfact` instead of planned `meme`.", markdown)
             self.assertIn("Hard failure truth", markdown)
             self.assertIn("Cached fallback accounts", markdown)
 
@@ -131,10 +193,12 @@ class CurrentLearningsTests(unittest.TestCase):
             competitor_path = root / "state" / "social_competitor_benchmark.json"
             competitor_social_path = root / "state" / "competitor_social_benchmark.json"
             competitor_snapshots_path = root / "state" / "competitor_social_snapshots.json"
+            weekly_strategy_path = root / "state" / "weekly_strategy_recommendation_packet.json"
             social_path.parent.mkdir(parents=True, exist_ok=True)
             social_path.write_text(json.dumps({"summary": {"post_count": 2, "metrics_coverage_pct": 100.0}}), encoding="utf-8")
             competitor_path.write_text(json.dumps({"summary": {}}), encoding="utf-8")
             competitor_social_path.write_text(json.dumps({"summary": {"post_count": 10}}), encoding="utf-8")
+            weekly_strategy_path.write_text(json.dumps({}), encoding="utf-8")
             competitor_snapshots_path.write_text(
                 json.dumps(
                     {
@@ -164,6 +228,8 @@ class CurrentLearningsTests(unittest.TestCase):
             ), patch.object(
                 current_learnings, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", competitor_snapshots_path
             ), patch.object(
+                current_learnings, "WEEKLY_STRATEGY_PACKET_PATH", weekly_strategy_path
+            ), patch.object(
                 current_learnings, "CURRENT_LEARNINGS_STATE_PATH", state_path
             ), patch.object(
                 current_learnings, "CURRENT_LEARNINGS_OPERATOR_JSON_PATH", operator_json_path
@@ -185,10 +251,12 @@ class CurrentLearningsTests(unittest.TestCase):
             competitor_path = root / "state" / "social_competitor_benchmark.json"
             competitor_social_path = root / "state" / "competitor_social_benchmark.json"
             competitor_snapshots_path = root / "state" / "competitor_social_snapshots.json"
+            weekly_strategy_path = root / "state" / "weekly_strategy_recommendation_packet.json"
             social_path.parent.mkdir(parents=True, exist_ok=True)
             social_path.write_text(json.dumps({"summary": {"post_count": 2, "metrics_coverage_pct": 100.0}}), encoding="utf-8")
             competitor_path.write_text(json.dumps({"summary": {}}), encoding="utf-8")
             competitor_social_path.write_text(json.dumps({"summary": {"post_count": 10}}), encoding="utf-8")
+            weekly_strategy_path.write_text(json.dumps({}), encoding="utf-8")
             competitor_snapshots_path.write_text(
                 json.dumps(
                     {
@@ -219,6 +287,8 @@ class CurrentLearningsTests(unittest.TestCase):
             ), patch.object(
                 current_learnings, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", competitor_snapshots_path
             ), patch.object(
+                current_learnings, "WEEKLY_STRATEGY_PACKET_PATH", weekly_strategy_path
+            ), patch.object(
                 current_learnings, "CURRENT_LEARNINGS_STATE_PATH", state_path
             ), patch.object(
                 current_learnings, "CURRENT_LEARNINGS_OPERATOR_JSON_PATH", operator_json_path
@@ -240,10 +310,12 @@ class CurrentLearningsTests(unittest.TestCase):
             competitor_path = root / "state" / "social_competitor_benchmark.json"
             competitor_social_path = root / "state" / "competitor_social_benchmark.json"
             competitor_snapshots_path = root / "state" / "competitor_social_snapshots.json"
+            weekly_strategy_path = root / "state" / "weekly_strategy_recommendation_packet.json"
             social_path.parent.mkdir(parents=True, exist_ok=True)
             social_path.write_text(json.dumps({"summary": {"post_count": 2, "metrics_coverage_pct": 100.0}}), encoding="utf-8")
             competitor_path.write_text(json.dumps({"summary": {}}), encoding="utf-8")
             competitor_social_path.write_text(json.dumps({"summary": {"post_count": 10}}), encoding="utf-8")
+            weekly_strategy_path.write_text(json.dumps({}), encoding="utf-8")
             competitor_snapshots_path.write_text(
                 json.dumps(
                     {
@@ -275,6 +347,8 @@ class CurrentLearningsTests(unittest.TestCase):
                 current_learnings, "COMPETITOR_SOCIAL_BENCHMARK_PATH", competitor_social_path
             ), patch.object(
                 current_learnings, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", competitor_snapshots_path
+            ), patch.object(
+                current_learnings, "WEEKLY_STRATEGY_PACKET_PATH", weekly_strategy_path
             ), patch.object(
                 current_learnings, "CURRENT_LEARNINGS_STATE_PATH", state_path
             ), patch.object(

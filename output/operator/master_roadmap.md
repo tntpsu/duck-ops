@@ -173,17 +173,17 @@ Why this matters:
 
 ## Recommended Next 3 Steps
 
-### 1. Feed Weekly Execution Feedback Back Into Learnings
-- Reuse the new social-plan execution follow-through inside `current_learnings` and any change-detection surfaces.
-- Make it obvious when a recommendation actually landed, when an alternate lane won, and when a slot slipped or missed.
-
-### 2. Build SEO Outcome Monitoring
+### 1. Build SEO Outcome Monitoring
 - Move beyond SEO hygiene into result tracking.
 - Start with a lightweight observe-only view that ties SEO changes to later traffic/click signal where available.
 
-### 3. Resume Review / Reliability Hardening In Safe Windows
+### 2. Resume Review / Reliability Hardening In Safe Windows
 - When Etsy access is safe again, return to `Review Execution` stabilization and stronger failure breadcrumbs.
 - Keep this in observe-first mode so the operator surface stays trustworthy.
+
+### 3. Add Learnings Change Notifications
+- Turn meaningful `current_learnings` and weekly-strategy shifts into a small operator-facing change notifier or morning digest section.
+- Only surface material movement: strong planned-lane validation, alternate-lane wins, missed slots, and freshness degradation.
 
 ## Lower-Priority / Nice-to-Have
 - Continue backfilling more exact Etsy `/messages/<id>` URLs.
