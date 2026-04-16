@@ -540,8 +540,14 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 )
                 if item.get("action"):
                     lines.append(f"    Action: {_trim_text(item.get('action'), 160)}")
-                if item.get("workflow"):
-                    lines.append(f"    Workflow: `{item.get('workflow')}`")
+                if item.get("suggested_lane"):
+                    lines.append(f"    Lane: `{item.get('suggested_lane')}`")
+                elif item.get("workflow"):
+                    lines.append(f"    Lane: `{item.get('workflow')}`")
+                if item.get("content_family"):
+                    lines.append(f"    Family: `{item.get('content_family')}`")
+                if item.get("execution_mode"):
+                    lines.append(f"    Mode: `{item.get('execution_mode')}`")
                 if item.get("watch_account"):
                     lines.append(f"    Watch: `{item.get('watch_account')}`")
         else:
@@ -842,8 +848,14 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                     lines.append(f"- {item.get('slot')}: {_trim_text(item.get('timing_hint'), 60)} | {_trim_text(item.get('goal'), 120)}")
                     if item.get("action"):
                         lines.append(f"  Action: {_trim_text(item.get('action'), 180)}")
-                    if item.get("workflow"):
-                        lines.append(f"  Workflow: {item.get('workflow')}")
+                    if item.get("suggested_lane"):
+                        lines.append(f"  Lane: {item.get('suggested_lane')}")
+                    elif item.get("workflow"):
+                        lines.append(f"  Lane: {item.get('workflow')}")
+                    if item.get("content_family"):
+                        lines.append(f"  Family: {item.get('content_family')}")
+                    if item.get("execution_mode"):
+                        lines.append(f"  Mode: {item.get('execution_mode')}")
                     if item.get("watch_account"):
                         lines.append(f"  Watch: {item.get('watch_account')}")
             else:

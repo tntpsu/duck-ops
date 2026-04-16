@@ -223,6 +223,7 @@ def _experimental_ideas(
                 "priority": "P2",
                 "category": "experimental_idea",
                 "signal_type": "competitor_watch_account",
+                "watch_account": stable_top_account,
                 "title": f"Borrow one bounded hook from `{stable_top_account}`",
                 "recommendation": (
                     f"Review the last few hooks and formats from `{stable_top_account}` before drafting one bounded post test. "
@@ -244,6 +245,7 @@ def _experimental_ideas(
                 "priority": "P2",
                 "category": "experimental_idea",
                 "signal_type": "competitor_theme",
+                "theme_label": theme_label,
                 "title": f"Stage one `{theme_label}`-leaning test inside `{strongest_workflow_label}`",
                 "recommendation": (
                     f"Use `{theme_label}` as the concept input, but keep the execution in our existing `{strongest_workflow_label}` lane "
@@ -267,6 +269,7 @@ def _experimental_ideas(
                 "priority": "P2",
                 "category": "experimental_idea",
                 "signal_type": "competitor_format",
+                "format_label": dominant_format_label,
                 "title": f"Keep one bounded `{dominant_format_label}` test on this week’s board",
                 "recommendation": (
                     f"Do one small `{dominant_format_label}` experiment this week, but keep it isolated to a single post until our own signal set gets bigger."
@@ -286,6 +289,7 @@ def _experimental_ideas(
                 "priority": "P3",
                 "category": "experimental_idea",
                 "signal_type": "competitor_hook",
+                "hook_label": hook_label,
                 "title": f"Test one `{hook_label}` hook without changing the whole caption style",
                 "recommendation": f"Use `{hook_label}` as a single caption-opening experiment this week, but keep the rest of the post in our usual voice.",
                 "evidence": f"`{hook_label}` appeared in {top_hook.get('post_count') or 0} competitor posts with average visible score {top_hook.get('avg_engagement_score') or 0}.",
@@ -355,19 +359,72 @@ def _do_not_copy_patterns(
     return guardrails[:4]
 
 
+def _workflow_labels(social_payload: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for item in ((social_payload.get("rollups") or {}).get("by_workflow") or []):
+        label = _compact_text((item or {}).get("label"))
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def _preferred_slot_lane(
+    *,
+    signal_type: str,
+    anchor_workflow: str,
+    available_workflows: list[str],
+    metadata: dict[str, Any],
+) -> tuple[str, str, str]:
+    workflow_pool = [label for label in available_workflows if label]
+    alternate_story_lane = next((label for label in workflow_pool if label != anchor_workflow), anchor_workflow)
+    if signal_type in {"stable_pattern", "competitor_watch_account", "competitor_hook"}:
+        return anchor_workflow, anchor_workflow, "standard_lane"
+    if signal_type == "competitor_theme":
+        preferred = next(
+            (
+                label
+                for label in workflow_pool
+                if label in {"jeepfact", "thursday", "meme", "review_carousel"} and label != anchor_workflow
+            ),
+            alternate_story_lane,
+        )
+        content_family = _compact_text(metadata.get("theme_label")) or "theme_test"
+        return preferred or anchor_workflow, content_family, "standard_lane"
+    if signal_type == "competitor_format":
+        format_label = _compact_text(metadata.get("format_label"))
+        if format_label == "carousel" and "review_carousel" in workflow_pool:
+            return "review_carousel", "carousel_test", "standard_lane"
+        if format_label in {"reel", "video"}:
+            return "manual_social_experiment", format_label or "format_test", "manual_test"
+        return anchor_workflow, format_label or "format_test", "standard_lane"
+    if signal_type == "guardrail":
+        return anchor_workflow, "review_guardrail", "review"
+    return anchor_workflow, anchor_workflow, "standard_lane"
+
+
 def _social_plan_slots(
     *,
     anchor_window: str,
     anchor_workflow: str,
     watch_account: str | None,
+    available_workflows: list[str],
     experimental_ideas: list[dict[str, Any]],
     do_not_copy_patterns: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    lane, content_family, execution_mode = _preferred_slot_lane(
+        signal_type="stable_pattern",
+        anchor_workflow=anchor_workflow,
+        available_workflows=available_workflows,
+        metadata={},
+    )
     slots: list[dict[str, Any]] = [
         {
             "slot": "Slot 1",
             "timing_hint": f"Early week · {anchor_window}",
-            "workflow": anchor_workflow,
+            "workflow": lane,
+            "suggested_lane": lane,
+            "content_family": content_family,
+            "execution_mode": execution_mode,
             "goal": "Anchor with the strongest proven workflow",
             "action": f"Run one `{anchor_workflow}` post in the `{anchor_window}` window to keep the week grounded in our best current signal.",
             "why": f"`{anchor_workflow}` in `{anchor_window}` is still the safest combination in our own performance data.",
@@ -394,10 +451,19 @@ def _social_plan_slots(
         evidence = _compact_text(idea.get("evidence"))
         if not action:
             continue
+        lane, content_family, execution_mode = _preferred_slot_lane(
+            signal_type=signal_type,
+            anchor_workflow=anchor_workflow,
+            available_workflows=available_workflows,
+            metadata=idea,
+        )
         slot_payload = {
             "slot": slot_label,
             "timing_hint": timing_hint,
-            "workflow": anchor_workflow,
+            "workflow": lane,
+            "suggested_lane": lane,
+            "content_family": content_family,
+            "execution_mode": execution_mode,
             "goal": goal,
             "action": action,
             "why": evidence,
@@ -410,11 +476,20 @@ def _social_plan_slots(
 
     if do_not_copy_patterns:
         first_guardrail = do_not_copy_patterns[0]
+        lane, content_family, execution_mode = _preferred_slot_lane(
+            signal_type="guardrail",
+            anchor_workflow=anchor_workflow,
+            available_workflows=available_workflows,
+            metadata={},
+        )
         slots.append(
             {
                 "slot": "Slot 5",
                 "timing_hint": "End of week review",
-                "workflow": anchor_workflow,
+                "workflow": lane,
+                "suggested_lane": lane,
+                "content_family": content_family,
+                "execution_mode": execution_mode,
                 "goal": "Review results before changing the calendar",
                 "action": _compact_text(first_guardrail.get("guidance")),
                 "why": _compact_text(first_guardrail.get("evidence")),
@@ -441,6 +516,7 @@ def _social_plan(
 ) -> dict[str, Any]:
     best_window = ((social_payload.get("rollups") or {}).get("by_time_window") or [{}])[0]
     strongest_workflow = ((social_payload.get("rollups") or {}).get("by_workflow") or [{}])[0]
+    available_workflows = _workflow_labels(social_payload)
     stable_account = next((item for item in stable_patterns if item.get("signal_type") == "competitor_watch_account"), None)
     anchor_window = _compact_text(best_window.get("label")) or "best available window"
     anchor_workflow = _compact_text(strongest_workflow.get("label")) or "best available workflow"
@@ -453,6 +529,7 @@ def _social_plan(
         anchor_window=anchor_window,
         anchor_workflow=anchor_workflow,
         watch_account=watch_account,
+        available_workflows=available_workflows,
         experimental_ideas=experimental_ideas,
         do_not_copy_patterns=do_not_copy_patterns,
     )
@@ -658,6 +735,12 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                 lines.append(f"    Action: {item.get('action')}")
                 if item.get("workflow"):
                     lines.append(f"    Workflow: `{item.get('workflow')}`")
+                if item.get("suggested_lane"):
+                    lines.append(f"    Lane: `{item.get('suggested_lane')}`")
+                if item.get("content_family"):
+                    lines.append(f"    Family: `{item.get('content_family')}`")
+                if item.get("execution_mode"):
+                    lines.append(f"    Mode: `{item.get('execution_mode')}`")
                 if item.get("watch_account"):
                     lines.append(f"    Watch: `{item.get('watch_account')}`")
                 if item.get("why"):

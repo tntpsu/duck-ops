@@ -299,6 +299,9 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "slot": "Slot 1",
                             "timing_hint": "Early week · evening",
                             "workflow": "meme",
+                            "suggested_lane": "meme",
+                            "content_family": "meme",
+                            "execution_mode": "standard_lane",
                             "goal": "Anchor with the strongest proven workflow",
                             "action": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
                         },
@@ -306,6 +309,9 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "slot": "Slot 2",
                             "timing_hint": "Midweek · evening",
                             "workflow": "meme",
+                            "suggested_lane": "meme",
+                            "content_family": "meme",
+                            "execution_mode": "standard_lane",
                             "goal": "Competitor-inspired hook test",
                             "action": "Review the last few hooks and formats from `f3dprinted` before drafting one bounded post test.",
                             "watch_account": "f3dprinted",
@@ -340,6 +346,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("## This Week's Social Plan", markdown)
         self.assertIn("Keep meme in evening and run one bounded music test.", markdown)
         self.assertIn("Slot 1: Early week", markdown)
+        self.assertIn("Lane: `meme`", markdown)
 
     def test_render_business_section_learning_uses_payload_items_without_crashing(self) -> None:
         output = render_business_section(
@@ -429,6 +436,9 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                                 "slot": "Slot 1",
                                 "timing_hint": "Early week · evening",
                                 "workflow": "meme",
+                                "suggested_lane": "meme",
+                                "content_family": "meme",
+                                "execution_mode": "standard_lane",
                                 "goal": "Anchor with the strongest proven workflow",
                                 "action": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
                             },
@@ -436,6 +446,9 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                                 "slot": "Slot 2",
                                 "timing_hint": "Midweek · evening",
                                 "workflow": "meme",
+                                "suggested_lane": "meme",
+                                "content_family": "meme",
+                                "execution_mode": "standard_lane",
                                 "goal": "Competitor-inspired hook test",
                                 "action": "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
                                 "watch_account": "f3dprinted",
@@ -453,6 +466,9 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "slot": "Slot 1",
                             "timing_hint": "Early week · evening",
                             "workflow": "meme",
+                            "suggested_lane": "meme",
+                            "content_family": "meme",
+                            "execution_mode": "standard_lane",
                             "goal": "Anchor with the strongest proven workflow",
                             "action": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
                         },
@@ -460,6 +476,9 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "slot": "Slot 2",
                             "timing_hint": "Midweek · evening",
                             "workflow": "meme",
+                            "suggested_lane": "meme",
+                            "content_family": "meme",
+                            "execution_mode": "standard_lane",
                             "goal": "Competitor-inspired hook test",
                             "action": "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
                             "watch_account": "f3dprinted",
@@ -475,6 +494,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Anchor window: evening", output)
         self.assertIn("Watch account: f3dprinted", output)
         self.assertIn("Slot 1: Early week", output)
+        self.assertIn("Lane: meme", output)
 
     def test_render_business_section_reviews_includes_decision_command(self) -> None:
         output = render_business_section(
