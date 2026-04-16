@@ -300,6 +300,14 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                         "manual_experiment": 0,
                         "not_supported_yet": 0,
                     },
+                    "execution_feedback": {
+                        "recommended_lane_executed": 1,
+                        "alternate_lane_executed": 1,
+                        "different_lane_executed": 0,
+                        "awaiting_slot": 0,
+                        "no_post_observed": 0,
+                        "review_slot": 0,
+                    },
                     "ready_this_week": [
                         {
                             "slot": "Slot 1",
@@ -313,6 +321,9 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
                             "lane_fit_strength": "strong",
                             "lane_fit_reason": "`meme` is still our safest baseline lane, so this slot should protect the strongest own-post signal before we experiment.",
+                            "tracking_status": "recommended_lane_executed",
+                            "performance_label": "strong",
+                            "performance_note": "This landed in the top third of the current social window at rank 1 of 3 observed posts.",
                         }
                     ],
                     "slots": [
@@ -323,6 +334,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "suggested_lane": "meme",
                             "content_family": "meme",
                             "execution_mode": "standard_lane",
+                            "calendar_date": "2026-04-13",
                             "calendar_label": "Monday evening",
                             "cadence_reason": "This lines up with the recurring Meme Monday lane while keeping the stronger evening window in view.",
                             "execution_readiness": "ready_with_approval",
@@ -335,6 +347,12 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "action": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
                             "lane_fit_strength": "strong",
                             "lane_fit_reason": "`meme` is still our safest baseline lane, so this slot should protect the strongest own-post signal before we experiment.",
+                            "tracking_status": "recommended_lane_executed",
+                            "tracking_note": "The recommended lane `meme` was observed on `2026-04-13`.",
+                            "actual_lane": "meme",
+                            "actual_platforms": ["instagram"],
+                            "performance_label": "strong",
+                            "performance_note": "This landed in the top third of the current social window at rank 1 of 3 observed posts.",
                         },
                         {
                             "slot": "Slot 2",
@@ -343,6 +361,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "suggested_lane": "meme",
                             "content_family": "meme",
                             "execution_mode": "standard_lane",
+                            "calendar_date": "2026-04-15",
                             "calendar_label": "Wednesday evening",
                             "cadence_reason": "This is the midweek test slot, so it should not steal focus from the Monday anchor post.",
                             "execution_readiness": "ready_with_approval",
@@ -358,6 +377,12 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "lane_fit_reason": "This is a bounded competitor-style borrow, so keeping it inside `meme` lets us test the signal without changing the production lane.",
                             "alternate_lane": "jeepfact",
                             "alternate_lane_reason": "If the borrowed account pattern needs more story than `meme` can carry cleanly, move the concept into `jeepfact` instead.",
+                            "tracking_status": "alternate_lane_executed",
+                            "tracking_note": "The primary lane `meme` did not land, but the planned fallback `jeepfact` was observed on `2026-04-15`.",
+                            "actual_lane": "jeepfact",
+                            "actual_platforms": ["instagram"],
+                            "performance_label": "watch",
+                            "performance_note": "This landed in the middle of the current social window at rank 2 of 3 observed posts.",
                         },
                     ],
                     "items": [
@@ -390,10 +415,14 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Keep meme in evening and run one bounded music test.", markdown)
         self.assertIn("Slot 1: Early week", markdown)
         self.assertIn("Lane: `meme`", markdown)
+        self.assertIn("Date: `2026-04-13`", markdown)
         self.assertIn("Calendar: `Monday evening`", markdown)
         self.assertIn("Fit: `strong`", markdown)
         self.assertIn("Lane reason:", markdown)
         self.assertIn("Alternate: `jeepfact`", markdown)
+        self.assertIn("Execution feedback: `recommended=1`, `alternate=1`", markdown)
+        self.assertIn("Outcome: `alternate_lane_executed`", markdown)
+        self.assertIn("Performance: `watch`", markdown)
         self.assertIn("Readiness: `ready_with_approval`", markdown)
         self.assertIn("Ready this week:", markdown)
         self.assertIn("Use: Run Meme Flow", markdown)
@@ -488,6 +517,14 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "manual_experiment": 0,
                             "not_supported_yet": 0,
                         },
+                        "execution_feedback": {
+                            "recommended_lane_executed": 1,
+                            "alternate_lane_executed": 1,
+                            "different_lane_executed": 0,
+                            "awaiting_slot": 0,
+                            "no_post_observed": 0,
+                            "review_slot": 0,
+                        },
                         "ready_this_week": [
                             {
                                 "slot": "Slot 1",
@@ -497,6 +534,8 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                                 "operator_action_label": "Run Meme Flow",
                                 "lane_fit_strength": "strong",
                                 "lane_fit_reason": "`meme` is still our safest baseline lane, so this slot should protect the strongest own-post signal before we experiment.",
+                                "tracking_status": "recommended_lane_executed",
+                                "performance_label": "strong",
                             }
                         ],
                         "slots": [
@@ -507,6 +546,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                                 "suggested_lane": "meme",
                                 "content_family": "meme",
                                 "execution_mode": "standard_lane",
+                                "calendar_date": "2026-04-13",
                                 "calendar_label": "Monday evening",
                                 "cadence_reason": "This lines up with the recurring Meme Monday lane while keeping the stronger evening window in view.",
                                 "execution_readiness": "ready_with_approval",
@@ -519,6 +559,12 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                                 "action": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
                                 "lane_fit_strength": "strong",
                                 "lane_fit_reason": "`meme` is still our safest baseline lane, so this slot should protect the strongest own-post signal before we experiment.",
+                                "tracking_status": "recommended_lane_executed",
+                                "tracking_note": "The recommended lane `meme` was observed on `2026-04-13`.",
+                                "actual_lane": "meme",
+                                "actual_platforms": ["instagram"],
+                                "performance_label": "strong",
+                                "performance_note": "This landed in the top third of the current social window at rank 1 of 3 observed posts.",
                             },
                             {
                                 "slot": "Slot 2",
@@ -527,6 +573,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                                 "suggested_lane": "meme",
                                 "content_family": "meme",
                                 "execution_mode": "standard_lane",
+                                "calendar_date": "2026-04-15",
                                 "calendar_label": "Wednesday evening",
                                 "cadence_reason": "This is the midweek test slot, so it should not steal focus from the Monday anchor post.",
                                 "execution_readiness": "ready_with_approval",
@@ -555,6 +602,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "suggested_lane": "meme",
                             "content_family": "meme",
                             "execution_mode": "standard_lane",
+                            "calendar_date": "2026-04-13",
                             "calendar_label": "Monday evening",
                             "cadence_reason": "This lines up with the recurring Meme Monday lane while keeping the stronger evening window in view.",
                             "execution_readiness": "ready_with_approval",
@@ -565,6 +613,14 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
                             "goal": "Anchor with the strongest proven workflow",
                             "action": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
+                            "lane_fit_strength": "strong",
+                            "lane_fit_reason": "`meme` is still our safest baseline lane, so this slot should protect the strongest own-post signal before we experiment.",
+                            "tracking_status": "recommended_lane_executed",
+                            "tracking_note": "The recommended lane `meme` was observed on `2026-04-13`.",
+                            "actual_lane": "meme",
+                            "actual_platforms": ["instagram"],
+                            "performance_label": "strong",
+                            "performance_note": "This landed in the top third of the current social window at rank 1 of 3 observed posts.",
                         },
                         {
                             "slot": "Slot 2",
@@ -573,6 +629,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "suggested_lane": "meme",
                             "content_family": "meme",
                             "execution_mode": "standard_lane",
+                            "calendar_date": "2026-04-15",
                             "calendar_label": "Wednesday evening",
                             "cadence_reason": "This is the midweek test slot, so it should not steal focus from the Monday anchor post.",
                             "execution_readiness": "ready_with_approval",
@@ -580,15 +637,21 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                             "schedule_reference": "Monday 09:00 scheduled flow",
                             "next_step": "Run the meme flow or wait for the scheduled run, then use the normal review/publish reply loop.",
                             "command_hint": "python src/main_agent.py --flow meme --all",
-                                "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
-                                "goal": "Competitor-inspired hook test",
-                                "action": "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
-                                "watch_account": "f3dprinted",
-                                "lane_fit_strength": "strong",
-                                "lane_fit_reason": "This is a bounded competitor-style borrow, so keeping it inside `meme` lets us test the signal without changing the production lane.",
-                                "alternate_lane": "jeepfact",
-                                "alternate_lane_reason": "If the borrowed account pattern needs more story than `meme` can carry cleanly, move the concept into `jeepfact` instead.",
-                            },
+                            "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
+                            "goal": "Competitor-inspired hook test",
+                            "action": "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
+                            "watch_account": "f3dprinted",
+                            "lane_fit_strength": "strong",
+                            "lane_fit_reason": "This is a bounded competitor-style borrow, so keeping it inside `meme` lets us test the signal without changing the production lane.",
+                            "alternate_lane": "jeepfact",
+                            "alternate_lane_reason": "If the borrowed account pattern needs more story than `meme` can carry cleanly, move the concept into `jeepfact` instead.",
+                            "tracking_status": "alternate_lane_executed",
+                            "tracking_note": "The primary lane `meme` did not land, but the planned fallback `jeepfact` was observed on `2026-04-15`.",
+                            "actual_lane": "jeepfact",
+                            "actual_platforms": ["instagram"],
+                            "performance_label": "watch",
+                            "performance_note": "This landed in the middle of the current social window at rank 2 of 3 observed posts.",
+                        },
                         ]
                     },
                 },
@@ -599,12 +662,16 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Keep meme in evening and run one bounded music test.", output)
         self.assertIn("Anchor window: evening", output)
         self.assertIn("Watch account: f3dprinted", output)
+        self.assertIn("Execution feedback: recommended=1, alternate=1", output)
         self.assertIn("Slot 1: Early week", output)
         self.assertIn("Lane: meme", output)
+        self.assertIn("Date: 2026-04-13", output)
         self.assertIn("Calendar: Monday evening", output)
         self.assertIn("Fit: strong", output)
         self.assertIn("Lane reason:", output)
         self.assertIn("Alternate: jeepfact", output)
+        self.assertIn("Outcome: alternate_lane_executed", output)
+        self.assertIn("Performance: watch", output)
         self.assertIn("Readiness: ready_with_approval", output)
         self.assertIn("Ready this week:", output)
         self.assertIn("Use: Run Meme Flow", output)

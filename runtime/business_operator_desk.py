@@ -96,6 +96,7 @@ def _load_weekly_strategy_packet() -> dict[str, Any]:
             "watch_account": social_plan.get("watch_account"),
             "slot_count": int(social_plan.get("slot_count") or len(social_plan.get("slots") or [])),
             "readiness_counts": dict(social_plan.get("readiness_counts") or {}),
+            "execution_feedback": dict(social_plan.get("execution_feedback") or {}),
             "ready_this_week": list(social_plan.get("ready_this_week") or [])[:5],
             "slots": list(social_plan.get("slots") or [])[:5],
             "items": list(social_plan.get("items") or [])[:5],
@@ -542,6 +543,17 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 f"`manual_experiment={readiness_counts.get('manual_experiment', 0)}`, "
                 f"`not_supported_yet={readiness_counts.get('not_supported_yet', 0)}`"
             )
+        execution_feedback = social_plan.get("execution_feedback") or {}
+        if execution_feedback:
+            lines.append(
+                "- Execution feedback: "
+                f"`recommended={execution_feedback.get('recommended_lane_executed', 0)}`, "
+                f"`alternate={execution_feedback.get('alternate_lane_executed', 0)}`, "
+                f"`different={execution_feedback.get('different_lane_executed', 0)}`, "
+                f"`awaiting={execution_feedback.get('awaiting_slot', 0)}`, "
+                f"`no_post={execution_feedback.get('no_post_observed', 0)}`, "
+                f"`review={execution_feedback.get('review_slot', 0)}`"
+            )
         slots = (sections.get("weekly_social_plan") or []) or list(social_plan.get("slots") or [])
         if slots and isinstance(slots[0], dict):
             lines.append("- Suggested slots:")
@@ -559,6 +571,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Family: `{item.get('content_family')}`")
                 if item.get("execution_mode"):
                     lines.append(f"    Mode: `{item.get('execution_mode')}`")
+                if item.get("calendar_date"):
+                    lines.append(f"    Date: `{item.get('calendar_date')}`")
                 if item.get("calendar_label"):
                     lines.append(f"    Calendar: `{item.get('calendar_label')}`")
                 if item.get("cadence_reason"):
@@ -585,6 +599,18 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Alternate: `{item.get('alternate_lane')}`")
                 if item.get("alternate_lane_reason"):
                     lines.append(f"    Alternate reason: {_trim_text(item.get('alternate_lane_reason'), 180)}")
+                if item.get("tracking_status"):
+                    lines.append(f"    Outcome: `{item.get('tracking_status')}`")
+                if item.get("tracking_note"):
+                    lines.append(f"    Outcome note: {_trim_text(item.get('tracking_note'), 180)}")
+                if item.get("actual_lane"):
+                    lines.append(f"    Actual lane: `{item.get('actual_lane')}`")
+                if item.get("actual_platforms"):
+                    lines.append(f"    Platforms: `{', '.join(item.get('actual_platforms') or [])}`")
+                if item.get("performance_label"):
+                    lines.append(f"    Performance: `{item.get('performance_label')}`")
+                if item.get("performance_note"):
+                    lines.append(f"    Performance note: {_trim_text(item.get('performance_note'), 180)}")
         else:
             items = slots or list(social_plan.get("items") or [])
             if items:
@@ -606,6 +632,10 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Hint: `{item.get('command_hint')}`")
                 if item.get("approval_followthrough"):
                     lines.append(f"    Then: {_trim_text(item.get('approval_followthrough'), 160)}")
+                if item.get("tracking_status"):
+                    lines.append(f"    Outcome: `{item.get('tracking_status')}`")
+                if item.get("performance_label"):
+                    lines.append(f"    Performance: `{item.get('performance_label')}`")
     lines.extend([
         "",
         "## Do Next",
@@ -901,6 +931,17 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                     f"manual_experiment={readiness_counts.get('manual_experiment', 0)}, "
                     f"not_supported_yet={readiness_counts.get('not_supported_yet', 0)}"
                 )
+            execution_feedback = social_plan.get("execution_feedback") or {}
+            if execution_feedback:
+                lines.append(
+                    "Execution feedback: "
+                    f"recommended={execution_feedback.get('recommended_lane_executed', 0)}, "
+                    f"alternate={execution_feedback.get('alternate_lane_executed', 0)}, "
+                    f"different={execution_feedback.get('different_lane_executed', 0)}, "
+                    f"awaiting={execution_feedback.get('awaiting_slot', 0)}, "
+                    f"no_post={execution_feedback.get('no_post_observed', 0)}, "
+                    f"review={execution_feedback.get('review_slot', 0)}"
+                )
             lines.append("")
             if items and isinstance(items[0], dict):
                 for item in items:
@@ -915,6 +956,8 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Family: {item.get('content_family')}")
                     if item.get("execution_mode"):
                         lines.append(f"  Mode: {item.get('execution_mode')}")
+                    if item.get("calendar_date"):
+                        lines.append(f"  Date: {item.get('calendar_date')}")
                     if item.get("calendar_label"):
                         lines.append(f"  Calendar: {item.get('calendar_label')}")
                     if item.get("cadence_reason"):
@@ -941,6 +984,18 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Alternate: {item.get('alternate_lane')}")
                     if item.get("alternate_lane_reason"):
                         lines.append(f"  Alternate reason: {_trim_text(item.get('alternate_lane_reason'), 180)}")
+                    if item.get("tracking_status"):
+                        lines.append(f"  Outcome: {item.get('tracking_status')}")
+                    if item.get("tracking_note"):
+                        lines.append(f"  Outcome note: {_trim_text(item.get('tracking_note'), 180)}")
+                    if item.get("actual_lane"):
+                        lines.append(f"  Actual lane: {item.get('actual_lane')}")
+                    if item.get("actual_platforms"):
+                        lines.append(f"  Platforms: {', '.join(item.get('actual_platforms') or [])}")
+                    if item.get("performance_label"):
+                        lines.append(f"  Performance: {item.get('performance_label')}")
+                    if item.get("performance_note"):
+                        lines.append(f"  Performance note: {_trim_text(item.get('performance_note'), 180)}")
             else:
                 for item in items:
                     lines.append(f"- {_trim_text(item, 180)}")
@@ -968,6 +1023,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Alternate: {item.get('alternate_lane')}")
                     if item.get("alternate_lane_reason"):
                         lines.append(f"  Alternate reason: {_trim_text(item.get('alternate_lane_reason'), 180)}")
+                    if item.get("tracking_status"):
+                        lines.append(f"  Outcome: {item.get('tracking_status')}")
+                    if item.get("performance_label"):
+                        lines.append(f"  Performance: {item.get('performance_label')}")
         return "\n".join(lines)
 
     items = sections.get(normalized) or []

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import datetime, timedelta
+import math
 from typing import Any
 
-from governance_review_common import DUCK_OPS_ROOT, OUTPUT_OPERATOR_DIR, load_json, now_local_iso, write_json, write_markdown
+from governance_review_common import DUCK_OPS_ROOT, OUTPUT_OPERATOR_DIR, load_json, parse_iso, write_json, write_markdown
 
 
+SOCIAL_POSTS_PATH = DUCK_OPS_ROOT / "state" / "social_performance_posts.json"
 SOCIAL_ROLLUPS_PATH = DUCK_OPS_ROOT / "state" / "social_performance_rollups.json"
 COMPETITOR_SOCIAL_BENCHMARK_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_benchmark.json"
 COMPETITOR_SOCIAL_SNAPSHOTS_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_snapshots.json"
@@ -35,6 +38,10 @@ def _humanize_label(value: Any) -> str:
     if not text:
         return ""
     return " ".join(part if part.isupper() else part.capitalize() for part in text.split())
+
+
+def _now_local() -> datetime:
+    return datetime.now().astimezone()
 
 
 def _recent_snapshot_stability(history_payload: dict[str, Any], *, lookback: int = 5) -> dict[str, Any]:
@@ -688,9 +695,30 @@ def _ready_this_week(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "lane_fit_reason": item.get("lane_fit_reason"),
                 "alternate_lane": item.get("alternate_lane"),
                 "alternate_lane_reason": item.get("alternate_lane_reason"),
+                "tracking_status": item.get("tracking_status"),
+                "tracking_note": item.get("tracking_note"),
+                "actual_lane": item.get("actual_lane"),
+                "actual_platforms": list(item.get("actual_platforms") or []),
+                "performance_label": item.get("performance_label"),
+                "performance_note": item.get("performance_note"),
             }
         )
     return ready[:5]
+
+
+def _slot_day_offset(slot_label: str) -> int:
+    return {
+        "Slot 1": 0,
+        "Slot 2": 2,
+        "Slot 3": 3,
+        "Slot 4": 5,
+        "Slot 5": 6,
+    }.get(slot_label, 0)
+
+
+def _slot_target_date(slot_label: str, *, packet_now: datetime) -> datetime.date:
+    week_start = (packet_now - timedelta(days=packet_now.weekday())).date()
+    return week_start + timedelta(days=_slot_day_offset(slot_label))
 
 
 def _calendar_target_for_slot(
@@ -699,6 +727,7 @@ def _calendar_target_for_slot(
     anchor_window: str,
     suggested_lane: str,
     execution_mode: str,
+    packet_now: datetime,
 ) -> dict[str, str]:
     day_by_slot = {
         "Slot 1": "Monday",
@@ -726,12 +755,229 @@ def _calendar_target_for_slot(
         cadence_reason = "End the week with a review block before changing the calendar or the lane mix."
     else:
         cadence_reason = "Use this as the suggested weekly rhythm unless a stronger operator reason changes the day."
+    calendar_date = _slot_target_date(slot_label, packet_now=packet_now).isoformat()
 
     return {
         "target_day": target_day,
         "target_window": target_window,
+        "calendar_date": calendar_date,
         "calendar_label": calendar_label,
         "cadence_reason": cadence_reason,
+    }
+
+
+def _post_group_summary(workflow: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    representative = max(items, key=lambda item: _safe_float(item.get("engagement_score")) or 0.0)
+    timestamps = [parsed for parsed in (parse_iso(item.get("published_at")) for item in items) if parsed is not None]
+    return {
+        "workflow": workflow,
+        "platforms": sorted({str(item.get("platform") or "").strip() for item in items if str(item.get("platform") or "").strip()}),
+        "post_count": len(items),
+        "published_at": min(timestamps).isoformat() if timestamps else representative.get("published_at"),
+        "time_window": _compact_text(representative.get("time_window")) or None,
+        "post_id": representative.get("post_id"),
+        "title": representative.get("title"),
+        "theme": representative.get("theme"),
+        "url": representative.get("url"),
+        "engagement_score": _safe_float(representative.get("engagement_score")),
+        "engagement_rate": _safe_float(representative.get("engagement_rate")),
+    }
+
+
+def _performance_signal(post_group: dict[str, Any], observed_posts: list[dict[str, Any]]) -> dict[str, Any]:
+    scored_posts = [
+        item
+        for item in observed_posts
+        if not bool(item.get("is_future_post")) and _safe_float(item.get("engagement_score")) is not None
+    ]
+    if not scored_posts:
+        return {
+            "performance_label": "pending",
+            "performance_note": "No scored social posts are available yet, so outcome quality is still pending.",
+            "performance_rank": None,
+            "performance_sample_size": 0,
+        }
+
+    target_post_id = str(post_group.get("post_id") or "").strip()
+    sorted_posts = sorted(
+        scored_posts,
+        key=lambda item: (-float(_safe_float(item.get("engagement_score")) or 0.0), str(item.get("published_at") or "")),
+    )
+    rank = next(
+        (
+            index
+            for index, item in enumerate(sorted_posts, start=1)
+            if str(item.get("post_id") or "").strip() == target_post_id
+        ),
+        None,
+    )
+    sample_size = len(sorted_posts)
+    if rank is None:
+        return {
+            "performance_label": "pending",
+            "performance_note": "The matched post could not be ranked against the current social window yet.",
+            "performance_rank": None,
+            "performance_sample_size": sample_size,
+        }
+
+    if sample_size < 3:
+        label = "limited"
+        note = (
+            f"Only {sample_size} scored post(s) are in the current window, so this result is still directional rather than trustworthy."
+        )
+    else:
+        top_band = max(1, math.ceil(sample_size / 3))
+        if rank <= top_band:
+            label = "strong"
+            note = f"This landed in the top third of the current social window at rank {rank} of {sample_size} observed posts."
+        elif rank > sample_size - top_band:
+            label = "weak"
+            note = f"This landed in the bottom third of the current social window at rank {rank} of {sample_size} observed posts."
+        else:
+            label = "watch"
+            note = f"This landed in the middle of the current social window at rank {rank} of {sample_size} observed posts."
+
+    score = _safe_float(post_group.get("engagement_score"))
+    rate = _safe_float(post_group.get("engagement_rate"))
+    evidence = []
+    if score is not None:
+        evidence.append(f"score {round(score, 2)}")
+    if rate is not None:
+        evidence.append(f"rate {round(rate, 4)}")
+    if evidence:
+        note = f"{note} Observed {' | '.join(evidence)}."
+
+    return {
+        "performance_label": label,
+        "performance_note": note,
+        "performance_rank": rank,
+        "performance_sample_size": sample_size,
+    }
+
+
+def _slot_execution_feedback(
+    slot: dict[str, Any],
+    *,
+    social_posts_payload: dict[str, Any],
+    packet_now: datetime,
+) -> dict[str, Any]:
+    slot_label = str(slot.get("slot") or "").strip()
+    target_date = _slot_target_date(slot_label, packet_now=packet_now)
+    target_date_text = target_date.isoformat()
+    suggested_lane = str(slot.get("suggested_lane") or "").strip()
+    alternate_lane = str(slot.get("alternate_lane") or "").strip()
+    execution_mode = str(slot.get("execution_mode") or "").strip()
+
+    if execution_mode == "review":
+        return {
+            "calendar_date": target_date_text,
+            "tracking_status": "review_slot",
+            "tracking_note": "This slot is intentionally a review checkpoint, so there is no social post to match.",
+            "actual_lane": None,
+            "actual_platforms": [],
+            "actual_post_id": None,
+            "actual_published_at": None,
+            "actual_time_window": None,
+            "actual_post_url": None,
+            "performance_label": None,
+            "performance_note": None,
+            "performance_rank": None,
+            "performance_sample_size": 0,
+        }
+
+    if target_date > packet_now.date():
+        return {
+            "calendar_date": target_date_text,
+            "tracking_status": "awaiting_slot",
+            "tracking_note": f"This slot is scheduled for `{target_date_text}`, so there is no post outcome to evaluate yet.",
+            "actual_lane": None,
+            "actual_platforms": [],
+            "actual_post_id": None,
+            "actual_published_at": None,
+            "actual_time_window": None,
+            "actual_post_url": None,
+            "performance_label": None,
+            "performance_note": None,
+            "performance_rank": None,
+            "performance_sample_size": 0,
+        }
+
+    posts = [item for item in (social_posts_payload.get("posts") or []) if isinstance(item, dict)]
+    observed_same_day = [
+        item
+        for item in posts
+        if str(item.get("published_date") or "").strip() == target_date_text and not bool(item.get("is_future_post"))
+    ]
+    if not observed_same_day:
+        return {
+            "calendar_date": target_date_text,
+            "tracking_status": "no_post_observed",
+            "tracking_note": f"No observed social post was found for the `{target_date_text}` target date yet.",
+            "actual_lane": None,
+            "actual_platforms": [],
+            "actual_post_id": None,
+            "actual_published_at": None,
+            "actual_time_window": None,
+            "actual_post_url": None,
+            "performance_label": None,
+            "performance_note": None,
+            "performance_rank": None,
+            "performance_sample_size": 0,
+        }
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in observed_same_day:
+        workflow = _compact_text(item.get("workflow"))
+        if not workflow:
+            continue
+        grouped.setdefault(workflow, []).append(item)
+    group_summaries = {workflow: _post_group_summary(workflow, items) for workflow, items in grouped.items()}
+    if suggested_lane and suggested_lane in group_summaries:
+        status = "recommended_lane_executed"
+        matched = group_summaries[suggested_lane]
+        note = f"The recommended lane `{suggested_lane}` was observed on `{target_date_text}`."
+    elif alternate_lane and alternate_lane in group_summaries:
+        status = "alternate_lane_executed"
+        matched = group_summaries[alternate_lane]
+        note = (
+            f"The primary lane `{suggested_lane}` did not land, but the planned fallback `{alternate_lane}` was observed on `{target_date_text}`."
+        )
+    else:
+        matched = max(
+            group_summaries.values(),
+            key=lambda item: (item.get("post_count") or 0, _safe_float(item.get("engagement_score")) or 0.0, str(item.get("published_at") or "")),
+        )
+        status = "different_lane_executed"
+        note = (
+            f"A different lane `{matched.get('workflow')}` was observed on `{target_date_text}` instead of `{suggested_lane or 'the planned lane'}`."
+        )
+
+    performance = _performance_signal(matched, posts)
+    if matched.get("time_window") and str(matched.get("time_window")) != str(slot.get("target_window") or ""):
+        note = f"{note} It landed in `{matched.get('time_window')}` instead of `{slot.get('target_window')}`."
+
+    return {
+        "calendar_date": target_date_text,
+        "tracking_status": status,
+        "tracking_note": note,
+        "actual_lane": matched.get("workflow"),
+        "actual_platforms": list(matched.get("platforms") or []),
+        "actual_post_id": matched.get("post_id"),
+        "actual_published_at": matched.get("published_at"),
+        "actual_time_window": matched.get("time_window"),
+        "actual_post_url": matched.get("url"),
+        **performance,
+    }
+
+
+def _execution_feedback_summary(slots: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "recommended_lane_executed": sum(1 for item in slots if str(item.get("tracking_status") or "") == "recommended_lane_executed"),
+        "alternate_lane_executed": sum(1 for item in slots if str(item.get("tracking_status") or "") == "alternate_lane_executed"),
+        "different_lane_executed": sum(1 for item in slots if str(item.get("tracking_status") or "") == "different_lane_executed"),
+        "awaiting_slot": sum(1 for item in slots if str(item.get("tracking_status") or "") == "awaiting_slot"),
+        "no_post_observed": sum(1 for item in slots if str(item.get("tracking_status") or "") == "no_post_observed"),
+        "review_slot": sum(1 for item in slots if str(item.get("tracking_status") or "") == "review_slot"),
     }
 
 
@@ -743,6 +989,8 @@ def _social_plan_slots(
     available_workflows: list[str],
     experimental_ideas: list[dict[str, Any]],
     do_not_copy_patterns: list[dict[str, Any]],
+    social_posts_payload: dict[str, Any],
+    packet_now: datetime,
 ) -> list[dict[str, Any]]:
     lane_choice = _preferred_slot_lane(
         signal_type="stable_pattern",
@@ -767,6 +1015,7 @@ def _social_plan_slots(
             anchor_window=anchor_window,
             suggested_lane=str(lane_choice.get("suggested_lane") or ""),
             execution_mode=str(lane_choice.get("execution_mode") or ""),
+            packet_now=packet_now,
         )
     )
     slots[0].update(
@@ -816,6 +1065,7 @@ def _social_plan_slots(
                 anchor_window=anchor_window,
                 suggested_lane=str(lane_choice.get("suggested_lane") or ""),
                 execution_mode=str(lane_choice.get("execution_mode") or ""),
+                packet_now=packet_now,
             )
         )
         slot_payload.update(
@@ -854,6 +1104,7 @@ def _social_plan_slots(
                 anchor_window=anchor_window,
                 suggested_lane=str(lane_choice.get("suggested_lane") or ""),
                 execution_mode=str(lane_choice.get("execution_mode") or ""),
+                packet_now=packet_now,
             )
         )
         slots[-1].update(
@@ -871,14 +1122,20 @@ def _social_plan_slots(
             continue
         deduped.append(item)
         seen_slots.add(slot_label)
-    return deduped[:5]
+    deduped = deduped[:5]
+    for item in deduped:
+        item.update(_slot_execution_feedback(item, social_posts_payload=social_posts_payload, packet_now=packet_now))
+    return deduped
 
 
 def _social_plan(
     social_payload: dict[str, Any],
+    social_posts_payload: dict[str, Any],
     stable_patterns: list[dict[str, Any]],
     experimental_ideas: list[dict[str, Any]],
     do_not_copy_patterns: list[dict[str, Any]],
+    *,
+    packet_now: datetime,
 ) -> dict[str, Any]:
     best_window = ((social_payload.get("rollups") or {}).get("by_time_window") or [{}])[0]
     strongest_workflow = ((social_payload.get("rollups") or {}).get("by_workflow") or [{}])[0]
@@ -898,9 +1155,12 @@ def _social_plan(
         available_workflows=available_workflows,
         experimental_ideas=experimental_ideas,
         do_not_copy_patterns=do_not_copy_patterns,
+        social_posts_payload=social_posts_payload,
+        packet_now=packet_now,
     )
     items = [item.get("action") for item in slots if _compact_text(item.get("action"))]
     ready_this_week = _ready_this_week(slots)
+    execution_feedback = _execution_feedback_summary(slots)
     readiness_counts = {
         "ready_now": sum(1 for item in slots if str(item.get("execution_readiness") or "") == "ready_now"),
         "ready_with_approval": sum(1 for item in slots if str(item.get("execution_readiness") or "") == "ready_with_approval"),
@@ -914,6 +1174,7 @@ def _social_plan(
         "watch_account": watch_account,
         "slot_count": len(slots),
         "readiness_counts": readiness_counts,
+        "execution_feedback": execution_feedback,
         "ready_this_week": ready_this_week,
         "slots": slots,
         "items": items[:5],
@@ -978,11 +1239,16 @@ def _watchouts(snapshot_payload: dict[str, Any], social_payload: dict[str, Any])
 
 
 def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
+    packet_now = _now_local()
+    generated_at = packet_now.isoformat()
+    social_posts_payload = load_json(SOCIAL_POSTS_PATH, {})
     social_payload = load_json(SOCIAL_ROLLUPS_PATH, {})
     competitor_social_payload = load_json(COMPETITOR_SOCIAL_BENCHMARK_PATH, {})
     snapshot_payload = load_json(COMPETITOR_SOCIAL_SNAPSHOTS_PATH, {})
     current_learnings_payload = load_json(CURRENT_LEARNINGS_PATH, {})
     snapshot_history_payload = load_json(COMPETITOR_SOCIAL_SNAPSHOT_HISTORY_PATH, {})
+    if not isinstance(social_posts_payload, dict):
+        social_posts_payload = {}
     if not isinstance(social_payload, dict):
         social_payload = {}
     if not isinstance(competitor_social_payload, dict):
@@ -1016,9 +1282,11 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
     )
     social_plan = _social_plan(
         social_payload,
+        social_posts_payload,
         stable_patterns,
         experimental_ideas,
         do_not_copy_patterns,
+        packet_now=packet_now,
     )
     stability_note = "Competitor history is still too short to call any pattern stable."
     if _compact_text(stability.get("stable_top_account")):
@@ -1027,7 +1295,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
             f"{stability.get('stable_top_account_count') or 0} of the last {stability.get('recent_snapshot_count') or 0} snapshots."
         )
     payload = {
-        "generated_at": now_local_iso(),
+        "generated_at": generated_at,
         "summary": {
             "headline": "Weekly strategy packet built from own-post performance and competitor social learnings.",
             "own_signal_confidence": own_signal[0],
@@ -1054,6 +1322,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
         ),
         "watchouts": _watchouts(snapshot_payload, social_payload),
         "source_paths": {
+            "social_posts": str(SOCIAL_POSTS_PATH),
             "social_rollups": str(SOCIAL_ROLLUPS_PATH),
             "competitor_social_benchmark": str(COMPETITOR_SOCIAL_BENCHMARK_PATH),
             "competitor_social_snapshots": str(COMPETITOR_SOCIAL_SNAPSHOTS_PATH),
@@ -1108,6 +1377,17 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
             f"`manual_experiment={readiness_counts.get('manual_experiment', 0)}`, "
             f"`not_supported_yet={readiness_counts.get('not_supported_yet', 0)}`"
         )
+        execution_feedback = social_plan.get("execution_feedback") or {}
+        if execution_feedback:
+            lines.append(
+                "- Execution feedback: "
+                f"`recommended={execution_feedback.get('recommended_lane_executed', 0)}`, "
+                f"`alternate={execution_feedback.get('alternate_lane_executed', 0)}`, "
+                f"`different={execution_feedback.get('different_lane_executed', 0)}`, "
+                f"`awaiting={execution_feedback.get('awaiting_slot', 0)}`, "
+                f"`no_post={execution_feedback.get('no_post_observed', 0)}`, "
+                f"`review={execution_feedback.get('review_slot', 0)}`"
+            )
         slots = social_plan.get("slots") or []
         if slots:
             lines.append("- Suggested slots:")
@@ -1124,6 +1404,8 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                     lines.append(f"    Family: `{item.get('content_family')}`")
                 if item.get("execution_mode"):
                     lines.append(f"    Mode: `{item.get('execution_mode')}`")
+                if item.get("calendar_date"):
+                    lines.append(f"    Date: `{item.get('calendar_date')}`")
                 if item.get("calendar_label"):
                     lines.append(f"    Calendar: `{item.get('calendar_label')}`")
                 if item.get("cadence_reason"):
@@ -1150,6 +1432,18 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                     lines.append(f"    Alternate: `{item.get('alternate_lane')}`")
                 if item.get("alternate_lane_reason"):
                     lines.append(f"    Alternate reason: {item.get('alternate_lane_reason')}")
+                if item.get("tracking_status"):
+                    lines.append(f"    Outcome: `{item.get('tracking_status')}`")
+                if item.get("tracking_note"):
+                    lines.append(f"    Outcome note: {item.get('tracking_note')}")
+                if item.get("actual_lane"):
+                    lines.append(f"    Actual lane: `{item.get('actual_lane')}`")
+                if item.get("actual_platforms"):
+                    lines.append(f"    Platforms: `{', '.join(item.get('actual_platforms') or [])}`")
+                if item.get("performance_label"):
+                    lines.append(f"    Performance: `{item.get('performance_label')}`")
+                if item.get("performance_note"):
+                    lines.append(f"    Performance note: {item.get('performance_note')}")
                 if item.get("why"):
                     lines.append(f"    Why: {item.get('why')}")
         else:
@@ -1188,6 +1482,16 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                 lines.append(f"  Alternate: `{item.get('alternate_lane')}`")
             if item.get("alternate_lane_reason"):
                 lines.append(f"  Alternate reason: {item.get('alternate_lane_reason')}")
+            if item.get("tracking_status"):
+                lines.append(f"  Outcome: `{item.get('tracking_status')}`")
+            if item.get("tracking_note"):
+                lines.append(f"  Outcome note: {item.get('tracking_note')}")
+            if item.get("actual_lane"):
+                lines.append(f"  Actual lane: `{item.get('actual_lane')}`")
+            if item.get("performance_label"):
+                lines.append(f"  Performance: `{item.get('performance_label')}`")
+            if item.get("performance_note"):
+                lines.append(f"  Performance note: {item.get('performance_note')}")
         lines.append("")
 
     lines.extend(["## Stable Competitor Patterns", ""])

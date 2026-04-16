@@ -71,6 +71,13 @@ Detailed execution sequence:
 - Engineering governance digest lane now exists and is scheduled for the morning.
 - Governance digest email delivery is smoke-tested, so the observe/propose recommendation channel is live.
 
+### 9. Social Strategy Intelligence Layer
+- Own-post social performance collection is live from DuckAgent post receipts.
+- Normalized social performance state and rollups are live in Duck Ops.
+- Current learnings, competitor benchmarking, and weekly strategy packet outputs are live.
+- The business desk now surfaces a weekly social plan with lane-fit reasoning and ready-to-run slot guidance.
+- Weekly slots now track recommended lane, alternate lane, actual observed lane, and simple performance follow-through.
+
 ## Active Operational Lanes
 
 ### 1. Shopify SEO Category Workflow
@@ -93,26 +100,23 @@ Detailed execution sequence:
 
 ## Highest-Value Open Work
 
-### Priority 1: Performance Learning Layer
-These are the six items we discussed that should become the next major learning system:
-1. Post-performance collector for Facebook and Instagram.
-2. Normalized performance state/warehouse for social results.
-3. Weekly operator summary for best post times, best content types, and best duck categories.
-4. SEO outcome monitoring so we can see whether metadata changes move traffic or clicks.
-5. Relist/renew outcome monitoring so we learn what renewal actually pays off.
-6. Customer-reply conversion insights so we learn what reply styles lead to orders.
-7. Competitor-post benchmarking so we can compare our post cadence, formats, hooks, and engagement patterns against similar shops/accounts.
+### Priority 1: Outcome Learning Layer Expansion
+The social learning foundation is now live. The next high-value work is extending that same discipline into the remaining business outcomes:
+1. Feed weekly slot execution feedback into current learnings and change detection so the system shows what actually changed week over week.
+2. SEO outcome monitoring so we can see whether metadata changes move traffic, clicks, or ranking surfaces.
+3. Relist/renew outcome monitoring so we learn what renewal actually pays off.
+4. Customer-reply conversion insights so we learn what reply styles lead to orders.
+5. Stronger competitor-strategy separation between stable patterns, experiments, and do-not-copy motifs over time.
 
 Why this is high value:
 - We now have better workflow truth and safer execution.
 - That makes it finally worth learning from outcomes instead of just automating actions.
 - It also gives us a disciplined way to borrow strong ideas from competitors instead of guessing when to shift content strategy.
 
-### Priority 2: Social Performance Observability
-- Facebook page/token wiring is now fixed enough for scheduled-post smoke testing.
-- The remaining gap is not auth anymore; it is collecting post outcomes reliably from both Instagram and Facebook after publish.
-- Best next step is to turn cross-channel posting truth into a normalized performance warehouse instead of waiting on manual inspection.
-- First substep: improve durable receipt coverage across the highest-value publish lanes so the collector has one stable source of truth.
+### Priority 2: Social Strategy Hardening
+- Improve cross-channel post coverage so Instagram and Facebook outcomes stay comparable when both publish.
+- Feed weekly strategy execution truth into current learnings, governance digest, and change-notifier surfaces.
+- Turn manual experiments into first-class lanes only after repeated execution and outcome evidence justify it.
 
 ### Priority 3: Expand SEO Audit Intelligence
 Current audit checks:
@@ -169,25 +173,17 @@ Why this matters:
 
 ## Recommended Next 3 Steps
 
-### 1. Finish Phase 2A Health Stabilization
-- Clean up or honestly relabel the biggest degraded lanes first:
-  - `Review Execution`
-- This keeps the operator surface trustworthy before we add a new insights layer.
+### 1. Feed Weekly Execution Feedback Back Into Learnings
+- Reuse the new social-plan execution follow-through inside `current_learnings` and any change-detection surfaces.
+- Make it obvious when a recommendation actually landed, when an alternate lane won, and when a slot slipped or missed.
 
-### 2. Build the Own-Post Social Performance Foundation
-- Reuse existing DuckAgent post receipts in `runs/*/*_posts.json`.
-- First patch the highest-value publish lanes that still do not emit durable post receipts.
-- Pull performance back from Instagram/Facebook after posts go live.
-- Normalize by post type, duck family, caption, hashtags, and publish time.
-- The concrete phase plan now lives in [SOCIAL_PERFORMANCE_EXECUTION_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/SOCIAL_PERFORMANCE_EXECUTION_PLAN.md).
+### 2. Build SEO Outcome Monitoring
+- Move beyond SEO hygiene into result tracking.
+- Start with a lightweight observe-only view that ties SEO changes to later traffic/click signal where available.
 
-### 3. Build Weekly Social And Competitor Reports
-- Turn the new `duck-social-insights` and `duck-competitor-benchmark` skills into real weekly output lanes.
-- Keep them observe/propose only at first and route findings into the governance/operator surfaces.
-
-### 4. Add Smarter SEO Heuristics
-- Expand beyond missing/length/duplicate checks.
-- Keep the same category email + apply workflow.
+### 3. Resume Review / Reliability Hardening In Safe Windows
+- When Etsy access is safe again, return to `Review Execution` stabilization and stronger failure breadcrumbs.
+- Keep this in observe-first mode so the operator surface stays trustworthy.
 
 ## Lower-Priority / Nice-to-Have
 - Continue backfilling more exact Etsy `/messages/<id>` URLs.
