@@ -58,6 +58,12 @@ SURFACES = [
         "markdown": OUTPUT_OPERATOR_DIR / "shopify_seo_audit.md",
     },
     {
+        "surface": "shopify_seo_outcomes",
+        "state_json": STATE_DIR / "shopify_seo_outcomes.json",
+        "operator_json": OUTPUT_OPERATOR_DIR / "shopify_seo_outcomes.json",
+        "markdown": OUTPUT_OPERATOR_DIR / "shopify_seo_outcomes.md",
+    },
+    {
         "surface": "social_insights",
         "state_json": STATE_DIR / "social_performance_rollups.json",
         "operator_json": OUTPUT_OPERATOR_DIR / "social_insights.json",

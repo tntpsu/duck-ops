@@ -262,6 +262,67 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("## Learning Surface", markdown)
         self.assertIn("Evening is the current best-performing posting window.", markdown)
 
+    def test_operator_desk_surfaces_seo_outcomes(self) -> None:
+        with patch(
+            "business_operator_desk._load_learning_surface",
+            return_value={
+                "available": False,
+                "path": "/tmp/current_learnings.md",
+                "items": [],
+                "change_count": 0,
+                "idea_count": 0,
+            },
+        ), patch(
+            "business_operator_desk._load_seo_outcome_surface",
+            return_value={
+                "available": True,
+                "path": "/tmp/shopify_seo_outcomes.md",
+                "applied_item_count": 3,
+                "stable_count": 1,
+                "monitoring_count": 1,
+                "issue_still_present_count": 1,
+                "missing_from_audit_count": 0,
+                "awaiting_audit_refresh_count": 0,
+                "traffic_signal_available_count": 0,
+                "traffic_signal_note": "No search-click or traffic collector is wired into Duck Ops yet.",
+                "attention_items": [
+                    {
+                        "title": "Open Duck",
+                        "category_label": "Missing SEO titles",
+                        "status": "issue_still_present",
+                        "verification_note": "The latest SEO audit still reports `missing_seo_title` for this resource.",
+                    }
+                ],
+                "recent_wins": [
+                    {
+                        "title": "Stable Duck",
+                        "category_label": "Missing SEO titles",
+                        "status": "stable",
+                        "verification_note": "The targeted SEO issue is cleared and has stayed clean for `12.0` day(s).",
+                    }
+                ],
+            },
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        self.assertEqual(payload["counts"]["seo_outcome_items"], 3)
+        self.assertEqual(payload["counts"]["seo_outcome_attention_items"], 1)
+        self.assertEqual(payload["counts"]["seo_outcome_stable_items"], 1)
+        self.assertIn("## SEO Outcomes", markdown)
+        self.assertIn("Open Duck", markdown)
+        self.assertIn("issue_still_present", markdown)
+        self.assertIn("No search-click or traffic collector is wired", markdown)
+
     def test_operator_desk_surfaces_weekly_strategy_packet(self) -> None:
         with patch(
             "business_operator_desk._load_learning_surface",
@@ -500,6 +561,48 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Stable patterns: 1", output)
         self.assertIn("Experimental ideas: 1", output)
         self.assertIn("Do-not-copy guardrails: 1", output)
+
+    def test_render_business_section_seo_outcomes_includes_attention_items(self) -> None:
+        output = render_business_section(
+            {
+                "seo_outcomes": {
+                    "available": True,
+                    "path": "/tmp/shopify_seo_outcomes.md",
+                    "applied_item_count": 3,
+                    "stable_count": 1,
+                    "monitoring_count": 1,
+                    "issue_still_present_count": 1,
+                    "missing_from_audit_count": 0,
+                    "awaiting_audit_refresh_count": 0,
+                    "traffic_signal_available_count": 0,
+                    "traffic_signal_note": "No search-click or traffic collector is wired into Duck Ops yet.",
+                    "attention_items": [
+                        {
+                            "title": "Open Duck",
+                            "category_label": "Missing SEO titles",
+                            "status": "issue_still_present",
+                            "verification_note": "The latest SEO audit still reports `missing_seo_title` for this resource.",
+                        }
+                    ],
+                },
+                "sections": {
+                    "seo_outcomes": [
+                        {
+                            "title": "Open Duck",
+                            "category_label": "Missing SEO titles",
+                            "status": "issue_still_present",
+                            "verification_note": "The latest SEO audit still reports `missing_seo_title` for this resource.",
+                        }
+                    ]
+                },
+            },
+            "seo",
+        )
+
+        self.assertIn("Duck Ops SEO Outcomes", output)
+        self.assertIn("Applied fixes tracked: 3", output)
+        self.assertIn("Open Duck | Missing SEO titles | issue_still_present", output)
+        self.assertIn("Signal note:", output)
 
     def test_render_business_section_social_plan_includes_plan_items(self) -> None:
         output = render_business_section(

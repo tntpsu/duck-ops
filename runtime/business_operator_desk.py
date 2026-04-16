@@ -20,6 +20,8 @@ CURRENT_LEARNINGS_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/curren
 CURRENT_LEARNINGS_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/current_learnings.md")
 WEEKLY_STRATEGY_PACKET_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/weekly_strategy_recommendation_packet.json")
 WEEKLY_STRATEGY_PACKET_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/weekly_strategy_recommendation_packet.md")
+SHOPIFY_SEO_OUTCOMES_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/shopify_seo_outcomes.json")
+SHOPIFY_SEO_OUTCOMES_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/shopify_seo_outcomes.md")
 
 
 def _trim_text(value: str | None, limit: int = 160) -> str:
@@ -102,6 +104,34 @@ def _load_weekly_strategy_packet() -> dict[str, Any]:
             "items": list(social_plan.get("items") or [])[:5],
         },
         "watchouts": watchouts[:3],
+    }
+
+
+def _load_seo_outcome_surface() -> dict[str, Any]:
+    if not SHOPIFY_SEO_OUTCOMES_PATH.exists():
+        return {"available": False, "path": str(SHOPIFY_SEO_OUTCOMES_MD_PATH), "attention_items": [], "recent_wins": []}
+    try:
+        payload = json.loads(SHOPIFY_SEO_OUTCOMES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": False, "path": str(SHOPIFY_SEO_OUTCOMES_MD_PATH), "attention_items": [], "recent_wins": []}
+    if not isinstance(payload, dict):
+        return {"available": False, "path": str(SHOPIFY_SEO_OUTCOMES_MD_PATH), "attention_items": [], "recent_wins": []}
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return {
+        "available": True,
+        "path": str(SHOPIFY_SEO_OUTCOMES_MD_PATH),
+        "generated_at": payload.get("generated_at"),
+        "applied_item_count": int(summary.get("applied_item_count") or len(payload.get("items") or [])),
+        "stable_count": int(summary.get("stable_count") or 0),
+        "monitoring_count": int(summary.get("monitoring_count") or 0),
+        "issue_still_present_count": int(summary.get("issue_still_present_count") or 0),
+        "missing_from_audit_count": int(summary.get("missing_from_audit_count") or 0),
+        "awaiting_audit_refresh_count": int(summary.get("awaiting_audit_refresh_count") or 0),
+        "traffic_signal_available_count": int(summary.get("traffic_signal_available_count") or 0),
+        "traffic_signal_note": summary.get("traffic_signal_note"),
+        "attention_items": list(payload.get("attention_items") or [])[:4],
+        "recent_wins": list(payload.get("recent_wins") or [])[:4],
     }
 
 
@@ -367,6 +397,7 @@ def build_business_operator_desk(
     workflow_items = list(workflow_followthrough or build_workflow_followthrough_items(limit=6))
     learning_surface = _load_learning_surface()
     weekly_strategy_packet = _load_weekly_strategy_packet()
+    seo_outcomes = _load_seo_outcome_surface()
     counts = (nightly_summary or {}).get("counts") or {}
     pack_items = list(((nightly_summary or {}).get("sections") or {}).get("orders_to_pack") or [])
     review_queue_backlog = int((review_queue or {}).get("pending_count_all") or len((review_queue or {}).get("items") or []))
@@ -375,6 +406,7 @@ def build_business_operator_desk(
         "strategy_focus": load_master_roadmap_focus(),
         "learning_surface": learning_surface,
         "weekly_strategy_packet": weekly_strategy_packet,
+        "seo_outcomes": seo_outcomes,
         "counts": {
             "customer_packets": len(customer_items),
             "customer_attention_items": int(counts.get("customer_attention_items") or 0),
@@ -396,6 +428,9 @@ def build_business_operator_desk(
             "strategy_recommendations": len(weekly_strategy_packet.get("recommendations") or []),
             "strategy_watchouts": len(weekly_strategy_packet.get("watchouts") or []),
             "strategy_plan_items": len(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or [])),
+            "seo_outcome_items": int(seo_outcomes.get("applied_item_count") or 0),
+            "seo_outcome_attention_items": len(seo_outcomes.get("attention_items") or []),
+            "seo_outcome_stable_items": int(seo_outcomes.get("stable_count") or 0),
         },
         "next_actions": _build_next_actions(
             customer_items=customer_items,
@@ -419,6 +454,7 @@ def build_business_operator_desk(
             "learning_surface": list(learning_surface.get("items") or [])[:4],
             "weekly_strategy_packet": list(weekly_strategy_packet.get("recommendations") or [])[:4],
             "weekly_social_plan": list(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or []))[:5],
+            "seo_outcomes": (list(seo_outcomes.get("attention_items") or []) or list(seo_outcomes.get("recent_wins") or []))[:4],
         },
     }
 
@@ -429,12 +465,16 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     strategy_focus = payload.get("strategy_focus") or {}
     learning_surface = payload.get("learning_surface") or {}
     weekly_strategy_packet = payload.get("weekly_strategy_packet") or {}
+    seo_outcomes = payload.get("seo_outcomes") or {}
     if not learning_surface.get("available"):
         learning_surface = _load_learning_surface()
     learning_items = (sections.get("learning_surface") or []) or list(learning_surface.get("items") or [])
     if not weekly_strategy_packet.get("available"):
         weekly_strategy_packet = _load_weekly_strategy_packet()
     strategy_items = (sections.get("weekly_strategy_packet") or []) or list(weekly_strategy_packet.get("recommendations") or [])
+    if not seo_outcomes.get("available"):
+        seo_outcomes = _load_seo_outcome_surface()
+    seo_items = (sections.get("seo_outcomes") or []) or list(seo_outcomes.get("attention_items") or []) or list(seo_outcomes.get("recent_wins") or [])
     lines = [
         "# Duck Ops Business Desk",
         "",
@@ -458,6 +498,9 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Strategy recommendations surfaced: `{counts.get('strategy_recommendations') or len(strategy_items)}`",
         f"- Strategy watchouts surfaced: `{counts.get('strategy_watchouts') or len(weekly_strategy_packet.get('watchouts') or [])}`",
         f"- Social plan items surfaced: `{counts.get('strategy_plan_items') or len((weekly_strategy_packet.get('social_plan') or {}).get('slots') or []) or len((weekly_strategy_packet.get('social_plan') or {}).get('items') or [])}`",
+        f"- SEO fixes tracked: `{counts.get('seo_outcome_items') or seo_outcomes.get('applied_item_count') or 0}`",
+        f"- SEO items needing follow-up: `{counts.get('seo_outcome_attention_items') or len(seo_outcomes.get('attention_items') or [])}`",
+        f"- Stable SEO fixes: `{counts.get('seo_outcome_stable_items') or seo_outcomes.get('stable_count') or 0}`",
         "",
         "## Strategic Focus",
         "",
@@ -486,6 +529,32 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append("- Top beliefs:")
             for item in learning_items:
                 lines.append(f"  - {_trim_text(item.get('headline'), 150)}")
+    lines.extend([
+        "",
+        "## SEO Outcomes",
+        "",
+    ])
+    if not seo_outcomes.get("available"):
+        lines.append("SEO outcome monitoring is not available yet.")
+    else:
+        lines.append(f"- Page: `{seo_outcomes.get('path')}`")
+        lines.append(f"- Applied fixes tracked: `{seo_outcomes.get('applied_item_count', 0)}`")
+        lines.append(f"- Stable fixes: `{seo_outcomes.get('stable_count', 0)}`")
+        lines.append(f"- Monitoring window: `{seo_outcomes.get('monitoring_count', 0)}`")
+        lines.append(f"- Still-open targeted issues: `{seo_outcomes.get('issue_still_present_count', 0)}`")
+        lines.append(f"- Missing from latest audit: `{seo_outcomes.get('missing_from_audit_count', 0)}`")
+        lines.append(f"- Awaiting audit refresh: `{seo_outcomes.get('awaiting_audit_refresh_count', 0)}`")
+        lines.append(f"- Traffic signals available: `{seo_outcomes.get('traffic_signal_available_count', 0)}`")
+        if seo_outcomes.get("traffic_signal_note"):
+            lines.append(f"- Signal note: {_trim_text(seo_outcomes.get('traffic_signal_note'), 180)}")
+        if seo_items:
+            lines.append("- Top SEO follow-through items:")
+            for item in seo_items:
+                lines.append(
+                    f"  - {_trim_text(item.get('title'), 100)} | `{item.get('category_label') or item.get('seo_category') or 'SEO review'}` | `{item.get('status') or 'unknown'}`"
+                )
+                if item.get("verification_note"):
+                    lines.append(f"    Note: {_trim_text(item.get('verification_note'), 170)}")
     lines.extend([
         "",
         "## Weekly Strategy Packet",
@@ -817,6 +886,9 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "strategy": "strategy_focus",
         "learning": "learning_surface",
         "learnings": "learning_surface",
+        "seo": "seo_outcomes",
+        "seo_outcome": "seo_outcomes",
+        "seo_outcomes": "seo_outcomes",
         "packet": "weekly_strategy_packet",
         "weekly_strategy": "weekly_strategy_packet",
         "strategy_packet": "weekly_strategy_packet",
@@ -866,6 +938,37 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             lines.append("")
             for item in learning_items:
                 lines.append(f"- {_trim_text(item.get('headline'), 150)}")
+        return "\n".join(lines)
+
+    if normalized == "seo_outcomes":
+        lines = ["Duck Ops SEO Outcomes", ""]
+        seo_outcomes = payload.get("seo_outcomes") or {}
+        if not seo_outcomes.get("available"):
+            seo_outcomes = _load_seo_outcome_surface()
+        seo_items = (sections.get("seo_outcomes") or []) or list(seo_outcomes.get("attention_items") or []) or list(seo_outcomes.get("recent_wins") or [])
+        if not seo_outcomes.get("available"):
+            lines.append("SEO outcome monitoring is not available yet.")
+        else:
+            lines.append(f"Page: {seo_outcomes.get('path')}")
+            lines.append(f"Applied fixes tracked: {seo_outcomes.get('applied_item_count', 0)}")
+            lines.append(f"Stable fixes: {seo_outcomes.get('stable_count', 0)}")
+            lines.append(f"Monitoring window: {seo_outcomes.get('monitoring_count', 0)}")
+            lines.append(f"Still-open targeted issues: {seo_outcomes.get('issue_still_present_count', 0)}")
+            lines.append(f"Missing from latest audit: {seo_outcomes.get('missing_from_audit_count', 0)}")
+            lines.append(f"Awaiting audit refresh: {seo_outcomes.get('awaiting_audit_refresh_count', 0)}")
+            lines.append(f"Traffic signals available: {seo_outcomes.get('traffic_signal_available_count', 0)}")
+            if seo_outcomes.get("traffic_signal_note"):
+                lines.append(f"Signal note: {_trim_text(seo_outcomes.get('traffic_signal_note'), 180)}")
+            lines.append("")
+            if seo_items:
+                for item in seo_items:
+                    lines.append(
+                        f"- {_trim_text(item.get('title'), 100)} | {item.get('category_label') or item.get('seo_category') or 'SEO review'} | {item.get('status') or 'unknown'}"
+                    )
+                    if item.get("verification_note"):
+                        lines.append(f"  Note: {_trim_text(item.get('verification_note'), 180)}")
+            else:
+                lines.append("No SEO outcome items are staged yet.")
         return "\n".join(lines)
 
     if normalized == "weekly_strategy_packet":

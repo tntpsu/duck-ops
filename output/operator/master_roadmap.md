@@ -173,17 +173,17 @@ Why this matters:
 
 ## Recommended Next 3 Steps
 
-### 1. Build SEO Outcome Monitoring
-- Move beyond SEO hygiene into result tracking.
-- Start with a lightweight observe-only view that ties SEO changes to later traffic/click signal where available.
-
-### 2. Resume Review / Reliability Hardening In Safe Windows
+### 1. Resume Review / Reliability Hardening In Safe Windows
 - When Etsy access is safe again, return to `Review Execution` stabilization and stronger failure breadcrumbs.
 - Keep this in observe-first mode so the operator surface stays trustworthy.
 
-### 3. Add Learnings Change Notifications
+### 2. Add Learnings Change Notifications
 - Turn meaningful `current_learnings` and weekly-strategy shifts into a small operator-facing change notifier or morning digest section.
 - Only surface material movement: strong planned-lane validation, alternate-lane wins, missed slots, and freshness degradation.
+
+### 3. Expand SEO Audit Intelligence
+- Add the richer SEO heuristics already called out in the roadmap: weak/generic copy, near-duplicates, title/raw-name overlap, and low-value page/article copy.
+- Feed those new categories into the monthly review lane without changing the existing approval boundary.
 
 ## Lower-Priority / Nice-to-Have
 - Continue backfilling more exact Etsy `/messages/<id>` URLs.
