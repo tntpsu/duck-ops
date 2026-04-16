@@ -368,38 +368,200 @@ def _workflow_labels(social_payload: dict[str, Any]) -> list[str]:
     return labels
 
 
+def _pick_workflow(
+    workflow_pool: list[str],
+    *,
+    preferred_order: list[str] | None = None,
+    exclude: set[str] | None = None,
+) -> str | None:
+    excluded = set(exclude or set())
+    if preferred_order:
+        for label in preferred_order:
+            if label in workflow_pool and label not in excluded:
+                return label
+    return next((label for label in workflow_pool if label not in excluded), None)
+
+
 def _preferred_slot_lane(
     *,
     signal_type: str,
     anchor_workflow: str,
     available_workflows: list[str],
     metadata: dict[str, Any],
-) -> tuple[str, str, str]:
+) -> dict[str, Any]:
     workflow_pool = [label for label in available_workflows if label]
-    alternate_story_lane = next((label for label in workflow_pool if label != anchor_workflow), anchor_workflow)
+    alternate_story_lane = _pick_workflow(workflow_pool, exclude={anchor_workflow}) or anchor_workflow
+    narrative_lane = _pick_workflow(
+        workflow_pool,
+        preferred_order=["jeepfact", "thursday", "blog", "review_carousel", "meme", "gtdf", "gtdf_winner"],
+        exclude={anchor_workflow},
+    )
+    format_label = _compact_text(metadata.get("format_label"))
+    theme_label = _compact_text(metadata.get("theme_label")) or "theme test"
+
+    def build_lane(
+        suggested_lane: str,
+        content_family: str,
+        execution_mode: str,
+        lane_fit_strength: str,
+        lane_fit_reason: str,
+        alternate_lane: str | None = None,
+        alternate_lane_reason: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "workflow": suggested_lane,
+            "suggested_lane": suggested_lane,
+            "content_family": content_family,
+            "execution_mode": execution_mode,
+            "lane_fit_strength": lane_fit_strength,
+            "lane_fit_reason": lane_fit_reason,
+            "alternate_lane": alternate_lane,
+            "alternate_lane_reason": alternate_lane_reason,
+        }
+
     if signal_type in {"stable_pattern", "competitor_watch_account", "competitor_hook"}:
-        return anchor_workflow, anchor_workflow, "standard_lane"
-    if signal_type == "competitor_theme":
-        preferred = next(
-            (
-                label
-                for label in workflow_pool
-                if label in {"jeepfact", "thursday", "meme", "review_carousel"} and label != anchor_workflow
-            ),
-            alternate_story_lane,
+        if signal_type == "stable_pattern":
+            return build_lane(
+                anchor_workflow,
+                anchor_workflow,
+                "standard_lane",
+                "strong",
+                f"`{anchor_workflow}` is still our safest baseline lane, so this slot should protect the strongest own-post signal before we experiment.",
+            )
+        if signal_type == "competitor_watch_account":
+            alternate_lane = narrative_lane if narrative_lane and narrative_lane != anchor_workflow else None
+            alternate_reason = (
+                f"If the borrowed account pattern needs more story than `{anchor_workflow}` can carry cleanly, move the concept into `{alternate_lane}` instead."
+                if alternate_lane
+                else None
+            )
+            return build_lane(
+                anchor_workflow,
+                anchor_workflow,
+                "standard_lane",
+                "strong",
+                f"This is a bounded competitor-style borrow, so keeping it inside `{anchor_workflow}` lets us test the signal without changing the production lane.",
+                alternate_lane,
+                alternate_reason,
+            )
+        alternate_lane = narrative_lane if narrative_lane and narrative_lane != anchor_workflow else None
+        alternate_reason = (
+            f"If the hook needs more explanation than `{anchor_workflow}` can support, stage the same idea in `{alternate_lane}`."
+            if alternate_lane
+            else None
         )
-        content_family = _compact_text(metadata.get("theme_label")) or "theme_test"
-        return preferred or anchor_workflow, content_family, "standard_lane"
+        return build_lane(
+            anchor_workflow,
+            anchor_workflow,
+            "standard_lane",
+            "strong",
+            f"Hook tests are safest in `{anchor_workflow}` because we can borrow the opener without changing the rest of the execution lane.",
+            alternate_lane,
+            alternate_reason,
+        )
+    if signal_type == "competitor_theme":
+        preferred = narrative_lane or alternate_story_lane or anchor_workflow
+        if preferred == anchor_workflow:
+            alternate_lane = None
+            alternate_reason = None
+            if alternate_story_lane and alternate_story_lane != anchor_workflow:
+                alternate_lane = alternate_story_lane
+                alternate_reason = (
+                    f"If the `{theme_label}` concept feels cramped in `{anchor_workflow}`, try `{alternate_lane}` as the next-best story lane."
+                )
+            return build_lane(
+                preferred,
+                theme_label,
+                "standard_lane",
+                "medium",
+                f"`{theme_label}` is worth testing, but we do not have a cleaner supported theme lane than `{anchor_workflow}` right now, so keep it bounded.",
+                alternate_lane,
+                alternate_reason,
+            )
+        if preferred == "jeepfact":
+            reason = f"`{theme_label}` reads more like a story or educational angle than a pure joke, so `jeepfact` is the cleanest supported lane."
+        elif preferred == "thursday":
+            reason = f"`{theme_label}` fits a feature-style spotlight better than a throwaway meme, so `thursday` is the better lane."
+        elif preferred == "review_carousel":
+            reason = f"`{theme_label}` will land better with a multi-panel explanation or proof pattern, so `review_carousel` is the strongest supported lane."
+        else:
+            reason = f"`{theme_label}` needs a slightly richer frame than the anchor slot, so `{preferred}` is the best supported lane for this test."
+        alternate_lane = anchor_workflow if anchor_workflow != preferred else None
+        alternate_reason = (
+            f"If `{theme_label}` feels too forced in `{preferred}`, collapse it back into `{anchor_workflow}` as a lighter test."
+            if alternate_lane
+            else None
+        )
+        return build_lane(
+            preferred,
+            theme_label,
+            "standard_lane",
+            "medium",
+            reason,
+            alternate_lane,
+            alternate_reason,
+        )
     if signal_type == "competitor_format":
-        format_label = _compact_text(metadata.get("format_label"))
         if format_label == "carousel" and "review_carousel" in workflow_pool:
-            return "review_carousel", "carousel_test", "standard_lane"
+            alternate_lane = anchor_workflow if anchor_workflow != "review_carousel" else None
+            alternate_reason = (
+                f"If the carousel idea is too thin for a full review carousel, simplify it into `{anchor_workflow}`."
+                if alternate_lane
+                else None
+            )
+            return build_lane(
+                "review_carousel",
+                "carousel_test",
+                "standard_lane",
+                "medium",
+                "`review_carousel` is our closest supported lane for multi-panel proof or sequence-driven ideas.",
+                alternate_lane,
+                alternate_reason,
+            )
         if format_label in {"reel", "video"}:
-            return "manual_social_experiment", format_label or "format_test", "manual_test"
-        return anchor_workflow, format_label or "format_test", "standard_lane"
+            alternate_lane = anchor_workflow or alternate_story_lane
+            alternate_reason = (
+                f"If we want a supported test this week, translate the same hook into `{alternate_lane}` instead of trying to force a true `{format_label}` lane."
+                if alternate_lane
+                else None
+            )
+            return build_lane(
+                "manual_social_experiment",
+                format_label or "format_test",
+                "manual_test",
+                "manual",
+                f"We see a `{format_label}` signal worth watching, but DuckAgent does not have a first-class `{format_label}` lane yet.",
+                alternate_lane,
+                alternate_reason,
+            )
+        return build_lane(
+            anchor_workflow,
+            format_label or "format_test",
+            "standard_lane",
+            "medium",
+            f"The format signal is interesting, but our safest supported way to test it is still inside `{anchor_workflow}`.",
+            alternate_story_lane if alternate_story_lane != anchor_workflow else None,
+            (
+                f"If the format needs a less anchor-like treatment, use `{alternate_story_lane}` as the next-best supported lane."
+                if alternate_story_lane and alternate_story_lane != anchor_workflow
+                else None
+            ),
+        )
     if signal_type == "guardrail":
-        return "operator_review", "review_guardrail", "review"
-    return anchor_workflow, anchor_workflow, "standard_lane"
+        return build_lane(
+            "operator_review",
+            "review_guardrail",
+            "review",
+            "strong",
+            "This slot is intentionally a review step, not a publish lane, so we can check what changed before rewriting the calendar.",
+        )
+    return build_lane(
+        anchor_workflow,
+        anchor_workflow,
+        "standard_lane",
+        "medium",
+        f"`{anchor_workflow}` is the current default because it is the safest supported lane we have for this signal.",
+    )
 
 
 def _slot_execution_bridge(
@@ -522,6 +684,10 @@ def _ready_this_week(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "command_hint": item.get("command_hint"),
                 "approval_followthrough": item.get("approval_followthrough"),
                 "schedule_reference": item.get("schedule_reference"),
+                "lane_fit_strength": item.get("lane_fit_strength"),
+                "lane_fit_reason": item.get("lane_fit_reason"),
+                "alternate_lane": item.get("alternate_lane"),
+                "alternate_lane_reason": item.get("alternate_lane_reason"),
             }
         )
     return ready[:5]
@@ -578,7 +744,7 @@ def _social_plan_slots(
     experimental_ideas: list[dict[str, Any]],
     do_not_copy_patterns: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    lane, content_family, execution_mode = _preferred_slot_lane(
+    lane_choice = _preferred_slot_lane(
         signal_type="stable_pattern",
         anchor_workflow=anchor_workflow,
         available_workflows=available_workflows,
@@ -588,25 +754,27 @@ def _social_plan_slots(
         {
             "slot": "Slot 1",
             "timing_hint": f"Early week · {anchor_window}",
-            "workflow": lane,
-            "suggested_lane": lane,
-            "content_family": content_family,
-            "execution_mode": execution_mode,
             "goal": "Anchor with the strongest proven workflow",
             "action": f"Run one `{anchor_workflow}` post in the `{anchor_window}` window to keep the week grounded in our best current signal.",
             "why": f"`{anchor_workflow}` in `{anchor_window}` is still the safest combination in our own performance data.",
             "source": "stable_pattern",
         }
     ]
+    slots[0].update(lane_choice)
     slots[0].update(
         _calendar_target_for_slot(
             slot_label="Slot 1",
             anchor_window=anchor_window,
-            suggested_lane=lane,
-            execution_mode=execution_mode,
+            suggested_lane=str(lane_choice.get("suggested_lane") or ""),
+            execution_mode=str(lane_choice.get("execution_mode") or ""),
         )
     )
-    slots[0].update(_slot_execution_bridge(suggested_lane=lane, execution_mode=execution_mode))
+    slots[0].update(
+        _slot_execution_bridge(
+            suggested_lane=str(lane_choice.get("suggested_lane") or ""),
+            execution_mode=str(lane_choice.get("execution_mode") or ""),
+        )
+    )
 
     signal_to_slot = {
         "competitor_watch_account": ("Slot 2", f"Midweek · {anchor_window}", "Competitor-inspired hook test"),
@@ -627,7 +795,7 @@ def _social_plan_slots(
         evidence = _compact_text(idea.get("evidence"))
         if not action:
             continue
-        lane, content_family, execution_mode = _preferred_slot_lane(
+        lane_choice = _preferred_slot_lane(
             signal_type=signal_type,
             anchor_workflow=anchor_workflow,
             available_workflows=available_workflows,
@@ -636,24 +804,26 @@ def _social_plan_slots(
         slot_payload = {
             "slot": slot_label,
             "timing_hint": timing_hint,
-            "workflow": lane,
-            "suggested_lane": lane,
-            "content_family": content_family,
-            "execution_mode": execution_mode,
             "goal": goal,
             "action": action,
             "why": evidence,
             "source": signal_type,
         }
+        slot_payload.update(lane_choice)
         slot_payload.update(
             _calendar_target_for_slot(
                 slot_label=slot_label,
                 anchor_window=anchor_window,
-                suggested_lane=lane,
-                execution_mode=execution_mode,
+                suggested_lane=str(lane_choice.get("suggested_lane") or ""),
+                execution_mode=str(lane_choice.get("execution_mode") or ""),
             )
         )
-        slot_payload.update(_slot_execution_bridge(suggested_lane=lane, execution_mode=execution_mode))
+        slot_payload.update(
+            _slot_execution_bridge(
+                suggested_lane=str(lane_choice.get("suggested_lane") or ""),
+                execution_mode=str(lane_choice.get("execution_mode") or ""),
+            )
+        )
         if signal_type == "competitor_watch_account" and watch_account:
             slot_payload["watch_account"] = watch_account
         slots.append(slot_payload)
@@ -661,7 +831,7 @@ def _social_plan_slots(
 
     if do_not_copy_patterns:
         first_guardrail = do_not_copy_patterns[0]
-        lane, content_family, execution_mode = _preferred_slot_lane(
+        lane_choice = _preferred_slot_lane(
             signal_type="guardrail",
             anchor_workflow=anchor_workflow,
             available_workflows=available_workflows,
@@ -671,25 +841,27 @@ def _social_plan_slots(
             {
                 "slot": "Slot 5",
                 "timing_hint": "End of week review",
-                "workflow": lane,
-                "suggested_lane": lane,
-                "content_family": content_family,
-                "execution_mode": execution_mode,
                 "goal": "Review results before changing the calendar",
                 "action": _compact_text(first_guardrail.get("guidance")),
                 "why": _compact_text(first_guardrail.get("evidence")),
                 "source": "guardrail",
             }
         )
+        slots[-1].update(lane_choice)
         slots[-1].update(
             _calendar_target_for_slot(
                 slot_label="Slot 5",
                 anchor_window=anchor_window,
-                suggested_lane=lane,
-                execution_mode=execution_mode,
+                suggested_lane=str(lane_choice.get("suggested_lane") or ""),
+                execution_mode=str(lane_choice.get("execution_mode") or ""),
             )
         )
-        slots[-1].update(_slot_execution_bridge(suggested_lane=lane, execution_mode=execution_mode))
+        slots[-1].update(
+            _slot_execution_bridge(
+                suggested_lane=str(lane_choice.get("suggested_lane") or ""),
+                execution_mode=str(lane_choice.get("execution_mode") or ""),
+            )
+        )
 
     deduped: list[dict[str, Any]] = []
     seen_slots: set[str] = set()
@@ -956,6 +1128,10 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                     lines.append(f"    Calendar: `{item.get('calendar_label')}`")
                 if item.get("cadence_reason"):
                     lines.append(f"    Cadence: {item.get('cadence_reason')}")
+                if item.get("lane_fit_strength"):
+                    lines.append(f"    Fit: `{item.get('lane_fit_strength')}`")
+                if item.get("lane_fit_reason"):
+                    lines.append(f"    Lane reason: {item.get('lane_fit_reason')}")
                 if item.get("execution_readiness"):
                     lines.append(f"    Readiness: `{item.get('execution_readiness')}`")
                 if item.get("schedule_reference"):
@@ -970,6 +1146,10 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                     lines.append(f"    Next: {item.get('next_step')}")
                 if item.get("watch_account"):
                     lines.append(f"    Watch: `{item.get('watch_account')}`")
+                if item.get("alternate_lane"):
+                    lines.append(f"    Alternate: `{item.get('alternate_lane')}`")
+                if item.get("alternate_lane_reason"):
+                    lines.append(f"    Alternate reason: {item.get('alternate_lane_reason')}")
                 if item.get("why"):
                     lines.append(f"    Why: {item.get('why')}")
         else:
@@ -1000,6 +1180,14 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                 lines.append(f"  Hint: `{item.get('command_hint')}`")
             if item.get("approval_followthrough"):
                 lines.append(f"  Then: {item.get('approval_followthrough')}")
+            if item.get("lane_fit_strength"):
+                lines.append(f"  Fit: `{item.get('lane_fit_strength')}`")
+            if item.get("lane_fit_reason"):
+                lines.append(f"  Lane reason: {item.get('lane_fit_reason')}")
+            if item.get("alternate_lane"):
+                lines.append(f"  Alternate: `{item.get('alternate_lane')}`")
+            if item.get("alternate_lane_reason"):
+                lines.append(f"  Alternate reason: {item.get('alternate_lane_reason')}")
         lines.append("")
 
     lines.extend(["## Stable Competitor Patterns", ""])

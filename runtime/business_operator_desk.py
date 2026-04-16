@@ -563,6 +563,10 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Calendar: `{item.get('calendar_label')}`")
                 if item.get("cadence_reason"):
                     lines.append(f"    Cadence: {_trim_text(item.get('cadence_reason'), 160)}")
+                if item.get("lane_fit_strength"):
+                    lines.append(f"    Fit: `{item.get('lane_fit_strength')}`")
+                if item.get("lane_fit_reason"):
+                    lines.append(f"    Lane reason: {_trim_text(item.get('lane_fit_reason'), 180)}")
                 if item.get("execution_readiness"):
                     lines.append(f"    Readiness: `{item.get('execution_readiness')}`")
                 if item.get("schedule_reference"):
@@ -577,6 +581,10 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Next: {_trim_text(item.get('next_step'), 160)}")
                 if item.get("watch_account"):
                     lines.append(f"    Watch: `{item.get('watch_account')}`")
+                if item.get("alternate_lane"):
+                    lines.append(f"    Alternate: `{item.get('alternate_lane')}`")
+                if item.get("alternate_lane_reason"):
+                    lines.append(f"    Alternate reason: {_trim_text(item.get('alternate_lane_reason'), 180)}")
         else:
             items = slots or list(social_plan.get("items") or [])
             if items:
@@ -911,6 +919,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Calendar: {item.get('calendar_label')}")
                     if item.get("cadence_reason"):
                         lines.append(f"  Cadence: {_trim_text(item.get('cadence_reason'), 180)}")
+                    if item.get("lane_fit_strength"):
+                        lines.append(f"  Fit: {item.get('lane_fit_strength')}")
+                    if item.get("lane_fit_reason"):
+                        lines.append(f"  Lane reason: {_trim_text(item.get('lane_fit_reason'), 180)}")
                     if item.get("execution_readiness"):
                         lines.append(f"  Readiness: {item.get('execution_readiness')}")
                     if item.get("schedule_reference"):
@@ -925,6 +937,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Next: {_trim_text(item.get('next_step'), 180)}")
                     if item.get("watch_account"):
                         lines.append(f"  Watch: {item.get('watch_account')}")
+                    if item.get("alternate_lane"):
+                        lines.append(f"  Alternate: {item.get('alternate_lane')}")
+                    if item.get("alternate_lane_reason"):
+                        lines.append(f"  Alternate reason: {_trim_text(item.get('alternate_lane_reason'), 180)}")
             else:
                 for item in items:
                     lines.append(f"- {_trim_text(item, 180)}")
@@ -944,6 +960,14 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Hint: {item.get('command_hint')}")
                     if item.get("approval_followthrough"):
                         lines.append(f"  Then: {_trim_text(item.get('approval_followthrough'), 180)}")
+                    if item.get("lane_fit_strength"):
+                        lines.append(f"  Fit: {item.get('lane_fit_strength')}")
+                    if item.get("lane_fit_reason"):
+                        lines.append(f"  Lane reason: {_trim_text(item.get('lane_fit_reason'), 180)}")
+                    if item.get("alternate_lane"):
+                        lines.append(f"  Alternate: {item.get('alternate_lane')}")
+                    if item.get("alternate_lane_reason"):
+                        lines.append(f"  Alternate reason: {_trim_text(item.get('alternate_lane_reason'), 180)}")
         return "\n".join(lines)
 
     items = sections.get(normalized) or []

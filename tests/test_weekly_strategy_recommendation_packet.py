@@ -16,6 +16,31 @@ import weekly_strategy_recommendation_packet
 
 
 class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
+    def test_preferred_slot_lane_surfaces_fit_and_alternates(self) -> None:
+        theme_choice = weekly_strategy_recommendation_packet._preferred_slot_lane(
+            signal_type="competitor_theme",
+            anchor_workflow="meme",
+            available_workflows=["meme", "jeepfact", "review_carousel"],
+            metadata={"theme_label": "trail stories"},
+        )
+        self.assertEqual(theme_choice["suggested_lane"], "jeepfact")
+        self.assertEqual(theme_choice["lane_fit_strength"], "medium")
+        self.assertEqual(theme_choice["alternate_lane"], "meme")
+        self.assertIn("trail stories", theme_choice["lane_fit_reason"])
+        self.assertIn("meme", theme_choice["alternate_lane_reason"])
+
+        manual_choice = weekly_strategy_recommendation_packet._preferred_slot_lane(
+            signal_type="competitor_format",
+            anchor_workflow="meme",
+            available_workflows=["meme", "jeepfact", "review_carousel"],
+            metadata={"format_label": "video"},
+        )
+        self.assertEqual(manual_choice["suggested_lane"], "manual_social_experiment")
+        self.assertEqual(manual_choice["lane_fit_strength"], "manual")
+        self.assertEqual(manual_choice["alternate_lane"], "meme")
+        self.assertIn("first-class `video` lane", manual_choice["lane_fit_reason"])
+        self.assertIn("supported test", manual_choice["alternate_lane_reason"])
+
     def test_build_packet_combines_own_and_competitor_signals(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -136,8 +161,14 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertEqual(payload["social_plan"]["slots"][0]["execution_readiness"], "ready_with_approval")
                 self.assertEqual(payload["social_plan"]["slots"][3]["execution_readiness"], "manual_experiment")
                 self.assertEqual(payload["social_plan"]["slots"][4]["execution_readiness"], "ready_now")
+                self.assertEqual(payload["social_plan"]["slots"][0]["lane_fit_strength"], "strong")
+                self.assertIn("safest baseline lane", payload["social_plan"]["slots"][0]["lane_fit_reason"])
+                self.assertEqual(payload["social_plan"]["slots"][3]["lane_fit_strength"], "manual")
+                self.assertEqual(payload["social_plan"]["slots"][3]["alternate_lane"], "meme")
+                self.assertIn("first-class `reel` lane", payload["social_plan"]["slots"][3]["lane_fit_reason"])
                 self.assertEqual(payload["social_plan"]["slots"][0]["operator_action_label"], "Run Meme Flow")
                 self.assertIn("Reply `publish`", payload["social_plan"]["slots"][0]["approval_followthrough"])
+                self.assertEqual(payload["social_plan"]["ready_this_week"][0]["lane_fit_strength"], "strong")
                 self.assertTrue(any(item["category"] == "stable_pattern" for item in payload["stable_patterns"]))
                 self.assertTrue(any(item["category"] == "experimental_idea" for item in payload["experimental_ideas"]))
                 self.assertTrue(any(item["category"] == "data_quality" for item in payload["recommendations"]))
@@ -159,6 +190,9 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertIn("ready_with_approval", markdown)
                 self.assertIn("Use: Run Meme Flow", markdown)
                 self.assertIn("Then: Reply `publish`", markdown)
+                self.assertIn("Fit: `manual`", markdown)
+                self.assertIn("Alternate: `meme`", markdown)
+                self.assertIn("Lane reason:", markdown)
 
 
 if __name__ == "__main__":
