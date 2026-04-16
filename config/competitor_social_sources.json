@@ -14,12 +14,14 @@
     "refresh_bucket_count": 4,
     "force_refresh_after_hours": 96,
     "profile_only_backoff_hours": 168,
+    "max_live_canary_targets": 1,
     "notes": [
       "Collect only public-facing competitor snapshots in the first slice.",
       "Do not like, follow, comment, or log in.",
       "Keep competitor social observations separate from our own post truth.",
       "Refresh accounts on a staggered daily cadence to reduce Instagram rate-limit pressure.",
-      "If an account only yields HTML profile metadata and no post timeline, back it off for a week before retrying."
+      "If an account only yields HTML profile metadata and no post timeline, back it off for a week before retrying.",
+      "Allow at most one bounded live canary target per run for non-forced competitor refreshes."
     ]
   },
   "snapshot_schema": {

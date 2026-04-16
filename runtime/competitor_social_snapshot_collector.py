@@ -507,6 +507,37 @@ def _scheduled_skip_profile_only_reuse(
     return profile, [], skip_record
 
 
+def _scheduled_skip_canary_limit_reuse(
+    *,
+    seed: dict[str, Any],
+    cached_profile: dict[str, Any],
+    cached_posts: list[dict[str, Any]],
+    refreshed_at: str,
+    limit: int,
+    canary_limit: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    profile = _clone_cached_profile(
+        cached_profile,
+        snapshot_source="scheduled_skip_live_canary_limit",
+        refreshed_at=refreshed_at,
+    )
+    posts = _clone_cached_posts(
+        cached_posts,
+        refreshed_at=refreshed_at,
+        limit=limit,
+        snapshot_source="scheduled_skip_live_canary_limit_cached",
+    )
+    skip_record = {
+        "account_handle": _compact_text(seed.get("instagram_handle")),
+        "skip_reason": "live_canary_limit",
+        "message": (
+            f"Refresh was intentionally deferred because this run allows only `{canary_limit}` bounded live canary target(s); "
+            "recent cached posts were reused instead."
+        ),
+    }
+    return profile, posts, skip_record
+
+
 def _html_meta_content(html_text: str, key: str) -> str | None:
     for content, attr in META_CONTENT_RE.findall(html_text):
         if _compact_text(attr).lower() == key.lower():
@@ -819,6 +850,7 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
     active_bucket_index = _refresh_bucket_index(bucket_count, generated_at=now_local_iso())
     force_refresh_after_hours = int(collection_boundary.get("force_refresh_after_hours") or max(24, bucket_count * 24))
     profile_only_backoff_hours = int(collection_boundary.get("profile_only_backoff_hours") or max(force_refresh_after_hours, 168))
+    max_live_canary_targets = max(0, int(collection_boundary.get("max_live_canary_targets") or 1))
 
     profiles: list[dict[str, Any]] = []
     posts: list[dict[str, Any]] = []
@@ -829,6 +861,7 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
     active_refresh_target_count = 0
     attempted_refresh_account_count = 0
     forced_refresh_account_count = 0
+    live_canary_target_count = 0
 
     for index, seed in enumerate(seed_accounts[: int((collection_boundary.get("max_accounts_per_run")) or 10)]):
         handle = _compact_text(seed.get("instagram_handle"))
@@ -872,9 +905,26 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
             scheduled_skips.append(skip_record)
             continue
 
+        can_use_live_canary = cached_profile is not None and bool(cached_posts) and not force_refresh and not profile_only_backoff
+        if can_use_live_canary and live_canary_target_count >= max_live_canary_targets:
+            profile, account_posts, skip_record = _scheduled_skip_canary_limit_reuse(
+                seed=seed,
+                cached_profile=cached_profile,
+                cached_posts=cached_posts,
+                refreshed_at=now_local_iso(),
+                limit=target_count,
+                canary_limit=max_live_canary_targets,
+            )
+            profiles.append(profile)
+            posts.extend(account_posts)
+            scheduled_skips.append(skip_record)
+            continue
+
         active_refresh_target_count += 1
         if force_refresh:
             forced_refresh_account_count += 1
+        elif can_use_live_canary:
+            live_canary_target_count += 1
         profile, account_posts, failure = _collect_account(
             seed,
             latest_posts_per_account=target_count,
@@ -930,6 +980,11 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
         for profile in profiles
         if "scheduled_skip_html_profile_only_backoff" in _compact_text(profile.get("snapshot_source"))
     )
+    live_canary_limited_account_count = sum(
+        1
+        for profile in profiles
+        if "scheduled_skip_live_canary_limit" in _compact_text(profile.get("snapshot_source"))
+    )
     degraded_account_count = len(failures)
     hard_failure_count = sum(1 for item in failures if not bool((item or {}).get("fallback_used")))
 
@@ -946,16 +1001,19 @@ def build_competitor_social_snapshots(*, latest_posts_per_account: int | None = 
             "html_profile_account_count": html_profile_account_count,
             "profile_only_account_count": profile_only_account_count,
             "profile_only_backoff_account_count": profile_only_backoff_account_count,
+            "live_canary_limited_account_count": live_canary_limited_account_count,
             "live_account_count": max(0, len(profiles) - cached_account_count),
             "post_count": len(posts),
             "latest_posts_per_account": target_count,
             "refresh_bucket_count": bucket_count,
             "active_refresh_bucket_index": active_bucket_index,
             "active_refresh_target_count": active_refresh_target_count,
+            "live_canary_target_count": live_canary_target_count,
             "attempted_refresh_account_count": attempted_refresh_account_count,
             "forced_refresh_account_count": forced_refresh_account_count,
             "scheduled_skip_count": len(scheduled_skips),
             "profile_only_backoff_hours": profile_only_backoff_hours,
+            "max_live_canary_targets": max_live_canary_targets,
             "rate_limit_circuit_breaker_used": rate_limit_circuit_breaker_used,
             "data_quality_note": "Visible metrics vary by post type and account. Treat this as directional benchmark data, not first-party truth.",
         },
@@ -1001,7 +1059,9 @@ def render_competitor_social_snapshots_markdown(payload: dict[str, Any]) -> str:
         f"- Accounts recovered from HTML profile fallback: `{summary.get('html_profile_account_count') or 0}`",
         f"- Accounts with profile-only fallback: `{summary.get('profile_only_account_count') or 0}`",
         f"- Accounts on profile-only backoff: `{summary.get('profile_only_backoff_account_count') or 0}`",
+        f"- Accounts deferred by live canary limit: `{summary.get('live_canary_limited_account_count') or 0}`",
         f"- Active refresh targets this run: `{summary.get('active_refresh_target_count') or 0}`",
+        f"- Live canary targets this run: `{summary.get('live_canary_target_count') or 0}` of `{summary.get('max_live_canary_targets') or 0}`",
         f"- Forced refresh targets this run: `{summary.get('forced_refresh_account_count') or 0}`",
         f"- Refresh bucket: `{summary.get('active_refresh_bucket_index') or 0}` of `{summary.get('refresh_bucket_count') or 1}`",
         f"- Posts observed: `{summary.get('post_count') or 0}`",

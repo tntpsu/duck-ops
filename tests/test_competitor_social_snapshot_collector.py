@@ -581,6 +581,157 @@ class CompetitorSocialSnapshotCollectorTests(unittest.TestCase):
         self.assertEqual(payload["scheduled_skips"][0]["skip_reason"], "profile_only_backoff")
         self.assertEqual(payload["failures"], [])
 
+    def test_build_competitor_social_snapshots_limits_live_canary_targets(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config" / "competitor_social_sources.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "collection_boundary": {
+                            "max_accounts_per_run": 10,
+                            "latest_posts_per_account": 2,
+                            "refresh_bucket_count": 1,
+                            "force_refresh_after_hours": 96,
+                            "profile_only_backoff_hours": 168,
+                            "max_live_canary_targets": 1,
+                        },
+                        "seed_accounts": [
+                            {
+                                "brand_key": "duck3d",
+                                "display_name": "Duck3DPrint",
+                                "instagram_handle": "duck3dprint.shop",
+                                "verification_status": "confirmed",
+                                "confidence": "medium",
+                                "category": "direct",
+                                "reason": "Overlap",
+                            },
+                            {
+                                "brand_key": "jeep",
+                                "display_name": "JeepDuckLove",
+                                "instagram_handle": "jeepducklove",
+                                "verification_status": "confirmed",
+                                "confidence": "medium",
+                                "category": "adjacent",
+                                "reason": "Overlap",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            state_path = root / "state" / "competitor_social_snapshots.json"
+            history_path = root / "state" / "competitor_social_snapshot_history.json"
+            operator_json_path = root / "output" / "operator" / "competitor_social_snapshots.json"
+            markdown_path = root / "output" / "operator" / "competitor_social_snapshots.md"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": "2026-04-15T08:00:00-04:00",
+                        "profiles": [
+                            {
+                                "account_handle": "duck3dprint.shop",
+                                "full_name": "Duck3DPrint",
+                                "snapshot_source": "live_profile_cached_posts",
+                                "observed_at": "2026-04-15T08:00:00-04:00",
+                            },
+                            {
+                                "account_handle": "jeepducklove",
+                                "full_name": "JeepDuckLove",
+                                "snapshot_source": "live_profile_cached_posts",
+                                "observed_at": "2026-04-15T08:00:00-04:00",
+                            },
+                        ],
+                        "posts": [
+                            {
+                                "account_handle": "duck3dprint.shop",
+                                "post_url": "https://www.instagram.com/p/DUCK31/",
+                                "observed_at": "2026-04-15T08:00:00-04:00",
+                                "post_format": "image",
+                                "hook_family": "statement_showcase",
+                                "theme": "dashboard",
+                                "engagement_visible": {"likes": 4, "comments": 1},
+                                "engagement_score": 8.0,
+                            },
+                            {
+                                "account_handle": "jeepducklove",
+                                "post_url": "https://www.instagram.com/p/JEEP1/",
+                                "observed_at": "2026-04-15T08:00:00-04:00",
+                                "post_format": "image",
+                                "hook_family": "statement_showcase",
+                                "theme": "jeep",
+                                "engagement_visible": {"likes": 3, "comments": 1},
+                                "engagement_score": 7.0,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            profile_payload = {
+                "data": {
+                    "user": {
+                        "full_name": "Duck3DPrint",
+                        "biography": "Dashboard ducks",
+                        "edge_followed_by": {"count": 10},
+                        "edge_follow": {"count": 20},
+                        "edge_owner_to_timeline_media": {"count": 5},
+                    }
+                }
+            }
+            timeline_payload = {
+                "items": [
+                    {
+                        "pk": "2",
+                        "code": "DUCK32",
+                        "taken_at": 1759797656,
+                        "media_type": 1,
+                        "like_count": 3,
+                        "comment_count": 1,
+                        "caption": {"text": "Dashboard duck refresh #dashboard #duck"},
+                    }
+                ]
+            }
+
+            def fake_request_json(url: str, *, referer_handle: str | None = None) -> dict:
+                if "jeepducklove" in url:
+                    raise AssertionError(f"Second canary should have been deferred to cache: {url}")
+                if "web_profile_info" in url:
+                    return profile_payload
+                return timeline_payload
+
+            with patch.object(competitor_social_snapshot_collector, "CONFIG_PATH", config_path), patch.object(
+                competitor_social_snapshot_collector, "STATE_PATH", state_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "HISTORY_PATH", history_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "OPERATOR_JSON_PATH", operator_json_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "OUTPUT_MD_PATH", markdown_path
+            ), patch.object(
+                competitor_social_snapshot_collector, "_request_json", side_effect=fake_request_json
+            ), patch.object(
+                competitor_social_snapshot_collector.time, "sleep", lambda *_args, **_kwargs: None
+            ):
+                payload = competitor_social_snapshot_collector.build_competitor_social_snapshots()
+
+        self.assertEqual(payload["summary"]["collected_account_count"], 2)
+        self.assertEqual(payload["summary"]["failed_account_count"], 0)
+        self.assertEqual(payload["summary"]["degraded_account_count"], 0)
+        self.assertEqual(payload["summary"]["active_refresh_target_count"], 1)
+        self.assertEqual(payload["summary"]["live_canary_target_count"], 1)
+        self.assertEqual(payload["summary"]["live_canary_limited_account_count"], 1)
+        limited_profile = next(item for item in payload["profiles"] if item["account_handle"] == "jeepducklove")
+        limited_post = next(item for item in payload["posts"] if item["account_handle"] == "jeepducklove")
+        self.assertEqual(limited_profile["snapshot_source"], "scheduled_skip_live_canary_limit")
+        self.assertEqual(limited_post["snapshot_source"], "scheduled_skip_live_canary_limit_cached")
+        self.assertEqual(payload["scheduled_skips"][-1]["skip_reason"], "live_canary_limit")
+        self.assertEqual(payload["failures"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

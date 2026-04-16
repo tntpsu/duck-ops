@@ -37,6 +37,9 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
     )
     scheduled_skip_account_count = int(summary.get("scheduled_skip_account_count") or summary.get("scheduled_skip_count") or 0)
     profile_only_backoff_account_count = int(summary.get("profile_only_backoff_account_count") or 0)
+    live_canary_limited_account_count = int(summary.get("live_canary_limited_account_count") or 0)
+    live_canary_target_count = int(summary.get("live_canary_target_count") or 0)
+    max_live_canary_targets = int(summary.get("max_live_canary_targets") or 0)
     active_refresh_target_count = int(summary.get("active_refresh_target_count") or 0)
     post_count = int(summary.get("post_count") or len(snapshot_payload.get("posts") or []))
     generated_at = _compact_text(snapshot_payload.get("generated_at"))
@@ -60,12 +63,20 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
             )
             if profile_only_backoff_account_count > 0:
                 freshness_note += f" `{profile_only_backoff_account_count}` profile-only account(s) were held on backoff."
+            if live_canary_limited_account_count > 0:
+                freshness_note += f" `{live_canary_limited_account_count}` account(s) were deferred by the live canary limit."
         elif profile_only_backoff_account_count > 0:
             freshness_label = "cached"
             freshness_note = (
                 f"Profile-only backoff truth: {profile_only_backoff_account_count} account(s) reused cached profile-only state "
                 f"because recent public refreshes still could not recover post timelines; {active_refresh_target_count} account(s) "
                 f"were still targeted live this run."
+            )
+        elif live_canary_limited_account_count > 0:
+            freshness_label = "staggered"
+            freshness_note = (
+                f"Live canary truth: {live_canary_target_count} canary target(s) were allowed live this run while "
+                f"{live_canary_limited_account_count} account(s) reused cache because the bounded canary limit is `{max_live_canary_targets}`."
             )
         elif scheduled_skip_account_count > 0:
             freshness_label = "staggered"
@@ -94,6 +105,9 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
         "competitor_social_failed_account_count": failed_account_count,
         "competitor_social_scheduled_skip_account_count": scheduled_skip_account_count,
         "competitor_social_profile_only_backoff_account_count": profile_only_backoff_account_count,
+        "competitor_social_live_canary_limited_account_count": live_canary_limited_account_count,
+        "competitor_social_live_canary_target_count": live_canary_target_count,
+        "competitor_social_max_live_canary_targets": max_live_canary_targets,
         "competitor_social_active_refresh_target_count": active_refresh_target_count,
         "competitor_social_freshness_label": freshness_label,
         "competitor_social_freshness_note": freshness_note,
@@ -221,6 +235,8 @@ def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
         f"- Hard failures: `{summary.get('competitor_social_failed_account_count') or 0}`",
         f"- Scheduled skip accounts: `{summary.get('competitor_social_scheduled_skip_account_count') or 0}`",
         f"- Profile-only backoff accounts: `{summary.get('competitor_social_profile_only_backoff_account_count') or 0}`",
+        f"- Live canary-limited accounts: `{summary.get('competitor_social_live_canary_limited_account_count') or 0}`",
+        f"- Live canary targets: `{summary.get('competitor_social_live_canary_target_count') or 0}` of `{summary.get('competitor_social_max_live_canary_targets') or 0}`",
         f"- Active refresh targets: `{summary.get('competitor_social_active_refresh_target_count') or 0}`",
         f"- Truth: {summary.get('competitor_social_freshness_note') or 'No competitor social snapshot is available yet.'}",
         "",

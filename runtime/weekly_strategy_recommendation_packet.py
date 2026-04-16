@@ -115,8 +115,15 @@ def _competitor_signal_quality(benchmark_payload: dict[str, Any], snapshot_paylo
     degraded_fetches = int(snapshot_summary.get("degraded_account_count") or 0)
     scheduled_skip_accounts = int(snapshot_summary.get("scheduled_skip_account_count") or snapshot_summary.get("scheduled_skip_count") or 0)
     profile_only_backoff_accounts = int(snapshot_summary.get("profile_only_backoff_account_count") or 0)
+    live_canary_limited_accounts = int(snapshot_summary.get("live_canary_limited_account_count") or 0)
+    live_canary_target_count = int(snapshot_summary.get("live_canary_target_count") or 0)
     if post_count >= 40 and live_accounts >= 4 and hard_failures == 0:
         return "medium", "Competitor social coverage is healthy enough to influence what we test next."
+    if hard_failures == 0 and degraded_fetches == 0 and live_canary_limited_accounts > 0 and post_count >= 24:
+        return (
+            "medium",
+            f"Competitor social coverage is being protected by a live canary policy: {live_canary_target_count} target(s) refreshed live while {live_canary_limited_accounts} account(s) reused cache.",
+        )
     if hard_failures == 0 and degraded_fetches == 0 and profile_only_backoff_accounts == 0 and scheduled_skip_accounts > 0 and post_count >= 24:
         return "medium", "Competitor social coverage is on a staggered cadence, but the snapshot remains healthy enough for bounded weekly tests."
     if post_count >= 24 and (live_accounts >= 2 or cached_accounts >= 2):
@@ -229,6 +236,7 @@ def _recommendations(
     degraded_accounts = int((snapshot_payload.get("summary") or {}).get("degraded_account_count") or 0)
     hard_failures = int((snapshot_payload.get("summary") or {}).get("failed_account_count") or 0)
     profile_only_backoff_accounts = int((snapshot_payload.get("summary") or {}).get("profile_only_backoff_account_count") or 0)
+    live_canary_limited_accounts = int((snapshot_payload.get("summary") or {}).get("live_canary_limited_account_count") or 0)
     if degraded_accounts or hard_failures or profile_only_backoff_accounts:
         recommendations.append(
             {
@@ -240,6 +248,17 @@ def _recommendations(
                     f"{degraded_accounts} degraded competitor account fetches, {hard_failures} hard failures, and "
                     f"{profile_only_backoff_accounts} profile-only backoff account(s) in the latest snapshot."
                 ),
+                "confidence": "high",
+            }
+        )
+    elif live_canary_limited_accounts:
+        recommendations.append(
+            {
+                "priority": "P3",
+                "category": "data_quality",
+                "title": "Trust the canary guardrail more than one-off competitor misses",
+                "recommendation": "Use the packet normally this week; the collector is intentionally limiting live pressure and preserving breadth with cache instead of over-polling competitors.",
+                "evidence": f"{live_canary_limited_accounts} account(s) were intentionally deferred by the live canary policy in the latest snapshot.",
                 "confidence": "high",
             }
         )
@@ -263,9 +282,14 @@ def _recommendations(
 def _watchouts(snapshot_payload: dict[str, Any], social_payload: dict[str, Any]) -> list[str]:
     items: list[str] = []
     profile_only_backoff_accounts = int(((snapshot_payload.get("summary") or {}).get("profile_only_backoff_account_count")) or 0)
+    live_canary_limited_accounts = int(((snapshot_payload.get("summary") or {}).get("live_canary_limited_account_count")) or 0)
     if profile_only_backoff_accounts > 0:
         items.append(
             f"{profile_only_backoff_accounts} competitor account(s) are on profile-only backoff, which means some benchmark patterns are being held on older profile-only state until public timelines become recoverable again."
+        )
+    if live_canary_limited_accounts > 0:
+        items.append(
+            f"{live_canary_limited_accounts} competitor account(s) were intentionally deferred by the live canary policy, so some freshness was traded for lower rate-limit risk."
         )
     if int(((snapshot_payload.get("summary") or {}).get("cached_account_count")) or 0) > 0:
         items.append("Competitor coverage relied on cached fallback for part of the snapshot, so use it to shape tests rather than major strategy pivots.")
