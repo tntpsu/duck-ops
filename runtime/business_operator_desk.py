@@ -94,6 +94,8 @@ def _load_weekly_strategy_packet() -> dict[str, Any]:
             "anchor_window": social_plan.get("anchor_window"),
             "anchor_workflow": social_plan.get("anchor_workflow"),
             "watch_account": social_plan.get("watch_account"),
+            "slot_count": int(social_plan.get("slot_count") or len(social_plan.get("slots") or [])),
+            "slots": list(social_plan.get("slots") or [])[:5],
             "items": list(social_plan.get("items") or [])[:5],
         },
         "watchouts": watchouts[:3],
@@ -390,7 +392,7 @@ def build_business_operator_desk(
             "learning_beliefs": len(learning_surface.get("items") or []),
             "strategy_recommendations": len(weekly_strategy_packet.get("recommendations") or []),
             "strategy_watchouts": len(weekly_strategy_packet.get("watchouts") or []),
-            "strategy_plan_items": len(((weekly_strategy_packet.get("social_plan") or {}).get("items") or [])),
+            "strategy_plan_items": len(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or [])),
         },
         "next_actions": _build_next_actions(
             customer_items=customer_items,
@@ -413,7 +415,7 @@ def build_business_operator_desk(
             "workflow_followthrough": workflow_items[:6],
             "learning_surface": list(learning_surface.get("items") or [])[:4],
             "weekly_strategy_packet": list(weekly_strategy_packet.get("recommendations") or [])[:4],
-            "weekly_social_plan": list(((weekly_strategy_packet.get("social_plan") or {}).get("items") or []))[:5],
+            "weekly_social_plan": list(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or []))[:5],
         },
     }
 
@@ -452,7 +454,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Learning beliefs surfaced: `{counts.get('learning_beliefs') or len(learning_items)}`",
         f"- Strategy recommendations surfaced: `{counts.get('strategy_recommendations') or len(strategy_items)}`",
         f"- Strategy watchouts surfaced: `{counts.get('strategy_watchouts') or len(weekly_strategy_packet.get('watchouts') or [])}`",
-        f"- Social plan items surfaced: `{counts.get('strategy_plan_items') or len((weekly_strategy_packet.get('social_plan') or {}).get('items') or [])}`",
+        f"- Social plan items surfaced: `{counts.get('strategy_plan_items') or len((weekly_strategy_packet.get('social_plan') or {}).get('slots') or []) or len((weekly_strategy_packet.get('social_plan') or {}).get('items') or [])}`",
         "",
         "## Strategic Focus",
         "",
@@ -529,11 +531,25 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- Anchor workflow: `{social_plan.get('anchor_workflow')}`")
         if social_plan.get("watch_account"):
             lines.append(f"- Watch account: `{social_plan.get('watch_account')}`")
-        items = (sections.get("weekly_social_plan") or []) or list(social_plan.get("items") or [])
-        if items:
-            lines.append("- Plan:")
-            for item in items[:5]:
-                lines.append(f"  - {_trim_text(item, 160)}")
+        slots = (sections.get("weekly_social_plan") or []) or list(social_plan.get("slots") or [])
+        if slots and isinstance(slots[0], dict):
+            lines.append("- Suggested slots:")
+            for item in slots[:5]:
+                lines.append(
+                    f"  - {item.get('slot')}: {_trim_text(item.get('timing_hint'), 60)} | {_trim_text(item.get('goal'), 90)}"
+                )
+                if item.get("action"):
+                    lines.append(f"    Action: {_trim_text(item.get('action'), 160)}")
+                if item.get("workflow"):
+                    lines.append(f"    Workflow: `{item.get('workflow')}`")
+                if item.get("watch_account"):
+                    lines.append(f"    Watch: `{item.get('watch_account')}`")
+        else:
+            items = slots or list(social_plan.get("items") or [])
+            if items:
+                lines.append("- Plan:")
+                for item in items[:5]:
+                    lines.append(f"  - {_trim_text(item, 160)}")
     lines.extend([
         "",
         "## Do Next",
@@ -808,7 +824,7 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         if not weekly_strategy_packet.get("available"):
             weekly_strategy_packet = _load_weekly_strategy_packet()
         social_plan = weekly_strategy_packet.get("social_plan") or {}
-        items = (sections.get("weekly_social_plan") or []) or list(social_plan.get("items") or [])
+        items = (sections.get("weekly_social_plan") or []) or list(social_plan.get("slots") or []) or list(social_plan.get("items") or [])
         if not weekly_strategy_packet.get("available") or not social_plan:
             lines.append("Weekly social plan is not available yet.")
         else:
@@ -821,8 +837,18 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             if social_plan.get("watch_account"):
                 lines.append(f"Watch account: {social_plan.get('watch_account')}")
             lines.append("")
-            for item in items:
-                lines.append(f"- {_trim_text(item, 180)}")
+            if items and isinstance(items[0], dict):
+                for item in items:
+                    lines.append(f"- {item.get('slot')}: {_trim_text(item.get('timing_hint'), 60)} | {_trim_text(item.get('goal'), 120)}")
+                    if item.get("action"):
+                        lines.append(f"  Action: {_trim_text(item.get('action'), 180)}")
+                    if item.get("workflow"):
+                        lines.append(f"  Workflow: {item.get('workflow')}")
+                    if item.get("watch_account"):
+                        lines.append(f"  Watch: {item.get('watch_account')}")
+            else:
+                for item in items:
+                    lines.append(f"- {_trim_text(item, 180)}")
         return "\n".join(lines)
 
     items = sections.get(normalized) or []

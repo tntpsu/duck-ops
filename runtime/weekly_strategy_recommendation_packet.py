@@ -355,6 +355,84 @@ def _do_not_copy_patterns(
     return guardrails[:4]
 
 
+def _social_plan_slots(
+    *,
+    anchor_window: str,
+    anchor_workflow: str,
+    watch_account: str | None,
+    experimental_ideas: list[dict[str, Any]],
+    do_not_copy_patterns: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    slots: list[dict[str, Any]] = [
+        {
+            "slot": "Slot 1",
+            "timing_hint": f"Early week · {anchor_window}",
+            "workflow": anchor_workflow,
+            "goal": "Anchor with the strongest proven workflow",
+            "action": f"Run one `{anchor_workflow}` post in the `{anchor_window}` window to keep the week grounded in our best current signal.",
+            "why": f"`{anchor_workflow}` in `{anchor_window}` is still the safest combination in our own performance data.",
+            "source": "stable_pattern",
+        }
+    ]
+
+    signal_to_slot = {
+        "competitor_watch_account": ("Slot 2", f"Midweek · {anchor_window}", "Competitor-inspired hook test"),
+        "competitor_hook": ("Slot 2", f"Midweek · {anchor_window}", "Caption-opening hook test"),
+        "competitor_theme": ("Slot 3", f"Late week · {anchor_window}", "Theme experiment"),
+        "competitor_format": ("Slot 4", "Weekend / bonus slot", "Format experiment"),
+    }
+    used_signal_types: set[str] = set()
+    for idea in experimental_ideas:
+        signal_type = str(idea.get("signal_type") or "").strip()
+        if not signal_type or signal_type in used_signal_types:
+            continue
+        slot_meta = signal_to_slot.get(signal_type)
+        if not slot_meta:
+            continue
+        slot_label, timing_hint, goal = slot_meta
+        action = _compact_text(idea.get("recommendation"))
+        evidence = _compact_text(idea.get("evidence"))
+        if not action:
+            continue
+        slot_payload = {
+            "slot": slot_label,
+            "timing_hint": timing_hint,
+            "workflow": anchor_workflow,
+            "goal": goal,
+            "action": action,
+            "why": evidence,
+            "source": signal_type,
+        }
+        if signal_type == "competitor_watch_account" and watch_account:
+            slot_payload["watch_account"] = watch_account
+        slots.append(slot_payload)
+        used_signal_types.add(signal_type)
+
+    if do_not_copy_patterns:
+        first_guardrail = do_not_copy_patterns[0]
+        slots.append(
+            {
+                "slot": "Slot 5",
+                "timing_hint": "End of week review",
+                "workflow": anchor_workflow,
+                "goal": "Review results before changing the calendar",
+                "action": _compact_text(first_guardrail.get("guidance")),
+                "why": _compact_text(first_guardrail.get("evidence")),
+                "source": "guardrail",
+            }
+        )
+
+    deduped: list[dict[str, Any]] = []
+    seen_slots: set[str] = set()
+    for item in slots:
+        slot_label = str(item.get("slot") or "").strip()
+        if not slot_label or slot_label in seen_slots:
+            continue
+        deduped.append(item)
+        seen_slots.add(slot_label)
+    return deduped[:5]
+
+
 def _social_plan(
     social_payload: dict[str, Any],
     stable_patterns: list[dict[str, Any]],
@@ -371,18 +449,21 @@ def _social_plan(
         title = _compact_text(stable_account.get("title"))
         if title.startswith("`") and "`" in title[1:]:
             watch_account = title.split("`")[1]
-    items = [f"Anchor the week around `{anchor_workflow}` in the `{anchor_window}` window."]
-    if watch_account:
-        items.append(f"Use `{watch_account}` as the competitor account to watch before drafting one new post.")
-    for item in experimental_ideas[:2]:
-        items.append(_compact_text(item.get("recommendation")))
-    if do_not_copy_patterns:
-        items.append(_compact_text((do_not_copy_patterns[0] or {}).get("guidance")))
+    slots = _social_plan_slots(
+        anchor_window=anchor_window,
+        anchor_workflow=anchor_workflow,
+        watch_account=watch_account,
+        experimental_ideas=experimental_ideas,
+        do_not_copy_patterns=do_not_copy_patterns,
+    )
+    items = [item.get("action") for item in slots if _compact_text(item.get("action"))]
     return {
         "headline": f"Keep `{anchor_workflow}` anchored in `{anchor_window}`, run one or two bounded competitor-inspired tests, and avoid copying competitor styles directly.",
         "anchor_window": anchor_window,
         "anchor_workflow": anchor_workflow,
         "watch_account": watch_account,
+        "slot_count": len(slots),
+        "slots": slots,
         "items": items[:5],
     }
 
@@ -567,11 +648,26 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
         lines.append(f"- Anchor workflow: `{social_plan.get('anchor_workflow') or 'unknown'}`")
         if social_plan.get("watch_account"):
             lines.append(f"- Watch account: `{social_plan.get('watch_account')}`")
-        items = social_plan.get("items") or []
-        if items:
-            lines.append("- Plan items:")
-            for item in items[:5]:
-                lines.append(f"  - {item}")
+        slots = social_plan.get("slots") or []
+        if slots:
+            lines.append("- Suggested slots:")
+            for item in slots[:5]:
+                lines.append(
+                    f"  - {item.get('slot')}: {item.get('timing_hint')} | {item.get('goal')}"
+                )
+                lines.append(f"    Action: {item.get('action')}")
+                if item.get("workflow"):
+                    lines.append(f"    Workflow: `{item.get('workflow')}`")
+                if item.get("watch_account"):
+                    lines.append(f"    Watch: `{item.get('watch_account')}`")
+                if item.get("why"):
+                    lines.append(f"    Why: {item.get('why')}")
+        else:
+            items = social_plan.get("items") or []
+            if items:
+                lines.append("- Plan items:")
+                for item in items[:5]:
+                    lines.append(f"  - {item}")
         lines.append("")
 
     lines.extend(["## Stable Competitor Patterns", ""])

@@ -120,8 +120,11 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertGreaterEqual(payload["summary"]["experimental_idea_count"], 2)
                 self.assertGreaterEqual(payload["summary"]["do_not_copy_count"], 1)
                 self.assertTrue(payload["social_plan"]["items"])
+                self.assertTrue(payload["social_plan"]["slots"])
                 self.assertTrue(payload["recommendations"])
                 self.assertEqual(payload["social_plan"]["anchor_window"], "evening")
+                self.assertEqual(payload["social_plan"]["slots"][0]["slot"], "Slot 1")
+                self.assertIn("Early week", payload["social_plan"]["slots"][0]["timing_hint"])
                 self.assertTrue(any(item["category"] == "stable_pattern" for item in payload["stable_patterns"]))
                 self.assertTrue(any(item["category"] == "experimental_idea" for item in payload["experimental_ideas"]))
                 self.assertTrue(any(item["category"] == "data_quality" for item in payload["recommendations"]))
@@ -136,6 +139,7 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertIn("## Stable Competitor Patterns", markdown)
                 self.assertIn("## Experimental Ideas", markdown)
                 self.assertIn("## Do Not Copy", markdown)
+                self.assertIn("Slot 1", markdown)
 
 
 if __name__ == "__main__":
