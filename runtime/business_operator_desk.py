@@ -22,6 +22,8 @@ WEEKLY_STRATEGY_PACKET_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/w
 WEEKLY_STRATEGY_PACKET_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/weekly_strategy_recommendation_packet.md")
 SHOPIFY_SEO_OUTCOMES_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/shopify_seo_outcomes.json")
 SHOPIFY_SEO_OUTCOMES_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/shopify_seo_outcomes.md")
+ENGINEERING_GOVERNANCE_DIGEST_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/engineering_governance_digest.json")
+ENGINEERING_GOVERNANCE_DIGEST_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/engineering_governance_digest.md")
 
 
 def _trim_text(value: str | None, limit: int = 160) -> str:
@@ -37,14 +39,39 @@ def _display_duck_name(title: str | None, limit: int = 36) -> str:
 
 def _load_learning_surface() -> dict[str, Any]:
     if not CURRENT_LEARNINGS_PATH.exists():
-        return {"available": False, "path": str(CURRENT_LEARNINGS_MD_PATH), "items": []}
+        return {
+            "available": False,
+            "path": str(CURRENT_LEARNINGS_MD_PATH),
+            "items": [],
+            "change_count": 0,
+            "idea_count": 0,
+            "material_change_count": 0,
+            "change_notifier": {"available": False, "items": []},
+        }
     try:
         payload = json.loads(CURRENT_LEARNINGS_PATH.read_text(encoding="utf-8"))
     except Exception:
-        return {"available": False, "path": str(CURRENT_LEARNINGS_MD_PATH), "items": []}
+        return {
+            "available": False,
+            "path": str(CURRENT_LEARNINGS_MD_PATH),
+            "items": [],
+            "change_count": 0,
+            "idea_count": 0,
+            "material_change_count": 0,
+            "change_notifier": {"available": False, "items": []},
+        }
     if not isinstance(payload, dict):
-        return {"available": False, "path": str(CURRENT_LEARNINGS_MD_PATH), "items": []}
+        return {
+            "available": False,
+            "path": str(CURRENT_LEARNINGS_MD_PATH),
+            "items": [],
+            "change_count": 0,
+            "idea_count": 0,
+            "material_change_count": 0,
+            "change_notifier": {"available": False, "items": []},
+        }
     items = list(payload.get("current_beliefs") or [])
+    notifier = payload.get("change_notifier") if isinstance(payload.get("change_notifier"), dict) else {}
     return {
         "available": True,
         "path": str(CURRENT_LEARNINGS_MD_PATH),
@@ -52,6 +79,13 @@ def _load_learning_surface() -> dict[str, Any]:
         "items": items[:4],
         "change_count": len(payload.get("changes_since_previous") or []),
         "idea_count": len(payload.get("ideas_to_test") or []),
+        "material_change_count": int(notifier.get("material_change_count") or 0),
+        "change_notifier": {
+            "available": bool(notifier.get("available", True)),
+            "headline": notifier.get("headline"),
+            "recommended_action": notifier.get("recommended_action"),
+            "items": list(notifier.get("items") or [])[:3],
+        },
     }
 
 
@@ -132,6 +166,51 @@ def _load_seo_outcome_surface() -> dict[str, Any]:
         "traffic_signal_note": summary.get("traffic_signal_note"),
         "attention_items": list(payload.get("attention_items") or [])[:4],
         "recent_wins": list(payload.get("recent_wins") or [])[:4],
+    }
+
+
+def _load_governance_surface() -> dict[str, Any]:
+    if not ENGINEERING_GOVERNANCE_DIGEST_PATH.exists():
+        return {
+            "available": False,
+            "path": str(ENGINEERING_GOVERNANCE_DIGEST_MD_PATH),
+            "findings": [],
+            "recommendations": [],
+        }
+    try:
+        payload = json.loads(ENGINEERING_GOVERNANCE_DIGEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "available": False,
+            "path": str(ENGINEERING_GOVERNANCE_DIGEST_MD_PATH),
+            "findings": [],
+            "recommendations": [],
+        }
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "path": str(ENGINEERING_GOVERNANCE_DIGEST_MD_PATH),
+            "findings": [],
+            "recommendations": [],
+        }
+
+    findings = list(payload.get("findings") or [])
+    recommendations = list(payload.get("review_recommendations") or [])
+    recommendation_summary = payload.get("review_recommendation_summary") if isinstance(payload.get("review_recommendation_summary"), dict) else {}
+    return {
+        "available": True,
+        "path": str(ENGINEERING_GOVERNANCE_DIGEST_MD_PATH),
+        "generated_at": payload.get("generated_at"),
+        "phase_focus": payload.get("phase_focus"),
+        "next_step": payload.get("next_step"),
+        "finding_count": len(findings),
+        "recommendation_count": int(recommendation_summary.get("count") or len(recommendations)),
+        "top_priority_count": int(
+            recommendation_summary.get("top_priority_count")
+            or sum(1 for item in recommendations if str((item or {}).get("priority") or "").upper() == "P1")
+        ),
+        "findings": findings[:3],
+        "recommendations": recommendations[:4],
     }
 
 
@@ -250,6 +329,92 @@ def _weekly_sale_items(weekly_sale_monitor: dict[str, Any] | None) -> list[dict[
     )
 
 
+def _social_plan_action_item(weekly_strategy_packet: dict[str, Any]) -> dict[str, Any] | None:
+    social_plan = weekly_strategy_packet.get("social_plan") or {}
+    if not isinstance(social_plan, dict) or not social_plan:
+        return None
+
+    readiness_rank = {
+        "ready_now": 0,
+        "ready_with_approval": 1,
+        "manual_experiment": 2,
+        "review_slot": 3,
+        "not_supported_yet": 4,
+    }
+
+    def _pick(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+        actionable = [
+            item
+            for item in items
+            if str(item.get("execution_readiness") or "").strip() in {"ready_now", "ready_with_approval", "manual_experiment"}
+        ]
+        if not actionable:
+            return None
+        actionable.sort(
+            key=lambda item: (
+                readiness_rank.get(str(item.get("execution_readiness") or "").strip(), 9),
+                str(item.get("calendar_date") or "9999-12-31"),
+                str(item.get("slot") or ""),
+            )
+        )
+        return actionable[0]
+
+    ready_this_week = [item for item in list(social_plan.get("ready_this_week") or []) if isinstance(item, dict)]
+    slot = _pick(ready_this_week)
+    if slot is None:
+        slots = [item for item in list(social_plan.get("slots") or []) if isinstance(item, dict)]
+        slot = _pick(slots)
+    if slot is None:
+        return None
+
+    slot_label = str(slot.get("slot") or "Social slot").strip()
+    calendar_label = str(slot.get("calendar_label") or slot.get("timing_hint") or "This week").strip()
+    lane = str(slot.get("suggested_lane") or slot.get("workflow") or "social").strip()
+    readiness = str(slot.get("execution_readiness") or "ready_now").strip()
+    goal = str(slot.get("goal") or slot.get("action") or slot.get("next_step") or slot.get("headline") or "").strip()
+    summary_bits = [calendar_label, readiness]
+    if goal:
+        summary_bits.append(_trim_text(goal, 90))
+    command = str(slot.get("command_hint") or slot.get("operator_action_label") or slot.get("next_step") or "").strip()
+    secondary_command = str(slot.get("approval_followthrough") or "").strip() or None
+    if secondary_command and secondary_command == command:
+        secondary_command = None
+    return {
+        "lane": "social_plan",
+        "title": f"{slot_label}: {lane}" if lane else slot_label,
+        "summary": " | ".join(bit for bit in summary_bits if bit),
+        "command": command or None,
+        "secondary_command": secondary_command,
+    }
+
+
+def _governance_action_item(governance_surface: dict[str, Any]) -> dict[str, Any] | None:
+    recommendations = [item for item in list(governance_surface.get("recommendations") or []) if isinstance(item, dict)]
+    if not recommendations:
+        return None
+
+    priority_rank = {"P1": 0, "P2": 1, "P3": 2}
+    recommendations.sort(
+        key=lambda item: (
+            priority_rank.get(str(item.get("priority") or "P3").upper(), 9),
+            str(item.get("title") or ""),
+        )
+    )
+    top = recommendations[0]
+    summary_parts = [
+        str(top.get("priority") or "P3"),
+        str(top.get("source") or "governance"),
+        _trim_text(str(top.get("summary") or ""), 90),
+    ]
+    return {
+        "lane": "engineering_governance",
+        "title": str(top.get("title") or "Engineering governance"),
+        "summary": " | ".join(part for part in summary_parts if part),
+        "command": str(top.get("next_action") or "").strip() or None,
+        "secondary_command": str(top.get("suggested_owner_skill") or "").strip() or None,
+    }
+
+
 def _build_next_actions(
     *,
     customer_items: list[dict[str, Any]],
@@ -260,6 +425,8 @@ def _build_next_actions(
     weekly_sale_items: list[dict[str, Any]],
     review_items: list[dict[str, Any]],
     workflow_items: list[dict[str, Any]],
+    weekly_strategy_packet: dict[str, Any],
+    governance_surface: dict[str, Any],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     if customer_items:
@@ -364,6 +531,12 @@ def _build_next_actions(
                 "secondary_command": first.get("approve_command"),
             }
         )
+    social_plan_action = _social_plan_action_item(weekly_strategy_packet)
+    if social_plan_action:
+        actions.append(social_plan_action)
+    governance_action = _governance_action_item(governance_surface)
+    if governance_action:
+        actions.append(governance_action)
     for item in workflow_items[:3]:
         actions.append(
             {
@@ -398,6 +571,12 @@ def build_business_operator_desk(
     learning_surface = _load_learning_surface()
     weekly_strategy_packet = _load_weekly_strategy_packet()
     seo_outcomes = _load_seo_outcome_surface()
+    governance_surface = _load_governance_surface()
+    social_plan = weekly_strategy_packet.get("social_plan") or {}
+    ready_counts = social_plan.get("readiness_counts") if isinstance(social_plan, dict) else {}
+    social_ready_slots = 0
+    if isinstance(ready_counts, dict):
+        social_ready_slots = sum(int(ready_counts.get(key) or 0) for key in ("ready_now", "ready_with_approval", "manual_experiment"))
     counts = (nightly_summary or {}).get("counts") or {}
     pack_items = list(((nightly_summary or {}).get("sections") or {}).get("orders_to_pack") or [])
     review_queue_backlog = int((review_queue or {}).get("pending_count_all") or len((review_queue or {}).get("items") or []))
@@ -424,10 +603,16 @@ def build_business_operator_desk(
             "review_queue_backlog": review_queue_backlog,
             "usps_live_customer_items": sum(1 for item in customer_items if str(item.get("tracking_live_label") or "").strip()),
             "workflow_followthrough_items": len(workflow_items),
+            "governance_findings": int(governance_surface.get("finding_count") or 0),
+            "governance_recommendations": int(governance_surface.get("recommendation_count") or 0),
+            "governance_top_priority_items": int(governance_surface.get("top_priority_count") or 0),
             "learning_beliefs": len(learning_surface.get("items") or []),
+            "learning_changes": int(learning_surface.get("change_count") or 0),
+            "learning_material_changes": int(learning_surface.get("material_change_count") or 0),
             "strategy_recommendations": len(weekly_strategy_packet.get("recommendations") or []),
             "strategy_watchouts": len(weekly_strategy_packet.get("watchouts") or []),
             "strategy_plan_items": len(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or [])),
+            "strategy_ready_slots": social_ready_slots,
             "seo_outcome_items": int(seo_outcomes.get("applied_item_count") or 0),
             "seo_outcome_attention_items": len(seo_outcomes.get("attention_items") or []),
             "seo_outcome_stable_items": int(seo_outcomes.get("stable_count") or 0),
@@ -441,7 +626,10 @@ def build_business_operator_desk(
             weekly_sale_items=weekly_sale_items,
             review_items=review_items,
             workflow_items=workflow_items,
+            weekly_strategy_packet=weekly_strategy_packet,
+            governance_surface=governance_surface,
         ),
+        "governance_surface": governance_surface,
         "sections": {
             "customer_packets": customer_items[:6],
             "etsy_browser_threads": browser_items[:6],
@@ -451,6 +639,7 @@ def build_business_operator_desk(
             "weekly_sale_monitor": weekly_sale_items[:6],
             "review_queue": review_items[:6],
             "workflow_followthrough": workflow_items[:6],
+            "engineering_governance": list(governance_surface.get("recommendations") or [])[:4],
             "learning_surface": list(learning_surface.get("items") or [])[:4],
             "weekly_strategy_packet": list(weekly_strategy_packet.get("recommendations") or [])[:4],
             "weekly_social_plan": list(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or []))[:5],
@@ -463,6 +652,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     counts = payload.get("counts") or {}
     sections = payload.get("sections") or {}
     strategy_focus = payload.get("strategy_focus") or {}
+    governance_surface = payload.get("governance_surface") or {}
     learning_surface = payload.get("learning_surface") or {}
     weekly_strategy_packet = payload.get("weekly_strategy_packet") or {}
     seo_outcomes = payload.get("seo_outcomes") or {}
@@ -494,7 +684,12 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Older creative/operator backlog: `{max(0, int(counts.get('review_queue_backlog', 0)) - int(counts.get('review_queue_items', 0)))}`",
         f"- Customer cases with live USPS context: `{counts.get('usps_live_customer_items', 0)}`",
         f"- Workflow follow-through items: `{counts.get('workflow_followthrough_items', 0)}`",
+        f"- Governance findings surfaced: `{counts.get('governance_findings', 0)}`",
+        f"- Governance recommendations surfaced: `{counts.get('governance_recommendations', 0)}`",
+        f"- Top-priority governance items: `{counts.get('governance_top_priority_items', 0)}`",
         f"- Learning beliefs surfaced: `{counts.get('learning_beliefs') or len(learning_items)}`",
+        f"- Learning changes surfaced: `{counts.get('learning_changes') or learning_surface.get('change_count') or 0}`",
+        f"- Material learning changes: `{counts.get('learning_material_changes') or learning_surface.get('material_change_count') or 0}`",
         f"- Strategy recommendations surfaced: `{counts.get('strategy_recommendations') or len(strategy_items)}`",
         f"- Strategy watchouts surfaced: `{counts.get('strategy_watchouts') or len(weekly_strategy_packet.get('watchouts') or [])}`",
         f"- Social plan items surfaced: `{counts.get('strategy_plan_items') or len((weekly_strategy_packet.get('social_plan') or {}).get('slots') or []) or len((weekly_strategy_packet.get('social_plan') or {}).get('items') or [])}`",
@@ -516,15 +711,63 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 lines.append(f"  - {step.get('title')}: {_trim_text(step.get('summary'), 160)}")
     lines.extend([
         "",
+        "## Engineering Governance",
+        "",
+    ])
+    if not governance_surface.get("available"):
+        governance_surface = _load_governance_surface()
+    governance_items = (sections.get("engineering_governance") or []) or list(governance_surface.get("recommendations") or [])
+    governance_findings = list(governance_surface.get("findings") or [])
+    if not governance_surface.get("available"):
+        lines.append("Engineering governance digest is not available yet.")
+    else:
+        lines.append(f"- Page: `{governance_surface.get('path')}`")
+        lines.append(f"- Phase focus: `{governance_surface.get('phase_focus') or 'unknown'}`")
+        lines.append(f"- Findings: `{governance_surface.get('finding_count', len(governance_findings))}`")
+        lines.append(f"- Recommendations: `{governance_surface.get('recommendation_count', len(governance_items))}`")
+        lines.append(f"- Top-priority recommendations: `{governance_surface.get('top_priority_count', 0)}`")
+        if governance_surface.get("next_step"):
+            lines.append(f"- Next step: {_trim_text(governance_surface.get('next_step'), 180)}")
+        if governance_findings:
+            lines.append("- Top findings:")
+            for item in governance_findings[:3]:
+                lines.append(
+                    f"  - {item.get('priority') or 'P3'} | {_trim_text(item.get('title'), 90)} | {_trim_text(item.get('summary'), 120)}"
+                )
+        if governance_items:
+            lines.append("- Recommended follow-through:")
+            for item in governance_items[:4]:
+                lines.append(
+                    f"  - {item.get('priority') or 'P3'} | {item.get('recommendation_type') or 'governance'} | {_trim_text(item.get('title'), 100)}"
+                )
+                if item.get("summary"):
+                    lines.append(f"    Why: {_trim_text(item.get('summary'), 160)}")
+                if item.get("next_action"):
+                    lines.append(f"    Next: {_trim_text(item.get('next_action'), 180)}")
+    lines.extend([
+        "",
         "## Learning Surface",
         "",
     ])
     if not learning_surface.get("available"):
         lines.append("Current learnings page is not available yet.")
     else:
+        change_notifier = learning_surface.get("change_notifier") if isinstance(learning_surface.get("change_notifier"), dict) else {}
         lines.append(f"- Page: `{learning_surface.get('path')}`")
         lines.append(f"- Changes since previous snapshot: `{learning_surface.get('change_count', 0)}`")
+        lines.append(f"- Material changes needing review: `{learning_surface.get('material_change_count', 0)}`")
         lines.append(f"- Ideas worth testing: `{learning_surface.get('idea_count', 0)}`")
+        if change_notifier.get("headline"):
+            lines.append(f"- Change notifier: {_trim_text(change_notifier.get('headline'), 180)}")
+        if change_notifier.get("recommended_action"):
+            lines.append(f"- Review command: `{change_notifier.get('recommended_action')}`")
+        notifier_items = list(change_notifier.get("items") or [])
+        if notifier_items:
+            lines.append("- Recent learning changes:")
+            for item in notifier_items:
+                lines.append(
+                    f"  - {_trim_text(item.get('headline'), 150)}"
+                )
         if learning_items:
             lines.append("- Top beliefs:")
             for item in learning_items:
@@ -884,6 +1127,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "workflows": "workflow_followthrough",
         "roadmap": "strategy_focus",
         "strategy": "strategy_focus",
+        "governance": "engineering_governance",
+        "engineering": "engineering_governance",
+        "digest": "engineering_governance",
+        "governance_digest": "engineering_governance",
         "learning": "learning_surface",
         "learnings": "learning_surface",
         "seo": "seo_outcomes",
@@ -922,6 +1169,42 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append("")
                 for step in next_steps:
                     lines.append(f"- {step.get('title')}: {_trim_text(step.get('summary'), 160)}")
+        return "\n".join(lines)
+    if normalized == "engineering_governance":
+        lines = ["Duck Ops Engineering Governance", ""]
+        governance_surface = payload.get("governance_surface") or {}
+        if not governance_surface.get("available"):
+            governance_surface = _load_governance_surface()
+        governance_items = (sections.get("engineering_governance") or []) or list(governance_surface.get("recommendations") or [])
+        governance_findings = list(governance_surface.get("findings") or [])
+        if not governance_surface.get("available"):
+            lines.append("Engineering governance digest is not available yet.")
+        else:
+            lines.append(f"Page: {governance_surface.get('path')}")
+            lines.append(f"Phase focus: {governance_surface.get('phase_focus') or 'unknown'}")
+            lines.append(f"Findings: {governance_surface.get('finding_count', len(governance_findings))}")
+            lines.append(f"Recommendations: {governance_surface.get('recommendation_count', len(governance_items))}")
+            lines.append(f"Top-priority recommendations: {governance_surface.get('top_priority_count', 0)}")
+            if governance_surface.get("next_step"):
+                lines.append(f"Next step: {_trim_text(governance_surface.get('next_step'), 180)}")
+            if governance_findings:
+                lines.append("")
+                lines.append("Top findings:")
+                for item in governance_findings[:3]:
+                    lines.append(
+                        f"- {item.get('priority') or 'P3'} | {_trim_text(item.get('title'), 100)} | {_trim_text(item.get('summary'), 160)}"
+                    )
+            if governance_items:
+                lines.append("")
+                lines.append("Recommended follow-through:")
+                for item in governance_items[:4]:
+                    lines.append(
+                        f"- {item.get('priority') or 'P3'} | {item.get('recommendation_type') or 'governance'} | {_trim_text(item.get('title'), 120)}"
+                    )
+                    if item.get("summary"):
+                        lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
+                    if item.get("next_action"):
+                        lines.append(f"  Next: {_trim_text(item.get('next_action'), 180)}")
         return "\n".join(lines)
     if normalized == "learning_surface":
         lines = ["Duck Ops Current Learnings", ""]

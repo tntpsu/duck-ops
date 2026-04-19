@@ -208,6 +208,51 @@ class ShopifySeoReviewTests(unittest.TestCase):
             self.assertEqual(item["proposed_seo_description"], "Already strong description that should stay in place for this test resource.")
             self.assertIn("DuckAgent will email the next remaining SEO category automatically", payload["approval_action"])
 
+    def test_weak_title_category_batch_uses_existing_issue_lane(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review_state_dir = root / "state" / "shopify_seo_review"
+            review_run_dir = review_state_dir / "runs"
+            output_path = root / "output" / "operator" / "shopify_seo_review.md"
+
+            audit_payload = {
+                "generated_at": "2026-04-14T12:00:00-04:00",
+                "shopify_domain": "example.myshopify.com",
+                "resources": [
+                    {
+                        "id": "gid://shopify/Product/7",
+                        "kind": "product",
+                        "title": "Bigfoot Duck",
+                        "resource_url": "/products/bigfoot-duck",
+                        "seo_title": "Bigfoot Duck | MyJeepDuck",
+                        "seo_description": "Already strong description that should stay in place for this test resource.",
+                        "issues": [{"code": "seo_title_matches_raw_title", "message": "Raw match title."}],
+                    }
+                ],
+            }
+
+            with patch.object(shopify_seo_review, "REVIEW_STATE_DIR", review_state_dir), patch.object(
+                shopify_seo_review, "REVIEW_RUN_DIR", review_run_dir
+            ), patch.object(shopify_seo_review, "REVIEW_OUTPUT_MD", output_path), patch.object(
+                shopify_seo_review, "build_shopify_seo_audit", return_value=audit_payload
+            ):
+                payload = shopify_seo_review.build_shopify_seo_review(
+                    limit=0,
+                    force_audit=True,
+                    review_type="issue_category_batch",
+                    issue_category="weak_title",
+                )
+
+            self.assertEqual(payload["category_label"], "Weak or raw-match SEO titles")
+            self.assertEqual(payload["item_count"], 1)
+            item = payload["items"][0]
+            self.assertTrue(item["apply_seo_title"])
+            self.assertFalse(item["apply_seo_description"])
+            self.assertEqual(
+                item["proposed_seo_description"],
+                "Already strong description that should stay in place for this test resource.",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

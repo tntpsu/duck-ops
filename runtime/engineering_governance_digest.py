@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import html as html_lib
 import json
 import os
 import subprocess
@@ -28,6 +29,10 @@ TECH_DEBT_TRIAGE_PATH = STATE_DIR / "tech_debt_triage.json"
 RELIABILITY_REVIEW_PATH = STATE_DIR / "reliability_review.json"
 DATA_MODEL_GOVERNANCE_REVIEW_PATH = STATE_DIR / "data_model_governance_review.json"
 COMPETITOR_SOCIAL_SNAPSHOTS_PATH = STATE_DIR / "competitor_social_snapshots.json"
+BUSINESS_OPERATOR_DESK_PATH = STATE_DIR / "business_operator_desk.json"
+BUSINESS_OPERATOR_DESK_MD_PATH = DUCK_OPS_ROOT / "output" / "operator" / "business_operator_desk.md"
+CURRENT_LEARNINGS_PATH = STATE_DIR / "current_learnings.json"
+CURRENT_LEARNINGS_MD_PATH = DUCK_OPS_ROOT / "output" / "operator" / "current_learnings.md"
 
 REQUIRED_SKILLS = [
     "duck-change-planner",
@@ -82,6 +87,13 @@ def _load_json(path: Path, default: Any) -> Any:
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _trim_text(value: Any, limit: int = 160) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
 
 
 def _repo_status(repo_name: str, repo_path: Path) -> dict[str, Any]:
@@ -195,6 +207,182 @@ def _observe_review_statuses() -> list[dict[str, Any]]:
             }
         )
     return items
+
+
+def _business_desk_highlights() -> dict[str, Any]:
+    payload = _load_json(BUSINESS_OPERATOR_DESK_PATH, {})
+    if not isinstance(payload, dict) or not payload:
+        return {
+            "available": False,
+            "path": str(BUSINESS_OPERATOR_DESK_MD_PATH),
+            "counts": [],
+            "next_actions": [],
+        }
+
+    counts = payload.get("counts") if isinstance(payload.get("counts"), dict) else {}
+    next_actions = list(payload.get("next_actions") or [])
+    count_specs = [
+        ("customer_attention_items", "Customer attention"),
+        ("etsy_browser_threads", "Etsy threads"),
+        ("custom_build_candidates", "Custom builds"),
+        ("orders_to_pack_units", "Pack tonight"),
+        ("review_queue_items", "Creative reviews"),
+        ("governance_top_priority_items", "Governance P1"),
+        ("strategy_ready_slots", "Social slots ready"),
+    ]
+    count_rows = [
+        {"key": key, "label": label, "count": int(counts.get(key) or 0)}
+        for key, label in count_specs
+        if int(counts.get(key) or 0) > 0
+    ]
+    if not count_rows:
+        count_rows = [{"key": "all_clear", "label": "Immediate desk alerts", "count": 0}]
+
+    highlights = []
+    for item in next_actions[:3]:
+        if not isinstance(item, dict):
+            continue
+        highlights.append(
+            {
+                "lane": str(item.get("lane") or "desk"),
+                "title": _trim_text(item.get("title") or "Next action", 80),
+                "summary": _trim_text(item.get("summary") or item.get("title") or "Follow up from the operator desk.", 140),
+                "command": _trim_text(item.get("command") or "", 120),
+                "secondary_command": _trim_text(item.get("secondary_command") or "", 120),
+            }
+        )
+
+    return {
+        "available": True,
+        "path": str(BUSINESS_OPERATOR_DESK_MD_PATH),
+        "generated_at": payload.get("generated_at"),
+        "counts": count_rows[:5],
+        "next_actions": highlights,
+    }
+
+
+def _learning_change_highlights() -> dict[str, Any]:
+    payload = _load_json(CURRENT_LEARNINGS_PATH, {})
+    if not isinstance(payload, dict) or not payload:
+        return {
+            "available": False,
+            "path": str(CURRENT_LEARNINGS_MD_PATH),
+            "items": [],
+        }
+
+    notifier = payload.get("change_notifier") if isinstance(payload.get("change_notifier"), dict) else {}
+    items = []
+    for item in list(notifier.get("items") or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        items.append(
+            {
+                "source": str(item.get("source") or "learning"),
+                "urgency": str(item.get("urgency") or "info"),
+                "headline": _trim_text(item.get("headline") or "Learning change", 150),
+                "detail": _trim_text(item.get("detail") or "", 180) or None,
+            }
+        )
+
+    return {
+        "available": True,
+        "path": str(CURRENT_LEARNINGS_MD_PATH),
+        "generated_at": payload.get("generated_at"),
+        "headline": notifier.get("headline"),
+        "change_count": int(notifier.get("change_count") or len(payload.get("changes_since_previous") or [])),
+        "material_change_count": int(notifier.get("material_change_count") or 0),
+        "attention_change_count": int(notifier.get("attention_change_count") or 0),
+        "recommended_action": notifier.get("recommended_action"),
+        "items": items,
+    }
+
+
+def _priority_rank(value: Any) -> int:
+    return {"P1": 0, "P2": 1, "P3": 2}.get(str(value or "P3").upper(), 9)
+
+
+def _review_recommendations() -> list[dict[str, Any]]:
+    recommendations: list[dict[str, Any]] = []
+
+    tech_debt_payload = _load_json(TECH_DEBT_TRIAGE_PATH, {})
+    tech_debt_items = tech_debt_payload.get("items") if isinstance(tech_debt_payload, dict) else []
+    if isinstance(tech_debt_items, list):
+        for item in tech_debt_items:
+            if not isinstance(item, dict):
+                continue
+            recommendations.append(
+                {
+                    "priority": str(item.get("priority") or "P3"),
+                    "source": "tech_debt_triage",
+                    "mode": "propose-only",
+                    "title": str(item.get("title") or "Tech debt item"),
+                    "summary": str(item.get("symptom") or item.get("root_cause") or "Tech debt follow-through is recommended.").strip(),
+                    "next_action": (
+                        f"{item.get('recommended_fix_type') or 'Cleanup'} via "
+                        f"{item.get('suggested_owner_skill') or 'duck-tech-debt-triage'}."
+                    ),
+                    "recommendation_type": str(item.get("recommended_fix_type") or "cleanup"),
+                    "suggested_owner_skill": str(item.get("suggested_owner_skill") or "duck-tech-debt-triage"),
+                }
+            )
+
+    reliability_payload = _load_json(RELIABILITY_REVIEW_PATH, {})
+    reliability_reviews = reliability_payload.get("reviews") if isinstance(reliability_payload, dict) else []
+    if isinstance(reliability_reviews, list):
+        for review in reliability_reviews:
+            if not isinstance(review, dict):
+                continue
+            go_decision = str(review.get("go_decision") or "").strip().lower()
+            status = str(review.get("status") or "").strip().lower()
+            required_fixes = list(review.get("required_rollout_fixes") or [])
+            recommendations.append(
+                {
+                    "priority": "P1" if go_decision == "no-go" or status == "bad" else "P2",
+                    "source": "reliability_review",
+                    "mode": "observe-only" if go_decision == "no-go" else "propose-only",
+                    "title": f"{review.get('label') or 'Lane'} rollout guardrail",
+                    "summary": str(review.get("lane_summary") or "Reliability review flagged this lane for follow-through.").strip(),
+                    "next_action": str(required_fixes[0] if required_fixes else "Review lock, timeout, freshness, and artifact proof before promoting this lane."),
+                    "recommendation_type": "reliability hardening",
+                    "suggested_owner_skill": "duck-reliability-review",
+                }
+            )
+
+    data_model_payload = _load_json(DATA_MODEL_GOVERNANCE_REVIEW_PATH, {})
+    data_model_surfaces = data_model_payload.get("surfaces") if isinstance(data_model_payload, dict) else []
+    if isinstance(data_model_surfaces, list):
+        for surface in data_model_surfaces:
+            if not isinstance(surface, dict):
+                continue
+            issues = [str(item).strip() for item in list(surface.get("issues") or []) if str(item).strip()]
+            if not issues:
+                continue
+            issue_text = issues[0]
+            issue_lower = " ".join(issues).lower()
+            priority = "P1" if ("missing" in issue_lower or "out of sync" in issue_lower) else "P2"
+            surface_name = str(surface.get("surface") or "surface")
+            recommendations.append(
+                {
+                    "priority": priority,
+                    "source": "data_model_governance_review",
+                    "mode": "propose-only",
+                    "title": f"{surface_name} contract drift risk",
+                    "summary": issue_text,
+                    "next_action": f"Refresh the canonical writer/reader contract for {surface_name} and rebuild the operator-facing artifact set.",
+                    "recommendation_type": "data model cleanup",
+                    "suggested_owner_skill": "duck-data-model-governance",
+                }
+            )
+
+    deduped: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for item in sorted(recommendations, key=lambda row: (_priority_rank(row.get("priority")), str(row.get("title") or ""))):
+        key = (str(item.get("source") or ""), str(item.get("title") or ""))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(item)
+    return deduped[:8]
 
 
 def _competitor_social_snapshot_status() -> dict[str, Any]:
@@ -450,8 +638,11 @@ def build_engineering_governance_digest() -> dict[str, Any]:
     repo_statuses = [_repo_status(name, path) for name, path in REPOS.items()]
     health_summary, health_findings = _top_health_findings()
     competitor_snapshot_status = _competitor_social_snapshot_status()
+    business_desk_highlights = _business_desk_highlights()
+    learning_change_highlights = _learning_change_highlights()
     observe_review_statuses = _observe_review_statuses()
     observe_review_statuses.append(competitor_snapshot_status)
+    review_recommendations = _review_recommendations()
     findings = _build_findings(skill_statuses, repo_statuses, health_summary, health_findings, competitor_snapshot_status)
     if missing_skills:
         next_step = "Build the remaining governance/learning skills and keep scheduled skill-backed work at Tier 0/Tier 1 until the digest lane is trusted."
@@ -467,6 +658,13 @@ def build_engineering_governance_digest() -> dict[str, Any]:
         "skill_statuses": skill_statuses,
         "repo_statuses": repo_statuses,
         "observe_review_statuses": observe_review_statuses,
+        "review_recommendations": review_recommendations,
+        "review_recommendation_summary": {
+            "count": len(review_recommendations),
+            "top_priority_count": sum(1 for item in review_recommendations if str(item.get("priority") or "").upper() == "P1"),
+        },
+        "business_desk_highlights": business_desk_highlights,
+        "learning_change_highlights": learning_change_highlights,
         "health_summary": health_summary,
         "health_findings": health_findings,
         "findings": findings,
@@ -496,6 +694,69 @@ def render_engineering_governance_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Type: `{finding.get('kind')}`")
         lines.append(f"- Summary: {finding.get('summary')}")
         lines.append(f"- Next action: {finding.get('next_action')}")
+        lines.append("")
+
+    lines.extend(["## Recommended Follow-Through", ""])
+    recommendations = payload.get("review_recommendations") or []
+    if not recommendations:
+        lines.append("No observe-only review recommendations are available yet.")
+        lines.append("")
+    else:
+        for item in recommendations:
+            lines.append(f"### {item.get('priority')} · {item.get('title')}")
+            lines.append(f"- Source: `{item.get('source')}`")
+            lines.append(f"- Mode: `{item.get('mode')}`")
+            lines.append(f"- Type: `{item.get('recommendation_type')}`")
+            lines.append(f"- Owner skill: `{item.get('suggested_owner_skill')}`")
+            lines.append(f"- Summary: {item.get('summary')}")
+            lines.append(f"- Next action: {item.get('next_action')}")
+            lines.append("")
+
+    lines.extend(["## Business Desk Highlights", ""])
+    business_desk = payload.get("business_desk_highlights") or {}
+    if not business_desk.get("available"):
+        lines.append("Business desk highlights are not available yet.")
+        lines.append("")
+    else:
+        lines.append(f"- Desk page: `{business_desk.get('path')}`")
+        lines.append(f"- Desk generated: `{business_desk.get('generated_at') or 'unknown'}`")
+        for item in business_desk.get("counts") or []:
+            lines.append(f"- {item.get('label')}: `{item.get('count')}`")
+        actions = business_desk.get("next_actions") or []
+        if actions:
+            lines.append("- Do next:")
+            for item in actions:
+                lines.append(
+                    f"  - {item.get('lane') or 'desk'} | {item.get('title') or 'Next action'} | {item.get('summary') or ''}"
+                )
+                if item.get("command"):
+                    lines.append(f"    Command: {item.get('command')}")
+        lines.append("")
+
+    lines.extend(["## Learning Change Highlights", ""])
+    learning_changes = payload.get("learning_change_highlights") or {}
+    if not learning_changes.get("available"):
+        lines.append("Learning change highlights are not available yet.")
+        lines.append("")
+    else:
+        lines.append(f"- Learnings page: `{learning_changes.get('path')}`")
+        lines.append(f"- Learnings generated: `{learning_changes.get('generated_at') or 'unknown'}`")
+        lines.append(f"- Total changes observed: `{learning_changes.get('change_count') or 0}`")
+        lines.append(f"- Material changes: `{learning_changes.get('material_change_count') or 0}`")
+        lines.append(f"- Attention-level changes: `{learning_changes.get('attention_change_count') or 0}`")
+        if learning_changes.get("headline"):
+            lines.append(f"- Notifier: {learning_changes.get('headline')}")
+        if learning_changes.get("recommended_action"):
+            lines.append(f"- Review command: `{learning_changes.get('recommended_action')}`")
+        items = learning_changes.get("items") or []
+        if items:
+            lines.append("- Highlights:")
+            for item in items:
+                lines.append(
+                    f"  - `{item.get('urgency') or 'info'}` | `{item.get('source') or 'learning'}` | {item.get('headline') or ''}"
+                )
+                if item.get("detail"):
+                    lines.append(f"    Detail: {item.get('detail')}")
         lines.append("")
 
     lines.extend(["## Skill Status", ""])
@@ -547,6 +808,80 @@ def render_engineering_governance_email(payload: dict[str, Any], *, render_repor
             )
         )
 
+    business_desk = payload.get("business_desk_highlights") or {}
+    if business_desk.get("available"):
+        count_html = "".join(
+            f"<li><strong>{html_lib.escape(str(item.get('label') or 'Desk metric'))}:</strong> {int(item.get('count') or 0)}</li>"
+            for item in (business_desk.get("counts") or [])[:5]
+        )
+        action_html = ""
+        actions = business_desk.get("next_actions") or []
+        if actions:
+            action_html = "<div style=\"margin-top:12px;\"><strong>Do next:</strong><ul style=\"margin:8px 0 0 18px;padding:0;\">"
+            for item in actions[:3]:
+                lane = html_lib.escape(str(item.get("lane") or "desk"))
+                title = html_lib.escape(str(item.get("title") or "Next action"))
+                summary = html_lib.escape(str(item.get("summary") or ""))
+                command = html_lib.escape(str(item.get("command") or ""))
+                secondary = html_lib.escape(str(item.get("secondary_command") or ""))
+                action_html += f"<li><strong>{lane}</strong> · {title}<br />{summary}"
+                if command:
+                    action_html += f"<br /><span style=\"color:#6b7280;\">Next: {command}</span>"
+                if secondary:
+                    action_html += f"<br /><span style=\"color:#9ca3af;\">Then: {secondary}</span>"
+                action_html += "</li>"
+            action_html += "</ul></div>"
+        finding_cards.append(
+            report_card(
+                "Business Desk Highlights",
+                (
+                    f"<div style=\"color:#374151;\">Generated: {html_lib.escape(str(business_desk.get('generated_at') or 'unknown'))}</div>"
+                    f"<ul style=\"margin:12px 0 0 18px;padding:0;\">{count_html}</ul>"
+                    f"{action_html}"
+                ),
+                eyebrow="Operator desk",
+            )
+        )
+
+    learning_changes = payload.get("learning_change_highlights") or {}
+    if learning_changes.get("available"):
+        change_html = "".join(
+            (
+                f"<li><strong>{html_lib.escape(str(item.get('urgency') or 'info'))}</strong> · "
+                f"{html_lib.escape(str(item.get('source') or 'learning'))} · "
+                f"{html_lib.escape(str(item.get('headline') or 'Learning change'))}"
+                + (
+                    f"<br /><span style=\"color:#6b7280;\">{html_lib.escape(str(item.get('detail') or ''))}</span>"
+                    if item.get("detail")
+                    else ""
+                )
+                + "</li>"
+            )
+            for item in (learning_changes.get("items") or [])[:4]
+        )
+        change_meta = (
+            f"<div style=\"color:#374151;\">{html_lib.escape(str(learning_changes.get('headline') or 'No material learning change needs operator action right now.'))}</div>"
+            f"<ul style=\"margin:12px 0 0 18px;padding:0;\">"
+            f"<li><strong>Total changes:</strong> {int(learning_changes.get('change_count') or 0)}</li>"
+            f"<li><strong>Material changes:</strong> {int(learning_changes.get('material_change_count') or 0)}</li>"
+            f"<li><strong>Attention-level:</strong> {int(learning_changes.get('attention_change_count') or 0)}</li>"
+            "</ul>"
+        )
+        if change_html:
+            change_meta += f"<div style=\"margin-top:12px;\"><strong>Highlights:</strong><ul style=\"margin:8px 0 0 18px;padding:0;\">{change_html}</ul></div>"
+        if learning_changes.get("recommended_action"):
+            change_meta += (
+                f"<div style=\"margin-top:12px;color:#6b7280;\"><strong>Next:</strong> "
+                f"{html_lib.escape(str(learning_changes.get('recommended_action') or ''))}</div>"
+            )
+        finding_cards.append(
+            report_card(
+                "Learning Change Highlights",
+                change_meta,
+                eyebrow="Current learnings",
+            )
+        )
+
     html = render_report_email(
         label="Duck Ops Engineering",
         title="Engineering Governance Digest",
@@ -554,6 +889,7 @@ def render_engineering_governance_email(payload: dict[str, Any], *, render_repor
         body_html="".join(finding_cards),
         stats=[
             ("Findings", len(payload.get("findings") or [])),
+            ("Recommendations", len(payload.get("review_recommendations") or [])),
             ("Missing skills", sum(1 for item in (payload.get("skill_statuses") or []) if not item.get("present"))),
             ("Review lanes", sum(1 for item in (payload.get("observe_review_statuses") or []) if item.get("present"))),
             ("Health alerts", len(payload.get("health_findings") or [])),
@@ -570,6 +906,40 @@ def render_engineering_governance_email(payload: dict[str, Any], *, render_repor
     for finding in (payload.get("findings") or [])[:5]:
         text_lines.append(f"- {finding.get('priority')} {finding.get('title')}: {finding.get('summary')}")
         text_lines.append(f"  Next: {finding.get('next_action')}")
+    recommendations = payload.get("review_recommendations") or []
+    if recommendations:
+        text_lines.extend(["", "Recommended follow-through:"])
+        for item in recommendations[:3]:
+            text_lines.append(f"- {item.get('priority')} {item.get('title')}: {item.get('summary')}")
+            text_lines.append(f"  Next: {item.get('next_action')}")
+    if business_desk.get("available"):
+        text_lines.extend(["", "Business desk highlights:"])
+        text_lines.append(f"- Generated: {business_desk.get('generated_at') or 'unknown'}")
+        for item in (business_desk.get("counts") or [])[:5]:
+            text_lines.append(f"- {item.get('label')}: {int(item.get('count') or 0)}")
+        actions = business_desk.get("next_actions") or []
+        if actions:
+            text_lines.append("- Do next:")
+            for item in actions[:3]:
+                text_lines.append(
+                    f"  - {item.get('lane') or 'desk'} | {item.get('title') or 'Next action'}: {item.get('summary') or ''}"
+                )
+                if item.get("command"):
+                    text_lines.append(f"    Next: {item.get('command')}")
+    if learning_changes.get("available"):
+        text_lines.extend(["", "Learning change highlights:"])
+        text_lines.append(f"- {learning_changes.get('headline') or 'No material learning change needs operator action right now.'}")
+        text_lines.append(f"- Total changes: {int(learning_changes.get('change_count') or 0)}")
+        text_lines.append(f"- Material changes: {int(learning_changes.get('material_change_count') or 0)}")
+        text_lines.append(f"- Attention-level changes: {int(learning_changes.get('attention_change_count') or 0)}")
+        for item in (learning_changes.get("items") or [])[:4]:
+            text_lines.append(
+                f"- {item.get('urgency') or 'info'} | {item.get('source') or 'learning'}: {item.get('headline') or ''}"
+            )
+            if item.get("detail"):
+                text_lines.append(f"  Detail: {item.get('detail')}")
+        if learning_changes.get("recommended_action"):
+            text_lines.append(f"- Next: {learning_changes.get('recommended_action')}")
     return subject, "\n".join(text_lines).strip(), html
 
 

@@ -51,6 +51,8 @@ CUSTOMER_CASES_PATH = ROOT / "state" / "normalized" / "customer_cases.json"
 CUSTOM_DESIGN_CASES_PATH = ROOT / "state" / "normalized" / "custom_design_cases.json"
 PRINT_QUEUE_CANDIDATES_PATH = ROOT / "state" / "normalized" / "print_queue_candidates.json"
 ETSY_BROWSER_CAPTURES_PATH = ROOT / "state" / "etsy_conversation_browser_captures.json"
+PACKING_SUMMARY_PATH = ROOT / "state" / "normalized" / "packing_summary.json"
+ORDER_SNAPSHOT_REFRESH_STATE_PATH = ROOT / "state" / "order_snapshot_refresh.json"
 NIGHTLY_ACTION_SUMMARY_STATE_PATH = ROOT / "state" / "nightly_action_summary.json"
 NIGHTLY_ACTION_SUMMARY_OPERATOR_JSON_PATH = ROOT / "output" / "operator" / "nightly_action_summary.json"
 NIGHTLY_ACTION_SUMMARY_OPERATOR_MD_PATH = ROOT / "output" / "operator" / "nightly_action_summary.md"
@@ -100,7 +102,73 @@ def _run_customer_inbox_refresh_preflight(limit: int = 3, timeout_seconds: int =
     return payload if isinstance(payload, dict) else None
 
 
-def refresh_nightly_action_summary_sources() -> None:
+def _default_packing_summary(now_local: datetime) -> dict[str, Any]:
+    return {
+        "generated_at": now_local.isoformat(),
+        "counts": {},
+        "orders_to_pack": [],
+        "custom_orders_to_make": [],
+    }
+
+
+def _default_order_snapshot_refresh_state(now_local: datetime) -> dict[str, Any]:
+    return {
+        "generated_at": now_local.isoformat(),
+        "state": "missing",
+        "state_reason": "order_snapshot_refresh_missing",
+        "next_action": "Run the standalone order refresh lane before relying on the packing summary.",
+        "sources": {},
+        "counts": {},
+        "workflow_control": {
+            "state": "missing",
+            "state_reason": "order_snapshot_refresh_missing",
+            "updated_at": now_local.isoformat(),
+            "next_action": "Run the standalone order refresh lane before relying on the packing summary.",
+        },
+    }
+
+
+def load_cached_order_refresh_artifacts(now_local: datetime | None = None) -> dict[str, Any]:
+    now_local = now_local or datetime.now().astimezone()
+    packing_summary = load_json(PACKING_SUMMARY_PATH, _default_packing_summary(now_local))
+    if not isinstance(packing_summary, dict):
+        packing_summary = _default_packing_summary(now_local)
+    else:
+        packing_summary = copy.deepcopy(packing_summary)
+
+    refresh_state = load_json(ORDER_SNAPSHOT_REFRESH_STATE_PATH, {})
+    if not isinstance(refresh_state, dict):
+        refresh_state = {}
+    else:
+        refresh_state = copy.deepcopy(refresh_state)
+
+    snapshot_refresh = packing_summary.get("snapshot_refresh")
+    if not refresh_state and isinstance(snapshot_refresh, dict):
+        refresh_state = copy.deepcopy(snapshot_refresh)
+
+    if not refresh_state:
+        refresh_state = _default_order_snapshot_refresh_state(now_local)
+
+    packing_summary.setdefault(
+        "generated_at",
+        str(refresh_state.get("packing_summary_generated_at") or refresh_state.get("generated_at") or now_local.isoformat()),
+    )
+    if not isinstance(packing_summary.get("counts"), dict):
+        packing_summary["counts"] = {}
+    if not isinstance(packing_summary.get("orders_to_pack"), list):
+        packing_summary["orders_to_pack"] = []
+    if not isinstance(packing_summary.get("custom_orders_to_make"), list):
+        packing_summary["custom_orders_to_make"] = []
+    refresh_state.setdefault("packing_summary_generated_at", packing_summary.get("generated_at"))
+    packing_summary["snapshot_refresh"] = refresh_state
+
+    return {
+        "packing_summary": packing_summary,
+        "refresh_state": refresh_state,
+    }
+
+
+def refresh_nightly_action_summary_sources(*, skip_order_refresh: bool = False) -> None:
     now_local = datetime.now().astimezone()
     customer_refresh_preflight = _run_customer_inbox_refresh_preflight()
     customer_cases_payload = load_json(CUSTOMER_CASES_PATH, {"items": []})
@@ -130,8 +198,14 @@ def refresh_nightly_action_summary_sources() -> None:
         "items": packet_items,
     }
     CUSTOMER_ACTION_PACKETS_PATH.write_text(json.dumps(packet_payload, indent=2), encoding="utf-8")
-    order_refresh = refresh_order_snapshots()
-    packing_summary = order_refresh.get("packing_summary") or {"orders_to_pack": [], "custom_orders_to_make": []}
+    if skip_order_refresh:
+        cached_order_refresh = load_cached_order_refresh_artifacts(now_local=now_local)
+        packing_summary = cached_order_refresh.get("packing_summary") or _default_packing_summary(now_local)
+        order_refresh_state = cached_order_refresh.get("refresh_state") or _default_order_snapshot_refresh_state(now_local)
+    else:
+        order_refresh = refresh_order_snapshots()
+        packing_summary = order_refresh.get("packing_summary") or _default_packing_summary(now_local)
+        order_refresh_state = order_refresh.get("refresh_state") or _default_order_snapshot_refresh_state(now_local)
     etsy_browser_sync = build_etsy_conversation_browser_sync(
         customer_issue_items,
         customer_packets=packet_payload,
@@ -145,7 +219,7 @@ def refresh_nightly_action_summary_sources() -> None:
         etsy_browser_sync=etsy_browser_sync,
         now_local=now_local,
     )
-    summary_payload["order_snapshot_refresh"] = order_refresh.get("refresh_state") or {}
+    summary_payload["order_snapshot_refresh"] = order_refresh_state
     if customer_refresh_preflight:
         summary_payload["customer_inbox_refresh_preflight"] = customer_refresh_preflight
     markdown = render_nightly_action_summary_markdown(summary_payload)
@@ -1318,6 +1392,7 @@ def _business_desk_whatsapp_lines(payload: dict[str, Any]) -> list[str]:
         f"Custom builds: {int(counts.get('custom_build_candidates') or 0)}",
         f"Pack tonight units: {int(counts.get('orders_to_pack_units') or 0)}",
         f"Creative reviews: {int(counts.get('review_queue_items') or 0)}",
+        f"Social plan ready: {int(counts.get('strategy_ready_slots') or 0)}",
         f"Workflow follow-through: {int(counts.get('workflow_followthrough_items') or 0)}",
     ]
     if next_actions:
@@ -1349,6 +1424,7 @@ def build_business_desk_whatsapp_operator_push(state: dict[str, Any]) -> dict[st
         + int(counts.get("custom_build_candidates") or 0)
         + int(counts.get("orders_to_pack_units") or 0)
         + int(counts.get("review_queue_items") or 0)
+        + int(counts.get("strategy_ready_slots") or 0)
         + int(counts.get("workflow_followthrough_items") or 0)
     )
     if actionable_count <= 0 and not next_actions:
@@ -1571,16 +1647,31 @@ def send_whatsapp_message(
         subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
+def preview_message_text(msg: EmailMessage, artifact: dict[str, Any]) -> str:
+    preview_part = msg.get_body(preferencelist=("plain", "html"))
+    if preview_part is not None:
+        return str(preview_part.get_content())
+    md_path = artifact.get("md_path")
+    if isinstance(md_path, Path) and md_path.exists():
+        return md_path.read_text(encoding="utf-8")
+    return json.dumps(artifact.get("payload", {}), indent=2)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Send or preview OpenClaw digest and urgent alerts.")
     parser.add_argument("--dry-run", action="store_true", help="Preview notifications without sending mail.")
+    parser.add_argument(
+        "--skip-order-refresh",
+        action="store_true",
+        help="Reuse the latest saved order snapshots and packing summary instead of refreshing them live.",
+    )
     args = parser.parse_args()
 
     settings = notifier_settings()
     state = load_json(STATE_PATH, {"sent": {}})
     state.setdefault("sent", {})
     try:
-        refresh_nightly_action_summary_sources()
+        refresh_nightly_action_summary_sources(skip_order_refresh=args.skip_order_refresh)
     except Exception as exc:
         print(f"[notifier] Warning: could not refresh nightly action summary sources: {exc}", file=sys.stderr)
     try:
@@ -1619,7 +1710,7 @@ def main() -> int:
             print(f"TO :: {msg['To']}")
             print(f"SOURCE :: {artifact['json_path']}")
             print("---")
-            print(msg.get_content()[:2000])
+            print(preview_message_text(msg, artifact)[:2000])
             print("===")
             continue
 

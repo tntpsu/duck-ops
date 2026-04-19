@@ -42,6 +42,7 @@ from review_reply_discovery import (
     session_is_open,
 )
 from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
+from etsy_browser_guard import cleanup_stale_playwright_processes
 from workflow_control import record_workflow_transition
 
 
@@ -386,17 +387,22 @@ def cleanup_review_reply_browsers(*, force_kill_temp_profiles: bool = False) -> 
 
     forced_cleanup = None
     if force_kill_temp_profiles:
-        kill = subprocess.run(
-            ["pkill", "-f", "playwright_chromiumdev_profile"],
-            capture_output=True,
-            text=True,
-            check=False,
+        forced_cleanup = cleanup_stale_playwright_processes(
+            stale_after_seconds=0,
+            force=True,
+            reason="review_reply_browser_cleanup",
+            respect_keepalive=False,
         )
-        forced_cleanup = {
-            "returncode": kill.returncode,
-            "stdout": (kill.stdout or "").strip() or None,
-            "stderr": (kill.stderr or "").strip() or None,
-        }
+    cleanup_suffix = "."
+    if forced_cleanup:
+        cleaned_groups = int(forced_cleanup.get("killed_group_count") or 0)
+        if cleaned_groups > 0:
+            cleanup_suffix = (
+                f" and force-cleaned {cleaned_groups} lingering Playwright browser group"
+                f"{'' if cleaned_groups == 1 else 's'}."
+            )
+        else:
+            cleanup_suffix = " and confirmed there were no lingering Playwright browser groups to clean."
 
     return {
         "ok": True,
@@ -404,7 +410,7 @@ def cleanup_review_reply_browsers(*, force_kill_temp_profiles: bool = False) -> 
         "message": (
             f"Closed {closed_count} review-reply automation browser session"
             f"{'' if closed_count == 1 else 's'}"
-            + (" and force-cleaned temp Playwright Chrome profiles." if force_kill_temp_profiles else ".")
+            + cleanup_suffix
         ),
         "open_before_count": open_before_count,
         "closed_count": closed_count,

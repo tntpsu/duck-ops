@@ -161,7 +161,11 @@ class CurrentLearningsTests(unittest.TestCase):
                 payload = current_learnings.build_current_learnings()
 
             self.assertEqual(len(payload["current_beliefs"]), 5)
-            self.assertEqual(len(payload["changes_since_previous"]), 6)
+            self.assertEqual(len(payload["changes_since_previous"]), 7)
+            self.assertIn(
+                "competitor_social_freshness_degraded",
+                {item.get("kind") for item in payload["changes_since_previous"] if isinstance(item, dict)},
+            )
             self.assertTrue(payload["ideas_to_test"])
             self.assertEqual(payload["summary"]["competitor_social_post_count"], 12)
             self.assertEqual(payload["summary"]["competitor_social_snapshot_generated_at"], "2026-04-15T09:00:00-04:00")
@@ -364,6 +368,111 @@ class CurrentLearningsTests(unittest.TestCase):
             markdown = markdown_path.read_text(encoding="utf-8")
             self.assertIn("Live canary truth", markdown)
             self.assertIn("Live canary-limited accounts", markdown)
+
+    def test_build_current_learnings_change_notifier_surfaces_material_changes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            social_path = root / "state" / "social_performance_rollups.json"
+            competitor_path = root / "state" / "social_competitor_benchmark.json"
+            competitor_social_path = root / "state" / "competitor_social_benchmark.json"
+            competitor_snapshots_path = root / "state" / "competitor_social_snapshots.json"
+            weekly_strategy_path = root / "state" / "weekly_strategy_recommendation_packet.json"
+            state_path = root / "state" / "current_learnings.json"
+            operator_json_path = root / "output" / "operator" / "current_learnings.json"
+            markdown_path = root / "output" / "operator" / "current_learnings.md"
+            social_path.parent.mkdir(parents=True, exist_ok=True)
+            social_path.write_text(json.dumps({"summary": {"post_count": 1, "metrics_coverage_pct": 100.0}}), encoding="utf-8")
+            competitor_path.write_text(json.dumps({"summary": {}}), encoding="utf-8")
+            competitor_social_path.write_text(json.dumps({"summary": {"post_count": 4}}), encoding="utf-8")
+            competitor_snapshots_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": "2026-04-16T09:00:00-04:00",
+                        "summary": {
+                            "post_count": 4,
+                            "collected_account_count": 3,
+                            "live_account_count": 1,
+                            "cached_account_count": 2,
+                            "degraded_account_count": 1,
+                            "failed_account_count": 0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            weekly_strategy_path.write_text(
+                json.dumps(
+                    {
+                        "social_plan": {
+                            "headline": "Keep the best lane, but flag misses quickly.",
+                            "execution_feedback": {
+                                "recommended_lane_executed": 0,
+                                "alternate_lane_executed": 0,
+                                "different_lane_executed": 0,
+                                "awaiting_slot": 0,
+                                "no_post_observed": 1,
+                                "review_slot": 0,
+                            },
+                            "slots": [
+                                {
+                                    "slot": "Slot 3",
+                                    "calendar_date": "2026-04-16",
+                                    "calendar_label": "Thursday evening",
+                                    "suggested_lane": "jeepfact",
+                                    "tracking_status": "no_post_observed",
+                                    "tracking_note": "No observed social post was found for the target date yet.",
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "summary": {
+                            "competitor_social_freshness_label": "live",
+                        },
+                        "weekly_strategy_feedback": {
+                            "slot_outcomes": [
+                                {
+                                    "slot": "Slot 3",
+                                    "tracking_status": "awaiting_slot",
+                                    "suggested_lane": "jeepfact",
+                                }
+                            ]
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(current_learnings, "SOCIAL_ROLLUPS_PATH", social_path), patch.object(
+                current_learnings, "COMPETITOR_BENCHMARK_PATH", competitor_path
+            ), patch.object(
+                current_learnings, "COMPETITOR_SOCIAL_BENCHMARK_PATH", competitor_social_path
+            ), patch.object(
+                current_learnings, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", competitor_snapshots_path
+            ), patch.object(
+                current_learnings, "WEEKLY_STRATEGY_PACKET_PATH", weekly_strategy_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_STATE_PATH", state_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_OPERATOR_JSON_PATH", operator_json_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_MD_PATH", markdown_path
+            ):
+                payload = current_learnings.build_current_learnings()
+
+            notifier = payload["change_notifier"]
+            self.assertTrue(notifier["available"])
+            self.assertGreaterEqual(notifier["material_change_count"], 2)
+            self.assertTrue(any(item["kind"] == "weekly_strategy_slot_missed" for item in notifier["items"]))
+            self.assertTrue(any(item["kind"] == "competitor_social_freshness_degraded" for item in notifier["items"]))
+            markdown = markdown_path.read_text(encoding="utf-8")
+            self.assertIn("## Change Notifier", markdown)
+            self.assertIn("Competitor social freshness degraded", markdown)
 
 
 if __name__ == "__main__":

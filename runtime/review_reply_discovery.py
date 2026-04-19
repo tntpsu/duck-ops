@@ -18,7 +18,7 @@ import os
 import re
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -37,6 +37,7 @@ DISCOVERY_SESSION_STATE_PATH = STATE_DIR / "review_reply_discovery_sessions.json
 DISCOVERY_CONFIG_PATH = CONFIG_DIR / "review_reply_discovery.json"
 DEFAULT_ETSY_REVIEWS_URL = "https://www.etsy.com/your/shops/me/dashboard"
 PWCLI_PATH = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "skills" / "playwright" / "scripts" / "playwright_cli.sh"
+MANUAL_BROWSER_KEEPALIVE_HOURS = 2
 
 
 def now_iso() -> str:
@@ -233,6 +234,10 @@ def launch_browser_session(session: str, url: str) -> dict[str, Any]:
         start_new_session=True,
         cwd=str(Path.cwd()),
     )
+    try:
+        process_group_id = os.getpgid(process.pid)
+    except Exception:
+        process_group_id = None
 
     deadline = time.time() + 20
     last_error = None
@@ -243,6 +248,7 @@ def launch_browser_session(session: str, url: str) -> dict[str, Any]:
                 "session_name": session,
                 "url": url,
                 "pid": process.pid,
+                "process_group_id": process_group_id,
                 "launched_at": now_iso(),
                 "log_path": str(log_path),
                 "ready": True,
@@ -256,6 +262,7 @@ def launch_browser_session(session: str, url: str) -> dict[str, Any]:
         "session_name": session,
         "url": url,
         "pid": process.pid,
+        "process_group_id": process_group_id,
         "launched_at": now_iso(),
         "log_path": str(log_path),
         "ready": False,
@@ -866,15 +873,25 @@ def main() -> int:
             raise SystemExit(f"Unknown probe id for auth launch: {probe_id}")
         session_name = args.session_name or entry.get("session_name") or probe_id
         state = load_session_state()
+        existing = (
+            state.get("sessions", {}).get(session_name)
+            if isinstance(state.get("sessions"), dict)
+            else {}
+        )
+        keepalive_until = (datetime.now(timezone.utc).astimezone() + timedelta(hours=MANUAL_BROWSER_KEEPALIVE_HOURS)).isoformat()
         if session_is_open(session_name):
             result = {
                 "session_name": session_name,
                 "url": entry.get("url") or DEFAULT_ETSY_REVIEWS_URL,
                 "already_open": True,
                 "launched_at": now_iso(),
+                "pid": existing.get("pid") if isinstance(existing, dict) else None,
+                "process_group_id": existing.get("process_group_id") if isinstance(existing, dict) else None,
+                "keepalive_until": keepalive_until,
             }
         else:
             result = launch_browser_session(session_name, entry.get("url") or DEFAULT_ETSY_REVIEWS_URL)
+            result["keepalive_until"] = keepalive_until
         state.setdefault("sessions", {})[session_name] = result
         save_session_state(state)
         print(json.dumps(result, indent=2))

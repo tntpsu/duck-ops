@@ -17,6 +17,17 @@ import shopify_seo_outcomes
 
 
 class ShopifySeoOutcomesTests(unittest.TestCase):
+    def test_target_issue_codes_expand_new_category_batches(self) -> None:
+        codes = shopify_seo_outcomes._target_issue_codes(
+            {"seo_category": "weak_title"},
+            {
+                "issues": [{"code": "seo_title_matches_raw_title"}],
+                "apply_seo_title": True,
+                "apply_seo_description": False,
+            },
+        )
+        self.assertEqual(codes, ["seo_title_matches_raw_title", "weak_generic_seo_title"])
+
     def test_build_shopify_seo_outcomes_classifies_recent_stable_and_open_items(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

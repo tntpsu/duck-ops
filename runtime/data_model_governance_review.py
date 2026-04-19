@@ -28,6 +28,24 @@ SURFACES = [
         "markdown": OUTPUT_OPERATOR_DIR / "engineering_governance_digest.md",
     },
     {
+        "surface": "tech_debt_triage",
+        "state_json": STATE_DIR / "tech_debt_triage.json",
+        "operator_json": None,
+        "markdown": OUTPUT_OPERATOR_DIR / "tech_debt_triage.md",
+    },
+    {
+        "surface": "reliability_review",
+        "state_json": STATE_DIR / "reliability_review.json",
+        "operator_json": None,
+        "markdown": OUTPUT_OPERATOR_DIR / "reliability_review.md",
+    },
+    {
+        "surface": "data_model_governance_review",
+        "state_json": STATE_DIR / "data_model_governance_review.json",
+        "operator_json": None,
+        "markdown": OUTPUT_OPERATOR_DIR / "data_model_governance_review.md",
+    },
+    {
         "surface": "weekly_sale_monitor",
         "state_json": STATE_DIR / "weekly_sale_monitor.json",
         "operator_json": OUTPUT_OPERATOR_DIR / "weekly_sale_monitor.json",

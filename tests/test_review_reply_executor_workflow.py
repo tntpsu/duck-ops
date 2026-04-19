@@ -15,6 +15,28 @@ import review_reply_executor
 
 
 class ReviewReplyExecutorWorkflowTests(unittest.TestCase):
+    def test_cleanup_review_reply_browsers_uses_shared_janitor_for_force_cleanup(self) -> None:
+        with (
+            patch.object(review_reply_executor, "_known_review_reply_browser_sessions", return_value=["esd"]),
+            patch.object(review_reply_executor, "session_is_open", return_value=True),
+            patch.object(review_reply_executor, "run_pw_command"),
+            patch.object(
+                review_reply_executor,
+                "cleanup_stale_playwright_processes",
+                return_value={"killed_group_count": 1},
+            ) as cleanup_mock,
+        ):
+            result = review_reply_executor.cleanup_review_reply_browsers(force_kill_temp_profiles=True)
+
+        cleanup_mock.assert_called_once_with(
+            stale_after_seconds=0,
+            force=True,
+            reason="review_reply_browser_cleanup",
+            respect_keepalive=False,
+        )
+        self.assertIn("force-cleaned 1 lingering Playwright browser group", result["message"])
+        self.assertEqual(result["closed_count"], 1)
+
     def test_annotate_attempt_failure_captures_row_not_found_breadcrumbs(self) -> None:
         attempt = {
             "session": {

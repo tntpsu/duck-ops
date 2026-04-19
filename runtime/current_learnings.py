@@ -16,6 +16,20 @@ CURRENT_LEARNINGS_STATE_PATH = DUCK_OPS_ROOT / "state" / "current_learnings.json
 CURRENT_LEARNINGS_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "current_learnings.json"
 CURRENT_LEARNINGS_MD_PATH = OUTPUT_OPERATOR_DIR / "current_learnings.md"
 
+MATERIAL_CHANGE_KINDS = {
+    "weekly_strategy_planned_lane_validated",
+    "weekly_strategy_alternate_lane_won",
+    "weekly_strategy_different_lane_won",
+    "weekly_strategy_slot_missed",
+    "competitor_social_freshness_degraded",
+    "competitor_social_freshness_recovered",
+    "competitor_social_freshness_staggered",
+}
+ATTENTION_CHANGE_KINDS = {
+    "weekly_strategy_slot_missed",
+    "competitor_social_freshness_degraded",
+}
+
 
 def _compact_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
@@ -150,6 +164,7 @@ def _changes(
     previous_current_learnings_payload: dict[str, Any],
     competitor_market_payload: dict[str, Any],
     competitor_social_payload: dict[str, Any],
+    competitor_social_freshness: dict[str, Any],
 ) -> list[dict[str, Any]]:
     changes: list[dict[str, Any]] = []
     for item in social_payload.get("changes_since_previous") or []:
@@ -163,6 +178,8 @@ def _changes(
     for item in competitor_social_payload.get("changes_since_previous") or []:
         if isinstance(item, dict):
             changes.append({"source": "competitor_social", **item})
+    for item in _competitor_social_freshness_changes(competitor_social_freshness, previous_current_learnings_payload):
+        changes.append({"source": "competitor_social_snapshot", **item})
     return changes
 
 
@@ -310,6 +327,77 @@ def _weekly_strategy_changes(
     return changes[:4]
 
 
+def _competitor_social_freshness_changes(
+    competitor_social_freshness: dict[str, Any],
+    previous_current_learnings_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    previous_summary = (
+        previous_current_learnings_payload.get("summary")
+        if isinstance(previous_current_learnings_payload.get("summary"), dict)
+        else {}
+    )
+    previous_label = _compact_text(previous_summary.get("competitor_social_freshness_label")) or "missing"
+    current_label = _compact_text(competitor_social_freshness.get("competitor_social_freshness_label")) or "missing"
+    if current_label == previous_label:
+        return []
+
+    if current_label == "live":
+        headline = "Competitor social freshness recovered to live coverage."
+        kind = "competitor_social_freshness_recovered"
+    elif current_label == "staggered":
+        headline = f"Competitor social freshness shifted into staggered cadence from `{previous_label}`."
+        kind = "competitor_social_freshness_staggered"
+    elif current_label in {"cached", "hard_failure"}:
+        headline = f"Competitor social freshness degraded from `{previous_label}` to `{current_label}`."
+        kind = "competitor_social_freshness_degraded"
+    else:
+        headline = f"Competitor social freshness changed from `{previous_label}` to `{current_label}`."
+        kind = "competitor_social_freshness_changed"
+
+    detail = _compact_text(competitor_social_freshness.get("competitor_social_freshness_note"))
+    payload = {"kind": kind, "headline": headline}
+    if detail:
+        payload["detail"] = detail
+    return [payload]
+
+
+def _change_notifier(changes: list[dict[str, Any]]) -> dict[str, Any]:
+    material_items: list[dict[str, Any]] = []
+    for item in changes:
+        kind = _compact_text(item.get("kind"))
+        if kind not in MATERIAL_CHANGE_KINDS:
+            continue
+        material_items.append(
+            {
+                "source": _compact_text(item.get("source")) or "learning",
+                "kind": kind,
+                "urgency": "attention" if kind in ATTENTION_CHANGE_KINDS else "opportunity",
+                "headline": _compact_text(item.get("headline")) or "Learning changed.",
+                "detail": _compact_text(item.get("detail")) or None,
+            }
+        )
+
+    attention_count = sum(1 for item in material_items if item.get("urgency") == "attention")
+    opportunity_count = sum(1 for item in material_items if item.get("urgency") == "opportunity")
+    if attention_count:
+        headline = f"{attention_count} attention-level learning change(s) need review in the next planning pass."
+    elif material_items:
+        headline = f"{len(material_items)} meaningful learning change(s) landed since the previous snapshot."
+    else:
+        headline = "No material learning change needs operator action right now."
+
+    return {
+        "available": True,
+        "headline": headline,
+        "change_count": len(changes),
+        "material_change_count": len(material_items),
+        "attention_change_count": attention_count,
+        "opportunity_change_count": opportunity_count,
+        "recommended_action": "review current_learnings + weekly_strategy_recommendation_packet" if material_items else None,
+        "items": material_items[:4],
+    }
+
+
 def build_current_learnings_payload() -> dict[str, Any]:
     social_payload = load_json(SOCIAL_ROLLUPS_PATH, {})
     competitor_market_payload = load_json(COMPETITOR_BENCHMARK_PATH, {})
@@ -332,6 +420,14 @@ def build_current_learnings_payload() -> dict[str, Any]:
 
     competitor_social_freshness = _competitor_social_freshness(competitor_social_snapshots_payload)
     weekly_strategy_feedback = _weekly_strategy_feedback(weekly_strategy_packet_payload)
+    changes = _changes(
+        social_payload,
+        weekly_strategy_feedback,
+        previous_current_learnings_payload,
+        competitor_market_payload,
+        competitor_social_payload,
+        competitor_social_freshness,
+    )
 
     payload = {
         "generated_at": now_local_iso(),
@@ -354,13 +450,8 @@ def build_current_learnings_payload() -> dict[str, Any]:
             competitor_market_payload,
             competitor_social_payload,
         ),
-        "changes_since_previous": _changes(
-            social_payload,
-            weekly_strategy_feedback,
-            previous_current_learnings_payload,
-            competitor_market_payload,
-            competitor_social_payload,
-        ),
+        "changes_since_previous": changes,
+        "change_notifier": _change_notifier(changes),
         "weekly_strategy_feedback": weekly_strategy_feedback,
         "best_windows": _best_windows(social_payload),
         "strongest_workflows": _strongest_workflows(social_payload),
@@ -385,6 +476,7 @@ def build_current_learnings_payload() -> dict[str, Any]:
 def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
     summary = payload.get("summary") or {}
     weekly_strategy_feedback = payload.get("weekly_strategy_feedback") if isinstance(payload.get("weekly_strategy_feedback"), dict) else {}
+    change_notifier = payload.get("change_notifier") if isinstance(payload.get("change_notifier"), dict) else {}
     lines = [
         "# Current Learnings",
         "",
@@ -454,6 +546,35 @@ def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
             if item.get("performance_note"):
                 lines.append(f"- Performance detail: {item.get('performance_note')}")
             lines.append("")
+
+    lines.extend(
+        [
+        "## Change Notifier",
+        "",
+        ]
+    )
+
+    if not change_notifier.get("available"):
+        lines.append("No change notifier is available yet.")
+        lines.append("")
+    else:
+        lines.append(str(change_notifier.get("headline") or "No material learning change needs operator action right now."))
+        lines.append("")
+        lines.append(f"- Total changes observed: `{change_notifier.get('change_count') or 0}`")
+        lines.append(f"- Material changes: `{change_notifier.get('material_change_count') or 0}`")
+        lines.append(f"- Attention-level changes: `{change_notifier.get('attention_change_count') or 0}`")
+        if change_notifier.get("recommended_action"):
+            lines.append(f"- Review command: `{change_notifier.get('recommended_action')}`")
+        notifier_items = change_notifier.get("items") or []
+        if notifier_items:
+            lines.append("- Highlights:")
+            for item in notifier_items:
+                lines.append(
+                    f"  - `{item.get('urgency') or 'info'}` | `{item.get('source') or 'learning'}` | {item.get('headline')}"
+                )
+                if item.get("detail"):
+                    lines.append(f"    Detail: {item.get('detail')}")
+        lines.append("")
 
     lines.extend(
         [

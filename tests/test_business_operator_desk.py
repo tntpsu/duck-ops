@@ -235,6 +235,80 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Why: Facebook object id is invalid.", markdown)
         self.assertIn("Fix: Fix the Meta target.", markdown)
 
+    def test_operator_desk_surfaces_engineering_governance_digest(self) -> None:
+        with patch(
+            "business_operator_desk._load_governance_surface",
+            return_value={
+                "available": True,
+                "path": "/tmp/engineering_governance_digest.md",
+                "phase_focus": "Phase 2: observe-only engineering reviews",
+                "next_step": "Run the top reliability recommendation before scheduling more overnight review work.",
+                "finding_count": 2,
+                "recommendation_count": 2,
+                "top_priority_count": 1,
+                "findings": [
+                    {
+                        "priority": "P1",
+                        "title": "Operator health is currently degraded",
+                        "summary": "Review execution is still failing.",
+                    }
+                ],
+                "recommendations": [
+                    {
+                        "priority": "P1",
+                        "source": "reliability_review",
+                        "mode": "observe-only",
+                        "title": "Review Execution rollout guardrail",
+                        "summary": "Review Execution is currently `bad` with last run state `failed`.",
+                        "next_action": "Add clearer retry and recovery receipts.",
+                        "recommendation_type": "reliability hardening",
+                        "suggested_owner_skill": "duck-reliability-review",
+                    },
+                    {
+                        "priority": "P2",
+                        "source": "tech_debt_triage",
+                        "mode": "propose-only",
+                        "title": "Weekly Sale Monitor debt review",
+                        "summary": "Weekly Sale Monitor is reporting warn with state `weak_items_present`.",
+                        "next_action": "Workflow cleanup via duck-tech-debt-triage.",
+                        "recommendation_type": "workflow cleanup",
+                        "suggested_owner_skill": "duck-tech-debt-triage",
+                    },
+                ],
+            },
+        ), patch(
+            "business_operator_desk._load_learning_surface",
+            return_value={"available": False, "path": "/tmp/current_learnings.md", "items": [], "change_count": 0, "idea_count": 0},
+        ), patch(
+            "business_operator_desk._load_weekly_strategy_packet",
+            return_value={"available": False, "path": "/tmp/weekly_strategy_recommendation_packet.md", "recommendations": [], "watchouts": [], "social_plan": {}},
+        ), patch(
+            "business_operator_desk._load_seo_outcome_surface",
+            return_value={"available": False, "path": "/tmp/shopify_seo_outcomes.md", "attention_items": [], "recent_wins": []},
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        governance_section = render_business_section(payload, "governance")
+        self.assertEqual(payload["counts"]["governance_recommendations"], 2)
+        self.assertEqual(payload["counts"]["governance_top_priority_items"], 1)
+        governance_action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "engineering_governance")
+        self.assertEqual(governance_action["title"], "Review Execution rollout guardrail")
+        self.assertIn("duck-reliability-review", governance_action["secondary_command"])
+        self.assertIn("## Engineering Governance", markdown)
+        self.assertIn("Review Execution rollout guardrail", markdown)
+        self.assertIn("Duck Ops Engineering Governance", governance_section)
+        self.assertIn("Top-priority recommendations: 1", governance_section)
+
     def test_operator_desk_surfaces_current_learnings(self) -> None:
         with patch(
             "business_operator_desk._load_learning_surface",
@@ -244,6 +318,13 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                 "items": [{"headline": "Evening is the current best-performing posting window."}],
                 "change_count": 1,
                 "idea_count": 2,
+                "material_change_count": 1,
+                "change_notifier": {
+                    "available": True,
+                    "headline": "1 attention-level learning change needs review in the next planning pass.",
+                    "recommended_action": "review current_learnings + weekly_strategy_recommendation_packet",
+                    "items": [{"headline": "Slot 3 has no observed post yet for the planned `jeepfact` slot."}],
+                },
             },
         ):
             payload = build_business_operator_desk(
@@ -259,8 +340,12 @@ class BusinessOperatorDeskTests(unittest.TestCase):
 
         markdown = render_business_operator_desk_markdown(payload)
         self.assertEqual(payload["counts"]["learning_beliefs"], 1)
+        self.assertEqual(payload["counts"]["learning_changes"], 1)
+        self.assertEqual(payload["counts"]["learning_material_changes"], 1)
         self.assertIn("## Learning Surface", markdown)
         self.assertIn("Evening is the current best-performing posting window.", markdown)
+        self.assertIn("Material learning changes", markdown)
+        self.assertIn("Slot 3 has no observed post yet", markdown)
 
     def test_operator_desk_surfaces_seo_outcomes(self) -> None:
         with patch(
@@ -488,6 +573,67 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Ready this week:", markdown)
         self.assertIn("Use: Run Meme Flow", markdown)
         self.assertIn("Then: Reply `publish` to the review email", markdown)
+
+    def test_operator_desk_next_actions_include_social_plan_slot(self) -> None:
+        with patch(
+            "business_operator_desk._load_learning_surface",
+            return_value={
+                "available": False,
+                "path": "/tmp/current_learnings.md",
+                "items": [],
+                "change_count": 0,
+                "idea_count": 0,
+            },
+        ), patch(
+            "business_operator_desk._load_weekly_strategy_packet",
+            return_value={
+                "available": True,
+                "path": "/tmp/weekly_strategy_recommendation_packet.md",
+                "recommendations": [],
+                "watchouts": [],
+                "social_plan": {
+                    "headline": "Keep meme in evening and run one bounded music test.",
+                    "readiness_counts": {
+                        "ready_now": 0,
+                        "ready_with_approval": 1,
+                        "manual_experiment": 0,
+                        "not_supported_yet": 0,
+                    },
+                    "ready_this_week": [
+                        {
+                            "slot": "Slot 1",
+                            "calendar_label": "Monday evening",
+                            "suggested_lane": "meme",
+                            "execution_readiness": "ready_with_approval",
+                            "operator_action_label": "Run Meme Flow",
+                            "command_hint": "python src/main_agent.py --flow meme --all",
+                            "approval_followthrough": "Reply `publish` to the review email after the content looks right.",
+                            "goal": "Anchor with the strongest proven workflow",
+                        }
+                    ],
+                    "slots": [],
+                    "items": [],
+                },
+            },
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        self.assertEqual(payload["counts"]["strategy_ready_slots"], 1)
+        social_action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "social_plan")
+        self.assertEqual(social_action["title"], "Slot 1: meme")
+        self.assertIn("Monday evening", social_action["summary"])
+        self.assertIn("ready_with_approval", social_action["summary"])
+        self.assertEqual(social_action["command"], "python src/main_agent.py --flow meme --all")
+        self.assertIn("Reply `publish`", social_action["secondary_command"])
 
     def test_render_business_section_learning_uses_payload_items_without_crashing(self) -> None:
         output = render_business_section(

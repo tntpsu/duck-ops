@@ -56,6 +56,24 @@ SEO_REVIEW_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         "apply_title": True,
         "apply_description": False,
     },
+    "near_duplicate_title": {
+        "label": "Near-duplicate SEO titles",
+        "issue_codes": {"near_duplicate_seo_title"},
+        "apply_title": True,
+        "apply_description": False,
+    },
+    "weak_title": {
+        "label": "Weak or raw-match SEO titles",
+        "issue_codes": {"seo_title_matches_raw_title", "weak_generic_seo_title"},
+        "apply_title": True,
+        "apply_description": False,
+    },
+    "weak_description": {
+        "label": "Weak or generic SEO descriptions",
+        "issue_codes": {"low_value_seo_copy", "weak_generic_seo_description"},
+        "apply_title": False,
+        "apply_description": True,
+    },
 }
 SEO_REVIEW_CATEGORY_ORDER = [
     "missing_title",
@@ -64,6 +82,9 @@ SEO_REVIEW_CATEGORY_ORDER = [
     "long_description",
     "short_title",
     "duplicate_title",
+    "near_duplicate_title",
+    "weak_title",
+    "weak_description",
 ]
 
 
@@ -250,6 +271,14 @@ def _default_rationale_for_resource(resource: dict[str, Any]) -> str:
         return f"Adds a missing SEO description for this {kind}."
     if "duplicate_seo_title" in issue_codes:
         return f"Helps this {kind} stand apart in search results."
+    if "near_duplicate_seo_title" in issue_codes:
+        return f"Helps this {kind} avoid blending into another similar search result."
+    if "seo_title_matches_raw_title" in issue_codes:
+        return f"Turns the raw {kind} name into a stronger search snippet."
+    if "weak_generic_seo_title" in issue_codes:
+        return f"Makes the SEO title for this {kind} more specific and click-worthy."
+    if "weak_generic_seo_description" in issue_codes or "low_value_seo_copy" in issue_codes:
+        return f"Makes the SEO description for this {kind} more specific to what shoppers will find."
     return f"Tightens weak SEO copy for this {kind}."
 
 

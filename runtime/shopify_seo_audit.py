@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -14,6 +15,105 @@ DUCK_AGENT_ROOT = DUCK_OPS_ROOT.parent / "duckAgent"
 DUCK_AGENT_VENV_PY = DUCK_AGENT_ROOT / ".venv" / "bin" / "python3"
 STATE_PATH = DUCK_OPS_ROOT / "state" / "shopify_seo_audit.json"
 OUTPUT_MD_PATH = DUCK_OPS_ROOT / "output" / "operator" / "shopify_seo_audit.md"
+
+TOKEN_RE = re.compile(r"[a-z0-9]+")
+GENERIC_TITLE_TOKENS = {
+    "and",
+    "blog",
+    "blogs",
+    "bundle",
+    "bundles",
+    "collectible",
+    "collectibles",
+    "collection",
+    "collections",
+    "dashboard",
+    "decor",
+    "duck",
+    "ducks",
+    "favorite",
+    "favorites",
+    "flock",
+    "gift",
+    "gifts",
+    "guide",
+    "guides",
+    "idea",
+    "ideas",
+    "my",
+    "myjeepduck",
+    "page",
+    "pages",
+    "product",
+    "products",
+    "shop",
+    "store",
+}
+GENERIC_DESCRIPTION_TOKENS = GENERIC_TITLE_TOKENS | {
+    "browse",
+    "built",
+    "buy",
+    "buyers",
+    "contact",
+    "custom",
+    "customers",
+    "discover",
+    "easy",
+    "explore",
+    "fans",
+    "for",
+    "from",
+    "fun",
+    "help",
+    "helps",
+    "learn",
+    "make",
+    "makes",
+    "order",
+    "orders",
+    "playful",
+    "policy",
+    "policies",
+    "quick",
+    "read",
+    "ready",
+    "review",
+    "service",
+    "services",
+    "ship",
+    "shipping",
+    "shopper",
+    "shoppers",
+    "standout",
+    "style",
+    "the",
+    "today",
+    "with",
+}
+TITLE_INTENT_TOKENS = {
+    "accessories",
+    "blog",
+    "bundle",
+    "bundles",
+    "collectible",
+    "collectibles",
+    "contact",
+    "decor",
+    "display",
+    "displays",
+    "gift",
+    "gifts",
+    "guide",
+    "guides",
+    "idea",
+    "ideas",
+    "policy",
+    "privacy",
+    "service",
+    "services",
+    "terms",
+}
+BRAND_ONLY_TOKENS = {"my", "myjeepduck", "shop", "store"}
 
 PRODUCT_FIELDS = """
 id
@@ -121,6 +221,59 @@ def _normalized_key(value: Any) -> str:
     return _normalize_text(value).lower()
 
 
+def _comparison_tokens(value: Any) -> list[str]:
+    return TOKEN_RE.findall(_normalized_key(value))
+
+
+def _meaningful_title_tokens(value: Any) -> list[str]:
+    return [token for token in _comparison_tokens(value) if len(token) > 1 and token not in GENERIC_TITLE_TOKENS]
+
+
+def _meaningful_description_tokens(value: Any) -> list[str]:
+    return [token for token in _comparison_tokens(value) if len(token) > 2 and token not in GENERIC_DESCRIPTION_TOKENS]
+
+
+def _title_matches_raw_title(seo_title: str, raw_title: Any) -> bool:
+    normalized_seo = " ".join(_comparison_tokens(seo_title))
+    normalized_raw = " ".join(_comparison_tokens(raw_title))
+    if not normalized_seo or not normalized_raw:
+        return False
+    if normalized_seo == normalized_raw:
+        return True
+    if not normalized_seo.startswith(f"{normalized_raw} "):
+        return False
+    tail_tokens = normalized_seo[len(normalized_raw) :].strip().split()
+    return bool(tail_tokens) and all(token in BRAND_ONLY_TOKENS for token in tail_tokens)
+
+
+def _has_title_intent_token(value: Any) -> bool:
+    return any(token in TITLE_INTENT_TOKENS for token in _comparison_tokens(value))
+
+
+def _is_weak_generic_seo_title(seo_title: str, raw_title: Any) -> bool:
+    if not seo_title or _title_matches_raw_title(seo_title, raw_title):
+        return False
+    seo_tokens = set(_meaningful_title_tokens(seo_title))
+    if not seo_tokens:
+        return True
+    raw_tokens = set(_meaningful_title_tokens(raw_title))
+    return bool(raw_tokens) and seo_tokens.issubset(raw_tokens) and not _has_title_intent_token(seo_title)
+
+
+def _is_weak_generic_seo_description(seo_description: str, raw_title: Any) -> bool:
+    if not seo_description:
+        return False
+    description_tokens = set(_meaningful_description_tokens(seo_description))
+    if not description_tokens:
+        return True
+    raw_tokens = set(_meaningful_title_tokens(raw_title))
+    return bool(raw_tokens) and not bool(description_tokens & raw_tokens)
+
+
+def _near_duplicate_title_key(value: Any) -> str:
+    return " ".join(_meaningful_title_tokens(value))
+
+
 def _seo_values(kind: str, node: dict[str, Any]) -> tuple[str, str, bool, bool]:
     if kind in {"product", "collection"}:
         seo = node.get("seo") if isinstance(node.get("seo"), dict) else {}
@@ -154,6 +307,7 @@ def _resource_url(kind: str, node: dict[str, Any]) -> str:
 
 def _issues_for_resource(kind: str, node: dict[str, Any]) -> list[dict[str, Any]]:
     seo_title, seo_description, has_explicit_title, has_explicit_description = _seo_values(kind, node)
+    raw_title = node.get("title")
     issues: list[dict[str, Any]] = []
 
     if not has_explicit_title:
@@ -162,6 +316,22 @@ def _issues_for_resource(kind: str, node: dict[str, Any]) -> list[dict[str, Any]
         issues.append({"code": "short_seo_title", "severity": "medium", "message": f"SEO title is short ({len(seo_title)} chars)."})
     elif len(seo_title) > 70:
         issues.append({"code": "long_seo_title", "severity": "medium", "message": f"SEO title is long ({len(seo_title)} chars)."})
+    elif _title_matches_raw_title(seo_title, raw_title):
+        issues.append(
+            {
+                "code": "seo_title_matches_raw_title",
+                "severity": "medium",
+                "message": "SEO title is too close to the raw resource title.",
+            }
+        )
+    elif _is_weak_generic_seo_title(seo_title, raw_title):
+        issues.append(
+            {
+                "code": "weak_generic_seo_title",
+                "severity": "medium",
+                "message": "SEO title is too generic and does not add enough search intent.",
+            }
+        )
 
     if not has_explicit_description:
         issues.append({"code": "missing_seo_description", "severity": "high", "message": "Missing SEO description."})
@@ -181,16 +351,30 @@ def _issues_for_resource(kind: str, node: dict[str, Any]) -> list[dict[str, Any]
                 "message": f"SEO description is long ({len(seo_description)} chars).",
             }
         )
+    elif _is_weak_generic_seo_description(seo_description, raw_title):
+        issues.append(
+            {
+                "code": "weak_generic_seo_description",
+                "severity": "medium",
+                "message": "SEO description is too generic and does not describe this resource specifically enough.",
+            }
+        )
 
     return issues
 
 
 def _decorate_duplicates(resources: list[dict[str, Any]]) -> None:
     title_map: dict[str, list[str]] = defaultdict(list)
+    near_map: dict[str, list[str]] = defaultdict(list)
+    title_text_by_id: dict[str, str] = {}
     for resource in resources:
         title_key = _normalized_key(resource.get("seo_title"))
         if title_key:
             title_map[title_key].append(resource["id"])
+        near_key = _near_duplicate_title_key(resource.get("seo_title"))
+        if near_key:
+            near_map[near_key].append(resource["id"])
+        title_text_by_id[resource["id"]] = _normalized_key(resource.get("seo_title"))
 
     for resource in resources:
         title_key = _normalized_key(resource.get("seo_title"))
@@ -205,6 +389,26 @@ def _decorate_duplicates(resources: list[dict[str, Any]]) -> None:
                 "severity": "medium",
                 "message": f"SEO title duplicates {len(duplicates)} other resource(s).",
                 "duplicates": duplicates,
+            }
+        )
+
+    for resource in resources:
+        near_key = _near_duplicate_title_key(resource.get("seo_title"))
+        if not near_key:
+            continue
+        near_duplicates = [
+            rid
+            for rid in near_map[near_key]
+            if rid != resource["id"] and title_text_by_id.get(rid) != title_text_by_id.get(resource["id"])
+        ]
+        if not near_duplicates:
+            continue
+        resource["issues"].append(
+            {
+                "code": "near_duplicate_seo_title",
+                "severity": "medium",
+                "message": f"SEO title is near-duplicate of {len(near_duplicates)} other resource(s).",
+                "duplicates": near_duplicates,
             }
         )
 

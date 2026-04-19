@@ -39,6 +39,9 @@ CATEGORY_TARGET_ISSUES = {
     "long_description": {"long_seo_description"},
     "short_title": {"short_seo_title"},
     "duplicate_title": {"duplicate_seo_title"},
+    "near_duplicate_title": {"near_duplicate_seo_title"},
+    "weak_title": {"seo_title_matches_raw_title", "weak_generic_seo_title"},
+    "weak_description": {"low_value_seo_copy", "weak_generic_seo_description"},
 }
 STATUS_ORDER = {
     "issue_still_present": 0,
