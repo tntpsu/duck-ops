@@ -151,6 +151,31 @@ def _meme_root_cause(receipt_payload: dict[str, Any]) -> str | None:
     return summary or None
 
 
+def _weekly_root_cause(item: dict[str, Any]) -> str | None:
+    receipt_payload = _load_receipt_payload(item)
+    payload = receipt_payload.get("payload") or {}
+    refresh_errors = payload.get("refresh_errors")
+    if not isinstance(refresh_errors, dict) or not refresh_errors:
+        refresh_errors = (item.get("input_freshness") or {}).get("refresh_errors")
+
+    if isinstance(refresh_errors, dict) and refresh_errors:
+        label_map = {
+            "sale_monitor_snapshot": "sale monitor",
+            "campaign_coordination_snapshot": "campaign coordination",
+        }
+        parts: list[str] = []
+        for source, error in refresh_errors.items():
+            label = label_map.get(str(source), str(source).replace("_", " "))
+            parts.append(f"{label}: {_trim_text(error, 180)}")
+        return "Weekly snapshot refresh failed. " + " | ".join(parts[:2])
+
+    freshness = item.get("input_freshness") or {}
+    missing_sources = [str(source).replace("_", " ") for source in list(freshness.get("missing_sources") or []) if str(source).strip()]
+    if missing_sources:
+        return "Required weekly inputs were missing: " + ", ".join(missing_sources[:3]) + "."
+    return None
+
+
 def _review_execution_root_cause(item: dict[str, Any]) -> str | None:
     metadata = item.get("metadata") or {}
     artifact_id = str(metadata.get("artifact_id") or item.get("entity_id") or "").strip()
@@ -306,6 +331,8 @@ def _root_cause(item: dict[str, Any], *, quality_gate_state_path: Path | None = 
     lane = str(item.get("lane") or "").strip()
     if lane == "meme":
         return _meme_root_cause(_load_receipt_payload(item))
+    if lane == "weekly" and str(item.get("state_reason") or "").strip() == "stale_input":
+        return _weekly_root_cause(item)
     if lane == "review_execution":
         return _review_execution_root_cause(item)
     if lane == "quality_gate":

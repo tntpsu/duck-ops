@@ -263,6 +263,53 @@ class WorkflowOperatorSummaryTests(unittest.TestCase):
             self.assertIsNone(items[0]["command"])
             self.assertFalse(items[0]["actionable"])
 
+    def test_weekly_stale_input_surfaces_snapshot_refresh_root_cause(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            receipt_dir = state_dir / "receipts"
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            receipt_path = receipt_dir / "weekly-stale.json"
+            receipt_path.write_text(
+                json.dumps(
+                    {
+                        "payload": {
+                            "refresh_errors": {
+                                "sale_monitor_snapshot": "No module named 'workflow_control'",
+                                "campaign_coordination_snapshot": "No module named 'workflow_control'",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (state_dir / "weekly.json").write_text(
+                json.dumps(
+                    {
+                        "lane": "weekly",
+                        "display_label": "Weekly",
+                        "state": "blocked",
+                        "state_reason": "stale_input",
+                        "next_action": "Fix weekly snapshot refresh errors, then rerun the weekly flow.",
+                        "updated_at": "2026-04-19T18:54:52-04:00",
+                        "metadata": {"theme_name": "Special Offers"},
+                        "latest_receipt": {
+                            "receipt_id": "20260419185452-weekly-sale-playbook-stale",
+                            "recorded_at": "2026-04-19T18:54:52-04:00",
+                            "path": str(receipt_path),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            items = build_workflow_followthrough_items(limit=5, state_dir=state_dir)
+
+            self.assertEqual(items[0]["lane"], "weekly")
+            self.assertIn("Weekly snapshot refresh failed.", items[0]["root_cause"])
+            self.assertIn("sale monitor: No module named 'workflow_control'", items[0]["root_cause"])
+
 
 if __name__ == "__main__":
     unittest.main()
