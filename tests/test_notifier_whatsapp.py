@@ -292,6 +292,159 @@ class NotifierWhatsAppTests(unittest.TestCase):
                 )
         self.assertFalse(any(item["kind"] == "promotion_readiness" for item in artifacts_again))
 
+    def test_build_operator_whatsapp_summary_skips_business_desk_when_disabled(self) -> None:
+        settings = {
+            "whatsapp": {
+                "enabled": True,
+                "review_operator_push_enabled": True,
+                "business_desk_operator_push_enabled": False,
+            }
+        }
+        with (
+            mock.patch.object(notifier, "build_reviews_whatsapp_operator_push", return_value=None) as review_push,
+            mock.patch.object(notifier, "build_business_desk_whatsapp_operator_push", return_value={"kind": "operator_whatsapp"}) as desk_push,
+        ):
+            result = notifier.build_operator_whatsapp_summary(settings, {})
+
+        self.assertIsNone(result)
+        review_push.assert_called_once_with({})
+        desk_push.assert_not_called()
+
+    def test_build_operator_whatsapp_summary_prefers_review_push_before_business_desk(self) -> None:
+        settings = {
+            "whatsapp": {
+                "enabled": True,
+                "review_operator_push_enabled": True,
+                "business_desk_operator_push_enabled": True,
+            }
+        }
+        expected = {"kind": "operator_whatsapp", "signature": "abc"}
+        with (
+            mock.patch.object(notifier, "build_reviews_whatsapp_operator_push", return_value=expected) as review_push,
+            mock.patch.object(notifier, "build_business_desk_whatsapp_operator_push", return_value={"kind": "operator_whatsapp"}) as desk_push,
+        ):
+            result = notifier.build_operator_whatsapp_summary(settings, {})
+
+        self.assertEqual(result, expected)
+        review_push.assert_called_once_with({})
+        desk_push.assert_not_called()
+
+    def test_build_reviews_whatsapp_operator_push_skips_non_review_quality_gate_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            operator_current_path = Path(tmpdir) / "current_review.json"
+            quality_gate_path = Path(tmpdir) / "quality_gate_state.json"
+            operator_current_path.write_text("{}", encoding="utf-8")
+            quality_gate_path.write_text(
+                """
+                {
+                  "artifacts": {
+                    "sale-1": {
+                      "decision": {
+                        "artifact_id": "sale-1",
+                        "flow": "weekly_sale",
+                        "title": "Weekly sale draft",
+                        "review_status": "pending",
+                        "reasoning": ["Looks good"],
+                        "confidence": 0.88,
+                        "priority": "high",
+                        "run_id": "run-001"
+                      }
+                    },
+                    "review-1": {
+                      "decision": {
+                        "artifact_id": "review-1",
+                        "flow": "reviews_reply_positive",
+                        "title": "Reply to customer review",
+                        "review_status": "pending",
+                        "reasoning": ["Helpful and polite"],
+                        "confidence": 0.93,
+                        "priority": "high",
+                        "run_id": "run-002"
+                      }
+                    }
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(notifier, "OPERATOR_CURRENT_PATH", operator_current_path),
+                mock.patch.object(notifier, "QUALITY_GATE_STATE_PATH", quality_gate_path),
+            ):
+                result = notifier.build_reviews_whatsapp_operator_push({})
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("Reply to customer review", result["message"])
+        self.assertNotIn("Weekly sale draft", result["message"])
+
+    def test_build_reviews_whatsapp_operator_push_allows_trend_current_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            operator_current_path = Path(tmpdir) / "current_review.json"
+            quality_gate_path = Path(tmpdir) / "quality_gate_state.json"
+            operator_current_path.write_text(
+                """
+                {
+                  "message": "Trend approval needed",
+                  "current": {
+                    "artifact_id": "trend-1",
+                    "artifact_type": "trend",
+                    "flow": "trend_ranker",
+                    "title": "Monster truck duck trend",
+                    "review_status": "pending",
+                    "preview": {
+                      "asset_url": "https://example.com/trend.png"
+                    }
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            quality_gate_path.write_text("{\"artifacts\": {}}", encoding="utf-8")
+
+            with (
+                mock.patch.object(notifier, "OPERATOR_CURRENT_PATH", operator_current_path),
+                mock.patch.object(notifier, "QUALITY_GATE_STATE_PATH", quality_gate_path),
+            ):
+                result = notifier.build_reviews_whatsapp_operator_push({})
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("Trend approval needed", result["message"])
+        self.assertEqual(result["media_urls"], ["https://example.com/trend.png"])
+
+    def test_build_reviews_whatsapp_operator_push_skips_non_review_current_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            operator_current_path = Path(tmpdir) / "current_review.json"
+            quality_gate_path = Path(tmpdir) / "quality_gate_state.json"
+            operator_current_path.write_text(
+                """
+                {
+                  "message": "Weekly sale approval needed",
+                  "current": {
+                    "artifact_id": "sale-1",
+                    "flow": "weekly_sale",
+                    "title": "Weekly sale draft",
+                    "review_status": "pending",
+                    "preview": {
+                      "asset_url": "https://example.com/sale.png"
+                    }
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            quality_gate_path.write_text("{\"artifacts\": {}}", encoding="utf-8")
+
+            with (
+                mock.patch.object(notifier, "OPERATOR_CURRENT_PATH", operator_current_path),
+                mock.patch.object(notifier, "QUALITY_GATE_STATE_PATH", quality_gate_path),
+            ):
+                result = notifier.build_reviews_whatsapp_operator_push({})
+
+        self.assertIsNone(result)
+
     @mock.patch.object(notifier, "build_business_desk_whatsapp_operator_push", return_value=None)
     @mock.patch.object(notifier, "build_reviews_whatsapp_operator_push", return_value=None)
     @mock.patch.object(notifier, "load_sendable_artifacts", return_value=[])
@@ -323,7 +476,10 @@ class NotifierWhatsAppTests(unittest.TestCase):
                 result = notifier.main()
 
         self.assertEqual(result, 0)
-        refresh_summary_mock.assert_called_once_with(skip_order_refresh=True)
+        refresh_summary_mock.assert_called_once_with(
+            skip_order_refresh=True,
+            skip_customer_refresh_preflight=False,
+        )
 
 
 if __name__ == "__main__":

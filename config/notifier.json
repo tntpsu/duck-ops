@@ -38,8 +38,13 @@
       "min_confidence": 0.72
     }
   },
+  "customer_inbox_refresh_preflight": {
+    "enabled": false
+  },
   "whatsapp": {
     "enabled": true,
+    "review_operator_push_enabled": true,
+    "business_desk_operator_push_enabled": false,
     "target": "+18148124112",
     "docker_path": "/usr/local/bin/docker",
     "gateway_container": "openclaw-openclaw-gateway-1"

@@ -1,5 +1,5 @@
 {
-  "auto_execution_enabled": true,
+  "auto_execution_enabled": false,
   "auto_queue_publish_ready_positive": true,
   "auto_queue_requires_browser_approval": true,
   "auto_drain_enabled": true,

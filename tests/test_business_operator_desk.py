@@ -664,6 +664,18 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                 },
             ),
             patch(
+                "business_operator_desk._load_meme_policy_surface",
+                return_value={"available": False},
+            ),
+            patch(
+                "business_operator_desk._load_review_carousel_policy_surface",
+                return_value={"available": False},
+            ),
+            patch(
+                "business_operator_desk._load_jeepfact_policy_surface",
+                return_value={"available": False},
+            ),
+            patch(
                 "business_operator_desk._load_review_reply_execution_surface",
                 return_value={"available": False},
             ),
@@ -698,6 +710,76 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Ready to promote: 1", promotion_section)
         self.assertIn("Duck Ops Weekly Sale Policy", policy_section)
         self.assertIn("Clean gated streak: 3", policy_section)
+
+    def test_operator_desk_surfaces_meme_policy_promotion_readiness(self) -> None:
+        with (
+            patch(
+                "business_operator_desk._load_weekly_sale_policy_surface",
+                return_value={"available": False},
+            ),
+            patch(
+                "business_operator_desk._load_meme_policy_surface",
+                return_value={
+                    "available": True,
+                    "path": "/tmp/meme_execution.json",
+                    "mode": "approval_gated",
+                    "promotion_threshold": 3,
+                    "clean_gated_streak": 3,
+                    "blocked_recent_count": 0,
+                    "auto_schedule_eligible_recent_count": 0,
+                    "promote_ready": True,
+                    "readiness_headline": "Meme Monday policy is ready for promotion after 3 clean gated run(s).",
+                    "recommended_action": "Flip `meme_execution.json` from `approval_gated` to `auto_schedule_meta`, then supervise the next Monday run.",
+                    "recent_runs": [
+                        {
+                            "title": "Monster Truck Duck",
+                            "decision": "manual_review_required",
+                            "state_reason": "awaiting_review",
+                            "manual_review_reasons": ["approval_gated_mode"],
+                            "blockers": [],
+                            "updated_at": "2026-04-20T09:00:00-04:00",
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "business_operator_desk._load_review_reply_execution_surface",
+                return_value={"available": False},
+            ),
+            patch(
+                "business_operator_desk._load_review_carousel_policy_surface",
+                return_value={"available": False},
+            ),
+            patch(
+                "business_operator_desk._load_jeepfact_policy_surface",
+                return_value={"available": False},
+            ),
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        meme_policy_section = render_business_section(payload, "meme_policy")
+
+        self.assertEqual(payload["counts"]["meme_policy_clean_streak"], 3)
+        self.assertEqual(payload["counts"]["meme_policy_promote_ready"], 1)
+        self.assertEqual(payload["counts"]["promotion_candidates"], 1)
+        self.assertEqual(payload["counts"]["promotion_ready_candidates"], 1)
+        action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "meme_policy")
+        self.assertEqual(action["title"], "Promote Meme Monday auto-schedule")
+        self.assertIn("3 clean gated run", action["summary"])
+        self.assertIn("## Meme Monday Policy", markdown)
+        self.assertIn("ready for promotion after 3 clean gated run", markdown)
+        self.assertIn("Duck Ops Meme Monday Policy", meme_policy_section)
+        self.assertIn("Clean gated streak: 3", meme_policy_section)
 
     def test_operator_desk_adds_learning_next_action_when_material_changes_exist(self) -> None:
         with patch(

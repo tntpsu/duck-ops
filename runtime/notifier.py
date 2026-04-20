@@ -174,9 +174,20 @@ def load_cached_order_refresh_artifacts(now_local: datetime | None = None) -> di
     }
 
 
-def refresh_nightly_action_summary_sources(*, skip_order_refresh: bool = False) -> None:
+def refresh_nightly_action_summary_sources(
+    *,
+    skip_order_refresh: bool = False,
+    skip_customer_refresh_preflight: bool = False,
+) -> None:
     now_local = datetime.now().astimezone()
-    customer_refresh_preflight = _run_customer_inbox_refresh_preflight()
+    if skip_customer_refresh_preflight:
+        customer_refresh_preflight = {
+            "status": "skipped",
+            "reason": "disabled_by_notifier_policy",
+            "generated_at": now_local.isoformat(),
+        }
+    else:
+        customer_refresh_preflight = _run_customer_inbox_refresh_preflight()
     customer_cases_payload = load_json(CUSTOMER_CASES_PATH, {"items": []})
     custom_design_payload = load_json(CUSTOM_DESIGN_CASES_PATH, {"items": []})
     print_queue_payload = load_json(PRINT_QUEUE_CANDIDATES_PATH, {"items": []})
@@ -293,6 +304,7 @@ def notifier_settings() -> dict[str, Any]:
         "use_starttls": bool(smtp_cfg.get("use_starttls", True)),
         "subjects": config.get("subjects", {}),
         "auto_approval": config.get("auto_approval", {}),
+        "customer_inbox_refresh_preflight": config.get("customer_inbox_refresh_preflight", {}),
         "whatsapp": config.get("whatsapp", {}),
     }
 
@@ -660,6 +672,14 @@ def unique_media_urls(urls: list[str] | None) -> list[str]:
         unique.append(candidate)
         seen.add(candidate)
     return unique
+
+
+def whatsapp_operator_item_allowed(item: dict[str, Any] | None) -> bool:
+    if not isinstance(item, dict) or not item:
+        return False
+    flow = str(item.get("flow") or "").strip()
+    artifact_type = str(item.get("artifact_type") or "").strip()
+    return flow.startswith("reviews_") or artifact_type == "trend"
 
 
 def build_whatsapp_collage(
@@ -1590,7 +1610,11 @@ def build_reviews_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any
     current = operator_current.get("current") or {}
     current_flow = current.get("flow") or ""
     current_message = (operator_current.get("message") or "").strip()
-    if current and str(current.get("review_status") or "") in {"", "pending"} and current_message:
+    if (
+        whatsapp_operator_item_allowed(current)
+        and str(current.get("review_status") or "") in {"", "pending"}
+        and current_message
+    ):
         preview = current.get("preview") or {}
         media_urls = [
             str(url).strip()
@@ -1623,6 +1647,8 @@ def build_reviews_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any
         decision = record.get("decision") or {}
         review_status = decision.get("review_status")
         if review_status not in {None, "pending"}:
+            continue
+        if not whatsapp_operator_item_allowed(decision):
             continue
         review_items.append(decision)
 
@@ -1797,6 +1823,19 @@ def build_business_desk_whatsapp_operator_push(state: dict[str, Any]) -> dict[st
         "media_urls": [],
         "media_title": "Duck Ops Business Desk",
     }
+
+
+def build_operator_whatsapp_summary(settings: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
+    whatsapp_cfg = settings.get("whatsapp") or {}
+    if not whatsapp_cfg.get("enabled"):
+        return None
+
+    summary = None
+    if whatsapp_cfg.get("review_operator_push_enabled", True):
+        summary = build_reviews_whatsapp_operator_push(state)
+    if not summary and whatsapp_cfg.get("business_desk_operator_push_enabled", True):
+        summary = build_business_desk_whatsapp_operator_push(state)
+    return summary
 
 
 def maybe_auto_approve_weekly_sales(
@@ -2015,13 +2054,23 @@ def main() -> int:
         action="store_true",
         help="Reuse the latest saved order snapshots and packing summary instead of refreshing them live.",
     )
+    parser.add_argument(
+        "--skip-customer-refresh-preflight",
+        action="store_true",
+        help="Skip the Etsy customer inbox browser preflight when building notifier summaries.",
+    )
     args = parser.parse_args()
 
     settings = notifier_settings()
     state = load_json(STATE_PATH, {"sent": {}})
     state.setdefault("sent", {})
     try:
-        refresh_nightly_action_summary_sources(skip_order_refresh=args.skip_order_refresh)
+        customer_preflight_cfg = settings.get("customer_inbox_refresh_preflight") or {}
+        customer_preflight_enabled = bool(customer_preflight_cfg.get("enabled", True))
+        refresh_nightly_action_summary_sources(
+            skip_order_refresh=args.skip_order_refresh,
+            skip_customer_refresh_preflight=(not customer_preflight_enabled) or args.skip_customer_refresh_preflight,
+        )
     except Exception as exc:
         print(f"[notifier] Warning: could not refresh nightly action summary sources: {exc}", file=sys.stderr)
     try:
@@ -2043,9 +2092,7 @@ def main() -> int:
     state_changed = hydrate_learning_change_signature(state) or state_changed
     state_changed = bool(auto_approval_result.get("changed")) or state_changed
     artifacts = load_sendable_artifacts(state)
-    whatsapp_summary = build_reviews_whatsapp_operator_push(state)
-    if not whatsapp_summary:
-        whatsapp_summary = build_business_desk_whatsapp_operator_push(state)
+    whatsapp_summary = build_operator_whatsapp_summary(settings, state)
 
     if args.dry_run and auto_approval_result.get("results"):
         for result in auto_approval_result.get("results") or []:

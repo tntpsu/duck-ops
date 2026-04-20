@@ -186,13 +186,13 @@ Why this matters:
 - When Etsy access is safe again, return to `Review Execution` stabilization and stronger failure breadcrumbs.
 - Keep this in observe-first mode so the operator surface stays trustworthy.
 
-### 2. Add Meme Monday Approval Policy And Promotion Watch
-- Give Meme Monday the same approval-policy structure as the weekly-sale lane so we can start in supervised mode, watch outcomes, and only promote after repeated clean runs.
-- Surface readiness and promotion state in the business desk instead of relying on memory or ad hoc checks.
-
-### 3. Turn Learnings Into Stronger Weekly Execution Guidance
+### 2. Turn Learnings Into Stronger Weekly Execution Guidance
 - Use the steadier competitor signal plus the new learnings notifier to sharpen the weekly experiment list and promotion-readiness calls.
 - Keep the recommendations explicit: what stayed stable, what is worth testing once, and what should not be copied.
+
+### 3. Carry Approval-Policy Promotion Watch To The Next Safe Social Lane
+- Weekly sale and Meme Monday now share the policy/watch/promote pattern; the next step is to decide which social lane earns that treatment next without widening automation too fast.
+- Keep the same model: supervised first, evidence in workflow control, promotion surfaced in the business desk, and default-off until the streak is clean.
 
 ## Lower-Priority / Nice-to-Have
 - Continue backfilling more exact Etsy `/messages/<id>` URLs.

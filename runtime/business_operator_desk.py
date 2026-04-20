@@ -27,8 +27,14 @@ SHOPIFY_SEO_OUTCOMES_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output
 ENGINEERING_GOVERNANCE_DIGEST_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/engineering_governance_digest.json")
 ENGINEERING_GOVERNANCE_DIGEST_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/engineering_governance_digest.md")
 WEEKLY_SALE_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/weekly_sale_execution.json")
+MEME_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/meme_execution.json")
+REVIEW_CAROUSEL_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/review_carousel_execution.json")
+JEEPFACT_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/jeepfact_execution.json")
 REVIEW_REPLY_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duck-ops/config/review_reply_execution.json")
 WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD = 3
+MEME_POLICY_PROMOTION_THRESHOLD = 3
+REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD = 3
+JEEPFACT_POLICY_PROMOTION_THRESHOLD = 3
 
 
 WEEKLY_SALE_POLICY_REASON_LABELS = {
@@ -43,6 +49,39 @@ WEEKLY_SALE_POLICY_REASON_LABELS = {
     "no_shopify_targets": "The playbook did not include any Shopify targets.",
     "already_published_for_run": "This weekly sale run was already published.",
     "policy_config_error": "The weekly sale execution config could not be loaded cleanly.",
+}
+
+MEME_POLICY_REASON_LABELS = {
+    "approval_gated_mode": "Manual review mode is still the only remaining gate.",
+    "meta_configuration_missing": "One or more required Meta IDs or tokens are missing.",
+    "rendered_asset_missing": "The meme image was not uploaded cleanly enough to publish.",
+    "caption_missing": "The meme caption is blank.",
+    "meme_text_missing": "The meme text is blank.",
+    "product_reference_missing": "The selected product metadata is incomplete.",
+    "already_scheduled_for_run": "This Meme Monday run is already scheduled.",
+    "policy_config_error": "The meme execution config could not be loaded cleanly.",
+}
+
+REVIEW_CAROUSEL_POLICY_REASON_LABELS = {
+    "approval_gated_mode": "Manual review mode is still the only remaining gate.",
+    "meta_configuration_missing": "Instagram scheduling credentials are missing.",
+    "slides_missing": "The review carousel has no slides to publish.",
+    "slide_assets_missing": "One or more review carousel slide images are missing on disk.",
+    "caption_missing": "The review carousel caption is blank.",
+    "already_scheduled_for_run": "This review carousel run is already scheduled.",
+    "policy_config_error": "The review carousel execution config could not be loaded cleanly.",
+}
+
+JEEPFACT_POLICY_REASON_LABELS = {
+    "approval_gated_mode": "Manual review mode is still the only remaining gate.",
+    "meta_configuration_missing": "One or more required Meta IDs or tokens are missing.",
+    "images_missing": "The rendered Jeep Fact slides are missing.",
+    "image_urls_missing": "One or more Jeep Fact slides are missing a public URL.",
+    "post_content_missing": "The Jeep Fact caption package is incomplete.",
+    "facts_missing": "The Jeep facts are missing or incomplete.",
+    "products_missing": "The Jeep Fact product set is missing or incomplete.",
+    "already_scheduled_for_run": "This Jeep Fact Wednesday run is already scheduled.",
+    "policy_config_error": "The Jeep Fact execution config could not be loaded cleanly.",
 }
 
 
@@ -62,6 +101,27 @@ def _weekly_sale_policy_reason_text(value: Any) -> str:
     if not key:
         return ""
     return WEEKLY_SALE_POLICY_REASON_LABELS.get(key, key.replace("_", " "))
+
+
+def _meme_policy_reason_text(value: Any) -> str:
+    key = str(value or "").strip()
+    if not key:
+        return ""
+    return MEME_POLICY_REASON_LABELS.get(key, key.replace("_", " "))
+
+
+def _review_carousel_policy_reason_text(value: Any) -> str:
+    key = str(value or "").strip()
+    if not key:
+        return ""
+    return REVIEW_CAROUSEL_POLICY_REASON_LABELS.get(key, key.replace("_", " "))
+
+
+def _jeepfact_policy_reason_text(value: Any) -> str:
+    key = str(value or "").strip()
+    if not key:
+        return ""
+    return JEEPFACT_POLICY_REASON_LABELS.get(key, key.replace("_", " "))
 
 
 def _load_weekly_sale_policy_surface() -> dict[str, Any]:
@@ -225,17 +285,494 @@ def _weekly_sale_policy_promotion_candidate(policy_surface: dict[str, Any]) -> d
     }
 
 
+def _load_meme_policy_surface() -> dict[str, Any]:
+    config_payload = load_json(MEME_EXECUTION_CONFIG_PATH, {})
+    config = config_payload if isinstance(config_payload, dict) else {}
+    mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
+    workflow_items = [
+        item
+        for item in list_workflow_states()
+        if str(item.get("lane") or "").strip() == "meme"
+        and isinstance(item.get("metadata"), dict)
+        and str((item.get("metadata") or {}).get("meme_policy_decision") or "").strip()
+    ]
+    workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
+    recent = workflow_items[:6]
+
+    def _recent_entry(item: dict[str, Any]) -> dict[str, Any]:
+        metadata = item.get("metadata") or {}
+        return {
+            "run_id": str(item.get("run_id") or item.get("entity_id") or "").strip() or None,
+            "updated_at": item.get("updated_at"),
+            "decision": str(metadata.get("meme_policy_decision") or "").strip() or "unknown",
+            "reason": str(metadata.get("meme_policy_reason") or "").strip() or None,
+            "blockers": [str(v).strip() for v in list(metadata.get("meme_policy_blockers") or []) if str(v).strip()],
+            "manual_review_reasons": [str(v).strip() for v in list(metadata.get("meme_policy_manual_review_reasons") or []) if str(v).strip()],
+            "state_reason": str(item.get("state_reason") or "").strip() or None,
+            "title": str(metadata.get("product_title") or item.get("display_label") or "Meme Monday").strip(),
+        }
+
+    recent_runs = [_recent_entry(item) for item in recent]
+
+    def _is_clean_gated(entry: dict[str, Any]) -> bool:
+        blockers = list(entry.get("blockers") or [])
+        review_reasons = list(entry.get("manual_review_reasons") or [])
+        return (
+            str(entry.get("decision") or "") == "manual_review_required"
+            and not blockers
+            and set(review_reasons or []) <= {"approval_gated_mode"}
+        )
+
+    clean_gated_streak = 0
+    for entry in recent_runs:
+        if _is_clean_gated(entry):
+            clean_gated_streak += 1
+            continue
+        break
+
+    blocked_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "blocked")
+    auto_schedule_eligible_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "auto_schedule_allowed")
+    latest = recent_runs[0] if recent_runs else {}
+    promote_ready = bool(mode == "approval_gated" and clean_gated_streak >= MEME_POLICY_PROMOTION_THRESHOLD)
+
+    if mode == "auto_schedule_meta":
+        readiness_headline = "Meme Monday auto-schedule is already enabled."
+        recommended_action = "Watch the next Monday run closely and keep the manual `publish` reply as the fallback if the lane degrades."
+    elif promote_ready:
+        readiness_headline = f"Meme Monday policy is ready for promotion after {clean_gated_streak} clean gated run(s)."
+        recommended_action = (
+            "Flip `meme_execution.json` from `approval_gated` to `auto_schedule_meta`, "
+            "then supervise the next Monday run."
+        )
+    elif recent_runs:
+        remaining = max(0, MEME_POLICY_PROMOTION_THRESHOLD - clean_gated_streak)
+        readiness_headline = f"Meme Monday policy is not ready for promotion yet; {remaining} more clean gated run(s) are recommended."
+        recommended_action = "Keep replying `publish` on Monday while the policy streak builds and watch for any blocked decisions."
+    else:
+        readiness_headline = "Meme Monday policy history is not available yet."
+        recommended_action = "Run Meme Monday a few times in approval-gated mode so Duck Ops can judge whether promotion is safe."
+
+    return {
+        "available": True,
+        "path": str(MEME_EXECUTION_CONFIG_PATH),
+        "mode": mode,
+        "promotion_threshold": MEME_POLICY_PROMOTION_THRESHOLD,
+        "clean_gated_streak": clean_gated_streak,
+        "blocked_recent_count": blocked_recent_count,
+        "auto_schedule_eligible_recent_count": auto_schedule_eligible_recent_count,
+        "promote_ready": promote_ready,
+        "latest_run_id": latest.get("run_id"),
+        "latest_decision": latest.get("decision"),
+        "latest_reason": latest.get("reason"),
+        "latest_blockers": list(latest.get("blockers") or []),
+        "latest_manual_review_reasons": list(latest.get("manual_review_reasons") or []),
+        "latest_updated_at": latest.get("updated_at"),
+        "readiness_headline": readiness_headline,
+        "recommended_action": recommended_action,
+        "recent_runs": recent_runs[:4],
+    }
+
+
+def _meme_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not policy_surface.get("available"):
+        return None
+    if not list(policy_surface.get("recent_runs") or []) and str(policy_surface.get("mode") or "") != "auto_schedule_meta":
+        return None
+
+    mode = str(policy_surface.get("mode") or "approval_gated").strip() or "approval_gated"
+    clean_streak = int(policy_surface.get("clean_gated_streak") or 0)
+    threshold = int(policy_surface.get("promotion_threshold") or MEME_POLICY_PROMOTION_THRESHOLD)
+    latest_decision = str(policy_surface.get("latest_decision") or "").strip()
+    blockers = [
+        _meme_policy_reason_text(value)
+        for value in list(policy_surface.get("latest_blockers") or [])
+        if _meme_policy_reason_text(value)
+    ]
+    review_reasons = [
+        _meme_policy_reason_text(value)
+        for value in list(policy_surface.get("latest_manual_review_reasons") or [])
+        if _meme_policy_reason_text(value)
+    ]
+    if mode == "auto_schedule_meta":
+        promotion_state = "active"
+        action_title = "Meme Monday auto-schedule active"
+    elif bool(policy_surface.get("promote_ready")):
+        promotion_state = "ready"
+        action_title = "Promote Meme Monday auto-schedule"
+    elif latest_decision == "blocked":
+        promotion_state = "blocked"
+        action_title = "Meme Monday auto-schedule promotion blocked"
+    else:
+        promotion_state = "observing"
+        action_title = "Meme Monday auto-schedule still building evidence"
+
+    evidence: list[str] = [
+        f"Clean gated streak {clean_streak}/{threshold}.",
+        f"Mode is {mode}.",
+    ]
+    if policy_surface.get("readiness_headline"):
+        evidence.append(str(policy_surface.get("readiness_headline")))
+    if blockers:
+        evidence.extend(blockers[:2])
+    elif review_reasons:
+        evidence.extend(review_reasons[:2])
+
+    return {
+        "promotion_id": "meme_auto_schedule",
+        "lane": "meme_policy",
+        "title": "Meme Monday auto-schedule",
+        "action_title": action_title,
+        "promotion_state": promotion_state,
+        "ready": promotion_state == "ready",
+        "already_promoted": promotion_state == "active",
+        "summary": str(policy_surface.get("readiness_headline") or "").strip()
+        or f"Clean gated streak {clean_streak}/{threshold}.",
+        "recommended_action": str(policy_surface.get("recommended_action") or "").strip() or None,
+        "secondary_action": str(policy_surface.get("path") or "").strip() or None,
+        "source_path": str(policy_surface.get("path") or "").strip() or None,
+        "updated_at": policy_surface.get("latest_updated_at"),
+        "latest_run_id": policy_surface.get("latest_run_id"),
+        "progress_label": f"{clean_streak}/{threshold} clean gated run(s)",
+        "threshold": threshold,
+        "progress_value": clean_streak,
+        "blockers": blockers[:3],
+        "manual_review_reasons": review_reasons[:3],
+        "evidence": evidence[:4],
+    }
+
+
+def _load_review_carousel_policy_surface() -> dict[str, Any]:
+    config_payload = load_json(REVIEW_CAROUSEL_EXECUTION_CONFIG_PATH, {})
+    config = config_payload if isinstance(config_payload, dict) else {}
+    mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
+    workflow_items = [
+        item
+        for item in list_workflow_states()
+        if str(item.get("lane") or "").strip() == "review_carousel"
+        and isinstance(item.get("metadata"), dict)
+        and str((item.get("metadata") or {}).get("review_carousel_policy_decision") or "").strip()
+    ]
+    workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
+    recent = workflow_items[:6]
+
+    def _recent_entry(item: dict[str, Any]) -> dict[str, Any]:
+        metadata = item.get("metadata") or {}
+        return {
+            "run_id": str(item.get("run_id") or item.get("entity_id") or "").strip() or None,
+            "updated_at": item.get("updated_at"),
+            "decision": str(metadata.get("review_carousel_policy_decision") or "").strip() or "unknown",
+            "reason": str(metadata.get("review_carousel_policy_reason") or "").strip() or None,
+            "blockers": [str(v).strip() for v in list(metadata.get("review_carousel_policy_blockers") or []) if str(v).strip()],
+            "manual_review_reasons": [str(v).strip() for v in list(metadata.get("review_carousel_policy_manual_review_reasons") or []) if str(v).strip()],
+            "state_reason": str(item.get("state_reason") or "").strip() or None,
+            "title": str(metadata.get("headline") or item.get("display_label") or "Tuesday review carousel").strip(),
+        }
+
+    recent_runs = [_recent_entry(item) for item in recent]
+
+    def _is_clean_gated(entry: dict[str, Any]) -> bool:
+        blockers = list(entry.get("blockers") or [])
+        review_reasons = list(entry.get("manual_review_reasons") or [])
+        return (
+            str(entry.get("decision") or "") == "manual_review_required"
+            and not blockers
+            and set(review_reasons or []) <= {"approval_gated_mode"}
+        )
+
+    clean_gated_streak = 0
+    for entry in recent_runs:
+        if _is_clean_gated(entry):
+            clean_gated_streak += 1
+            continue
+        break
+
+    blocked_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "blocked")
+    auto_schedule_eligible_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "auto_schedule_allowed")
+    latest = recent_runs[0] if recent_runs else {}
+    promote_ready = bool(mode == "approval_gated" and clean_gated_streak >= REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD)
+
+    if mode == "auto_schedule_instagram":
+        readiness_headline = "Tuesday review carousel auto-schedule is already enabled."
+        recommended_action = "Watch the next Tuesday run closely and keep the manual `publish` reply as the fallback if the lane degrades."
+    elif promote_ready:
+        readiness_headline = f"Tuesday review carousel policy is ready for promotion after {clean_gated_streak} clean gated run(s)."
+        recommended_action = (
+            "Flip `review_carousel_execution.json` from `approval_gated` to `auto_schedule_instagram`, "
+            "then supervise the next Tuesday run."
+        )
+    elif recent_runs:
+        remaining = max(0, REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD - clean_gated_streak)
+        readiness_headline = f"Tuesday review carousel policy is not ready for promotion yet; {remaining} more clean gated run(s) are recommended."
+        recommended_action = "Keep replying `publish` on Tuesday while the policy streak builds and watch for any blocked decisions."
+    else:
+        readiness_headline = "Tuesday review carousel policy history is not available yet."
+        recommended_action = "Run the Tuesday carousel a few times in approval-gated mode so Duck Ops can judge whether promotion is safe."
+
+    return {
+        "available": True,
+        "path": str(REVIEW_CAROUSEL_EXECUTION_CONFIG_PATH),
+        "mode": mode,
+        "promotion_threshold": REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD,
+        "clean_gated_streak": clean_gated_streak,
+        "blocked_recent_count": blocked_recent_count,
+        "auto_schedule_eligible_recent_count": auto_schedule_eligible_recent_count,
+        "promote_ready": promote_ready,
+        "latest_run_id": latest.get("run_id"),
+        "latest_decision": latest.get("decision"),
+        "latest_reason": latest.get("reason"),
+        "latest_blockers": list(latest.get("blockers") or []),
+        "latest_manual_review_reasons": list(latest.get("manual_review_reasons") or []),
+        "latest_updated_at": latest.get("updated_at"),
+        "readiness_headline": readiness_headline,
+        "recommended_action": recommended_action,
+        "recent_runs": recent_runs[:4],
+    }
+
+
+def _review_carousel_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not policy_surface.get("available"):
+        return None
+    if not list(policy_surface.get("recent_runs") or []) and str(policy_surface.get("mode") or "") != "auto_schedule_instagram":
+        return None
+
+    mode = str(policy_surface.get("mode") or "approval_gated").strip() or "approval_gated"
+    clean_streak = int(policy_surface.get("clean_gated_streak") or 0)
+    threshold = int(policy_surface.get("promotion_threshold") or REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD)
+    latest_decision = str(policy_surface.get("latest_decision") or "").strip()
+    blockers = [
+        _review_carousel_policy_reason_text(value)
+        for value in list(policy_surface.get("latest_blockers") or [])
+        if _review_carousel_policy_reason_text(value)
+    ]
+    review_reasons = [
+        _review_carousel_policy_reason_text(value)
+        for value in list(policy_surface.get("latest_manual_review_reasons") or [])
+        if _review_carousel_policy_reason_text(value)
+    ]
+    if mode == "auto_schedule_instagram":
+        promotion_state = "active"
+        action_title = "Tuesday review carousel auto-schedule active"
+    elif bool(policy_surface.get("promote_ready")):
+        promotion_state = "ready"
+        action_title = "Promote Tuesday review carousel auto-schedule"
+    elif latest_decision == "blocked":
+        promotion_state = "blocked"
+        action_title = "Tuesday review carousel promotion blocked"
+    else:
+        promotion_state = "observing"
+        action_title = "Tuesday review carousel still building evidence"
+
+    evidence: list[str] = [
+        f"Clean gated streak {clean_streak}/{threshold}.",
+        f"Mode is {mode}.",
+    ]
+    if policy_surface.get("readiness_headline"):
+        evidence.append(str(policy_surface.get("readiness_headline")))
+    if blockers:
+        evidence.extend(blockers[:2])
+    elif review_reasons:
+        evidence.extend(review_reasons[:2])
+
+    return {
+        "promotion_id": "review_carousel_auto_schedule",
+        "lane": "review_carousel_policy",
+        "title": "Tuesday review carousel auto-schedule",
+        "action_title": action_title,
+        "promotion_state": promotion_state,
+        "ready": promotion_state == "ready",
+        "already_promoted": promotion_state == "active",
+        "summary": str(policy_surface.get("readiness_headline") or "").strip()
+        or f"Clean gated streak {clean_streak}/{threshold}.",
+        "recommended_action": str(policy_surface.get("recommended_action") or "").strip() or None,
+        "secondary_action": str(policy_surface.get("path") or "").strip() or None,
+        "source_path": str(policy_surface.get("path") or "").strip() or None,
+        "updated_at": policy_surface.get("latest_updated_at"),
+        "latest_run_id": policy_surface.get("latest_run_id"),
+        "progress_label": f"{clean_streak}/{threshold} clean gated run(s)",
+        "threshold": threshold,
+        "progress_value": clean_streak,
+        "blockers": blockers[:3],
+        "manual_review_reasons": review_reasons[:3],
+        "evidence": evidence[:4],
+    }
+
+
+def _load_jeepfact_policy_surface() -> dict[str, Any]:
+    config_payload = load_json(JEEPFACT_EXECUTION_CONFIG_PATH, {})
+    config = config_payload if isinstance(config_payload, dict) else {}
+    mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
+    workflow_items = [
+        item
+        for item in list_workflow_states()
+        if str(item.get("lane") or "").strip() == "jeepfact"
+        and isinstance(item.get("metadata"), dict)
+        and str((item.get("metadata") or {}).get("jeepfact_policy_decision") or "").strip()
+    ]
+    workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
+    recent = workflow_items[:6]
+
+    def _recent_entry(item: dict[str, Any]) -> dict[str, Any]:
+        metadata = item.get("metadata") or {}
+        return {
+            "run_id": str(item.get("run_id") or item.get("entity_id") or "").strip() or None,
+            "updated_at": item.get("updated_at"),
+            "decision": str(metadata.get("jeepfact_policy_decision") or "").strip() or "unknown",
+            "reason": str(metadata.get("jeepfact_policy_reason") or "").strip() or None,
+            "blockers": [str(v).strip() for v in list(metadata.get("jeepfact_policy_blockers") or []) if str(v).strip()],
+            "manual_review_reasons": [str(v).strip() for v in list(metadata.get("jeepfact_policy_manual_review_reasons") or []) if str(v).strip()],
+            "state_reason": str(item.get("state_reason") or "").strip() or None,
+            "title": str(metadata.get("cover_hook") or item.get("display_label") or "Jeep Fact Wednesday").strip(),
+        }
+
+    recent_runs = [_recent_entry(item) for item in recent]
+
+    def _is_clean_gated(entry: dict[str, Any]) -> bool:
+        blockers = list(entry.get("blockers") or [])
+        review_reasons = list(entry.get("manual_review_reasons") or [])
+        return (
+            str(entry.get("decision") or "") == "manual_review_required"
+            and not blockers
+            and set(review_reasons or []) <= {"approval_gated_mode"}
+        )
+
+    clean_gated_streak = 0
+    for entry in recent_runs:
+        if _is_clean_gated(entry):
+            clean_gated_streak += 1
+            continue
+        break
+
+    blocked_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "blocked")
+    auto_schedule_eligible_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "auto_schedule_allowed")
+    latest = recent_runs[0] if recent_runs else {}
+    promote_ready = bool(mode == "approval_gated" and clean_gated_streak >= JEEPFACT_POLICY_PROMOTION_THRESHOLD)
+
+    if mode == "auto_schedule_meta":
+        readiness_headline = "Jeep Fact Wednesday auto-schedule is already enabled."
+        recommended_action = "Watch the next Wednesday run closely and keep the manual `publish` reply as the fallback if the lane degrades."
+    elif promote_ready:
+        readiness_headline = f"Jeep Fact Wednesday policy is ready for promotion after {clean_gated_streak} clean gated run(s)."
+        recommended_action = (
+            "Flip `jeepfact_execution.json` from `approval_gated` to `auto_schedule_meta`, "
+            "then supervise the next Wednesday run."
+        )
+    elif recent_runs:
+        remaining = max(0, JEEPFACT_POLICY_PROMOTION_THRESHOLD - clean_gated_streak)
+        readiness_headline = f"Jeep Fact Wednesday policy is not ready for promotion yet; {remaining} more clean gated run(s) are recommended."
+        recommended_action = "Keep replying `publish` on Wednesday while the policy streak builds and watch for any blocked decisions."
+    else:
+        readiness_headline = "Jeep Fact Wednesday policy history is not available yet."
+        recommended_action = "Run Jeep Fact Wednesday a few times in approval-gated mode so Duck Ops can judge whether promotion is safe."
+
+    return {
+        "available": True,
+        "path": str(JEEPFACT_EXECUTION_CONFIG_PATH),
+        "mode": mode,
+        "promotion_threshold": JEEPFACT_POLICY_PROMOTION_THRESHOLD,
+        "clean_gated_streak": clean_gated_streak,
+        "blocked_recent_count": blocked_recent_count,
+        "auto_schedule_eligible_recent_count": auto_schedule_eligible_recent_count,
+        "promote_ready": promote_ready,
+        "latest_run_id": latest.get("run_id"),
+        "latest_decision": latest.get("decision"),
+        "latest_reason": latest.get("reason"),
+        "latest_blockers": list(latest.get("blockers") or []),
+        "latest_manual_review_reasons": list(latest.get("manual_review_reasons") or []),
+        "latest_updated_at": latest.get("updated_at"),
+        "readiness_headline": readiness_headline,
+        "recommended_action": recommended_action,
+        "recent_runs": recent_runs[:4],
+    }
+
+
+def _jeepfact_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not policy_surface.get("available"):
+        return None
+    if not list(policy_surface.get("recent_runs") or []) and str(policy_surface.get("mode") or "") != "auto_schedule_meta":
+        return None
+
+    mode = str(policy_surface.get("mode") or "approval_gated").strip() or "approval_gated"
+    clean_streak = int(policy_surface.get("clean_gated_streak") or 0)
+    threshold = int(policy_surface.get("promotion_threshold") or JEEPFACT_POLICY_PROMOTION_THRESHOLD)
+    latest_decision = str(policy_surface.get("latest_decision") or "").strip()
+    blockers = [
+        _jeepfact_policy_reason_text(value)
+        for value in list(policy_surface.get("latest_blockers") or [])
+        if _jeepfact_policy_reason_text(value)
+    ]
+    review_reasons = [
+        _jeepfact_policy_reason_text(value)
+        for value in list(policy_surface.get("latest_manual_review_reasons") or [])
+        if _jeepfact_policy_reason_text(value)
+    ]
+    if mode == "auto_schedule_meta":
+        promotion_state = "active"
+        action_title = "Jeep Fact Wednesday auto-schedule active"
+    elif bool(policy_surface.get("promote_ready")):
+        promotion_state = "ready"
+        action_title = "Promote Jeep Fact Wednesday auto-schedule"
+    elif latest_decision == "blocked":
+        promotion_state = "blocked"
+        action_title = "Jeep Fact Wednesday promotion blocked"
+    else:
+        promotion_state = "observing"
+        action_title = "Jeep Fact Wednesday still building evidence"
+
+    evidence: list[str] = [
+        f"Clean gated streak {clean_streak}/{threshold}.",
+        f"Mode is {mode}.",
+    ]
+    if policy_surface.get("readiness_headline"):
+        evidence.append(str(policy_surface.get("readiness_headline")))
+    if blockers:
+        evidence.extend(blockers[:2])
+    elif review_reasons:
+        evidence.extend(review_reasons[:2])
+
+    return {
+        "promotion_id": "jeepfact_auto_schedule",
+        "lane": "jeepfact_policy",
+        "title": "Jeep Fact Wednesday auto-schedule",
+        "action_title": action_title,
+        "promotion_state": promotion_state,
+        "ready": promotion_state == "ready",
+        "already_promoted": promotion_state == "active",
+        "summary": str(policy_surface.get("readiness_headline") or "").strip()
+        or f"Clean gated streak {clean_streak}/{threshold}.",
+        "recommended_action": str(policy_surface.get("recommended_action") or "").strip() or None,
+        "secondary_action": str(policy_surface.get("path") or "").strip() or None,
+        "source_path": str(policy_surface.get("path") or "").strip() or None,
+        "updated_at": policy_surface.get("latest_updated_at"),
+        "latest_run_id": policy_surface.get("latest_run_id"),
+        "progress_label": f"{clean_streak}/{threshold} clean gated run(s)",
+        "threshold": threshold,
+        "progress_value": clean_streak,
+        "blockers": blockers[:3],
+        "manual_review_reasons": review_reasons[:3],
+        "evidence": evidence[:4],
+    }
+
+
 def _load_promotion_watch_surface(
     *,
     weekly_sale_policy_surface: dict[str, Any] | None = None,
+    meme_policy_surface: dict[str, Any] | None = None,
+    review_carousel_policy_surface: dict[str, Any] | None = None,
+    jeepfact_policy_surface: dict[str, Any] | None = None,
     review_reply_execution_surface: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     policy_surface = weekly_sale_policy_surface or _load_weekly_sale_policy_surface()
+    meme_surface = meme_policy_surface or _load_meme_policy_surface()
+    review_carousel_surface = review_carousel_policy_surface or _load_review_carousel_policy_surface()
+    jeepfact_surface = jeepfact_policy_surface or _load_jeepfact_policy_surface()
     review_surface = review_reply_execution_surface or _load_review_reply_execution_surface()
     items = [
         item
         for item in [
             _weekly_sale_policy_promotion_candidate(policy_surface),
+            _meme_policy_promotion_candidate(meme_surface),
+            _review_carousel_policy_promotion_candidate(review_carousel_surface),
+            _jeepfact_policy_promotion_candidate(jeepfact_surface),
             _review_reply_execution_promotion_candidate(review_surface),
         ]
         if isinstance(item, dict)
@@ -971,8 +1508,14 @@ def build_business_operator_desk(
     seo_outcomes = _load_seo_outcome_surface()
     governance_surface = _load_governance_surface()
     weekly_sale_policy_surface = _load_weekly_sale_policy_surface()
+    meme_policy_surface = _load_meme_policy_surface()
+    review_carousel_policy_surface = _load_review_carousel_policy_surface()
+    jeepfact_policy_surface = _load_jeepfact_policy_surface()
     promotion_watch_surface = _load_promotion_watch_surface(
         weekly_sale_policy_surface=weekly_sale_policy_surface,
+        meme_policy_surface=meme_policy_surface,
+        review_carousel_policy_surface=review_carousel_policy_surface,
+        jeepfact_policy_surface=jeepfact_policy_surface,
     )
     social_plan = weekly_strategy_packet.get("social_plan") or {}
     ready_counts = social_plan.get("readiness_counts") if isinstance(social_plan, dict) else {}
@@ -1011,6 +1554,15 @@ def build_business_operator_desk(
             "weekly_sale_policy_clean_streak": int(weekly_sale_policy_surface.get("clean_gated_streak") or 0),
             "weekly_sale_policy_blocked_recent": int(weekly_sale_policy_surface.get("blocked_recent_count") or 0),
             "weekly_sale_policy_promote_ready": 1 if weekly_sale_policy_surface.get("promote_ready") else 0,
+            "meme_policy_clean_streak": int(meme_policy_surface.get("clean_gated_streak") or 0),
+            "meme_policy_blocked_recent": int(meme_policy_surface.get("blocked_recent_count") or 0),
+            "meme_policy_promote_ready": 1 if meme_policy_surface.get("promote_ready") else 0,
+            "review_carousel_policy_clean_streak": int(review_carousel_policy_surface.get("clean_gated_streak") or 0),
+            "review_carousel_policy_blocked_recent": int(review_carousel_policy_surface.get("blocked_recent_count") or 0),
+            "review_carousel_policy_promote_ready": 1 if review_carousel_policy_surface.get("promote_ready") else 0,
+            "jeepfact_policy_clean_streak": int(jeepfact_policy_surface.get("clean_gated_streak") or 0),
+            "jeepfact_policy_blocked_recent": int(jeepfact_policy_surface.get("blocked_recent_count") or 0),
+            "jeepfact_policy_promote_ready": 1 if jeepfact_policy_surface.get("promote_ready") else 0,
             "governance_findings": int(governance_surface.get("finding_count") or 0),
             "governance_recommendations": int(governance_surface.get("recommendation_count") or 0),
             "governance_top_priority_items": int(governance_surface.get("top_priority_count") or 0),
@@ -1041,6 +1593,9 @@ def build_business_operator_desk(
         ),
         "governance_surface": governance_surface,
         "weekly_sale_policy_surface": weekly_sale_policy_surface,
+        "meme_policy_surface": meme_policy_surface,
+        "review_carousel_policy_surface": review_carousel_policy_surface,
+        "jeepfact_policy_surface": jeepfact_policy_surface,
         "promotion_watch_surface": promotion_watch_surface,
         "sections": {
             "customer_packets": customer_items[:6],
@@ -1053,6 +1608,9 @@ def build_business_operator_desk(
             "workflow_followthrough": workflow_items[:6],
             "promotion_watch": list(promotion_watch_surface.get("items") or [])[:4],
             "weekly_sale_policy": list(weekly_sale_policy_surface.get("recent_runs") or [])[:4],
+            "meme_policy": list(meme_policy_surface.get("recent_runs") or [])[:4],
+            "review_carousel_policy": list(review_carousel_policy_surface.get("recent_runs") or [])[:4],
+            "jeepfact_policy": list(jeepfact_policy_surface.get("recent_runs") or [])[:4],
             "engineering_governance": list(governance_surface.get("recommendations") or [])[:4],
             "learning_surface": list(learning_surface.get("items") or [])[:4],
             "weekly_strategy_packet": list(weekly_strategy_packet.get("recommendations") or [])[:4],
@@ -1069,6 +1627,9 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     governance_surface = payload.get("governance_surface") or {}
     promotion_watch_surface = payload.get("promotion_watch_surface") or {}
     weekly_sale_policy_surface = payload.get("weekly_sale_policy_surface") or {}
+    meme_policy_surface = payload.get("meme_policy_surface") or {}
+    review_carousel_policy_surface = payload.get("review_carousel_policy_surface") or {}
+    jeepfact_policy_surface = payload.get("jeepfact_policy_surface") or {}
     learning_surface = payload.get("learning_surface") or {}
     weekly_strategy_packet = payload.get("weekly_strategy_packet") or {}
     seo_outcomes = payload.get("seo_outcomes") or {}
@@ -1106,6 +1667,15 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Weekly sale policy clean streak: `{counts.get('weekly_sale_policy_clean_streak', 0)}`",
         f"- Weekly sale policy blocked recent runs: `{counts.get('weekly_sale_policy_blocked_recent', 0)}`",
         f"- Weekly sale policy promote-ready: `{counts.get('weekly_sale_policy_promote_ready', 0)}`",
+        f"- Meme Monday policy clean streak: `{counts.get('meme_policy_clean_streak', 0)}`",
+        f"- Meme Monday policy blocked recent runs: `{counts.get('meme_policy_blocked_recent', 0)}`",
+        f"- Meme Monday policy promote-ready: `{counts.get('meme_policy_promote_ready', 0)}`",
+        f"- Tuesday review carousel policy clean streak: `{counts.get('review_carousel_policy_clean_streak', 0)}`",
+        f"- Tuesday review carousel policy blocked recent runs: `{counts.get('review_carousel_policy_blocked_recent', 0)}`",
+        f"- Tuesday review carousel policy promote-ready: `{counts.get('review_carousel_policy_promote_ready', 0)}`",
+        f"- Jeep Fact Wednesday policy clean streak: `{counts.get('jeepfact_policy_clean_streak', 0)}`",
+        f"- Jeep Fact Wednesday policy blocked recent runs: `{counts.get('jeepfact_policy_blocked_recent', 0)}`",
+        f"- Jeep Fact Wednesday policy promote-ready: `{counts.get('jeepfact_policy_promote_ready', 0)}`",
         f"- Governance findings surfaced: `{counts.get('governance_findings', 0)}`",
         f"- Governance recommendations surfaced: `{counts.get('governance_recommendations', 0)}`",
         f"- Top-priority governance items: `{counts.get('governance_top_priority_items', 0)}`",
@@ -1549,6 +2119,132 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 if item.get("updated_at"):
                     lines.append(f"    Updated: `{item.get('updated_at')}`")
 
+    lines.extend(["", "## Meme Monday Policy", ""])
+    if not meme_policy_surface.get("available"):
+        lines.append("Meme Monday policy history is not available yet.")
+    else:
+        lines.append(f"- Config: `{meme_policy_surface.get('path')}`")
+        lines.append(f"- Mode: `{meme_policy_surface.get('mode') or 'approval_gated'}`")
+        lines.append(f"- Clean gated streak: `{meme_policy_surface.get('clean_gated_streak', 0)}`")
+        lines.append(f"- Blocked recent runs: `{meme_policy_surface.get('blocked_recent_count', 0)}`")
+        lines.append(f"- Auto-eligible recent runs: `{meme_policy_surface.get('auto_schedule_eligible_recent_count', 0)}`")
+        lines.append(f"- Promote after clean streak: `{meme_policy_surface.get('promotion_threshold', MEME_POLICY_PROMOTION_THRESHOLD)}`")
+        if meme_policy_surface.get("readiness_headline"):
+            lines.append(f"- Promotion status: {_trim_text(meme_policy_surface.get('readiness_headline'), 180)}")
+        if meme_policy_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(meme_policy_surface.get('recommended_action'), 180)}")
+        recent_meme_runs = sections.get("meme_policy") or []
+        if recent_meme_runs:
+            lines.append("- Recent policy runs:")
+            for item in recent_meme_runs:
+                title = _trim_text(item.get("title"), 48) or "Meme Monday"
+                decision = str(item.get("decision") or "unknown")
+                state_reason = str(item.get("state_reason") or "").strip()
+                bits = [title, decision]
+                if state_reason:
+                    bits.append(state_reason)
+                lines.append(f"  - {' | '.join(bits)}")
+                blockers = [
+                    _meme_policy_reason_text(value)
+                    for value in list(item.get("blockers") or [])[:2]
+                    if _meme_policy_reason_text(value)
+                ]
+                review_reasons = [
+                    _meme_policy_reason_text(value)
+                    for value in list(item.get("manual_review_reasons") or [])[:2]
+                    if _meme_policy_reason_text(value)
+                ]
+                if blockers:
+                    lines.append(f"    Blockers: {_trim_text('; '.join(blockers), 180)}")
+                elif review_reasons:
+                    lines.append(f"    Gate: {_trim_text('; '.join(review_reasons), 180)}")
+                if item.get("updated_at"):
+                    lines.append(f"    Updated: `{item.get('updated_at')}`")
+
+    lines.extend(["", "## Tuesday Review Carousel Policy", ""])
+    if not review_carousel_policy_surface.get("available"):
+        lines.append("Tuesday review carousel policy history is not available yet.")
+    else:
+        lines.append(f"- Config: `{review_carousel_policy_surface.get('path')}`")
+        lines.append(f"- Mode: `{review_carousel_policy_surface.get('mode') or 'approval_gated'}`")
+        lines.append(f"- Clean gated streak: `{review_carousel_policy_surface.get('clean_gated_streak', 0)}`")
+        lines.append(f"- Blocked recent runs: `{review_carousel_policy_surface.get('blocked_recent_count', 0)}`")
+        lines.append(f"- Auto-eligible recent runs: `{review_carousel_policy_surface.get('auto_schedule_eligible_recent_count', 0)}`")
+        lines.append(f"- Promote after clean streak: `{review_carousel_policy_surface.get('promotion_threshold', REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD)}`")
+        if review_carousel_policy_surface.get("readiness_headline"):
+            lines.append(f"- Promotion status: {_trim_text(review_carousel_policy_surface.get('readiness_headline'), 180)}")
+        if review_carousel_policy_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(review_carousel_policy_surface.get('recommended_action'), 180)}")
+        recent_review_carousel_runs = sections.get("review_carousel_policy") or []
+        if recent_review_carousel_runs:
+            lines.append("- Recent policy runs:")
+            for item in recent_review_carousel_runs:
+                title = _trim_text(item.get("title"), 48) or "Tuesday review carousel"
+                decision = str(item.get("decision") or "unknown")
+                state_reason = str(item.get("state_reason") or "").strip()
+                bits = [title, decision]
+                if state_reason:
+                    bits.append(state_reason)
+                lines.append(f"  - {' | '.join(bits)}")
+                blockers = [
+                    _review_carousel_policy_reason_text(value)
+                    for value in list(item.get("blockers") or [])[:2]
+                    if _review_carousel_policy_reason_text(value)
+                ]
+                review_reasons = [
+                    _review_carousel_policy_reason_text(value)
+                    for value in list(item.get("manual_review_reasons") or [])[:2]
+                    if _review_carousel_policy_reason_text(value)
+                ]
+                if blockers:
+                    lines.append(f"    Blockers: {_trim_text('; '.join(blockers), 180)}")
+                elif review_reasons:
+                    lines.append(f"    Gate: {_trim_text('; '.join(review_reasons), 180)}")
+                if item.get("updated_at"):
+                    lines.append(f"    Updated: `{item.get('updated_at')}`")
+
+    lines.extend(["", "## Jeep Fact Wednesday Policy", ""])
+    if not jeepfact_policy_surface.get("available"):
+        lines.append("Jeep Fact Wednesday policy history is not available yet.")
+    else:
+        lines.append(f"- Config: `{jeepfact_policy_surface.get('path')}`")
+        lines.append(f"- Mode: `{jeepfact_policy_surface.get('mode') or 'approval_gated'}`")
+        lines.append(f"- Clean gated streak: `{jeepfact_policy_surface.get('clean_gated_streak', 0)}`")
+        lines.append(f"- Blocked recent runs: `{jeepfact_policy_surface.get('blocked_recent_count', 0)}`")
+        lines.append(f"- Auto-eligible recent runs: `{jeepfact_policy_surface.get('auto_schedule_eligible_recent_count', 0)}`")
+        lines.append(f"- Promote after clean streak: `{jeepfact_policy_surface.get('promotion_threshold', JEEPFACT_POLICY_PROMOTION_THRESHOLD)}`")
+        if jeepfact_policy_surface.get("readiness_headline"):
+            lines.append(f"- Promotion status: {_trim_text(jeepfact_policy_surface.get('readiness_headline'), 180)}")
+        if jeepfact_policy_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(jeepfact_policy_surface.get('recommended_action'), 180)}")
+        recent_jeepfact_runs = sections.get("jeepfact_policy") or []
+        if recent_jeepfact_runs:
+            lines.append("- Recent policy runs:")
+            for item in recent_jeepfact_runs:
+                title = _trim_text(item.get("title"), 48) or "Jeep Fact Wednesday"
+                decision = str(item.get("decision") or "unknown")
+                state_reason = str(item.get("state_reason") or "").strip()
+                bits = [title, decision]
+                if state_reason:
+                    bits.append(state_reason)
+                lines.append(f"  - {' | '.join(bits)}")
+                blockers = [
+                    _jeepfact_policy_reason_text(value)
+                    for value in list(item.get("blockers") or [])[:2]
+                    if _jeepfact_policy_reason_text(value)
+                ]
+                review_reasons = [
+                    _jeepfact_policy_reason_text(value)
+                    for value in list(item.get("manual_review_reasons") or [])[:2]
+                    if _jeepfact_policy_reason_text(value)
+                ]
+                if blockers:
+                    lines.append(f"    Blockers: {_trim_text('; '.join(blockers), 180)}")
+                elif review_reasons:
+                    lines.append(f"    Gate: {_trim_text('; '.join(review_reasons), 180)}")
+                if item.get("updated_at"):
+                    lines.append(f"    Updated: `{item.get('updated_at')}`")
+
     lines.extend(["", "## Creative Review Queue", ""])
     review_items = sections.get("review_queue") or []
     if not review_items:
@@ -1618,6 +2314,12 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "policy": "weekly_sale_policy",
         "sale_policy": "weekly_sale_policy",
         "weekly_sale_policy": "weekly_sale_policy",
+        "meme_policy": "meme_policy",
+        "meme_monday_policy": "meme_policy",
+        "review_carousel_policy": "review_carousel_policy",
+        "tuesday_policy": "review_carousel_policy",
+        "jeepfact_policy": "jeepfact_policy",
+        "wednesday_policy": "jeepfact_policy",
         "stock": "stock_print_candidates",
         "print": "stock_print_candidates",
         "reviews": "review_queue",
@@ -1791,6 +2493,150 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         _weekly_sale_policy_reason_text(value)
                         for value in list(item.get("manual_review_reasons") or [])[:2]
                         if _weekly_sale_policy_reason_text(value)
+                    ]
+                    if blockers:
+                        lines.append(f"  Blockers: {_trim_text('; '.join(blockers), 180)}")
+                    elif review_reasons:
+                        lines.append(f"  Gate: {_trim_text('; '.join(review_reasons), 180)}")
+                    if item.get("updated_at"):
+                        lines.append(f"  Updated: {item.get('updated_at')}")
+        return "\n".join(lines)
+
+    if normalized == "meme_policy":
+        lines = ["Duck Ops Meme Monday Policy", ""]
+        meme_policy_surface = payload.get("meme_policy_surface") or {}
+        if not meme_policy_surface.get("available"):
+            meme_policy_surface = _load_meme_policy_surface()
+        recent_runs = (sections.get("meme_policy") or []) or list(meme_policy_surface.get("recent_runs") or [])
+        if not meme_policy_surface.get("available"):
+            lines.append("Meme Monday policy history is not available yet.")
+        else:
+            lines.append(f"Config: {meme_policy_surface.get('path')}")
+            lines.append(f"Mode: {meme_policy_surface.get('mode') or 'approval_gated'}")
+            lines.append(f"Clean gated streak: {meme_policy_surface.get('clean_gated_streak', 0)}")
+            lines.append(f"Blocked recent runs: {meme_policy_surface.get('blocked_recent_count', 0)}")
+            lines.append(f"Auto-eligible recent runs: {meme_policy_surface.get('auto_schedule_eligible_recent_count', 0)}")
+            lines.append(f"Promote after clean streak: {meme_policy_surface.get('promotion_threshold', MEME_POLICY_PROMOTION_THRESHOLD)}")
+            if meme_policy_surface.get("readiness_headline"):
+                lines.append(f"Promotion status: {_trim_text(meme_policy_surface.get('readiness_headline'), 180)}")
+            if meme_policy_surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(meme_policy_surface.get('recommended_action'), 180)}")
+            if recent_runs:
+                lines.append("")
+                lines.append("Recent policy runs:")
+                for item in recent_runs:
+                    title = _trim_text(item.get("title"), 48) or "Meme Monday"
+                    decision = str(item.get("decision") or "unknown")
+                    state_reason = str(item.get("state_reason") or "").strip()
+                    bits = [title, decision]
+                    if state_reason:
+                        bits.append(state_reason)
+                    lines.append(f"- {' | '.join(bits)}")
+                    blockers = [
+                        _meme_policy_reason_text(value)
+                        for value in list(item.get("blockers") or [])[:2]
+                        if _meme_policy_reason_text(value)
+                    ]
+                    review_reasons = [
+                        _meme_policy_reason_text(value)
+                        for value in list(item.get("manual_review_reasons") or [])[:2]
+                        if _meme_policy_reason_text(value)
+                    ]
+                    if blockers:
+                        lines.append(f"  Blockers: {_trim_text('; '.join(blockers), 180)}")
+                    elif review_reasons:
+                        lines.append(f"  Gate: {_trim_text('; '.join(review_reasons), 180)}")
+                    if item.get("updated_at"):
+                        lines.append(f"  Updated: {item.get('updated_at')}")
+        return "\n".join(lines)
+
+    if normalized == "review_carousel_policy":
+        lines = ["Duck Ops Tuesday Review Carousel Policy", ""]
+        review_carousel_policy_surface = payload.get("review_carousel_policy_surface") or {}
+        if not review_carousel_policy_surface.get("available"):
+            review_carousel_policy_surface = _load_review_carousel_policy_surface()
+        recent_runs = (sections.get("review_carousel_policy") or []) or list(review_carousel_policy_surface.get("recent_runs") or [])
+        if not review_carousel_policy_surface.get("available"):
+            lines.append("Tuesday review carousel policy history is not available yet.")
+        else:
+            lines.append(f"Config: {review_carousel_policy_surface.get('path')}")
+            lines.append(f"Mode: {review_carousel_policy_surface.get('mode') or 'approval_gated'}")
+            lines.append(f"Clean gated streak: {review_carousel_policy_surface.get('clean_gated_streak', 0)}")
+            lines.append(f"Blocked recent runs: {review_carousel_policy_surface.get('blocked_recent_count', 0)}")
+            lines.append(f"Auto-eligible recent runs: {review_carousel_policy_surface.get('auto_schedule_eligible_recent_count', 0)}")
+            lines.append(f"Promote after clean streak: {review_carousel_policy_surface.get('promotion_threshold', REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD)}")
+            if review_carousel_policy_surface.get("readiness_headline"):
+                lines.append(f"Promotion status: {_trim_text(review_carousel_policy_surface.get('readiness_headline'), 180)}")
+            if review_carousel_policy_surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(review_carousel_policy_surface.get('recommended_action'), 180)}")
+            if recent_runs:
+                lines.append("")
+                lines.append("Recent policy runs:")
+                for item in recent_runs:
+                    title = _trim_text(item.get("title"), 48) or "Tuesday review carousel"
+                    decision = str(item.get("decision") or "unknown")
+                    state_reason = str(item.get("state_reason") or "").strip()
+                    bits = [title, decision]
+                    if state_reason:
+                        bits.append(state_reason)
+                    lines.append(f"- {' | '.join(bits)}")
+                    blockers = [
+                        _review_carousel_policy_reason_text(value)
+                        for value in list(item.get("blockers") or [])[:2]
+                        if _review_carousel_policy_reason_text(value)
+                    ]
+                    review_reasons = [
+                        _review_carousel_policy_reason_text(value)
+                        for value in list(item.get("manual_review_reasons") or [])[:2]
+                        if _review_carousel_policy_reason_text(value)
+                    ]
+                    if blockers:
+                        lines.append(f"  Blockers: {_trim_text('; '.join(blockers), 180)}")
+                    elif review_reasons:
+                        lines.append(f"  Gate: {_trim_text('; '.join(review_reasons), 180)}")
+                    if item.get("updated_at"):
+                        lines.append(f"  Updated: {item.get('updated_at')}")
+        return "\n".join(lines)
+
+    if normalized == "jeepfact_policy":
+        lines = ["Duck Ops Jeep Fact Wednesday Policy", ""]
+        jeepfact_policy_surface = payload.get("jeepfact_policy_surface") or {}
+        if not jeepfact_policy_surface.get("available"):
+            jeepfact_policy_surface = _load_jeepfact_policy_surface()
+        recent_runs = (sections.get("jeepfact_policy") or []) or list(jeepfact_policy_surface.get("recent_runs") or [])
+        if not jeepfact_policy_surface.get("available"):
+            lines.append("Jeep Fact Wednesday policy history is not available yet.")
+        else:
+            lines.append(f"Config: {jeepfact_policy_surface.get('path')}")
+            lines.append(f"Mode: {jeepfact_policy_surface.get('mode') or 'approval_gated'}")
+            lines.append(f"Clean gated streak: {jeepfact_policy_surface.get('clean_gated_streak', 0)}")
+            lines.append(f"Blocked recent runs: {jeepfact_policy_surface.get('blocked_recent_count', 0)}")
+            lines.append(f"Auto-eligible recent runs: {jeepfact_policy_surface.get('auto_schedule_eligible_recent_count', 0)}")
+            lines.append(f"Promote after clean streak: {jeepfact_policy_surface.get('promotion_threshold', JEEPFACT_POLICY_PROMOTION_THRESHOLD)}")
+            if jeepfact_policy_surface.get("readiness_headline"):
+                lines.append(f"Promotion status: {_trim_text(jeepfact_policy_surface.get('readiness_headline'), 180)}")
+            if jeepfact_policy_surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(jeepfact_policy_surface.get('recommended_action'), 180)}")
+            if recent_runs:
+                lines.append("")
+                lines.append("Recent policy runs:")
+                for item in recent_runs:
+                    title = _trim_text(item.get("title"), 48) or "Jeep Fact Wednesday"
+                    decision = str(item.get("decision") or "unknown")
+                    state_reason = str(item.get("state_reason") or "").strip()
+                    bits = [title, decision]
+                    if state_reason:
+                        bits.append(state_reason)
+                    lines.append(f"- {' | '.join(bits)}")
+                    blockers = [
+                        _jeepfact_policy_reason_text(value)
+                        for value in list(item.get("blockers") or [])[:2]
+                        if _jeepfact_policy_reason_text(value)
+                    ]
+                    review_reasons = [
+                        _jeepfact_policy_reason_text(value)
+                        for value in list(item.get("manual_review_reasons") or [])[:2]
+                        if _jeepfact_policy_reason_text(value)
                     ]
                     if blockers:
                         lines.append(f"  Blockers: {_trim_text('; '.join(blockers), 180)}")
