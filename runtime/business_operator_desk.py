@@ -488,6 +488,9 @@ def _load_seo_outcome_surface() -> dict[str, Any]:
         "issue_still_present_count": int(summary.get("issue_still_present_count") or 0),
         "missing_from_audit_count": int(summary.get("missing_from_audit_count") or 0),
         "awaiting_audit_refresh_count": int(summary.get("awaiting_audit_refresh_count") or 0),
+        "writeback_receipt_count": int(summary.get("writeback_receipt_count") or 0),
+        "writeback_verified_count": int(summary.get("writeback_verified_count") or 0),
+        "writeback_failed_count": int(summary.get("writeback_failed_count") or 0),
         "traffic_signal_available_count": int(summary.get("traffic_signal_available_count") or 0),
         "traffic_signal_note": summary.get("traffic_signal_note"),
         "attention_items": list(payload.get("attention_items") or [])[:4],
@@ -1234,6 +1237,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Still-open targeted issues: `{seo_outcomes.get('issue_still_present_count', 0)}`")
         lines.append(f"- Missing from latest audit: `{seo_outcomes.get('missing_from_audit_count', 0)}`")
         lines.append(f"- Awaiting audit refresh: `{seo_outcomes.get('awaiting_audit_refresh_count', 0)}`")
+        lines.append(f"- Immediate writeback receipts: `{seo_outcomes.get('writeback_receipt_count', 0)}`")
+        lines.append(f"- Immediate writeback failures: `{seo_outcomes.get('writeback_failed_count', 0)}`")
         lines.append(f"- Traffic signals available: `{seo_outcomes.get('traffic_signal_available_count', 0)}`")
         if seo_outcomes.get("traffic_signal_note"):
             lines.append(f"- Signal note: {_trim_text(seo_outcomes.get('traffic_signal_note'), 180)}")
@@ -1811,6 +1816,8 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             lines.append(f"Still-open targeted issues: {seo_outcomes.get('issue_still_present_count', 0)}")
             lines.append(f"Missing from latest audit: {seo_outcomes.get('missing_from_audit_count', 0)}")
             lines.append(f"Awaiting audit refresh: {seo_outcomes.get('awaiting_audit_refresh_count', 0)}")
+            lines.append(f"Immediate writeback receipts: {seo_outcomes.get('writeback_receipt_count', 0)}")
+            lines.append(f"Immediate writeback failures: {seo_outcomes.get('writeback_failed_count', 0)}")
             lines.append(f"Traffic signals available: {seo_outcomes.get('traffic_signal_available_count', 0)}")
             if seo_outcomes.get("traffic_signal_note"):
                 lines.append(f"Signal note: {_trim_text(seo_outcomes.get('traffic_signal_note'), 180)}")

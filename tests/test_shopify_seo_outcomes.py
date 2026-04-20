@@ -253,6 +253,79 @@ class ShopifySeoOutcomesTests(unittest.TestCase):
             self.assertEqual(payload["attention_items"][0]["status"], "awaiting_audit_refresh")
             self.assertIn("has not been rechecked yet", payload["attention_items"][0]["verification_note"])
 
+    def test_build_shopify_seo_outcomes_includes_writeback_receipts(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit_path = root / "state" / "shopify_seo_audit.json"
+            review_run_dir = root / "state" / "shopify_seo_review" / "runs"
+            receipt_dir = root / "state" / "shopify_seo_writeback" / "receipts"
+            state_path = root / "state" / "shopify_seo_outcomes.json"
+            operator_json_path = root / "output" / "operator" / "shopify_seo_outcomes.json"
+            markdown_path = root / "output" / "operator" / "shopify_seo_outcomes.md"
+            review_run_dir.mkdir(parents=True, exist_ok=True)
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+
+            now = datetime.now().astimezone()
+            audit_path.write_text(json.dumps({"generated_at": now.isoformat(), "resources": []}), encoding="utf-8")
+            receipt_dir.joinpath("blog-success.json").write_text(
+                json.dumps(
+                    {
+                        "receipt_id": "blog-success",
+                        "verified_at": now.isoformat(),
+                        "status": "verified",
+                        "summary": "Blog Shopify SEO writeback verified.",
+                        "lane": "blog",
+                        "source": "blog_set_seo",
+                        "resource_kind": "article",
+                        "resource_id": "gid://shopify/Article/10",
+                        "title": "Duck Gazette",
+                        "resource_url": "/blogs/news/duck-gazette",
+                        "observed": {"seo_title": "Duck Gazette", "seo_description": "Description"},
+                        "failure_codes": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            receipt_dir.joinpath("review-fail.json").write_text(
+                json.dumps(
+                    {
+                        "receipt_id": "review-fail",
+                        "verified_at": now.isoformat(),
+                        "status": "failed",
+                        "summary": "Shopify SEO writeback failed verification: seo_title_mismatch.",
+                        "lane": "shopify_seo_review",
+                        "source": "shopify_seo_review_apply",
+                        "resource_kind": "product",
+                        "resource_id": "gid://shopify/Product/77",
+                        "title": "Open Duck",
+                        "resource_url": "/products/open-duck",
+                        "observed": {"seo_title": "Wrong", "seo_description": "Description"},
+                        "failure_codes": ["seo_title_mismatch"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(shopify_seo_outcomes, "SEO_AUDIT_PATH", audit_path), patch.object(
+                shopify_seo_outcomes, "SEO_REVIEW_RUN_DIR", review_run_dir
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_WRITEBACK_RECEIPT_DIR", receipt_dir
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_STATE_PATH", state_path
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_OPERATOR_JSON_PATH", operator_json_path
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_MD_PATH", markdown_path
+            ):
+                payload = shopify_seo_outcomes.build_shopify_seo_outcomes()
+
+            self.assertEqual(payload["summary"]["writeback_receipt_count"], 2)
+            self.assertEqual(payload["summary"]["writeback_failed_count"], 1)
+            self.assertEqual(payload["attention_items"][0]["status"], "writeback_verification_failed")
+            self.assertEqual(payload["recent_wins"][0]["status"], "writeback_verified")
+            markdown = markdown_path.read_text(encoding="utf-8")
+            self.assertIn("Immediate writeback failures: `1`", markdown)
+
 
 if __name__ == "__main__":
     unittest.main()

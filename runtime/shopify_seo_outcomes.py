@@ -10,6 +10,7 @@ from governance_review_common import OUTPUT_OPERATOR_DIR, STATE_DIR, load_json, 
 
 SEO_AUDIT_PATH = STATE_DIR / "shopify_seo_audit.json"
 SEO_REVIEW_RUN_DIR = STATE_DIR / "shopify_seo_review" / "runs"
+SEO_WRITEBACK_RECEIPT_DIR = STATE_DIR / "shopify_seo_writeback" / "receipts"
 SEO_OUTCOMES_STATE_PATH = STATE_DIR / "shopify_seo_outcomes.json"
 SEO_OUTCOMES_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "shopify_seo_outcomes.json"
 SEO_OUTCOMES_MD_PATH = OUTPUT_OPERATOR_DIR / "shopify_seo_outcomes.md"
@@ -44,11 +45,13 @@ CATEGORY_TARGET_ISSUES = {
     "weak_description": {"low_value_seo_copy", "weak_generic_seo_description"},
 }
 STATUS_ORDER = {
+    "writeback_verification_failed": -1,
     "issue_still_present": 0,
     "missing_from_audit": 1,
     "awaiting_audit_refresh": 2,
     "stable": 3,
     "monitoring": 4,
+    "writeback_verified": 5,
 }
 
 
@@ -207,6 +210,63 @@ def _review_runs() -> list[dict[str, Any]]:
     return runs
 
 
+def _latest_writeback_receipts() -> list[dict[str, Any]]:
+    if not SEO_WRITEBACK_RECEIPT_DIR.exists():
+        return []
+    latest: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for path in sorted(SEO_WRITEBACK_RECEIPT_DIR.glob("*.json")):
+        payload = load_json(path, {})
+        if not isinstance(payload, dict):
+            continue
+        key = (
+            _normalize_text(payload.get("resource_kind")).lower(),
+            _normalize_text(payload.get("resource_id")),
+            _normalize_text(payload.get("source")).lower(),
+        )
+        if not any(key):
+            continue
+        current = latest.get(key)
+        current_dt = parse_iso((current or {}).get("verified_at")) if isinstance(current, dict) else None
+        candidate_dt = parse_iso(payload.get("verified_at"))
+        if current is None or (candidate_dt is not None and (current_dt is None or candidate_dt >= current_dt)):
+            latest[key] = payload
+    return list(latest.values())
+
+
+def _writeback_outcome_item(receipt: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    verified_at = _normalize_text(receipt.get("verified_at")) or None
+    failure_codes = [_normalize_text(code) for code in list(receipt.get("failure_codes") or []) if _normalize_text(code)]
+    status = "writeback_verification_failed" if failure_codes or _normalize_text(receipt.get("status")).lower() != "verified" else "writeback_verified"
+    lane = _normalize_text(receipt.get("lane"))
+    label = f"{lane.replace('_', ' ').title()} SEO writeback" if lane else "SEO writeback"
+    return {
+        "run_id": _normalize_text(receipt.get("run_id")) or None,
+        "seo_category": None,
+        "category_label": label,
+        "status": status,
+        "title": _normalize_text(receipt.get("title")) or "SEO writeback",
+        "kind": _normalize_text(receipt.get("resource_kind")) or None,
+        "resource_id": _normalize_text(receipt.get("resource_id")) or None,
+        "resource_url": _normalize_text(receipt.get("resource_url")) or None,
+        "applied_at": verified_at,
+        "age_days": _age_days(verified_at, now=now),
+        "applied_fields": list(receipt.get("applied_fields") or []),
+        "target_issue_codes": [],
+        "remaining_target_issue_codes": failure_codes,
+        "current_issue_codes": failure_codes,
+        "current_seo_title": _normalize_text(((receipt.get("observed") or {}).get("seo_title"))),
+        "current_seo_description": _normalize_text(((receipt.get("observed") or {}).get("seo_description"))),
+        "verification_note": _normalize_text(receipt.get("summary")) or "SEO writeback receipt captured.",
+        "traffic_signal": {
+            "available": False,
+            "status": "unavailable",
+            "note": "Immediate writeback verification confirms fields stuck in Shopify, but it does not measure organic search lift yet.",
+        },
+        "lane": lane or None,
+        "source": _normalize_text(receipt.get("source")) or None,
+    }
+
+
 def _category_summary(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for item in items:
@@ -256,6 +316,11 @@ def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
                 )
             )
 
+    writeback_items = [
+        _writeback_outcome_item(receipt, now=now)
+        for receipt in _latest_writeback_receipts()
+        if isinstance(receipt, dict)
+    ]
     monitored_items.sort(
         key=lambda item: (
             STATUS_ORDER.get(str(item.get("status") or ""), 9),
@@ -264,8 +329,13 @@ def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
         )
     )
 
-    attention_items = [item for item in monitored_items if item.get("status") in {"issue_still_present", "missing_from_audit", "awaiting_audit_refresh"}][:5]
+    writeback_attention = [item for item in writeback_items if item.get("status") == "writeback_verification_failed"]
+    attention_items = (
+        writeback_attention
+        + [item for item in monitored_items if item.get("status") in {"issue_still_present", "missing_from_audit", "awaiting_audit_refresh"}]
+    )[:5]
     recent_wins = [item for item in monitored_items if item.get("status") in {"stable", "monitoring"}]
+    recent_wins = [item for item in writeback_items if item.get("status") == "writeback_verified" and item.get("lane") in {"blog", "newduck"}] + recent_wins
     recent_wins.sort(
         key=lambda item: (
             0 if item.get("status") == "stable" else 1,
@@ -276,7 +346,7 @@ def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
     payload = {
         "generated_at": now_local_iso(),
         "summary": {
-            "headline": "Track whether applied SEO fixes stay resolved, then attach traffic or click evidence later when a search-performance collector exists.",
+            "headline": "Track immediate Shopify SEO writeback verification now, then keep monitoring whether applied SEO fixes stay resolved after fresh audits land.",
             "audit_generated_at": audit_generated_at,
             "applied_run_count": len(applied_runs),
             "applied_item_count": len(monitored_items),
@@ -285,6 +355,9 @@ def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
             "issue_still_present_count": sum(1 for item in monitored_items if item.get("status") == "issue_still_present"),
             "missing_from_audit_count": sum(1 for item in monitored_items if item.get("status") == "missing_from_audit"),
             "awaiting_audit_refresh_count": sum(1 for item in monitored_items if item.get("status") == "awaiting_audit_refresh"),
+            "writeback_receipt_count": len(writeback_items),
+            "writeback_verified_count": sum(1 for item in writeback_items if item.get("status") == "writeback_verified"),
+            "writeback_failed_count": sum(1 for item in writeback_items if item.get("status") == "writeback_verification_failed"),
             "traffic_signal_available_count": 0,
             "traffic_signal_note": "No search-click or traffic collector is wired into Duck Ops yet, so this monitor currently measures durable SEO cleanup rather than organic lift.",
         },
@@ -295,6 +368,7 @@ def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
         "paths": {
             "seo_audit": str(SEO_AUDIT_PATH),
             "seo_review_runs": str(SEO_REVIEW_RUN_DIR),
+            "seo_writeback_receipts": str(SEO_WRITEBACK_RECEIPT_DIR),
         },
     }
     return payload
@@ -314,6 +388,8 @@ def render_shopify_seo_outcomes_markdown(payload: dict[str, Any]) -> str:
         f"- Still-open targeted issues: `{summary.get('issue_still_present_count') or 0}`",
         f"- Missing from latest audit: `{summary.get('missing_from_audit_count') or 0}`",
         f"- Awaiting audit refresh: `{summary.get('awaiting_audit_refresh_count') or 0}`",
+        f"- Immediate writeback receipts: `{summary.get('writeback_receipt_count') or 0}`",
+        f"- Immediate writeback failures: `{summary.get('writeback_failed_count') or 0}`",
         f"- Traffic signals available: `{summary.get('traffic_signal_available_count') or 0}`",
         "",
         str(summary.get("headline") or ""),

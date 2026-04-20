@@ -50,6 +50,7 @@ Detailed execution sequence:
 - Shopify MCP connectivity groundwork and SEO audit flow are in place.
 - Shopify SEO audit now flags low-value SEO copy in addition to generic/duplicate/title-overlap issues.
 - Newduck listing policy now enforces internal/external Shopify links and structured Etsy titles.
+- Blog, newduck activation, and Shopify SEO apply now record writeback-verification receipts so failed SEO mutations stop looking like clean success.
 
 ### 6. GTDF / Weekly / Review / Creative Health
 - GTDF winner now reports upstream blockers honestly instead of fake failures.
@@ -185,9 +186,9 @@ Why this matters:
 - When Etsy access is safe again, return to `Review Execution` stabilization and stronger failure breadcrumbs.
 - Keep this in observe-first mode so the operator surface stays trustworthy.
 
-### 2. Add Post-Publish SEO Verification Receipts
-- After blog/newduck/shopify SEO updates land, capture lightweight verification receipts that prove the intended SEO fields and required links actually stuck.
-- Surface any failed writebacks in health and the business desk so “successful” runs stop hiding incomplete SEO state.
+### 2. Add Meme Monday Approval Policy And Promotion Watch
+- Give Meme Monday the same approval-policy structure as the weekly-sale lane so we can start in supervised mode, watch outcomes, and only promote after repeated clean runs.
+- Surface readiness and promotion state in the business desk instead of relying on memory or ad hoc checks.
 
 ### 3. Turn Learnings Into Stronger Weekly Execution Guidance
 - Use the steadier competitor signal plus the new learnings notifier to sharpen the weekly experiment list and promotion-readiness calls.
