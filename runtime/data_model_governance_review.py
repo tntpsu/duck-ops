@@ -70,6 +70,12 @@ SURFACES = [
         "markdown": OUTPUT_OPERATOR_DIR / "business_operator_desk.md",
     },
     {
+        "surface": "repo_ci_status",
+        "state_json": STATE_DIR / "repo_ci_status.json",
+        "operator_json": OUTPUT_OPERATOR_DIR / "repo_ci_status.json",
+        "markdown": OUTPUT_OPERATOR_DIR / "repo_ci_status.md",
+    },
+    {
         "surface": "shopify_seo_audit",
         "state_json": STATE_DIR / "shopify_seo_audit.json",
         "operator_json": None,

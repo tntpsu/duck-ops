@@ -309,6 +309,89 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Duck Ops Engineering Governance", governance_section)
         self.assertIn("Top-priority recommendations: 1", governance_section)
 
+    def test_operator_desk_surfaces_repo_ci_status(self) -> None:
+        with patch(
+            "business_operator_desk._load_repo_ci_surface",
+            return_value={
+                "available": True,
+                "path": "/tmp/repo_ci_status.md",
+                "headline": "1 repo CI mirror result is behind the current commit.",
+                "recommended_action": "Rerun the local CI mirror for the repo that moved after the last check.",
+                "repo_count": 2,
+                "attention_count": 1,
+                "failing_count": 0,
+                "dirty_count": 0,
+                "outdated_count": 1,
+                "not_run_count": 0,
+                "stale_count": 0,
+                "passed_count": 1,
+                "items": [
+                    {
+                        "repo": "duckAgent",
+                        "status": "outdated",
+                        "status_label": "OUTDATED",
+                        "headline": "duckAgent has new commits after the last CI mirror result.",
+                        "summary": "clean workspace | last check covered `abc1234` but current head is `def5678`",
+                        "recommended_action": "Rerun `python3 runtime/repo_ci_status.py --run-checks --repo duckAgent` so the CI mirror matches the current head.",
+                        "attention_needed": True,
+                        "rerun_command": "python3 runtime/repo_ci_status.py --run-checks --repo duckAgent",
+                        "branch": "codex/test-agent",
+                        "head_sha_short": "def5678",
+                        "check_finished_at": "2026-04-20T20:00:03-04:00",
+                    },
+                    {
+                        "repo": "duck-ops",
+                        "status": "passed",
+                        "status_label": "PASSED",
+                        "headline": "duck-ops local CI mirror is green.",
+                        "summary": "clean workspace | Compiled 47 Python files.",
+                        "recommended_action": "No immediate action is needed.",
+                        "attention_needed": False,
+                        "rerun_command": "python3 runtime/repo_ci_status.py --run-checks --repo duck-ops",
+                        "branch": "codex/test-ops",
+                        "head_sha_short": "aaa1111",
+                        "check_finished_at": "2026-04-20T20:00:05-04:00",
+                    },
+                ],
+            },
+        ), patch(
+            "business_operator_desk._load_learning_surface",
+            return_value={"available": False, "path": "/tmp/current_learnings.md", "items": [], "change_count": 0, "idea_count": 0},
+        ), patch(
+            "business_operator_desk._load_weekly_strategy_packet",
+            return_value={"available": False, "path": "/tmp/weekly_strategy_recommendation_packet.md", "recommendations": [], "watchouts": [], "social_plan": {}},
+        ), patch(
+            "business_operator_desk._load_seo_outcome_surface",
+            return_value={"available": False, "path": "/tmp/shopify_seo_outcomes.md", "attention_items": [], "recent_wins": []},
+        ), patch(
+            "business_operator_desk._load_governance_surface",
+            return_value={"available": False, "path": "/tmp/engineering_governance_digest.md", "findings": [], "recommendations": []},
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        ci_section = render_business_section(payload, "ci")
+        self.assertEqual(payload["counts"]["repo_ci_tracked_repos"], 2)
+        self.assertEqual(payload["counts"]["repo_ci_attention_items"], 1)
+        self.assertEqual(payload["counts"]["repo_ci_failing_repos"], 0)
+        action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "repo_ci")
+        self.assertIn("duckAgent", action["summary"])
+        self.assertIn("OUTDATED", action["summary"])
+        self.assertEqual(action["command"], "python3 runtime/repo_ci_status.py --run-checks --repo duckAgent")
+        self.assertIn("## Repo CI Status", markdown)
+        self.assertIn("duckAgent | `OUTDATED`", markdown)
+        self.assertIn("Duck Ops Repo CI Status", ci_section)
+        self.assertIn("Need attention: 1", ci_section)
+
     def test_operator_desk_surfaces_current_learnings(self) -> None:
         with patch(
             "business_operator_desk._load_learning_surface",

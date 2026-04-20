@@ -15,6 +15,7 @@ from typing import Any
 
 from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
+from repo_ci_status import REPO_CI_MD_PATH, build_repo_ci_status
 from workflow_control import list_workflow_states, load_json
 from workflow_operator_summary import build_workflow_followthrough_items
 
@@ -1080,6 +1081,89 @@ def _load_governance_surface() -> dict[str, Any]:
     }
 
 
+def _load_repo_ci_surface() -> dict[str, Any]:
+    try:
+        payload = build_repo_ci_status(run_checks=False, write_outputs=False)
+    except Exception:
+        return {
+            "available": False,
+            "path": str(REPO_CI_MD_PATH),
+            "headline": None,
+            "recommended_action": None,
+            "repo_count": 0,
+            "attention_count": 0,
+            "failing_count": 0,
+            "items": [],
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "path": str(REPO_CI_MD_PATH),
+            "headline": None,
+            "recommended_action": None,
+            "repo_count": 0,
+            "attention_count": 0,
+            "failing_count": 0,
+            "items": [],
+        }
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    normalized_items: list[dict[str, Any]] = []
+    for item in list(payload.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        git = item.get("git") if isinstance(item.get("git"), dict) else {}
+        check = item.get("check") if isinstance(item.get("check"), dict) else {}
+        normalized_items.append(
+            {
+                "repo": str(item.get("repo") or "").strip() or "repo",
+                "status": str(item.get("status") or "unknown").strip() or "unknown",
+                "status_label": str(item.get("status_label") or "UNKNOWN").strip() or "UNKNOWN",
+                "headline": str(item.get("headline") or "").strip() or None,
+                "summary": str(item.get("summary") or "").strip() or None,
+                "recommended_action": str(item.get("recommended_action") or "").strip() or None,
+                "attention_needed": bool(item.get("attention_needed")),
+                "rerun_command": str(item.get("rerun_command") or "").strip() or None,
+                "path": str(item.get("path") or "").strip() or None,
+                "visibility": str(item.get("visibility") or "").strip() or None,
+                "workflow_name": str(item.get("workflow_name") or "").strip() or None,
+                "job_name": str(item.get("job_name") or "").strip() or None,
+                "branch": str(git.get("branch") or "").strip() or None,
+                "head_sha_short": str(git.get("head_sha_short") or "").strip() or None,
+                "upstream": str(git.get("upstream") or "").strip() or None,
+                "ahead": int(git.get("ahead") or 0),
+                "behind": int(git.get("behind") or 0),
+                "modified_count": int(git.get("modified_count") or 0),
+                "untracked_count": int(git.get("untracked_count") or 0),
+                "check_summary": str(check.get("summary") or "").strip() or None,
+                "check_finished_at": check.get("finished_at"),
+                "check_age_hours": check.get("age_hours"),
+                "check_command": str(check.get("command") or "").strip() or None,
+                "matches_current_head": bool(check.get("matches_current_head")),
+                "stdout_tail": list(check.get("stdout_tail") or [])[:6],
+                "stderr_tail": list(check.get("stderr_tail") or [])[:6],
+            }
+        )
+
+    return {
+        "available": True,
+        "path": str(REPO_CI_MD_PATH),
+        "generated_at": payload.get("generated_at"),
+        "headline": payload.get("headline"),
+        "recommended_action": payload.get("recommended_action"),
+        "repo_count": int(summary.get("repo_count") or len(normalized_items)),
+        "attention_count": int(summary.get("attention_count") or 0),
+        "failing_count": int(summary.get("failing_count") or 0),
+        "dirty_count": int(summary.get("dirty_count") or 0),
+        "outdated_count": int(summary.get("outdated_count") or 0),
+        "not_run_count": int(summary.get("not_run_count") or 0),
+        "stale_count": int(summary.get("stale_count") or 0),
+        "passed_count": int(summary.get("passed_count") or 0),
+        "items": normalized_items[:4],
+    }
+
+
 def _customer_action_items(customer_packets: dict[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for item in list((customer_packets or {}).get("items") or []):
@@ -1281,6 +1365,30 @@ def _governance_action_item(governance_surface: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _repo_ci_action_item(repo_ci_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not repo_ci_surface.get("available"):
+        return None
+
+    items = [item for item in list(repo_ci_surface.get("items") or []) if isinstance(item, dict)]
+    attention_items = [item for item in items if item.get("attention_needed")]
+    if not attention_items:
+        return None
+
+    top = attention_items[0]
+    summary_bits = [
+        str(top.get("repo") or "repo"),
+        str(top.get("status_label") or "ATTENTION"),
+        _trim_text(str(top.get("summary") or ""), 90),
+    ]
+    return {
+        "lane": "repo_ci",
+        "title": str(top.get("headline") or f"{top.get('repo') or 'Repo'} CI attention"),
+        "summary": " | ".join(bit for bit in summary_bits if bit),
+        "command": str(top.get("rerun_command") or "").strip() or None,
+        "secondary_command": str(top.get("recommended_action") or "").strip() or None,
+    }
+
+
 def _promotion_watch_action_item(promotion_surface: dict[str, Any]) -> dict[str, Any] | None:
     if not promotion_surface.get("available"):
         return None
@@ -1355,6 +1463,7 @@ def _build_next_actions(
     learning_surface: dict[str, Any],
     weekly_strategy_packet: dict[str, Any],
     governance_surface: dict[str, Any],
+    repo_ci_surface: dict[str, Any],
     promotion_watch_surface: dict[str, Any],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
@@ -1469,6 +1578,9 @@ def _build_next_actions(
     governance_action = _governance_action_item(governance_surface)
     if governance_action:
         actions.append(governance_action)
+    repo_ci_action = _repo_ci_action_item(repo_ci_surface)
+    if repo_ci_action:
+        actions.append(repo_ci_action)
     promotion_action = _promotion_watch_action_item(promotion_watch_surface)
     if promotion_action:
         actions.append(promotion_action)
@@ -1507,6 +1619,7 @@ def build_business_operator_desk(
     weekly_strategy_packet = _load_weekly_strategy_packet()
     seo_outcomes = _load_seo_outcome_surface()
     governance_surface = _load_governance_surface()
+    repo_ci_surface = _load_repo_ci_surface()
     weekly_sale_policy_surface = _load_weekly_sale_policy_surface()
     meme_policy_surface = _load_meme_policy_surface()
     review_carousel_policy_surface = _load_review_carousel_policy_surface()
@@ -1566,6 +1679,9 @@ def build_business_operator_desk(
             "governance_findings": int(governance_surface.get("finding_count") or 0),
             "governance_recommendations": int(governance_surface.get("recommendation_count") or 0),
             "governance_top_priority_items": int(governance_surface.get("top_priority_count") or 0),
+            "repo_ci_tracked_repos": int(repo_ci_surface.get("repo_count") or 0),
+            "repo_ci_attention_items": int(repo_ci_surface.get("attention_count") or 0),
+            "repo_ci_failing_repos": int(repo_ci_surface.get("failing_count") or 0),
             "learning_beliefs": len(learning_surface.get("items") or []),
             "learning_changes": int(learning_surface.get("change_count") or 0),
             "learning_material_changes": int(learning_surface.get("material_change_count") or 0),
@@ -1589,9 +1705,11 @@ def build_business_operator_desk(
             learning_surface=learning_surface,
             weekly_strategy_packet=weekly_strategy_packet,
             governance_surface=governance_surface,
+            repo_ci_surface=repo_ci_surface,
             promotion_watch_surface=promotion_watch_surface,
         ),
         "governance_surface": governance_surface,
+        "repo_ci_surface": repo_ci_surface,
         "weekly_sale_policy_surface": weekly_sale_policy_surface,
         "meme_policy_surface": meme_policy_surface,
         "review_carousel_policy_surface": review_carousel_policy_surface,
@@ -1612,6 +1730,7 @@ def build_business_operator_desk(
             "review_carousel_policy": list(review_carousel_policy_surface.get("recent_runs") or [])[:4],
             "jeepfact_policy": list(jeepfact_policy_surface.get("recent_runs") or [])[:4],
             "engineering_governance": list(governance_surface.get("recommendations") or [])[:4],
+            "repo_ci_status": list(repo_ci_surface.get("items") or [])[:4],
             "learning_surface": list(learning_surface.get("items") or [])[:4],
             "weekly_strategy_packet": list(weekly_strategy_packet.get("recommendations") or [])[:4],
             "weekly_social_plan": list(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or []))[:5],
@@ -1625,6 +1744,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     sections = payload.get("sections") or {}
     strategy_focus = payload.get("strategy_focus") or {}
     governance_surface = payload.get("governance_surface") or {}
+    repo_ci_surface = payload.get("repo_ci_surface") or {}
     promotion_watch_surface = payload.get("promotion_watch_surface") or {}
     weekly_sale_policy_surface = payload.get("weekly_sale_policy_surface") or {}
     meme_policy_surface = payload.get("meme_policy_surface") or {}
@@ -1679,6 +1799,9 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Governance findings surfaced: `{counts.get('governance_findings', 0)}`",
         f"- Governance recommendations surfaced: `{counts.get('governance_recommendations', 0)}`",
         f"- Top-priority governance items: `{counts.get('governance_top_priority_items', 0)}`",
+        f"- Repo CI tracked repos: `{counts.get('repo_ci_tracked_repos', 0)}`",
+        f"- Repo CI items needing attention: `{counts.get('repo_ci_attention_items', 0)}`",
+        f"- Repo CI failing repos: `{counts.get('repo_ci_failing_repos', 0)}`",
         f"- Learning beliefs surfaced: `{counts.get('learning_beliefs') or len(learning_items)}`",
         f"- Learning changes surfaced: `{counts.get('learning_changes') or learning_surface.get('change_count') or 0}`",
         f"- Material learning changes: `{counts.get('learning_material_changes') or learning_surface.get('material_change_count') or 0}`",
@@ -1729,6 +1852,41 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Why: {_trim_text(item.get('summary'), 170)}")
                 if item.get("recommended_action"):
                     lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
+    lines.extend([
+        "",
+        "## Repo CI Status",
+        "",
+    ])
+    if not repo_ci_surface.get("available"):
+        repo_ci_surface = _load_repo_ci_surface()
+    repo_ci_items = (sections.get("repo_ci_status") or []) or list(repo_ci_surface.get("items") or [])
+    if not repo_ci_surface.get("available"):
+        lines.append("Repo CI status is not available yet.")
+    else:
+        lines.append(f"- Page: `{repo_ci_surface.get('path')}`")
+        lines.append(f"- Tracked repos: `{repo_ci_surface.get('repo_count', len(repo_ci_items))}`")
+        lines.append(f"- Need attention: `{repo_ci_surface.get('attention_count', 0)}`")
+        lines.append(f"- Failing: `{repo_ci_surface.get('failing_count', 0)}`")
+        lines.append(f"- Dirty: `{repo_ci_surface.get('dirty_count', 0)}`")
+        lines.append(f"- Outdated: `{repo_ci_surface.get('outdated_count', 0)}`")
+        lines.append(f"- Not run: `{repo_ci_surface.get('not_run_count', 0)}`")
+        lines.append(f"- Stale: `{repo_ci_surface.get('stale_count', 0)}`")
+        if repo_ci_surface.get("headline"):
+            lines.append(f"- Status: {_trim_text(repo_ci_surface.get('headline'), 180)}")
+        if repo_ci_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(repo_ci_surface.get('recommended_action'), 180)}")
+        if repo_ci_items:
+            lines.append("- Repo checks:")
+            for item in repo_ci_items[:4]:
+                lines.append(
+                    f"  - {item.get('repo')} | `{item.get('status_label') or 'UNKNOWN'}` | branch `{item.get('branch') or 'detached'}` | head `{item.get('head_sha_short') or 'unknown'}`"
+                )
+                if item.get("summary"):
+                    lines.append(f"    Why: {_trim_text(item.get('summary'), 170)}")
+                if item.get("recommended_action"):
+                    lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
+                if item.get("check_finished_at"):
+                    lines.append(f"    Checked: `{item.get('check_finished_at')}`")
     lines.extend([
         "",
         "## Engineering Governance",
@@ -2333,6 +2491,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "engineering": "engineering_governance",
         "digest": "engineering_governance",
         "governance_digest": "engineering_governance",
+        "ci": "repo_ci_status",
+        "repo_ci": "repo_ci_status",
+        "repo_ci_status": "repo_ci_status",
+        "github_checks": "repo_ci_status",
         "learning": "learning_surface",
         "learnings": "learning_surface",
         "seo": "seo_outcomes",
@@ -2407,6 +2569,41 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
                     if item.get("next_action"):
                         lines.append(f"  Next: {_trim_text(item.get('next_action'), 180)}")
+        return "\n".join(lines)
+    if normalized == "repo_ci_status":
+        lines = ["Duck Ops Repo CI Status", ""]
+        repo_ci_surface = payload.get("repo_ci_surface") or {}
+        if not repo_ci_surface.get("available"):
+            repo_ci_surface = _load_repo_ci_surface()
+        repo_ci_items = (sections.get("repo_ci_status") or []) or list(repo_ci_surface.get("items") or [])
+        if not repo_ci_surface.get("available"):
+            lines.append("Repo CI status is not available yet.")
+        else:
+            lines.append(f"Page: {repo_ci_surface.get('path')}")
+            lines.append(f"Tracked repos: {repo_ci_surface.get('repo_count', len(repo_ci_items))}")
+            lines.append(f"Need attention: {repo_ci_surface.get('attention_count', 0)}")
+            lines.append(f"Failing: {repo_ci_surface.get('failing_count', 0)}")
+            lines.append(f"Dirty: {repo_ci_surface.get('dirty_count', 0)}")
+            lines.append(f"Outdated: {repo_ci_surface.get('outdated_count', 0)}")
+            lines.append(f"Not run: {repo_ci_surface.get('not_run_count', 0)}")
+            lines.append(f"Stale: {repo_ci_surface.get('stale_count', 0)}")
+            if repo_ci_surface.get("headline"):
+                lines.append(f"Status: {_trim_text(repo_ci_surface.get('headline'), 180)}")
+            if repo_ci_surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(repo_ci_surface.get('recommended_action'), 180)}")
+            if repo_ci_items:
+                lines.append("")
+                lines.append("Repo checks:")
+                for item in repo_ci_items[:6]:
+                    lines.append(
+                        f"- {item.get('repo')} | {item.get('status_label') or 'UNKNOWN'} | branch {item.get('branch') or 'detached'} | head {item.get('head_sha_short') or 'unknown'}"
+                    )
+                    if item.get("summary"):
+                        lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
+                    if item.get("recommended_action"):
+                        lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
+                    if item.get("check_finished_at"):
+                        lines.append(f"  Checked: {item.get('check_finished_at')}")
         return "\n".join(lines)
     if normalized == "learning_surface":
         lines = ["Duck Ops Current Learnings", ""]
