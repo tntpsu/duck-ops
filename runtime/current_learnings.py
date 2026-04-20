@@ -21,12 +21,16 @@ MATERIAL_CHANGE_KINDS = {
     "weekly_strategy_alternate_lane_won",
     "weekly_strategy_different_lane_won",
     "weekly_strategy_slot_missed",
+    "weekly_strategy_stable_pattern_changed",
+    "weekly_strategy_experiment_changed",
+    "weekly_strategy_guardrail_changed",
     "competitor_social_freshness_degraded",
     "competitor_social_freshness_recovered",
     "competitor_social_freshness_staggered",
 }
 ATTENTION_CHANGE_KINDS = {
     "weekly_strategy_slot_missed",
+    "weekly_strategy_guardrail_changed",
     "competitor_social_freshness_degraded",
 }
 
@@ -185,8 +189,18 @@ def _changes(
 
 def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
     social_plan = packet_payload.get("social_plan") if isinstance(packet_payload.get("social_plan"), dict) else {}
+    stable_patterns = list(packet_payload.get("stable_patterns") or [])
+    experimental_ideas = list(packet_payload.get("experimental_ideas") or [])
+    do_not_copy_patterns = list(packet_payload.get("do_not_copy_patterns") or [])
     if not social_plan:
-        return {"available": False, "execution_feedback": {}, "slot_outcomes": []}
+        return {
+            "available": False,
+            "execution_feedback": {},
+            "slot_outcomes": [],
+            "stable_patterns": [],
+            "experimental_ideas": [],
+            "do_not_copy_patterns": [],
+        }
 
     slot_outcomes: list[dict[str, Any]] = []
     for item in social_plan.get("slots") or []:
@@ -212,6 +226,39 @@ def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
         "headline": _compact_text(social_plan.get("headline")) or None,
         "execution_feedback": dict(social_plan.get("execution_feedback") or {}),
         "slot_outcomes": slot_outcomes[:5],
+        "stable_patterns": [
+            {
+                "title": _compact_text(item.get("title")),
+                "recommendation": _compact_text(item.get("recommendation")),
+                "evidence": _compact_text(item.get("evidence")),
+                "signal_type": _compact_text(item.get("signal_type")),
+                "confidence": _compact_text(item.get("confidence")),
+            }
+            for item in stable_patterns[:4]
+            if isinstance(item, dict) and _compact_text(item.get("title"))
+        ],
+        "experimental_ideas": [
+            {
+                "title": _compact_text(item.get("title")),
+                "recommendation": _compact_text(item.get("recommendation")),
+                "evidence": _compact_text(item.get("evidence")),
+                "signal_type": _compact_text(item.get("signal_type")),
+                "confidence": _compact_text(item.get("confidence")),
+            }
+            for item in experimental_ideas[:4]
+            if isinstance(item, dict) and _compact_text(item.get("title"))
+        ],
+        "do_not_copy_patterns": [
+            {
+                "title": _compact_text(item.get("title")),
+                "guidance": _compact_text(item.get("guidance")),
+                "evidence": _compact_text(item.get("evidence")),
+                "signal_type": _compact_text(item.get("signal_type")),
+                "confidence": _compact_text(item.get("confidence")),
+            }
+            for item in do_not_copy_patterns[:4]
+            if isinstance(item, dict) and _compact_text(item.get("title"))
+        ],
     }
 
 
@@ -263,6 +310,51 @@ def _weekly_strategy_beliefs(feedback_payload: dict[str, Any]) -> list[dict[str,
                     "recommendation": "Review whether the scheduling or lane-fit heuristic should be tightened before reusing this pattern.",
                 }
             )
+    for item in feedback_payload.get("stable_patterns") or []:
+        title = _compact_text(item.get("title"))
+        recommendation = _compact_text(item.get("recommendation"))
+        evidence = _compact_text(item.get("evidence"))
+        if not title or not recommendation:
+            continue
+        beliefs.append(
+            {
+                "headline": title,
+                "confidence": _compact_text(item.get("confidence")) or "medium",
+                "evidence": evidence or "The weekly strategy packet still considers this a stable pattern.",
+                "recommendation": recommendation,
+            }
+        )
+        break
+    for item in feedback_payload.get("experimental_ideas") or []:
+        title = _compact_text(item.get("title"))
+        recommendation = _compact_text(item.get("recommendation"))
+        evidence = _compact_text(item.get("evidence"))
+        if not title or not recommendation:
+            continue
+        beliefs.append(
+            {
+                "headline": f"Active experiment: {title}",
+                "confidence": _compact_text(item.get("confidence")) or "low_medium",
+                "evidence": evidence or "The weekly strategy packet staged this as the next bounded experiment.",
+                "recommendation": recommendation,
+            }
+        )
+        break
+    for item in feedback_payload.get("do_not_copy_patterns") or []:
+        title = _compact_text(item.get("title"))
+        guidance = _compact_text(item.get("guidance"))
+        evidence = _compact_text(item.get("evidence"))
+        if not title or not guidance:
+            continue
+        beliefs.append(
+            {
+                "headline": f"Guardrail: {title}",
+                "confidence": _compact_text(item.get("confidence")) or "high",
+                "evidence": evidence or "The weekly strategy packet marked this as a do-not-copy pattern.",
+                "recommendation": guidance,
+            }
+        )
+        break
     return beliefs[:3]
 
 
@@ -324,6 +416,46 @@ def _weekly_strategy_changes(
                         "headline": f"{slot} has no observed post yet for the planned `{suggested}` slot.",
                     }
                 )
+
+    def _titles(items: Any) -> list[str]:
+        return [
+            _compact_text(item.get("title"))
+            for item in (items or [])
+            if isinstance(item, dict) and _compact_text(item.get("title"))
+        ][:3]
+
+    previous_stable_titles = _titles(previous_feedback.get("stable_patterns"))
+    current_stable_titles = _titles(feedback_payload.get("stable_patterns"))
+    if current_stable_titles and current_stable_titles != previous_stable_titles:
+        changes.append(
+            {
+                "kind": "weekly_strategy_stable_pattern_changed",
+                "headline": "Weekly strategy stable patterns changed since the previous snapshot.",
+                "detail": "Current stable patterns: " + "; ".join(current_stable_titles),
+            }
+        )
+
+    previous_experiment_titles = _titles(previous_feedback.get("experimental_ideas"))
+    current_experiment_titles = _titles(feedback_payload.get("experimental_ideas"))
+    if current_experiment_titles and current_experiment_titles != previous_experiment_titles:
+        changes.append(
+            {
+                "kind": "weekly_strategy_experiment_changed",
+                "headline": "Weekly strategy experiment ideas changed since the previous snapshot.",
+                "detail": "Current experiments: " + "; ".join(current_experiment_titles),
+            }
+        )
+
+    previous_guardrail_titles = _titles(previous_feedback.get("do_not_copy_patterns"))
+    current_guardrail_titles = _titles(feedback_payload.get("do_not_copy_patterns"))
+    if current_guardrail_titles and current_guardrail_titles != previous_guardrail_titles:
+        changes.append(
+            {
+                "kind": "weekly_strategy_guardrail_changed",
+                "headline": "Weekly strategy do-not-copy guardrails changed and should be re-read.",
+                "detail": "Current guardrails: " + "; ".join(current_guardrail_titles),
+            }
+        )
     return changes[:4]
 
 

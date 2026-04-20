@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
 from workflow_control import list_workflow_states, load_json
 from workflow_operator_summary import build_workflow_followthrough_items
@@ -26,6 +27,7 @@ SHOPIFY_SEO_OUTCOMES_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output
 ENGINEERING_GOVERNANCE_DIGEST_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/engineering_governance_digest.json")
 ENGINEERING_GOVERNANCE_DIGEST_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/engineering_governance_digest.md")
 WEEKLY_SALE_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/weekly_sale_execution.json")
+REVIEW_REPLY_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duck-ops/config/review_reply_execution.json")
 WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD = 3
 
 
@@ -226,12 +228,15 @@ def _weekly_sale_policy_promotion_candidate(policy_surface: dict[str, Any]) -> d
 def _load_promotion_watch_surface(
     *,
     weekly_sale_policy_surface: dict[str, Any] | None = None,
+    review_reply_execution_surface: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     policy_surface = weekly_sale_policy_surface or _load_weekly_sale_policy_surface()
+    review_surface = review_reply_execution_surface or _load_review_reply_execution_surface()
     items = [
         item
         for item in [
             _weekly_sale_policy_promotion_candidate(policy_surface),
+            _review_reply_execution_promotion_candidate(review_surface),
         ]
         if isinstance(item, dict)
     ]
@@ -266,6 +271,84 @@ def _load_promotion_watch_surface(
         "headline": headline,
         "recommended_action": recommended_action,
         "items": items[:6],
+    }
+
+
+def _load_review_reply_execution_surface() -> dict[str, Any]:
+    config_payload = load_json(REVIEW_REPLY_EXECUTION_CONFIG_PATH, {})
+    config = config_payload if isinstance(config_payload, dict) else {}
+    browser_guard = etsy_browser_blocked_status()
+    return {
+        "available": REVIEW_REPLY_EXECUTION_CONFIG_PATH.exists(),
+        "path": str(REVIEW_REPLY_EXECUTION_CONFIG_PATH),
+        "auto_execution_enabled": bool(config.get("auto_execution_enabled")),
+        "auto_queue_enabled": bool(config.get("auto_queue_publish_ready_positive", True)),
+        "auto_drain_enabled": bool(config.get("auto_drain_enabled", True)),
+        "max_submits_per_run": int(config.get("auto_drain_max_submits_per_run") or 0),
+        "browser_guard": browser_guard if isinstance(browser_guard, dict) else {},
+    }
+
+
+def _review_reply_execution_promotion_candidate(surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not surface.get("available"):
+        return None
+
+    browser_guard = surface.get("browser_guard") if isinstance(surface.get("browser_guard"), dict) else {}
+    auto_execution_enabled = bool(surface.get("auto_execution_enabled"))
+    blocked = bool(browser_guard.get("blocked"))
+    blocked_until = str(browser_guard.get("blocked_until") or "").strip() or None
+    block_reason = str(browser_guard.get("block_reason") or "").strip() or None
+
+    if auto_execution_enabled and not blocked:
+        promotion_state = "active"
+        action_title = "Etsy review auto-execution active"
+        summary = "Etsy review auto-execution is enabled and the browser guard is currently clear."
+        recommended_action = "Keep monitoring the live lane and only widen automation after the browser guard stays quiet."
+    elif blocked:
+        promotion_state = "blocked"
+        action_title = "Etsy review auto-execution cooling down"
+        summary = (
+            f"Etsy browser automation is cooling down until {blocked_until}."
+            if blocked_until
+            else "Etsy browser automation is cooling down and should stay paused."
+        )
+        recommended_action = "Keep the Etsy review lane in manual mode until the browser cooldown clears and the sidecar stays healthy again."
+    else:
+        promotion_state = "observing"
+        action_title = "Etsy review auto-execution still gated"
+        summary = "Review auto-execution is still intentionally gated while we supervise the Etsy lane manually."
+        recommended_action = "Keep manual review replies as the control path until the cooldown and failure signals stay quiet long enough to revisit promotion."
+
+    evidence = [
+        f"Auto execution enabled: {auto_execution_enabled}.",
+        f"Auto queue enabled: {bool(surface.get('auto_queue_enabled'))}.",
+        f"Auto drain enabled: {bool(surface.get('auto_drain_enabled'))}.",
+        (
+            f"Browser guard reason: {block_reason}."
+            if block_reason
+            else "Browser guard is clear right now."
+        ),
+    ]
+    return {
+        "promotion_id": "review_reply_auto_execution",
+        "lane": "review_reply_execution",
+        "title": "Etsy review auto-execution",
+        "action_title": action_title,
+        "promotion_state": promotion_state,
+        "ready": False,
+        "already_promoted": promotion_state == "active",
+        "summary": summary,
+        "recommended_action": recommended_action,
+        "secondary_action": str(surface.get("path") or "").strip() or None,
+        "source_path": str(surface.get("path") or "").strip() or None,
+        "updated_at": blocked_until,
+        "latest_run_id": None,
+        "progress_label": "manual supervision" if not auto_execution_enabled else "live canary",
+        "threshold": None,
+        "progress_value": None,
+        "blockers": [entry for entry in [block_reason, blocked_until] if entry],
+        "manual_review_reasons": ["browser automation remains intentionally gated"] if not auto_execution_enabled else [],
+        "evidence": evidence[:4],
     }
 
 
@@ -695,6 +778,30 @@ def _promotion_watch_action_item(promotion_surface: dict[str, Any]) -> dict[str,
     return None
 
 
+def _learning_change_action_item(learning_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not learning_surface.get("available"):
+        return None
+    notifier = learning_surface.get("change_notifier") if isinstance(learning_surface.get("change_notifier"), dict) else {}
+    if not notifier.get("available"):
+        return None
+    items = [item for item in list(notifier.get("items") or []) if isinstance(item, dict)]
+    if not items:
+        return None
+    top = items[0]
+    summary_parts = [
+        str(top.get("urgency") or "opportunity"),
+        f"{int(learning_surface.get('material_change_count') or 0)} material change(s)",
+        _trim_text(str(top.get("headline") or ""), 90),
+    ]
+    return {
+        "lane": "learning_surface",
+        "title": str(notifier.get("headline") or "Review learning changes"),
+        "summary": " | ".join(part for part in summary_parts if part),
+        "command": str(notifier.get("recommended_action") or "").strip() or "review current_learnings + weekly_strategy_recommendation_packet",
+        "secondary_command": str(learning_surface.get("path") or "").strip() or None,
+    }
+
+
 def _build_next_actions(
     *,
     customer_items: list[dict[str, Any]],
@@ -705,6 +812,7 @@ def _build_next_actions(
     weekly_sale_items: list[dict[str, Any]],
     review_items: list[dict[str, Any]],
     workflow_items: list[dict[str, Any]],
+    learning_surface: dict[str, Any],
     weekly_strategy_packet: dict[str, Any],
     governance_surface: dict[str, Any],
     promotion_watch_surface: dict[str, Any],
@@ -815,6 +923,9 @@ def _build_next_actions(
     social_plan_action = _social_plan_action_item(weekly_strategy_packet)
     if social_plan_action:
         actions.append(social_plan_action)
+    learning_action = _learning_change_action_item(learning_surface)
+    if learning_action:
+        actions.append(learning_action)
     governance_action = _governance_action_item(governance_surface)
     if governance_action:
         actions.append(governance_action)
@@ -920,6 +1031,7 @@ def build_business_operator_desk(
             weekly_sale_items=weekly_sale_items,
             review_items=review_items,
             workflow_items=workflow_items,
+            learning_surface=learning_surface,
             weekly_strategy_packet=weekly_strategy_packet,
             governance_surface=governance_surface,
             promotion_watch_surface=promotion_watch_surface,

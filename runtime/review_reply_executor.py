@@ -721,6 +721,17 @@ def is_auth_error(error: Exception | str | None) -> bool:
     return any(marker in text for marker in markers)
 
 
+def is_cooldown_error(error: Exception | str | None) -> bool:
+    text = str(error or "").lower()
+    markers = (
+        "etsy automation is cooling down until",
+        "shared pacing budget",
+        "rate_limit_preemptive_cooldown",
+        "cooling down because",
+    )
+    return any(marker in text for marker in markers)
+
+
 def is_signed_out_state(current_url: str | None, auth_probe: dict[str, Any] | None) -> bool:
     return "/signin" in str(current_url or "").lower() or bool((auth_probe or {}).get("signInVisible"))
 
@@ -1907,6 +1918,26 @@ def prepare_auth_for_drain(policy: dict[str, Any]) -> dict[str, Any]:
     try:
         session_meta = ensure_authenticated_session(session_name, start_url, policy=policy)
     except Exception as exc:  # noqa: BLE001
+        if is_cooldown_error(exc):
+            blocked = etsy_browser_blocked_status()
+            blocked_until = blocked.get("blocked_until")
+            block_reason = blocked.get("block_reason")
+            detail = (
+                f"Etsy browser automation is cooling down until {blocked_until}."
+                if blocked_until
+                else "Etsy browser automation is cooling down."
+            )
+            if block_reason:
+                detail += f" Reason: {block_reason}."
+            return {
+                "ok": True,
+                "ready": False,
+                "status": "cooldown",
+                "message": detail,
+                "blocked_until": blocked_until,
+                "block_reason": block_reason,
+                "auth_state": auth_state,
+            }
         if not is_auth_error(exc):
             raise
         auth_state = mark_auth_blocked(
@@ -2740,6 +2771,8 @@ def drain_queue(
             "results": [],
             "auth_state": auth_readiness.get("auth_state"),
             "alert": auth_readiness.get("alert"),
+            "blocked_until": auth_readiness.get("blocked_until"),
+            "block_reason": auth_readiness.get("block_reason"),
         }
 
     results: list[dict[str, Any]] = []

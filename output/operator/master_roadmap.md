@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-04-15
+Last updated: 2026-04-20
 
 Detailed execution sequence:
 - [ROADMAP_EXECUTION_SEQUENCE.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/ROADMAP_EXECUTION_SEQUENCE.md)
@@ -48,12 +48,15 @@ Detailed execution sequence:
 - Newduck now writes SEO into Shopify instead of only generating it.
 - Blog and newduck flows now have stronger SEO validation rules.
 - Shopify MCP connectivity groundwork and SEO audit flow are in place.
+- Shopify SEO audit now flags low-value SEO copy in addition to generic/duplicate/title-overlap issues.
+- Newduck listing policy now enforces internal/external Shopify links and structured Etsy titles.
 
 ### 6. GTDF / Weekly / Review / Creative Health
 - GTDF winner now reports upstream blockers honestly instead of fake failures.
 - Review execution and trend/health reporting were cleaned up to reduce false bad states.
 - Weekly/workflow health is more root-cause-aware than before.
 - Blog and ops health now treat healthy idle/backlog states as operator truth instead of fake warnings.
+- Etsy review auto-execution cooldown now degrades into a paused lane instead of crashing the sidecar.
 
 ### 7. Shopify Draft Activation Controls
 - Newduck is now a two-step Shopify flow:
@@ -67,6 +70,7 @@ Detailed execution sequence:
 - `duck-architecture-guard` skill is now created and validated.
 - `duck-change-planner`, `duck-reliability-review`, `duck-data-model-governance`, and `duck-automation-safety` are now created and validated.
 - `duck-tech-debt-triage`, `duck-social-insights`, and `duck-competitor-benchmark` are now created and validated.
+- `duck-documentation-governance` now exists so canonical roadmap, governance, and current-system docs can be reviewed for drift and cleanup.
 - Agent/skill governance policy now exists to define power tiers, recommendation flow, and review/push expectations.
 - Engineering governance digest lane now exists and is scheduled for the morning.
 - Governance digest email delivery is smoke-tested, so the observe/propose recommendation channel is live.
@@ -77,6 +81,8 @@ Detailed execution sequence:
 - Current learnings, competitor benchmarking, and weekly strategy packet outputs are live.
 - The business desk now surfaces a weekly social plan with lane-fit reasoning and ready-to-run slot guidance.
 - Weekly slots now track recommended lane, alternate lane, actual observed lane, and simple performance follow-through.
+- Material learning changes now feed a dedicated learnings-change digest and business-desk follow-through action.
+- Weekly strategy packet now carries a `What Changed` section so learning shifts are folded back into the weekly plan.
 
 ## Active Operational Lanes
 
@@ -165,6 +171,8 @@ Key uses next:
    - review scheduled lanes and degraded health before promotion
 8. `duck-change-planner`
    - remain the entry point for major roadmap work
+9. `duck-documentation-governance`
+   - keep canonical roadmap, governance, and current-system docs clean, current, and non-duplicative as the system evolves
 
 Why this matters:
 - DuckAgent and Duck Ops are getting more capable and more complex.
@@ -177,13 +185,13 @@ Why this matters:
 - When Etsy access is safe again, return to `Review Execution` stabilization and stronger failure breadcrumbs.
 - Keep this in observe-first mode so the operator surface stays trustworthy.
 
-### 2. Add Learnings Change Notifications
-- Turn meaningful `current_learnings` and weekly-strategy shifts into a small operator-facing change notifier or morning digest section.
-- Only surface material movement: strong planned-lane validation, alternate-lane wins, missed slots, and freshness degradation.
+### 2. Add Post-Publish SEO Verification Receipts
+- After blog/newduck/shopify SEO updates land, capture lightweight verification receipts that prove the intended SEO fields and required links actually stuck.
+- Surface any failed writebacks in health and the business desk so “successful” runs stop hiding incomplete SEO state.
 
-### 3. Expand SEO Audit Intelligence
-- Add the richer SEO heuristics already called out in the roadmap: weak/generic copy, near-duplicates, title/raw-name overlap, and low-value page/article copy.
-- Feed those new categories into the monthly review lane without changing the existing approval boundary.
+### 3. Turn Learnings Into Stronger Weekly Execution Guidance
+- Use the steadier competitor signal plus the new learnings notifier to sharpen the weekly experiment list and promotion-readiness calls.
+- Keep the recommendations explicit: what stayed stable, what is worth testing once, and what should not be copied.
 
 ## Lower-Priority / Nice-to-Have
 - Continue backfilling more exact Etsy `/messages/<id>` URLs.

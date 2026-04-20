@@ -474,6 +474,99 @@ class CurrentLearningsTests(unittest.TestCase):
             self.assertIn("## Change Notifier", markdown)
             self.assertIn("Competitor social freshness degraded", markdown)
 
+    def test_build_current_learnings_surfaces_strategy_pattern_changes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            social_path = root / "state" / "social_performance_rollups.json"
+            competitor_path = root / "state" / "social_competitor_benchmark.json"
+            competitor_social_path = root / "state" / "competitor_social_benchmark.json"
+            competitor_snapshots_path = root / "state" / "competitor_social_snapshots.json"
+            weekly_strategy_path = root / "state" / "weekly_strategy_recommendation_packet.json"
+            state_path = root / "state" / "current_learnings.json"
+            operator_json_path = root / "output" / "operator" / "current_learnings.json"
+            markdown_path = root / "output" / "operator" / "current_learnings.md"
+            social_path.parent.mkdir(parents=True, exist_ok=True)
+            social_path.write_text(json.dumps({"summary": {"post_count": 6, "metrics_coverage_pct": 100.0}}), encoding="utf-8")
+            competitor_path.write_text(json.dumps({"summary": {}}), encoding="utf-8")
+            competitor_social_path.write_text(json.dumps({"summary": {"post_count": 8}}), encoding="utf-8")
+            competitor_snapshots_path.write_text(
+                json.dumps({"generated_at": "2026-04-16T09:00:00-04:00", "summary": {"post_count": 8, "collected_account_count": 3, "live_account_count": 3}}),
+                encoding="utf-8",
+            )
+            weekly_strategy_path.write_text(
+                json.dumps(
+                    {
+                        "social_plan": {
+                            "headline": "Keep one strong anchor lane this week.",
+                            "execution_feedback": {},
+                            "slots": [],
+                        },
+                        "stable_patterns": [
+                            {
+                                "title": "`evening` is still the default test window",
+                                "recommendation": "Keep evening as the anchor window.",
+                                "evidence": "Observed posts still cluster there.",
+                                "confidence": "medium",
+                            }
+                        ],
+                        "experimental_ideas": [
+                            {
+                                "title": "Borrow one bounded hook from `f3dprinted`",
+                                "recommendation": "Test one bounded competitor-inspired hook.",
+                                "evidence": "That account stayed steady across recent snapshots.",
+                                "confidence": "low_medium",
+                            }
+                        ],
+                        "do_not_copy_patterns": [
+                            {
+                                "title": "Do not chase degraded competitor snapshots too aggressively",
+                                "guidance": "Keep tests small when freshness is mixed.",
+                                "evidence": "Freshness can still swing quickly.",
+                                "confidence": "high",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "summary": {"competitor_social_freshness_label": "live"},
+                        "weekly_strategy_feedback": {
+                            "slot_outcomes": [],
+                            "stable_patterns": [{"title": "`midday` used to be the default test window"}],
+                            "experimental_ideas": [{"title": "Reuse the old caption family"}],
+                            "do_not_copy_patterns": [{"title": "Old guardrail"}],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(current_learnings, "SOCIAL_ROLLUPS_PATH", social_path), patch.object(
+                current_learnings, "COMPETITOR_BENCHMARK_PATH", competitor_path
+            ), patch.object(
+                current_learnings, "COMPETITOR_SOCIAL_BENCHMARK_PATH", competitor_social_path
+            ), patch.object(
+                current_learnings, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", competitor_snapshots_path
+            ), patch.object(
+                current_learnings, "WEEKLY_STRATEGY_PACKET_PATH", weekly_strategy_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_STATE_PATH", state_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_OPERATOR_JSON_PATH", operator_json_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_MD_PATH", markdown_path
+            ):
+                payload = current_learnings.build_current_learnings()
+
+            notifier = payload["change_notifier"]
+            kinds = {item["kind"] for item in notifier["items"]}
+            self.assertIn("weekly_strategy_stable_pattern_changed", kinds)
+            self.assertIn("weekly_strategy_experiment_changed", kinds)
+            self.assertIn("weekly_strategy_guardrail_changed", kinds)
+
 
 if __name__ == "__main__":
     unittest.main()

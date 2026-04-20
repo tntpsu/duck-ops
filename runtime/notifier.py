@@ -41,13 +41,17 @@ CONFIG_PATH = ROOT / "config" / "notifier.json"
 STATE_PATH = ROOT / "state" / "notifier_state.json"
 OUTPUT_DIGESTS = ROOT / "output" / "digests"
 PROMOTION_READINESS_DIGEST_PATH = OUTPUT_DIGESTS / "promotion_readiness.json"
+LEARNING_CHANGE_DIGEST_PATH = OUTPUT_DIGESTS / "learning_change_digest.json"
 DIGEST_SIGNATURE_VERSION = 2
 TREND_DIGEST_SIGNATURE_VERSION = 1
 PROMOTION_READINESS_SIGNATURE_VERSION = 1
+LEARNING_CHANGE_SIGNATURE_VERSION = 1
 QUALITY_GATE_STATE_PATH = ROOT / "state" / "quality_gate_state.json"
 OPERATOR_CURRENT_PATH = ROOT / "output" / "operator" / "current_review.json"
 WHATSAPP_PUSH_SENTINEL = "OPENCLAW_OPERATOR_PUSH"
 BUSINESS_OPERATOR_DESK_PATH = ROOT / "output" / "operator" / "business_operator_desk.json"
+CURRENT_LEARNINGS_PATH = ROOT / "state" / "current_learnings.json"
+WEEKLY_STRATEGY_PACKET_PATH = ROOT / "state" / "weekly_strategy_recommendation_packet.json"
 CUSTOMER_ACTION_PACKETS_PATH = ROOT / "state" / "customer_action_packets.json"
 CUSTOMER_CASES_PATH = ROOT / "state" / "normalized" / "customer_cases.json"
 CUSTOM_DESIGN_CASES_PATH = ROOT / "state" / "normalized" / "custom_design_cases.json"
@@ -553,6 +557,35 @@ def _render_promotion_readiness_html(subject: str, payload: dict[str, Any]) -> s
     return _notifier_shell("Duck Ops Promotion Ready", subject, subtitle, stats, "".join(sections))
 
 
+def _render_learning_change_html(subject: str, payload: dict[str, Any]) -> str:
+    items = list(payload.get("items") or [])
+    stats = "".join(
+        [
+            _notifier_stat("Material changes", payload.get("material_change_count") or len(items)),
+            _notifier_stat("Attention items", payload.get("attention_change_count") or 0),
+            _notifier_stat("Source", payload.get("source") or "current_learnings"),
+        ]
+    )
+    sections: list[str] = []
+    for item in items[:6]:
+        meta_bits = [
+            str(item.get("urgency") or "opportunity"),
+            str(item.get("source") or "learning"),
+            str(item.get("kind") or ""),
+        ]
+        body = [
+            f"<div style=\"font-size:13px;color:#6b7280;margin-bottom:8px;\">{' | '.join(bit for bit in meta_bits if bit)}</div>",
+            f"<div style=\"margin-bottom:8px;\"><strong>Change:</strong> {_html_text(item.get('headline') or '')}</div>",
+        ]
+        if item.get("detail"):
+            body.append(f"<div style=\"margin-bottom:8px;\"><strong>Detail:</strong> {_html_text(item.get('detail'))}</div>")
+        sections.append(_notifier_card(str(item.get("headline") or "Learning change"), "".join(body)))
+    if not sections:
+        sections.append(_notifier_card("No material learning changes", "<div style=\"color:#4b5563;\">No material learning changes are ready to send right now.</div>"))
+    subtitle = f"Generated {payload.get('generated_at')} | current learnings + weekly strategy shifts"
+    return _notifier_shell("Duck Ops Learning Changes", subject, subtitle, stats, "".join(sections))
+
+
 def render_notifier_html(kind: str, subject: str, body: str, payload: dict[str, Any]) -> str:
     if kind == "nightly_action_summary":
         return render_nightly_action_summary_html(payload)
@@ -566,6 +599,8 @@ def render_notifier_html(kind: str, subject: str, body: str, payload: dict[str, 
         return _render_phase_readiness_html(subject, payload)
     if kind == "promotion_readiness":
         return _render_promotion_readiness_html(subject, payload)
+    if kind == "learning_change_digest":
+        return _render_learning_change_html(subject, payload)
     escaped_body = html.escape(body)
     label = {
         "digest": "OpenClaw Digest",
@@ -573,6 +608,7 @@ def render_notifier_html(kind: str, subject: str, body: str, payload: dict[str, 
         "urgent": "OpenClaw Urgent",
         "phase_readiness": "OpenClaw Phase Readiness",
         "promotion_readiness": "Duck Ops Promotion Ready",
+        "learning_change_digest": "Duck Ops Learning Changes",
     }.get(kind, "OpenClaw Notification")
     return (
         "<html><body style=\"margin:0;padding:0;background:#f3f4f6;color:#111827;\">"
@@ -886,6 +922,28 @@ def promotion_readiness_signature(payload: dict[str, Any]) -> str:
     return canonical_hash({"ready_item_count": payload.get("ready_item_count", 0), "items": items})
 
 
+def learning_change_signature(payload: dict[str, Any]) -> str:
+    items = []
+    for item in payload.get("items", []):
+        items.append(
+            {
+                "source": item.get("source"),
+                "kind": item.get("kind"),
+                "urgency": item.get("urgency"),
+                "headline": item.get("headline"),
+                "detail": item.get("detail"),
+            }
+        )
+    items.sort(key=lambda item: ((item.get("kind") or ""), (item.get("headline") or "")))
+    return canonical_hash(
+        {
+            "material_change_count": payload.get("material_change_count", 0),
+            "attention_change_count": payload.get("attention_change_count", 0),
+            "items": items,
+        }
+    )
+
+
 def render_promotion_readiness_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Duck Ops Promotion Ready",
@@ -917,6 +975,33 @@ def render_promotion_readiness_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_learning_change_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Duck Ops Learning Changes",
+        "",
+        f"- Generated at: `{payload.get('generated_at')}`",
+        f"- Source: `{payload.get('source') or 'current_learnings'}`",
+        f"- Material changes: `{payload.get('material_change_count', 0)}`",
+        f"- Attention changes: `{payload.get('attention_change_count', 0)}`",
+    ]
+    if payload.get("headline"):
+        lines.append(f"- Status: `{payload.get('headline')}`")
+    if payload.get("recommended_action"):
+        lines.append(f"- Recommended action: `{payload.get('recommended_action')}`")
+    lines.extend(["", "## Material Changes", ""])
+    items = list(payload.get("items") or [])
+    if not items:
+        lines.append("No material learning changes are ready right now.")
+        return "\n".join(lines)
+    for item in items:
+        lines.append(f"- `{item.get('urgency') or 'opportunity'}` · {item.get('headline') or 'Learning change'}")
+        if item.get("detail"):
+            lines.append(f"  Detail: {item.get('detail')}")
+        if item.get("source"):
+            lines.append(f"  Source: `{item.get('source')}`")
+    return "\n".join(lines)
+
+
 def refresh_promotion_readiness_artifact() -> None:
     payload = load_json(BUSINESS_OPERATOR_DESK_PATH, {})
     if not isinstance(payload, dict) or not payload:
@@ -942,6 +1027,33 @@ def refresh_promotion_readiness_artifact() -> None:
     PROMOTION_READINESS_DIGEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     PROMOTION_READINESS_DIGEST_PATH.write_text(json.dumps(digest_payload, indent=2), encoding="utf-8")
     md_for_json(PROMOTION_READINESS_DIGEST_PATH).write_text(markdown + "\n", encoding="utf-8")
+
+
+def refresh_learning_change_artifact() -> None:
+    payload = load_json(CURRENT_LEARNINGS_PATH, {})
+    if not isinstance(payload, dict) or not payload:
+        return
+    notifier = payload.get("change_notifier") if isinstance(payload.get("change_notifier"), dict) else {}
+    items = [item for item in list(notifier.get("items") or []) if isinstance(item, dict)]
+    digest_payload = {
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "source": "current_learnings",
+        "source_path": str(CURRENT_LEARNINGS_PATH),
+        "supporting_paths": {
+            "current_learnings": str(CURRENT_LEARNINGS_PATH),
+            "weekly_strategy_packet": str(WEEKLY_STRATEGY_PACKET_PATH),
+        },
+        "headline": notifier.get("headline"),
+        "recommended_action": notifier.get("recommended_action"),
+        "change_count": int(notifier.get("change_count") or 0),
+        "material_change_count": int(notifier.get("material_change_count") or 0),
+        "attention_change_count": int(notifier.get("attention_change_count") or 0),
+        "items": items[:6],
+    }
+    markdown = render_learning_change_markdown(digest_payload)
+    LEARNING_CHANGE_DIGEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LEARNING_CHANGE_DIGEST_PATH.write_text(json.dumps(digest_payload, indent=2), encoding="utf-8")
+    md_for_json(LEARNING_CHANGE_DIGEST_PATH).write_text(markdown + "\n", encoding="utf-8")
 
 
 def digest_signature(payload: dict[str, Any]) -> str:
@@ -1079,6 +1191,35 @@ def hydrate_promotion_readiness_signature(state: dict[str, Any]) -> bool:
     return True
 
 
+def hydrate_learning_change_signature(state: dict[str, Any]) -> bool:
+    if (
+        state.get("last_learning_change_signature")
+        and state.get("last_learning_change_signature_version") == LEARNING_CHANGE_SIGNATURE_VERSION
+    ):
+        return False
+
+    payload_path = LEARNING_CHANGE_DIGEST_PATH
+    sent_items = state.get("sent") or {}
+    sent_at: str | None = None
+    learning_entries = []
+    for key, record in sent_items.items():
+        if record.get("kind") != "learning_change_digest":
+            continue
+        learning_entries.append((record.get("sent_at") or "", key))
+    if learning_entries:
+        sent_at, latest_key = sorted(learning_entries)[-1]
+        payload_path = Path(latest_key)
+
+    if not payload_path.exists():
+        return False
+    payload = load_json(payload_path, {})
+    state["last_learning_change_signature"] = learning_change_signature(payload)
+    state["last_learning_change_signature_version"] = LEARNING_CHANGE_SIGNATURE_VERSION
+    if sent_at:
+        state["last_learning_change_sent_at"] = sent_at
+    return True
+
+
 def should_send_digest(state: dict[str, Any], payload: dict[str, Any]) -> tuple[bool, str, str]:
     signature = digest_signature(payload)
     if not payload.get("items"):
@@ -1115,6 +1256,20 @@ def should_send_promotion_readiness(state: dict[str, Any], payload: dict[str, An
     previous_signature = state.get("last_promotion_readiness_signature")
     if signature != previous_signature:
         return True, "promotion_ready", signature
+
+    return False, "no_material_change", signature
+
+
+def should_send_learning_change(state: dict[str, Any], payload: dict[str, Any]) -> tuple[bool, str, str]:
+    signature = learning_change_signature(payload)
+    if int(payload.get("material_change_count") or 0) <= 0:
+        return False, "no_material_changes", signature
+
+    previous_signature = state.get("last_learning_change_signature")
+    if signature != previous_signature:
+        if int(payload.get("attention_change_count") or 0) > 0:
+            return True, "attention_learning_change", signature
+        return True, "learning_change", signature
 
     return False, "no_material_change", signature
 
@@ -1170,6 +1325,22 @@ def load_sendable_artifacts(state: dict[str, Any]) -> list[dict[str, Any]]:
                     "payload": payload,
                     "send_reason": send_reason,
                     "promotion_readiness_signature": signature,
+                }
+            )
+
+    if LEARNING_CHANGE_DIGEST_PATH.exists():
+        payload = load_json(LEARNING_CHANGE_DIGEST_PATH, {})
+        should_send, send_reason, signature = should_send_learning_change(state, payload)
+        if should_send:
+            artifacts.append(
+                {
+                    "kind": "learning_change_digest",
+                    "key": str(LEARNING_CHANGE_DIGEST_PATH),
+                    "json_path": LEARNING_CHANGE_DIGEST_PATH,
+                    "md_path": md_for_json(LEARNING_CHANGE_DIGEST_PATH),
+                    "payload": payload,
+                    "send_reason": send_reason,
+                    "learning_change_signature": signature,
                 }
             )
 
@@ -1249,6 +1420,7 @@ def sync_notifier_control(
             last_delivery_dt,
             parse_iso_datetime(state.get("last_digest_sent_at")),
             parse_iso_datetime(state.get("last_trend_digest_sent_at")),
+            parse_iso_datetime(state.get("last_learning_change_sent_at")),
             _latest_file_mtime(OUTPUT_DIGESTS),
             _latest_file_mtime(ROOT / "output" / "operator"),
         ] if dt is not None],
@@ -1260,7 +1432,11 @@ def sync_notifier_control(
 
     pending_count = len(pending_artifacts or [])
     has_whatsapp = bool(state.get("last_operator_whatsapp_signature") or (whatsapp_summary or {}).get("signature"))
-    has_recent_digest = bool(state.get("last_digest_sent_at") or state.get("last_trend_digest_sent_at"))
+    has_recent_digest = bool(
+        state.get("last_digest_sent_at")
+        or state.get("last_trend_digest_sent_at")
+        or state.get("last_learning_change_sent_at")
+    )
     sent_count = len(state.get("sent") or {})
 
     if age_hours is not None and age_hours >= 72 and not pending_count:
@@ -1856,10 +2032,15 @@ def main() -> int:
         refresh_promotion_readiness_artifact()
     except Exception as exc:
         print(f"[notifier] Warning: could not refresh promotion readiness artifact: {exc}", file=sys.stderr)
+    try:
+        refresh_learning_change_artifact()
+    except Exception as exc:
+        print(f"[notifier] Warning: could not refresh learning change artifact: {exc}", file=sys.stderr)
     auto_approval_result = maybe_auto_approve_weekly_sales(settings, state, dry_run=args.dry_run)
     state_changed = hydrate_digest_signature(state)
     state_changed = hydrate_trend_digest_signature(state) or state_changed
     state_changed = hydrate_promotion_readiness_signature(state) or state_changed
+    state_changed = hydrate_learning_change_signature(state) or state_changed
     state_changed = bool(auto_approval_result.get("changed")) or state_changed
     artifacts = load_sendable_artifacts(state)
     whatsapp_summary = build_reviews_whatsapp_operator_push(state)
@@ -1916,6 +2097,11 @@ def main() -> int:
             state["last_promotion_readiness_signature_version"] = PROMOTION_READINESS_SIGNATURE_VERSION
             state["last_promotion_readiness_sent_at"] = state["sent"][artifact["key"]]["sent_at"]
             state["last_promotion_readiness_reason"] = artifact.get("send_reason")
+        if artifact["kind"] == "learning_change_digest":
+            state["last_learning_change_signature"] = artifact["learning_change_signature"]
+            state["last_learning_change_signature_version"] = LEARNING_CHANGE_SIGNATURE_VERSION
+            state["last_learning_change_sent_at"] = state["sent"][artifact["key"]]["sent_at"]
+            state["last_learning_change_reason"] = artifact.get("send_reason")
         state_changed = True
 
     if whatsapp_summary:

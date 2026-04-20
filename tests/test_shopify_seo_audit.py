@@ -74,6 +74,20 @@ class ShopifySeoAuditTests(unittest.TestCase):
         codes = {issue["code"] for issue in issues}
         self.assertIn("weak_generic_seo_title", codes)
 
+    def test_audit_flags_low_value_seo_copy(self) -> None:
+        issues = audit._issues_for_resource(
+            "page",
+            {
+                "title": "Monster Truck Duck Display Guide",
+                "titleTag": {"value": "Monster Truck Duck Display Guide | MyJeepDuck"},
+                "descriptionTag": {
+                    "value": "Shop our collectible ducks, dashboard decor, and gift ideas at MyJeepDuck for playful flock favorites.",
+                },
+            },
+        )
+        codes = {issue["code"] for issue in issues}
+        self.assertIn("low_value_seo_copy", codes)
+
     def test_duplicate_titles_are_marked(self) -> None:
         resources = [
             {

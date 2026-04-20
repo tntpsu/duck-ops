@@ -90,6 +90,18 @@ GENERIC_DESCRIPTION_TOKENS = GENERIC_TITLE_TOKENS | {
     "today",
     "with",
 }
+LOW_VALUE_DESCRIPTION_PHRASES = (
+    "shop myjeepduck",
+    "browse myjeepduck",
+    "discover myjeepduck",
+    "shop our",
+    "browse our",
+    "discover our",
+    "collectible ducks",
+    "dashboard decor",
+    "gift ideas",
+    "learn more",
+)
 TITLE_INTENT_TOKENS = {
     "accessories",
     "blog",
@@ -270,6 +282,19 @@ def _is_weak_generic_seo_description(seo_description: str, raw_title: Any) -> bo
     return bool(raw_tokens) and not bool(description_tokens & raw_tokens)
 
 
+def _is_low_value_seo_copy(seo_description: str, raw_title: Any) -> bool:
+    normalized_description = _normalized_key(seo_description)
+    if not normalized_description:
+        return False
+    phrase_hits = sum(1 for phrase in LOW_VALUE_DESCRIPTION_PHRASES if phrase in normalized_description)
+    if phrase_hits <= 0:
+        return False
+    description_tokens = set(_meaningful_description_tokens(seo_description))
+    raw_tokens = set(_meaningful_title_tokens(raw_title))
+    overlap = description_tokens & raw_tokens
+    return len(overlap) < 2
+
+
 def _near_duplicate_title_key(value: Any) -> str:
     return " ".join(_meaningful_title_tokens(value))
 
@@ -351,14 +376,23 @@ def _issues_for_resource(kind: str, node: dict[str, Any]) -> list[dict[str, Any]
                 "message": f"SEO description is long ({len(seo_description)} chars).",
             }
         )
-    elif _is_weak_generic_seo_description(seo_description, raw_title):
-        issues.append(
-            {
-                "code": "weak_generic_seo_description",
-                "severity": "medium",
-                "message": "SEO description is too generic and does not describe this resource specifically enough.",
-            }
-        )
+    else:
+        if _is_low_value_seo_copy(seo_description, raw_title):
+            issues.append(
+                {
+                    "code": "low_value_seo_copy",
+                    "severity": "medium",
+                    "message": "SEO description reads like generic site copy instead of a strong resource-specific summary.",
+                }
+            )
+        if _is_weak_generic_seo_description(seo_description, raw_title):
+            issues.append(
+                {
+                    "code": "weak_generic_seo_description",
+                    "severity": "medium",
+                    "message": "SEO description is too generic and does not describe this resource specifically enough.",
+                }
+            )
 
     return issues
 

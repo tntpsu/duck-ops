@@ -1238,6 +1238,31 @@ def _watchouts(snapshot_payload: dict[str, Any], social_payload: dict[str, Any])
     return items[:3]
 
 
+def _change_focus(current_learnings_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    notifier = (
+        current_learnings_payload.get("change_notifier")
+        if isinstance(current_learnings_payload.get("change_notifier"), dict)
+        else {}
+    )
+    items: list[dict[str, Any]] = []
+    for item in list(notifier.get("items") or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        headline = _compact_text(item.get("headline"))
+        if not headline:
+            continue
+        items.append(
+            {
+                "urgency": _compact_text(item.get("urgency")) or "opportunity",
+                "source": _compact_text(item.get("source")) or "learning",
+                "kind": _compact_text(item.get("kind")) or None,
+                "headline": headline,
+                "detail": _compact_text(item.get("detail")) or None,
+            }
+        )
+    return items
+
+
 def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
     packet_now = _now_local()
     generated_at = packet_now.isoformat()
@@ -1309,10 +1334,12 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
             "social_plan_item_count": len(social_plan.get("items") or []),
             "recommendation_count": 0,
             "watchout_count": 0,
+            "change_focus_count": 0,
         },
         "stable_patterns": stable_patterns,
         "experimental_ideas": experimental_ideas,
         "do_not_copy_patterns": do_not_copy_patterns,
+        "change_focus": _change_focus(current_learnings_payload),
         "social_plan": social_plan,
         "recommendations": _recommendations(
             stable_patterns,
@@ -1332,6 +1359,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
     }
     payload["summary"]["recommendation_count"] = len(payload["recommendations"])
     payload["summary"]["watchout_count"] = len(payload["watchouts"])
+    payload["summary"]["change_focus_count"] = len(payload.get("change_focus") or [])
     write_json(PACKET_STATE_PATH, payload)
     write_json(PACKET_OPERATOR_JSON_PATH, payload)
     write_markdown(PACKET_MD_PATH, render_weekly_strategy_recommendation_packet_markdown(payload))
@@ -1346,6 +1374,7 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
         f"- Generated: `{payload.get('generated_at') or ''}`",
         f"- Own signal confidence: `{summary.get('own_signal_confidence') or 'unknown'}`",
         f"- Competitor signal confidence: `{summary.get('competitor_signal_confidence') or 'unknown'}`",
+        f"- Learning changes carried in: `{summary.get('change_focus_count') or 0}`",
         "",
         str(summary.get("headline") or ""),
         "",
@@ -1355,9 +1384,25 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
         "",
         f"Competitor-stability note: {summary.get('competitor_stability_note') or ''}",
         "",
-        "## This Week's Social Plan",
+        "## What Changed Since The Last Learning Snapshot",
         "",
     ]
+
+    change_focus = payload.get("change_focus") or []
+    if not change_focus:
+        lines.append("No material learning changes need to be folded into this week’s plan right now.")
+        lines.append("")
+    else:
+        for item in change_focus[:4]:
+            lines.append(f"- `{item.get('urgency') or 'opportunity'}` · {item.get('headline')}")
+            if item.get("detail"):
+                lines.append(f"  Detail: {item.get('detail')}")
+        lines.append("")
+
+    lines.extend([
+        "## This Week's Social Plan",
+        "",
+    ])
 
     social_plan = payload.get("social_plan") or {}
     if not social_plan:

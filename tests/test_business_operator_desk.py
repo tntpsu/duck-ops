@@ -636,31 +636,37 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Reply `publish`", social_action["secondary_command"])
 
     def test_operator_desk_surfaces_weekly_sale_policy_promotion_readiness(self) -> None:
-        with patch(
-            "business_operator_desk._load_weekly_sale_policy_surface",
-            return_value={
-                "available": True,
-                "path": "/tmp/weekly_sale_execution.json",
-                "mode": "approval_gated",
-                "promotion_threshold": 3,
-                "clean_gated_streak": 3,
-                "clean_gated_recent_count": 3,
-                "blocked_recent_count": 0,
-                "auto_apply_eligible_recent_count": 0,
-                "promote_ready": True,
-                "readiness_headline": "Weekly sale policy is ready for promotion after 3 clean gated run(s).",
-                "recommended_action": "Flip `weekly_sale_execution.json` from `approval_gated` to `auto_apply_shopify`, then supervise the next Sunday run.",
-                "recent_runs": [
-                    {
-                        "title": "Spring Ducks",
-                        "decision": "manual_review_required",
-                        "state_reason": "awaiting_sale_review",
-                        "manual_review_reasons": ["approval_gated_mode"],
-                        "blockers": [],
-                        "updated_at": "2026-04-19T09:00:00-04:00",
-                    }
-                ],
-            },
+        with (
+            patch(
+                "business_operator_desk._load_weekly_sale_policy_surface",
+                return_value={
+                    "available": True,
+                    "path": "/tmp/weekly_sale_execution.json",
+                    "mode": "approval_gated",
+                    "promotion_threshold": 3,
+                    "clean_gated_streak": 3,
+                    "clean_gated_recent_count": 3,
+                    "blocked_recent_count": 0,
+                    "auto_apply_eligible_recent_count": 0,
+                    "promote_ready": True,
+                    "readiness_headline": "Weekly sale policy is ready for promotion after 3 clean gated run(s).",
+                    "recommended_action": "Flip `weekly_sale_execution.json` from `approval_gated` to `auto_apply_shopify`, then supervise the next Sunday run.",
+                    "recent_runs": [
+                        {
+                            "title": "Spring Ducks",
+                            "decision": "manual_review_required",
+                            "state_reason": "awaiting_sale_review",
+                            "manual_review_reasons": ["approval_gated_mode"],
+                            "blockers": [],
+                            "updated_at": "2026-04-19T09:00:00-04:00",
+                        }
+                    ],
+                },
+            ),
+            patch(
+                "business_operator_desk._load_review_reply_execution_surface",
+                return_value={"available": False},
+            ),
         ):
             payload = build_business_operator_desk(
                 customer_packets={"items": []},
@@ -692,6 +698,47 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Ready to promote: 1", promotion_section)
         self.assertIn("Duck Ops Weekly Sale Policy", policy_section)
         self.assertIn("Clean gated streak: 3", policy_section)
+
+    def test_operator_desk_adds_learning_next_action_when_material_changes_exist(self) -> None:
+        with patch(
+            "business_operator_desk._load_learning_surface",
+            return_value={
+                "available": True,
+                "path": "/tmp/current_learnings.md",
+                "change_count": 3,
+                "idea_count": 2,
+                "material_change_count": 2,
+                "items": [{"headline": "Evening jeepfacts stayed strong."}],
+                "change_notifier": {
+                    "available": True,
+                    "headline": "2 meaningful learning change(s) landed since the previous snapshot.",
+                    "recommended_action": "review current_learnings + weekly_strategy_recommendation_packet",
+                    "items": [
+                        {
+                            "urgency": "attention",
+                            "headline": "Slot 3 has no observed post yet for the planned jeepfact slot.",
+                            "source": "weekly_strategy",
+                            "kind": "weekly_strategy_slot_missed",
+                        }
+                    ],
+                },
+            },
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "learning_surface")
+        self.assertIn("2 material change", action["summary"])
+        self.assertIn("Slot 3 has no observed post yet", action["summary"])
+        self.assertEqual(action["command"], "review current_learnings + weekly_strategy_recommendation_packet")
 
     def test_render_business_section_learning_uses_payload_items_without_crashing(self) -> None:
         output = render_business_section(

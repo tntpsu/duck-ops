@@ -162,6 +162,33 @@ class NotifierEmailRenderingTests(unittest.TestCase):
         self.assertIn("Flip the mode to auto_apply_shopify", html)
         self.assertNotIn("<pre", html)
 
+    def test_learning_change_html_uses_change_cards(self) -> None:
+        html = notifier.render_notifier_html(
+            "learning_change_digest",
+            "[Duck Ops Learnings Changed] 2026-04-20",
+            "plain body",
+            {
+                "generated_at": "2026-04-20T08:00:00-04:00",
+                "source": "current_learnings",
+                "material_change_count": 2,
+                "attention_change_count": 1,
+                "items": [
+                    {
+                        "source": "weekly_strategy",
+                        "kind": "weekly_strategy_slot_missed",
+                        "urgency": "attention",
+                        "headline": "Slot 3 has no observed post yet for the planned jeepfact slot.",
+                        "detail": "No post was observed for Thursday evening.",
+                    }
+                ],
+            },
+        )
+
+        self.assertIn("Slot 3 has no observed post yet", html)
+        self.assertIn("weekly_strategy_slot_missed", html)
+        self.assertIn("No post was observed for Thursday evening.", html)
+        self.assertNotIn("<pre", html)
+
 
 if __name__ == "__main__":
     unittest.main()

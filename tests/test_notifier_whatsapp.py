@@ -296,6 +296,7 @@ class NotifierWhatsAppTests(unittest.TestCase):
     @mock.patch.object(notifier, "build_reviews_whatsapp_operator_push", return_value=None)
     @mock.patch.object(notifier, "load_sendable_artifacts", return_value=[])
     @mock.patch.object(notifier, "maybe_auto_approve_weekly_sales", return_value={"changed": False, "results": []})
+    @mock.patch.object(notifier, "refresh_learning_change_artifact")
     @mock.patch.object(notifier, "refresh_promotion_readiness_artifact")
     @mock.patch.object(notifier, "refresh_phase_readiness_artifact")
     @mock.patch.object(notifier, "refresh_nightly_action_summary_sources")
@@ -306,6 +307,7 @@ class NotifierWhatsAppTests(unittest.TestCase):
         refresh_summary_mock: mock.Mock,
         refresh_phase_mock: mock.Mock,
         refresh_promotion_mock: mock.Mock,
+        refresh_learning_mock: mock.Mock,
         auto_approve_mock: mock.Mock,
         load_artifacts_mock: mock.Mock,
         reviews_push_mock: mock.Mock,

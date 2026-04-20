@@ -202,6 +202,33 @@ class ReviewReplyExecutorWorkflowTests(unittest.TestCase):
         self.assertEqual(kwargs["state"], "blocked")
         self.assertEqual(kwargs["state_reason"], "auth_blocked")
 
+    def test_prepare_auth_for_drain_treats_browser_cooldown_as_nonfatal_pause(self) -> None:
+        with (
+            patch.object(review_reply_executor, "load_auth_state", return_value={"auth_status": "healthy"}),
+            patch.object(review_reply_executor, "choose_session", return_value=("esd", "https://www.etsy.com/your/shops/me/reviews")),
+            patch.object(
+                review_reply_executor,
+                "ensure_authenticated_session",
+                side_effect=RuntimeError("Etsy automation is cooling down until 2026-04-20T09:15:00-04:00 because: rate_limit_preemptive_cooldown"),
+            ),
+            patch.object(
+                review_reply_executor,
+                "etsy_browser_blocked_status",
+                return_value={
+                    "blocked": True,
+                    "blocked_until": "2026-04-20T09:15:00-04:00",
+                    "block_reason": "rate_limit_preemptive_cooldown",
+                },
+            ),
+        ):
+            result = review_reply_executor.prepare_auth_for_drain({"auto_execution_enabled": True})
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["status"], "cooldown")
+        self.assertEqual(result["blocked_until"], "2026-04-20T09:15:00-04:00")
+        self.assertEqual(result["block_reason"], "rate_limit_preemptive_cooldown")
+
     def test_run_live_submit_records_submit_confirmed_before_verified(self) -> None:
         quality_state = {
             "artifacts": {
