@@ -129,6 +129,39 @@ class NotifierEmailRenderingTests(unittest.TestCase):
         self.assertIn("Urgent alerts are still firing in the last 7 days.", html)
         self.assertNotIn("<pre", html)
 
+    def test_promotion_readiness_html_uses_candidate_cards(self) -> None:
+        html = notifier.render_notifier_html(
+            "promotion_readiness",
+            "[Duck Ops Promotion Ready] 2026-04-19",
+            "plain body",
+            {
+                "generated_at": "2026-04-19T08:00:00-04:00",
+                "source": "business_desk",
+                "item_count": 1,
+                "ready_item_count": 1,
+                "items": [
+                    {
+                        "promotion_id": "weekly_sale_auto_apply",
+                        "title": "Weekly sale auto-apply",
+                        "promotion_state": "ready",
+                        "progress_label": "3/3 clean gated run(s)",
+                        "summary": "Weekly sale policy is ready for promotion after 3 clean gated run(s).",
+                        "recommended_action": "Flip the mode to auto_apply_shopify and supervise the next Sunday run.",
+                        "source_path": "/tmp/weekly_sale_execution.json",
+                        "evidence": [
+                            "Clean gated streak 3/3.",
+                            "Mode is approval_gated.",
+                        ],
+                    }
+                ],
+            },
+        )
+
+        self.assertIn("Weekly sale auto-apply", html)
+        self.assertIn("3/3 clean gated run(s)", html)
+        self.assertIn("Flip the mode to auto_apply_shopify", html)
+        self.assertNotIn("<pre", html)
+
 
 if __name__ == "__main__":
     unittest.main()

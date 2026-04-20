@@ -8,12 +8,13 @@ specialized queues that already exist.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any
 
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
+from workflow_control import list_workflow_states, load_json
 from workflow_operator_summary import build_workflow_followthrough_items
 
 CURRENT_LEARNINGS_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/current_learnings.json")
@@ -24,6 +25,248 @@ SHOPIFY_SEO_OUTCOMES_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/sho
 SHOPIFY_SEO_OUTCOMES_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/shopify_seo_outcomes.md")
 ENGINEERING_GOVERNANCE_DIGEST_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/engineering_governance_digest.json")
 ENGINEERING_GOVERNANCE_DIGEST_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/engineering_governance_digest.md")
+WEEKLY_SALE_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/weekly_sale_execution.json")
+WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD = 3
+
+
+WEEKLY_SALE_POLICY_REASON_LABELS = {
+    "approval_gated_mode": "Manual review mode is still the only remaining gate.",
+    "non_sale_primary_week": "This is not a promotional-offers primary week.",
+    "products_touched_exceeds_limit": "The playbook touches more Shopify products than the unattended limit.",
+    "stale_inputs": "Weekly sale inputs were stale.",
+    "refresh_errors_present": "Weekly sale snapshots failed to refresh cleanly.",
+    "non_numeric_shopify_product_ids": "One or more Shopify targets are missing numeric product IDs.",
+    "duplicate_shopify_product_ids": "The playbook repeated a Shopify product target.",
+    "out_of_policy_discount": "One or more Shopify discounts fell outside the allowed policy set.",
+    "no_shopify_targets": "The playbook did not include any Shopify targets.",
+    "already_published_for_run": "This weekly sale run was already published.",
+    "policy_config_error": "The weekly sale execution config could not be loaded cleanly.",
+}
+
+
+def _parse_iso(value: Any) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _weekly_sale_policy_reason_text(value: Any) -> str:
+    key = str(value or "").strip()
+    if not key:
+        return ""
+    return WEEKLY_SALE_POLICY_REASON_LABELS.get(key, key.replace("_", " "))
+
+
+def _load_weekly_sale_policy_surface() -> dict[str, Any]:
+    config_payload = load_json(WEEKLY_SALE_EXECUTION_CONFIG_PATH, {})
+    config = config_payload if isinstance(config_payload, dict) else {}
+    mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
+    workflow_items = [
+        item for item in list_workflow_states()
+        if str(item.get("lane") or "").strip() == "weekly"
+        and isinstance(item.get("metadata"), dict)
+        and str((item.get("metadata") or {}).get("weekly_sale_policy_decision") or "").strip()
+    ]
+    workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
+    recent = workflow_items[:6]
+
+    def _recent_entry(item: dict[str, Any]) -> dict[str, Any]:
+        metadata = item.get("metadata") or {}
+        return {
+            "run_id": str(item.get("run_id") or item.get("entity_id") or "").strip() or None,
+            "updated_at": item.get("updated_at"),
+            "decision": str(metadata.get("weekly_sale_policy_decision") or "").strip() or "unknown",
+            "reason": str(metadata.get("weekly_sale_policy_reason") or "").strip() or None,
+            "blockers": [str(v).strip() for v in list(metadata.get("weekly_sale_policy_blockers") or []) if str(v).strip()],
+            "manual_review_reasons": [str(v).strip() for v in list(metadata.get("weekly_sale_policy_manual_review_reasons") or []) if str(v).strip()],
+            "state_reason": str(item.get("state_reason") or "").strip() or None,
+            "title": str(metadata.get("sale_theme_name") or metadata.get("theme_name") or item.get("display_label") or "Weekly sale").strip(),
+        }
+
+    recent_runs = [_recent_entry(item) for item in recent]
+
+    def _is_clean_gated(entry: dict[str, Any]) -> bool:
+        blockers = list(entry.get("blockers") or [])
+        review_reasons = list(entry.get("manual_review_reasons") or [])
+        return (
+            str(entry.get("decision") or "") == "manual_review_required"
+            and not blockers
+            and set(review_reasons or []) <= {"approval_gated_mode"}
+        )
+
+    clean_gated_streak = 0
+    for entry in recent_runs:
+        if _is_clean_gated(entry):
+            clean_gated_streak += 1
+            continue
+        break
+
+    blocked_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "blocked")
+    clean_gated_recent_count = sum(1 for entry in recent_runs if _is_clean_gated(entry))
+    auto_apply_eligible_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "auto_apply_allowed")
+    latest = recent_runs[0] if recent_runs else {}
+    promote_ready = bool(
+        mode == "approval_gated"
+        and clean_gated_streak >= WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD
+    )
+    if mode == "auto_apply_shopify":
+        readiness_headline = "Weekly sale auto-apply is already enabled."
+        recommended_action = "Watch the next Sunday run closely and keep the manual `publish` reply as the fallback if the lane degrades."
+    elif promote_ready:
+        readiness_headline = (
+            f"Weekly sale policy is ready for promotion after {clean_gated_streak} clean gated run(s)."
+        )
+        recommended_action = (
+            "Flip `weekly_sale_execution.json` from `approval_gated` to `auto_apply_shopify`, "
+            "then supervise the next Sunday run."
+        )
+    elif recent_runs:
+        remaining = max(0, WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD - clean_gated_streak)
+        readiness_headline = (
+            f"Weekly sale policy is not ready for promotion yet; {remaining} more clean gated run(s) are recommended."
+        )
+        recommended_action = "Keep replying `publish` on Sunday while the policy streak builds and watch for any blocked decisions."
+    else:
+        readiness_headline = "Weekly sale policy history is not available yet."
+        recommended_action = "Run the weekly sale flow a few times in approval-gated mode so Duck Ops can judge whether promotion is safe."
+
+    return {
+        "available": True,
+        "path": str(WEEKLY_SALE_EXECUTION_CONFIG_PATH),
+        "mode": mode,
+        "promotion_threshold": WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD,
+        "clean_gated_streak": clean_gated_streak,
+        "clean_gated_recent_count": clean_gated_recent_count,
+        "blocked_recent_count": blocked_recent_count,
+        "auto_apply_eligible_recent_count": auto_apply_eligible_recent_count,
+        "promote_ready": promote_ready,
+        "latest_run_id": latest.get("run_id"),
+        "latest_decision": latest.get("decision"),
+        "latest_reason": latest.get("reason"),
+        "latest_blockers": list(latest.get("blockers") or []),
+        "latest_manual_review_reasons": list(latest.get("manual_review_reasons") or []),
+        "latest_updated_at": latest.get("updated_at"),
+        "readiness_headline": readiness_headline,
+        "recommended_action": recommended_action,
+        "recent_runs": recent_runs[:4],
+    }
+
+
+def _weekly_sale_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not policy_surface.get("available"):
+        return None
+
+    mode = str(policy_surface.get("mode") or "approval_gated").strip() or "approval_gated"
+    clean_streak = int(policy_surface.get("clean_gated_streak") or 0)
+    threshold = int(policy_surface.get("promotion_threshold") or WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD)
+    latest_decision = str(policy_surface.get("latest_decision") or "").strip()
+    blockers = [
+        _weekly_sale_policy_reason_text(value)
+        for value in list(policy_surface.get("latest_blockers") or [])
+        if _weekly_sale_policy_reason_text(value)
+    ]
+    review_reasons = [
+        _weekly_sale_policy_reason_text(value)
+        for value in list(policy_surface.get("latest_manual_review_reasons") or [])
+        if _weekly_sale_policy_reason_text(value)
+    ]
+    if mode == "auto_apply_shopify":
+        promotion_state = "active"
+        action_title = "Weekly sale auto-apply active"
+    elif bool(policy_surface.get("promote_ready")):
+        promotion_state = "ready"
+        action_title = "Promote weekly sale auto-apply"
+    elif latest_decision == "blocked":
+        promotion_state = "blocked"
+        action_title = "Weekly sale auto-apply promotion blocked"
+    else:
+        promotion_state = "observing"
+        action_title = "Weekly sale auto-apply still building evidence"
+
+    evidence: list[str] = [
+        f"Clean gated streak {clean_streak}/{threshold}.",
+        f"Mode is {mode}.",
+    ]
+    if policy_surface.get("readiness_headline"):
+        evidence.append(str(policy_surface.get("readiness_headline")))
+    if blockers:
+        evidence.extend(blockers[:2])
+    elif review_reasons:
+        evidence.extend(review_reasons[:2])
+
+    return {
+        "promotion_id": "weekly_sale_auto_apply",
+        "lane": "weekly_sale_policy",
+        "title": "Weekly sale auto-apply",
+        "action_title": action_title,
+        "promotion_state": promotion_state,
+        "ready": promotion_state == "ready",
+        "already_promoted": promotion_state == "active",
+        "summary": str(policy_surface.get("readiness_headline") or "").strip()
+        or f"Clean gated streak {clean_streak}/{threshold}.",
+        "recommended_action": str(policy_surface.get("recommended_action") or "").strip() or None,
+        "secondary_action": str(policy_surface.get("path") or "").strip() or None,
+        "source_path": str(policy_surface.get("path") or "").strip() or None,
+        "updated_at": policy_surface.get("latest_updated_at"),
+        "latest_run_id": policy_surface.get("latest_run_id"),
+        "progress_label": f"{clean_streak}/{threshold} clean gated run(s)",
+        "threshold": threshold,
+        "progress_value": clean_streak,
+        "blockers": blockers[:3],
+        "manual_review_reasons": review_reasons[:3],
+        "evidence": evidence[:4],
+    }
+
+
+def _load_promotion_watch_surface(
+    *,
+    weekly_sale_policy_surface: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    policy_surface = weekly_sale_policy_surface or _load_weekly_sale_policy_surface()
+    items = [
+        item
+        for item in [
+            _weekly_sale_policy_promotion_candidate(policy_surface),
+        ]
+        if isinstance(item, dict)
+    ]
+    ready_items = [item for item in items if item.get("promotion_state") == "ready"]
+    blocked_items = [item for item in items if item.get("promotion_state") == "blocked"]
+    active_items = [item for item in items if item.get("promotion_state") == "active"]
+    observing_items = [item for item in items if item.get("promotion_state") == "observing"]
+
+    if ready_items:
+        headline = f"{len(ready_items)} promotion candidate(s) are ready to promote."
+        recommended_action = "Review the promotion-ready item in the business desk and promote it when you are comfortable with the recent evidence."
+    elif blocked_items:
+        headline = f"{len(blocked_items)} promotion candidate(s) are blocked and need more cleanup before promotion."
+        recommended_action = "Clear the blockers on the affected promotion candidate before promoting it."
+    elif active_items:
+        headline = f"{len(active_items)} promotion candidate(s) are already active."
+        recommended_action = "Monitor the live canary closely and only split out dedicated cooldown rules if the lane starts drifting."
+    elif observing_items:
+        headline = f"{len(observing_items)} promotion candidate(s) are still collecting evidence."
+        recommended_action = "Keep running the manual lane until the evidence threshold is met."
+    else:
+        headline = "Promotion watch is not available yet."
+        recommended_action = "Build at least one promotion candidate surface before relying on this watch."
+
+    return {
+        "available": bool(items),
+        "item_count": len(items),
+        "ready_count": len(ready_items),
+        "blocked_count": len(blocked_items),
+        "active_count": len(active_items),
+        "observing_count": len(observing_items),
+        "headline": headline,
+        "recommended_action": recommended_action,
+        "items": items[:6],
+    }
 
 
 def _trim_text(value: str | None, limit: int = 160) -> str:
@@ -415,6 +658,43 @@ def _governance_action_item(governance_surface: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _promotion_watch_action_item(promotion_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not promotion_surface.get("available"):
+        return None
+
+    ready_items = [item for item in list(promotion_surface.get("items") or []) if item.get("promotion_state") == "ready"]
+    if ready_items:
+        item = ready_items[0]
+        return {
+            "lane": item.get("lane") or "promotion_watch",
+            "title": item.get("action_title") or item.get("title") or "Promotion ready",
+            "summary": " | ".join(
+                part
+                for part in [
+                    str(item.get("progress_label") or "").strip(),
+                    _trim_text(item.get("summary"), 90),
+                ]
+                if part
+            ),
+            "command": item.get("recommended_action") or promotion_surface.get("recommended_action"),
+            "secondary_command": item.get("secondary_action"),
+        }
+
+    blocked_items = [item for item in list(promotion_surface.get("items") or []) if item.get("promotion_state") == "blocked"]
+    if blocked_items:
+        item = blocked_items[0]
+        blockers = [str(value).strip() for value in list(item.get("blockers") or [])[:2] if str(value).strip()]
+        return {
+            "lane": item.get("lane") or "promotion_watch",
+            "title": item.get("action_title") or item.get("title") or "Promotion blocked",
+            "summary": " | ".join(blockers) if blockers else _trim_text(item.get("summary"), 120),
+            "command": item.get("recommended_action") or promotion_surface.get("recommended_action"),
+            "secondary_command": item.get("secondary_action"),
+        }
+
+    return None
+
+
 def _build_next_actions(
     *,
     customer_items: list[dict[str, Any]],
@@ -427,6 +707,7 @@ def _build_next_actions(
     workflow_items: list[dict[str, Any]],
     weekly_strategy_packet: dict[str, Any],
     governance_surface: dict[str, Any],
+    promotion_watch_surface: dict[str, Any],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     if customer_items:
@@ -537,6 +818,9 @@ def _build_next_actions(
     governance_action = _governance_action_item(governance_surface)
     if governance_action:
         actions.append(governance_action)
+    promotion_action = _promotion_watch_action_item(promotion_watch_surface)
+    if promotion_action:
+        actions.append(promotion_action)
     for item in workflow_items[:3]:
         actions.append(
             {
@@ -572,6 +856,10 @@ def build_business_operator_desk(
     weekly_strategy_packet = _load_weekly_strategy_packet()
     seo_outcomes = _load_seo_outcome_surface()
     governance_surface = _load_governance_surface()
+    weekly_sale_policy_surface = _load_weekly_sale_policy_surface()
+    promotion_watch_surface = _load_promotion_watch_surface(
+        weekly_sale_policy_surface=weekly_sale_policy_surface,
+    )
     social_plan = weekly_strategy_packet.get("social_plan") or {}
     ready_counts = social_plan.get("readiness_counts") if isinstance(social_plan, dict) else {}
     social_ready_slots = 0
@@ -603,6 +891,12 @@ def build_business_operator_desk(
             "review_queue_backlog": review_queue_backlog,
             "usps_live_customer_items": sum(1 for item in customer_items if str(item.get("tracking_live_label") or "").strip()),
             "workflow_followthrough_items": len(workflow_items),
+            "promotion_candidates": int(promotion_watch_surface.get("item_count") or 0),
+            "promotion_ready_candidates": int(promotion_watch_surface.get("ready_count") or 0),
+            "promotion_blocked_candidates": int(promotion_watch_surface.get("blocked_count") or 0),
+            "weekly_sale_policy_clean_streak": int(weekly_sale_policy_surface.get("clean_gated_streak") or 0),
+            "weekly_sale_policy_blocked_recent": int(weekly_sale_policy_surface.get("blocked_recent_count") or 0),
+            "weekly_sale_policy_promote_ready": 1 if weekly_sale_policy_surface.get("promote_ready") else 0,
             "governance_findings": int(governance_surface.get("finding_count") or 0),
             "governance_recommendations": int(governance_surface.get("recommendation_count") or 0),
             "governance_top_priority_items": int(governance_surface.get("top_priority_count") or 0),
@@ -628,8 +922,11 @@ def build_business_operator_desk(
             workflow_items=workflow_items,
             weekly_strategy_packet=weekly_strategy_packet,
             governance_surface=governance_surface,
+            promotion_watch_surface=promotion_watch_surface,
         ),
         "governance_surface": governance_surface,
+        "weekly_sale_policy_surface": weekly_sale_policy_surface,
+        "promotion_watch_surface": promotion_watch_surface,
         "sections": {
             "customer_packets": customer_items[:6],
             "etsy_browser_threads": browser_items[:6],
@@ -639,6 +936,8 @@ def build_business_operator_desk(
             "weekly_sale_monitor": weekly_sale_items[:6],
             "review_queue": review_items[:6],
             "workflow_followthrough": workflow_items[:6],
+            "promotion_watch": list(promotion_watch_surface.get("items") or [])[:4],
+            "weekly_sale_policy": list(weekly_sale_policy_surface.get("recent_runs") or [])[:4],
             "engineering_governance": list(governance_surface.get("recommendations") or [])[:4],
             "learning_surface": list(learning_surface.get("items") or [])[:4],
             "weekly_strategy_packet": list(weekly_strategy_packet.get("recommendations") or [])[:4],
@@ -653,6 +952,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     sections = payload.get("sections") or {}
     strategy_focus = payload.get("strategy_focus") or {}
     governance_surface = payload.get("governance_surface") or {}
+    promotion_watch_surface = payload.get("promotion_watch_surface") or {}
+    weekly_sale_policy_surface = payload.get("weekly_sale_policy_surface") or {}
     learning_surface = payload.get("learning_surface") or {}
     weekly_strategy_packet = payload.get("weekly_strategy_packet") or {}
     seo_outcomes = payload.get("seo_outcomes") or {}
@@ -684,6 +985,12 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Older creative/operator backlog: `{max(0, int(counts.get('review_queue_backlog', 0)) - int(counts.get('review_queue_items', 0)))}`",
         f"- Customer cases with live USPS context: `{counts.get('usps_live_customer_items', 0)}`",
         f"- Workflow follow-through items: `{counts.get('workflow_followthrough_items', 0)}`",
+        f"- Promotion candidates surfaced: `{counts.get('promotion_candidates', 0)}`",
+        f"- Promotion-ready candidates: `{counts.get('promotion_ready_candidates', 0)}`",
+        f"- Promotion-blocked candidates: `{counts.get('promotion_blocked_candidates', 0)}`",
+        f"- Weekly sale policy clean streak: `{counts.get('weekly_sale_policy_clean_streak', 0)}`",
+        f"- Weekly sale policy blocked recent runs: `{counts.get('weekly_sale_policy_blocked_recent', 0)}`",
+        f"- Weekly sale policy promote-ready: `{counts.get('weekly_sale_policy_promote_ready', 0)}`",
         f"- Governance findings surfaced: `{counts.get('governance_findings', 0)}`",
         f"- Governance recommendations surfaced: `{counts.get('governance_recommendations', 0)}`",
         f"- Top-priority governance items: `{counts.get('governance_top_priority_items', 0)}`",
@@ -709,6 +1016,34 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append("- Next major steps:")
             for step in next_steps:
                 lines.append(f"  - {step.get('title')}: {_trim_text(step.get('summary'), 160)}")
+    lines.extend([
+        "",
+        "## Promotion Watch",
+        "",
+    ])
+    promotion_items = (sections.get("promotion_watch") or []) or list(promotion_watch_surface.get("items") or [])
+    if not promotion_watch_surface.get("available"):
+        lines.append("Promotion watch is not available yet.")
+    else:
+        lines.append(f"- Promotion candidates: `{promotion_watch_surface.get('item_count', len(promotion_items))}`")
+        lines.append(f"- Ready to promote: `{promotion_watch_surface.get('ready_count', 0)}`")
+        lines.append(f"- Blocked: `{promotion_watch_surface.get('blocked_count', 0)}`")
+        lines.append(f"- Already active: `{promotion_watch_surface.get('active_count', 0)}`")
+        lines.append(f"- Observing only: `{promotion_watch_surface.get('observing_count', 0)}`")
+        if promotion_watch_surface.get("headline"):
+            lines.append(f"- Status: {_trim_text(promotion_watch_surface.get('headline'), 180)}")
+        if promotion_watch_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(promotion_watch_surface.get('recommended_action'), 180)}")
+        if promotion_items:
+            lines.append("- Promotion candidates:")
+            for item in promotion_items[:4]:
+                lines.append(
+                    f"  - {_trim_text(item.get('title'), 90)} | `{item.get('promotion_state') or 'unknown'}` | {_trim_text(item.get('progress_label'), 80)}"
+                )
+                if item.get("summary"):
+                    lines.append(f"    Why: {_trim_text(item.get('summary'), 170)}")
+                if item.get("recommended_action"):
+                    lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
     lines.extend([
         "",
         "## Engineering Governance",
@@ -1055,6 +1390,48 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"  Recommendation: {item.get('recommendation')}")
             lines.append(f"  Marketing: {_trim_text(item.get('marketing_recommendation'), 120)}")
 
+    lines.extend(["", "## Weekly Sale Policy", ""])
+    if not weekly_sale_policy_surface.get("available"):
+        lines.append("Weekly sale policy history is not available yet.")
+    else:
+        lines.append(f"- Config: `{weekly_sale_policy_surface.get('path')}`")
+        lines.append(f"- Mode: `{weekly_sale_policy_surface.get('mode') or 'approval_gated'}`")
+        lines.append(f"- Clean gated streak: `{weekly_sale_policy_surface.get('clean_gated_streak', 0)}`")
+        lines.append(f"- Blocked recent runs: `{weekly_sale_policy_surface.get('blocked_recent_count', 0)}`")
+        lines.append(f"- Auto-eligible recent runs: `{weekly_sale_policy_surface.get('auto_apply_eligible_recent_count', 0)}`")
+        lines.append(f"- Promote after clean streak: `{weekly_sale_policy_surface.get('promotion_threshold', WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD)}`")
+        if weekly_sale_policy_surface.get("readiness_headline"):
+            lines.append(f"- Promotion status: {_trim_text(weekly_sale_policy_surface.get('readiness_headline'), 180)}")
+        if weekly_sale_policy_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(weekly_sale_policy_surface.get('recommended_action'), 180)}")
+        recent_policy_runs = sections.get("weekly_sale_policy") or []
+        if recent_policy_runs:
+            lines.append("- Recent policy runs:")
+            for item in recent_policy_runs:
+                title = _trim_text(item.get("title"), 48) or "Weekly sale"
+                decision = str(item.get("decision") or "unknown")
+                state_reason = str(item.get("state_reason") or "").strip()
+                bits = [title, decision]
+                if state_reason:
+                    bits.append(state_reason)
+                lines.append(f"  - {' | '.join(bits)}")
+                blockers = [
+                    _weekly_sale_policy_reason_text(value)
+                    for value in list(item.get("blockers") or [])[:2]
+                    if _weekly_sale_policy_reason_text(value)
+                ]
+                review_reasons = [
+                    _weekly_sale_policy_reason_text(value)
+                    for value in list(item.get("manual_review_reasons") or [])[:2]
+                    if _weekly_sale_policy_reason_text(value)
+                ]
+                if blockers:
+                    lines.append(f"    Blockers: {_trim_text('; '.join(blockers), 180)}")
+                elif review_reasons:
+                    lines.append(f"    Gate: {_trim_text('; '.join(review_reasons), 180)}")
+                if item.get("updated_at"):
+                    lines.append(f"    Updated: `{item.get('updated_at')}`")
+
     lines.extend(["", "## Creative Review Queue", ""])
     review_items = sections.get("review_queue") or []
     if not review_items:
@@ -1118,6 +1495,12 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "sale": "weekly_sale_monitor",
         "sales": "weekly_sale_monitor",
         "weekly_sales": "weekly_sale_monitor",
+        "promotion": "promotion_watch",
+        "promotions": "promotion_watch",
+        "promotion_watch": "promotion_watch",
+        "policy": "weekly_sale_policy",
+        "sale_policy": "weekly_sale_policy",
+        "weekly_sale_policy": "weekly_sale_policy",
         "stock": "stock_print_candidates",
         "print": "stock_print_candidates",
         "reviews": "review_queue",
@@ -1221,6 +1604,83 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             lines.append("")
             for item in learning_items:
                 lines.append(f"- {_trim_text(item.get('headline'), 150)}")
+        return "\n".join(lines)
+
+    if normalized == "promotion_watch":
+        lines = ["Duck Ops Promotion Watch", ""]
+        promotion_watch_surface = payload.get("promotion_watch_surface") or {}
+        promotion_items = (sections.get("promotion_watch") or []) or list(promotion_watch_surface.get("items") or [])
+        if not promotion_watch_surface.get("available"):
+            lines.append("Promotion watch is not available yet.")
+        else:
+            lines.append(f"Promotion candidates: {promotion_watch_surface.get('item_count', len(promotion_items))}")
+            lines.append(f"Ready to promote: {promotion_watch_surface.get('ready_count', 0)}")
+            lines.append(f"Blocked: {promotion_watch_surface.get('blocked_count', 0)}")
+            lines.append(f"Already active: {promotion_watch_surface.get('active_count', 0)}")
+            lines.append(f"Observing only: {promotion_watch_surface.get('observing_count', 0)}")
+            if promotion_watch_surface.get("headline"):
+                lines.append(f"Status: {_trim_text(promotion_watch_surface.get('headline'), 180)}")
+            if promotion_watch_surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(promotion_watch_surface.get('recommended_action'), 180)}")
+            if promotion_items:
+                lines.append("")
+                lines.append("Candidates:")
+                for item in promotion_items[:6]:
+                    lines.append(
+                        f"- {_trim_text(item.get('title'), 100)} | {item.get('promotion_state') or 'unknown'} | {_trim_text(item.get('progress_label'), 100)}"
+                    )
+                    if item.get("summary"):
+                        lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
+                    if item.get("recommended_action"):
+                        lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
+        return "\n".join(lines)
+
+    if normalized == "weekly_sale_policy":
+        lines = ["Duck Ops Weekly Sale Policy", ""]
+        weekly_sale_policy_surface = payload.get("weekly_sale_policy_surface") or {}
+        if not weekly_sale_policy_surface.get("available"):
+            weekly_sale_policy_surface = _load_weekly_sale_policy_surface()
+        recent_runs = (sections.get("weekly_sale_policy") or []) or list(weekly_sale_policy_surface.get("recent_runs") or [])
+        if not weekly_sale_policy_surface.get("available"):
+            lines.append("Weekly sale policy history is not available yet.")
+        else:
+            lines.append(f"Config: {weekly_sale_policy_surface.get('path')}")
+            lines.append(f"Mode: {weekly_sale_policy_surface.get('mode') or 'approval_gated'}")
+            lines.append(f"Clean gated streak: {weekly_sale_policy_surface.get('clean_gated_streak', 0)}")
+            lines.append(f"Blocked recent runs: {weekly_sale_policy_surface.get('blocked_recent_count', 0)}")
+            lines.append(f"Auto-eligible recent runs: {weekly_sale_policy_surface.get('auto_apply_eligible_recent_count', 0)}")
+            lines.append(f"Promote after clean streak: {weekly_sale_policy_surface.get('promotion_threshold', WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD)}")
+            if weekly_sale_policy_surface.get("readiness_headline"):
+                lines.append(f"Promotion status: {_trim_text(weekly_sale_policy_surface.get('readiness_headline'), 180)}")
+            if weekly_sale_policy_surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(weekly_sale_policy_surface.get('recommended_action'), 180)}")
+            if recent_runs:
+                lines.append("")
+                lines.append("Recent policy runs:")
+                for item in recent_runs:
+                    title = _trim_text(item.get("title"), 48) or "Weekly sale"
+                    decision = str(item.get("decision") or "unknown")
+                    state_reason = str(item.get("state_reason") or "").strip()
+                    bits = [title, decision]
+                    if state_reason:
+                        bits.append(state_reason)
+                    lines.append(f"- {' | '.join(bits)}")
+                    blockers = [
+                        _weekly_sale_policy_reason_text(value)
+                        for value in list(item.get("blockers") or [])[:2]
+                        if _weekly_sale_policy_reason_text(value)
+                    ]
+                    review_reasons = [
+                        _weekly_sale_policy_reason_text(value)
+                        for value in list(item.get("manual_review_reasons") or [])[:2]
+                        if _weekly_sale_policy_reason_text(value)
+                    ]
+                    if blockers:
+                        lines.append(f"  Blockers: {_trim_text('; '.join(blockers), 180)}")
+                    elif review_reasons:
+                        lines.append(f"  Gate: {_trim_text('; '.join(review_reasons), 180)}")
+                    if item.get("updated_at"):
+                        lines.append(f"  Updated: {item.get('updated_at')}")
         return "\n".join(lines)
 
     if normalized == "seo_outcomes":

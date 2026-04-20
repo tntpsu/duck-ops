@@ -635,6 +635,64 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertEqual(social_action["command"], "python src/main_agent.py --flow meme --all")
         self.assertIn("Reply `publish`", social_action["secondary_command"])
 
+    def test_operator_desk_surfaces_weekly_sale_policy_promotion_readiness(self) -> None:
+        with patch(
+            "business_operator_desk._load_weekly_sale_policy_surface",
+            return_value={
+                "available": True,
+                "path": "/tmp/weekly_sale_execution.json",
+                "mode": "approval_gated",
+                "promotion_threshold": 3,
+                "clean_gated_streak": 3,
+                "clean_gated_recent_count": 3,
+                "blocked_recent_count": 0,
+                "auto_apply_eligible_recent_count": 0,
+                "promote_ready": True,
+                "readiness_headline": "Weekly sale policy is ready for promotion after 3 clean gated run(s).",
+                "recommended_action": "Flip `weekly_sale_execution.json` from `approval_gated` to `auto_apply_shopify`, then supervise the next Sunday run.",
+                "recent_runs": [
+                    {
+                        "title": "Spring Ducks",
+                        "decision": "manual_review_required",
+                        "state_reason": "awaiting_sale_review",
+                        "manual_review_reasons": ["approval_gated_mode"],
+                        "blockers": [],
+                        "updated_at": "2026-04-19T09:00:00-04:00",
+                    }
+                ],
+            },
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        policy_section = render_business_section(payload, "policy")
+
+        self.assertEqual(payload["counts"]["weekly_sale_policy_clean_streak"], 3)
+        self.assertEqual(payload["counts"]["weekly_sale_policy_promote_ready"], 1)
+        self.assertEqual(payload["counts"]["promotion_candidates"], 1)
+        self.assertEqual(payload["counts"]["promotion_ready_candidates"], 1)
+        action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "weekly_sale_policy")
+        self.assertEqual(action["title"], "Promote weekly sale auto-apply")
+        self.assertIn("3 clean gated run", action["summary"])
+        self.assertIn("## Promotion Watch", markdown)
+        self.assertIn("1 promotion candidate(s) are ready to promote.", markdown)
+        self.assertIn("## Weekly Sale Policy", markdown)
+        self.assertIn("ready for promotion after 3 clean gated run", markdown)
+        promotion_section = render_business_section(payload, "promotion")
+        self.assertIn("Duck Ops Promotion Watch", promotion_section)
+        self.assertIn("Ready to promote: 1", promotion_section)
+        self.assertIn("Duck Ops Weekly Sale Policy", policy_section)
+        self.assertIn("Clean gated streak: 3", policy_section)
+
     def test_render_business_section_learning_uses_payload_items_without_crashing(self) -> None:
         output = render_business_section(
             {

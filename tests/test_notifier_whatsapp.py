@@ -254,10 +254,49 @@ class NotifierWhatsAppTests(unittest.TestCase):
         self.assertIn("Social plan ready: 1", result["message"])
         self.assertIn("python src/main_agent.py --flow meme --all", result["message"])
 
+    def test_load_sendable_artifacts_includes_promotion_readiness_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            digest_path = Path(tmpdir) / "promotion_readiness.json"
+            digest_path.write_text(
+                """
+                {
+                  "generated_at": "2026-04-19T08:00:00-04:00",
+                  "source": "business_desk",
+                  "item_count": 1,
+                  "ready_item_count": 1,
+                  "items": [
+                    {
+                      "promotion_id": "weekly_sale_auto_apply",
+                      "title": "Weekly sale auto-apply",
+                      "promotion_state": "ready",
+                      "progress_label": "3/3 clean gated run(s)",
+                      "summary": "Weekly sale policy is ready for promotion after 3 clean gated run(s).",
+                      "recommended_action": "Flip the mode and supervise the next run."
+                    }
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with mock.patch.object(notifier, "PROMOTION_READINESS_DIGEST_PATH", digest_path):
+                artifacts = notifier.load_sendable_artifacts({"sent": {}})
+                self.assertEqual([item["kind"] for item in artifacts if item["kind"] == "promotion_readiness"], ["promotion_readiness"])
+                promotion_artifact = next(item for item in artifacts if item["kind"] == "promotion_readiness")
+                signature = promotion_artifact["promotion_readiness_signature"]
+                artifacts_again = notifier.load_sendable_artifacts(
+                    {
+                        "sent": {},
+                        "last_promotion_readiness_signature": signature,
+                        "last_promotion_readiness_signature_version": notifier.PROMOTION_READINESS_SIGNATURE_VERSION,
+                    }
+                )
+        self.assertFalse(any(item["kind"] == "promotion_readiness" for item in artifacts_again))
+
     @mock.patch.object(notifier, "build_business_desk_whatsapp_operator_push", return_value=None)
     @mock.patch.object(notifier, "build_reviews_whatsapp_operator_push", return_value=None)
     @mock.patch.object(notifier, "load_sendable_artifacts", return_value=[])
     @mock.patch.object(notifier, "maybe_auto_approve_weekly_sales", return_value={"changed": False, "results": []})
+    @mock.patch.object(notifier, "refresh_promotion_readiness_artifact")
     @mock.patch.object(notifier, "refresh_phase_readiness_artifact")
     @mock.patch.object(notifier, "refresh_nightly_action_summary_sources")
     @mock.patch.object(notifier, "notifier_settings", return_value={})
@@ -266,6 +305,7 @@ class NotifierWhatsAppTests(unittest.TestCase):
         notifier_settings_mock: mock.Mock,
         refresh_summary_mock: mock.Mock,
         refresh_phase_mock: mock.Mock,
+        refresh_promotion_mock: mock.Mock,
         auto_approve_mock: mock.Mock,
         load_artifacts_mock: mock.Mock,
         reviews_push_mock: mock.Mock,

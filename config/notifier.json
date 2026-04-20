@@ -27,7 +27,8 @@
     "trend_digest": "[OpenClaw Trends] <date>",
     "nightly_action_summary": "[Duck Ops Tonight] <date>",
     "urgent": "[OpenClaw Urgent] <artifact_id>",
-    "phase_readiness": "[OpenClaw Phase Readiness] <week>"
+    "phase_readiness": "[OpenClaw Phase Readiness] <week>",
+    "promotion_readiness": "[Duck Ops Promotion Ready] <date>"
   },
   "auto_approval": {
     "weekly_sale": {

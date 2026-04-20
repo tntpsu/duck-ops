@@ -40,8 +40,10 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "notifier.json"
 STATE_PATH = ROOT / "state" / "notifier_state.json"
 OUTPUT_DIGESTS = ROOT / "output" / "digests"
+PROMOTION_READINESS_DIGEST_PATH = OUTPUT_DIGESTS / "promotion_readiness.json"
 DIGEST_SIGNATURE_VERSION = 2
 TREND_DIGEST_SIGNATURE_VERSION = 1
+PROMOTION_READINESS_SIGNATURE_VERSION = 1
 QUALITY_GATE_STATE_PATH = ROOT / "state" / "quality_gate_state.json"
 OPERATOR_CURRENT_PATH = ROOT / "output" / "operator" / "current_review.json"
 WHATSAPP_PUSH_SENTINEL = "OPENCLAW_OPERATOR_PUSH"
@@ -513,6 +515,44 @@ def _render_phase_readiness_html(subject: str, payload: dict[str, Any]) -> str:
     return _notifier_shell("OpenClaw Phase Readiness", subject, subtitle, stats, body)
 
 
+def _render_promotion_readiness_html(subject: str, payload: dict[str, Any]) -> str:
+    items = list(payload.get("items") or [])
+    stats = "".join(
+        [
+            _notifier_stat("Ready now", payload.get("ready_item_count") or len(items)),
+            _notifier_stat("Candidates", payload.get("item_count") or len(items)),
+            _notifier_stat("Source", payload.get("source") or "business_desk"),
+        ]
+    )
+    sections: list[str] = []
+    for item in items[:6]:
+        evidence_html = "".join(
+            f"<li style=\"margin-bottom:6px;\">{_html_text(entry)}</li>"
+            for entry in list(item.get("evidence") or [])[:4]
+        ) or "<li>No evidence captured.</li>"
+        summary_html = ""
+        if item.get("summary"):
+            summary_html += f"<div style=\"margin-bottom:8px;\"><strong>Why now:</strong> {_html_text(item.get('summary'))}</div>"
+        if item.get("recommended_action"):
+            summary_html += f"<div style=\"margin-bottom:8px;\"><strong>Promote with:</strong> {_html_text(item.get('recommended_action'))}</div>"
+        if item.get("source_path"):
+            summary_html += f"<div><strong>Source:</strong> {_html_text(item.get('source_path'))}</div>"
+        sections.append(
+            _notifier_card(
+                str(item.get("title") or item.get("promotion_id") or "Promotion candidate"),
+                f"<div style=\"font-size:13px;color:#6b7280;margin-bottom:8px;\">"
+                f"{_html_text(item.get('promotion_state') or 'ready')} | {_html_text(item.get('progress_label') or '')}"
+                "</div>"
+                f"{summary_html}"
+                f"<ul style=\"margin:0;padding-left:18px;color:#111827;\">{evidence_html}</ul>",
+            )
+        )
+    if not sections:
+        sections.append(_notifier_card("No promotion candidates", "<div style=\"color:#4b5563;\">No promotion candidates are ready right now.</div>"))
+    subtitle = f"Generated {payload.get('generated_at')} | business desk promotion watch"
+    return _notifier_shell("Duck Ops Promotion Ready", subject, subtitle, stats, "".join(sections))
+
+
 def render_notifier_html(kind: str, subject: str, body: str, payload: dict[str, Any]) -> str:
     if kind == "nightly_action_summary":
         return render_nightly_action_summary_html(payload)
@@ -524,12 +564,15 @@ def render_notifier_html(kind: str, subject: str, body: str, payload: dict[str, 
         return _render_urgent_html(subject, payload)
     if kind == "phase_readiness":
         return _render_phase_readiness_html(subject, payload)
+    if kind == "promotion_readiness":
+        return _render_promotion_readiness_html(subject, payload)
     escaped_body = html.escape(body)
     label = {
         "digest": "OpenClaw Digest",
         "trend_digest": "OpenClaw Trends",
         "urgent": "OpenClaw Urgent",
         "phase_readiness": "OpenClaw Phase Readiness",
+        "promotion_readiness": "Duck Ops Promotion Ready",
     }.get(kind, "OpenClaw Notification")
     return (
         "<html><body style=\"margin:0;padding:0;background:#f3f4f6;color:#111827;\">"
@@ -827,6 +870,80 @@ def refresh_phase_readiness_artifact() -> None:
     md_path.write_text(markdown + "\n", encoding="utf-8")
 
 
+def promotion_readiness_signature(payload: dict[str, Any]) -> str:
+    items = []
+    for item in payload.get("items", []):
+        items.append(
+            {
+                "promotion_id": item.get("promotion_id"),
+                "promotion_state": item.get("promotion_state"),
+                "progress_label": item.get("progress_label"),
+                "summary": item.get("summary"),
+                "recommended_action": item.get("recommended_action"),
+            }
+        )
+    items.sort(key=lambda item: item.get("promotion_id") or "")
+    return canonical_hash({"ready_item_count": payload.get("ready_item_count", 0), "items": items})
+
+
+def render_promotion_readiness_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Duck Ops Promotion Ready",
+        "",
+        f"- Generated at: `{payload.get('generated_at')}`",
+        f"- Source: `{payload.get('source') or 'business_desk'}`",
+        f"- Promotion candidates: `{payload.get('item_count', 0)}`",
+        f"- Ready now: `{payload.get('ready_item_count', 0)}`",
+    ]
+    if payload.get("headline"):
+        lines.append(f"- Status: `{payload.get('headline')}`")
+    if payload.get("recommended_action"):
+        lines.append(f"- Recommended action: `{payload.get('recommended_action')}`")
+    lines.extend(["", "## Ready Candidates", ""])
+    items = list(payload.get("items") or [])
+    if not items:
+        lines.append("No promotion candidates are ready right now.")
+        return "\n".join(lines)
+    for item in items:
+        lines.append(
+            f"- {item.get('title') or item.get('promotion_id') or 'Promotion candidate'} | `{item.get('promotion_state') or 'ready'}` | `{item.get('progress_label') or ''}`"
+        )
+        if item.get("summary"):
+            lines.append(f"  Why: {item.get('summary')}")
+        if item.get("recommended_action"):
+            lines.append(f"  Next: {item.get('recommended_action')}")
+        for entry in list(item.get("evidence") or [])[:4]:
+            lines.append(f"  Evidence: {entry}")
+    return "\n".join(lines)
+
+
+def refresh_promotion_readiness_artifact() -> None:
+    payload = load_json(BUSINESS_OPERATOR_DESK_PATH, {})
+    if not isinstance(payload, dict) or not payload:
+        return
+    promotion_surface = payload.get("promotion_watch_surface") if isinstance(payload.get("promotion_watch_surface"), dict) else {}
+    items = [item for item in list(promotion_surface.get("items") or []) if isinstance(item, dict)]
+    ready_items = [
+        item
+        for item in items
+        if item.get("promotion_state") == "ready" and not bool(item.get("already_promoted"))
+    ]
+    digest_payload = {
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "source": "business_desk",
+        "source_path": str(BUSINESS_OPERATOR_DESK_PATH),
+        "headline": promotion_surface.get("headline"),
+        "recommended_action": promotion_surface.get("recommended_action"),
+        "item_count": len(items),
+        "ready_item_count": len(ready_items),
+        "items": ready_items[:6],
+    }
+    markdown = render_promotion_readiness_markdown(digest_payload)
+    PROMOTION_READINESS_DIGEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PROMOTION_READINESS_DIGEST_PATH.write_text(json.dumps(digest_payload, indent=2), encoding="utf-8")
+    md_for_json(PROMOTION_READINESS_DIGEST_PATH).write_text(markdown + "\n", encoding="utf-8")
+
+
 def digest_signature(payload: dict[str, Any]) -> str:
     blocked_items = []
     for item in payload.get("items", []):
@@ -933,6 +1050,35 @@ def hydrate_trend_digest_signature(state: dict[str, Any]) -> bool:
     return True
 
 
+def hydrate_promotion_readiness_signature(state: dict[str, Any]) -> bool:
+    if (
+        state.get("last_promotion_readiness_signature")
+        and state.get("last_promotion_readiness_signature_version") == PROMOTION_READINESS_SIGNATURE_VERSION
+    ):
+        return False
+
+    payload_path = PROMOTION_READINESS_DIGEST_PATH
+    sent_items = state.get("sent") or {}
+    promotion_entries = []
+    sent_at: str | None = None
+    for key, record in sent_items.items():
+        if record.get("kind") != "promotion_readiness":
+            continue
+        promotion_entries.append((record.get("sent_at") or "", key))
+    if promotion_entries:
+        sent_at, latest_key = sorted(promotion_entries)[-1]
+        payload_path = Path(latest_key)
+
+    if not payload_path.exists():
+        return False
+    payload = load_json(payload_path, {})
+    state["last_promotion_readiness_signature"] = promotion_readiness_signature(payload)
+    state["last_promotion_readiness_signature_version"] = PROMOTION_READINESS_SIGNATURE_VERSION
+    if sent_at:
+        state["last_promotion_readiness_sent_at"] = sent_at
+    return True
+
+
 def should_send_digest(state: dict[str, Any], payload: dict[str, Any]) -> tuple[bool, str, str]:
     signature = digest_signature(payload)
     if not payload.get("items"):
@@ -957,6 +1103,18 @@ def should_send_trend_digest(state: dict[str, Any], payload: dict[str, Any]) -> 
         if int(payload.get("new_decision_count", 0)) > 0:
             return True, "new_trend_decision", signature
         return True, "trend_state_changed", signature
+
+    return False, "no_material_change", signature
+
+
+def should_send_promotion_readiness(state: dict[str, Any], payload: dict[str, Any]) -> tuple[bool, str, str]:
+    signature = promotion_readiness_signature(payload)
+    if int(payload.get("ready_item_count") or 0) <= 0:
+        return False, "no_ready_candidates", signature
+
+    previous_signature = state.get("last_promotion_readiness_signature")
+    if signature != previous_signature:
+        return True, "promotion_ready", signature
 
     return False, "no_material_change", signature
 
@@ -996,6 +1154,22 @@ def load_sendable_artifacts(state: dict[str, Any]) -> list[dict[str, Any]]:
                     "payload": payload,
                     "send_reason": send_reason,
                     "trend_digest_signature": signature,
+                }
+            )
+
+    if PROMOTION_READINESS_DIGEST_PATH.exists():
+        payload = load_json(PROMOTION_READINESS_DIGEST_PATH, {})
+        should_send, send_reason, signature = should_send_promotion_readiness(state, payload)
+        if should_send:
+            artifacts.append(
+                {
+                    "kind": "promotion_readiness",
+                    "key": str(PROMOTION_READINESS_DIGEST_PATH),
+                    "json_path": PROMOTION_READINESS_DIGEST_PATH,
+                    "md_path": md_for_json(PROMOTION_READINESS_DIGEST_PATH),
+                    "payload": payload,
+                    "send_reason": send_reason,
+                    "promotion_readiness_signature": signature,
                 }
             )
 
@@ -1678,9 +1852,14 @@ def main() -> int:
         refresh_phase_readiness_artifact()
     except Exception as exc:
         print(f"[notifier] Warning: could not refresh phase readiness artifact: {exc}", file=sys.stderr)
+    try:
+        refresh_promotion_readiness_artifact()
+    except Exception as exc:
+        print(f"[notifier] Warning: could not refresh promotion readiness artifact: {exc}", file=sys.stderr)
     auto_approval_result = maybe_auto_approve_weekly_sales(settings, state, dry_run=args.dry_run)
     state_changed = hydrate_digest_signature(state)
     state_changed = hydrate_trend_digest_signature(state) or state_changed
+    state_changed = hydrate_promotion_readiness_signature(state) or state_changed
     state_changed = bool(auto_approval_result.get("changed")) or state_changed
     artifacts = load_sendable_artifacts(state)
     whatsapp_summary = build_reviews_whatsapp_operator_push(state)
@@ -1732,6 +1911,11 @@ def main() -> int:
             state["last_trend_digest_signature_version"] = TREND_DIGEST_SIGNATURE_VERSION
             state["last_trend_digest_sent_at"] = state["sent"][artifact["key"]]["sent_at"]
             state["last_trend_digest_reason"] = artifact.get("send_reason")
+        if artifact["kind"] == "promotion_readiness":
+            state["last_promotion_readiness_signature"] = artifact["promotion_readiness_signature"]
+            state["last_promotion_readiness_signature_version"] = PROMOTION_READINESS_SIGNATURE_VERSION
+            state["last_promotion_readiness_sent_at"] = state["sent"][artifact["key"]]["sent_at"]
+            state["last_promotion_readiness_reason"] = artifact.get("send_reason")
         state_changed = True
 
     if whatsapp_summary:
