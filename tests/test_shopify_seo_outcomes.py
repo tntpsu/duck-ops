@@ -28,6 +28,74 @@ class ShopifySeoOutcomesTests(unittest.TestCase):
         )
         self.assertEqual(codes, ["seo_title_matches_raw_title", "weak_generic_seo_title"])
 
+    def test_build_shopify_seo_outcomes_infers_specific_category_for_generic_runs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit_path = root / "state" / "shopify_seo_audit.json"
+            review_run_dir = root / "state" / "shopify_seo_review" / "runs"
+            state_path = root / "state" / "shopify_seo_outcomes.json"
+            operator_json_path = root / "output" / "operator" / "shopify_seo_outcomes.json"
+            markdown_path = root / "output" / "operator" / "shopify_seo_outcomes.md"
+            review_run_dir.mkdir(parents=True, exist_ok=True)
+
+            now = datetime.now().astimezone()
+            applied_at = (now - timedelta(days=8)).isoformat()
+            audit_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": now.isoformat(),
+                        "resources": [
+                            {
+                                "id": "gid://shopify/Product/10",
+                                "title": "Generic Run Duck",
+                                "resource_url": "/products/generic-run-duck",
+                                "seo_title": "",
+                                "seo_description": "Still missing title.",
+                                "issues": [{"code": "missing_seo_title"}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            review_run_dir.joinpath("generic.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "generic",
+                        "status": "applied",
+                        "apply_result": {"applied_at": applied_at},
+                        "items": [
+                            {
+                                "id": "gid://shopify/Product/10",
+                                "kind": "product",
+                                "title": "Generic Run Duck",
+                                "resource_url": "/products/generic-run-duck",
+                                "issues": [{"code": "missing_seo_title"}],
+                                "apply_seo_title": True,
+                                "apply_seo_description": False,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(shopify_seo_outcomes, "SEO_AUDIT_PATH", audit_path), patch.object(
+                shopify_seo_outcomes, "SEO_REVIEW_RUN_DIR", review_run_dir
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_STATE_PATH", state_path
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_OPERATOR_JSON_PATH", operator_json_path
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_MD_PATH", markdown_path
+            ):
+                payload = shopify_seo_outcomes.build_shopify_seo_outcomes()
+
+            item = payload["items"][0]
+            self.assertEqual(item["seo_category"], "missing_title")
+            self.assertEqual(item["category_label"], "Missing SEO titles")
+            self.assertEqual(payload["category_guidance"][0]["category_label"], "Missing SEO titles")
+
     def test_build_shopify_seo_outcomes_classifies_recent_stable_and_open_items(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -170,6 +238,9 @@ class ShopifySeoOutcomesTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["monitoring_count"], 1)
             self.assertEqual(payload["summary"]["issue_still_present_count"], 1)
             self.assertEqual(payload["summary"]["traffic_signal_available_count"], 0)
+            self.assertEqual(payload["verification_truth"]["label"], "reopened")
+            self.assertTrue(payload["category_guidance"])
+            self.assertEqual(payload["category_guidance"][0]["decision"], "fix_now")
             self.assertEqual(payload["attention_items"][0]["title"], "Open Duck")
             self.assertEqual(payload["attention_items"][0]["status"], "issue_still_present")
             self.assertEqual(payload["recent_wins"][0]["status"], "stable")
@@ -177,6 +248,8 @@ class ShopifySeoOutcomesTests(unittest.TestCase):
             self.assertTrue(operator_json_path.exists())
             self.assertTrue(markdown_path.exists())
             markdown = markdown_path.read_text(encoding="utf-8")
+            self.assertIn("## Outcome Truth", markdown)
+            self.assertIn("## Category Guidance", markdown)
             self.assertIn("## Needs Attention", markdown)
             self.assertIn("Open Duck", markdown)
             self.assertIn("## Recent Wins", markdown)
@@ -321,6 +394,7 @@ class ShopifySeoOutcomesTests(unittest.TestCase):
 
             self.assertEqual(payload["summary"]["writeback_receipt_count"], 2)
             self.assertEqual(payload["summary"]["writeback_failed_count"], 1)
+            self.assertEqual(payload["verification_truth"]["label"], "writeback_failing")
             self.assertEqual(payload["attention_items"][0]["status"], "writeback_verification_failed")
             self.assertEqual(payload["recent_wins"][0]["status"], "writeback_verified")
             markdown = markdown_path.read_text(encoding="utf-8")

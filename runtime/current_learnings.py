@@ -21,6 +21,9 @@ MATERIAL_CHANGE_KINDS = {
     "weekly_strategy_alternate_lane_won",
     "weekly_strategy_different_lane_won",
     "weekly_strategy_slot_missed",
+    "weekly_strategy_execution_truth_changed",
+    "weekly_strategy_lane_ready_to_scale",
+    "weekly_strategy_lane_pull_back",
     "weekly_strategy_stable_pattern_changed",
     "weekly_strategy_experiment_changed",
     "weekly_strategy_guardrail_changed",
@@ -30,6 +33,7 @@ MATERIAL_CHANGE_KINDS = {
 }
 ATTENTION_CHANGE_KINDS = {
     "weekly_strategy_slot_missed",
+    "weekly_strategy_lane_pull_back",
     "weekly_strategy_guardrail_changed",
     "competitor_social_freshness_degraded",
 }
@@ -189,6 +193,7 @@ def _changes(
 
 def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
     social_plan = packet_payload.get("social_plan") if isinstance(packet_payload.get("social_plan"), dict) else {}
+    strategy_frames = packet_payload.get("strategy_frames") if isinstance(packet_payload.get("strategy_frames"), dict) else {}
     stable_patterns = list(packet_payload.get("stable_patterns") or [])
     experimental_ideas = list(packet_payload.get("experimental_ideas") or [])
     do_not_copy_patterns = list(packet_payload.get("do_not_copy_patterns") or [])
@@ -196,10 +201,14 @@ def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
         return {
             "available": False,
             "execution_feedback": {},
+            "execution_truth": {},
+            "lane_guidance_summary": {},
+            "lane_guidance": [],
             "slot_outcomes": [],
             "stable_patterns": [],
             "experimental_ideas": [],
             "do_not_copy_patterns": [],
+            "strategy_frames": {},
         }
 
     slot_outcomes: list[dict[str, Any]] = []
@@ -213,6 +222,8 @@ def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
                 "calendar_label": _compact_text(item.get("calendar_label")) or None,
                 "suggested_lane": _compact_text(item.get("suggested_lane")) or None,
                 "alternate_lane": _compact_text(item.get("alternate_lane")) or None,
+                "execution_mode": _compact_text(item.get("execution_mode")) or None,
+                "execution_readiness": _compact_text(item.get("execution_readiness")) or None,
                 "tracking_status": _compact_text(item.get("tracking_status")) or None,
                 "tracking_note": _compact_text(item.get("tracking_note")) or None,
                 "actual_lane": _compact_text(item.get("actual_lane")) or None,
@@ -225,6 +236,21 @@ def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
         "available": True,
         "headline": _compact_text(social_plan.get("headline")) or None,
         "execution_feedback": dict(social_plan.get("execution_feedback") or {}),
+        "execution_truth": dict(social_plan.get("execution_truth") or {}),
+        "lane_guidance_summary": dict(social_plan.get("lane_guidance_summary") or {}),
+        "lane_guidance": [
+            {
+                "lane": _compact_text(item.get("lane")) or None,
+                "decision": _compact_text(item.get("decision")) or None,
+                "title": _compact_text(item.get("title")) or None,
+                "summary": _compact_text(item.get("summary")) or None,
+                "recommended_action": _compact_text(item.get("recommended_action")) or None,
+                "evidence": _compact_text(item.get("evidence")) or None,
+                "confidence": _compact_text(item.get("confidence")) or None,
+            }
+            for item in (social_plan.get("lane_guidance") or [])[:5]
+            if isinstance(item, dict) and _compact_text(item.get("lane"))
+        ],
         "slot_outcomes": slot_outcomes[:5],
         "stable_patterns": [
             {
@@ -259,11 +285,22 @@ def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
             for item in do_not_copy_patterns[:4]
             if isinstance(item, dict) and _compact_text(item.get("title"))
         ],
+        "strategy_frames": {
+            key: dict(strategy_frames.get(key) or {})
+            for key in ("stable_patterns", "experimental_ideas", "do_not_copy_patterns")
+            if isinstance(strategy_frames.get(key), dict)
+        },
     }
 
 
 def _weekly_strategy_summary(feedback_payload: dict[str, Any]) -> dict[str, Any]:
     counts = feedback_payload.get("execution_feedback") if isinstance(feedback_payload.get("execution_feedback"), dict) else {}
+    execution_truth = feedback_payload.get("execution_truth") if isinstance(feedback_payload.get("execution_truth"), dict) else {}
+    lane_guidance_summary = (
+        feedback_payload.get("lane_guidance_summary")
+        if isinstance(feedback_payload.get("lane_guidance_summary"), dict)
+        else {}
+    )
     return {
         "weekly_strategy_feedback_available": bool(feedback_payload.get("available")),
         "weekly_strategy_recommended_lane_executed_count": int(counts.get("recommended_lane_executed") or 0),
@@ -272,11 +309,33 @@ def _weekly_strategy_summary(feedback_payload: dict[str, Any]) -> dict[str, Any]
         "weekly_strategy_awaiting_slot_count": int(counts.get("awaiting_slot") or 0),
         "weekly_strategy_no_post_observed_count": int(counts.get("no_post_observed") or 0),
         "weekly_strategy_review_slot_count": int(counts.get("review_slot") or 0),
+        "weekly_strategy_execution_truth_label": _compact_text(execution_truth.get("label")) or None,
+        "weekly_strategy_execution_truth_note": _compact_text(execution_truth.get("note")) or None,
+        "weekly_strategy_lane_ready_to_scale_count": int(lane_guidance_summary.get("ready_to_scale") or 0),
+        "weekly_strategy_lane_keep_anchor_count": int(lane_guidance_summary.get("keep_anchor") or 0),
+        "weekly_strategy_lane_fallback_only_count": int(lane_guidance_summary.get("fallback_only") or 0),
+        "weekly_strategy_lane_experiment_only_count": int(lane_guidance_summary.get("experiment_only") or 0),
+        "weekly_strategy_lane_pull_back_count": int(lane_guidance_summary.get("pull_back") or 0),
     }
 
 
 def _weekly_strategy_beliefs(feedback_payload: dict[str, Any]) -> list[dict[str, Any]]:
     beliefs: list[dict[str, Any]] = []
+    execution_truth = feedback_payload.get("execution_truth") if isinstance(feedback_payload.get("execution_truth"), dict) else {}
+    execution_headline = _compact_text(execution_truth.get("headline"))
+    execution_note = _compact_text(execution_truth.get("note"))
+    lane_guidance = [item for item in (feedback_payload.get("lane_guidance") or []) if isinstance(item, dict)]
+    if execution_headline or execution_note:
+        primary_guidance = next((item for item in lane_guidance if _compact_text(item.get("recommended_action"))), {})
+        beliefs.append(
+            {
+                "headline": execution_headline or "Weekly strategy execution truth is available.",
+                "confidence": "medium",
+                "evidence": execution_note or "Recent slot outcomes were folded back into the current learnings surface.",
+                "recommendation": _compact_text(primary_guidance.get("recommended_action"))
+                or "Use the lane guidance before scaling or cutting any weekly lane.",
+            }
+        )
     for item in feedback_payload.get("slot_outcomes") or []:
         slot = _compact_text(item.get("slot")) or "Weekly slot"
         suggested = _compact_text(item.get("suggested_lane")) or "planned lane"
@@ -355,7 +414,7 @@ def _weekly_strategy_beliefs(feedback_payload: dict[str, Any]) -> list[dict[str,
             }
         )
         break
-    return beliefs[:3]
+    return beliefs[:4]
 
 
 def _weekly_strategy_changes(
@@ -416,6 +475,57 @@ def _weekly_strategy_changes(
                         "headline": f"{slot} has no observed post yet for the planned `{suggested}` slot.",
                     }
                 )
+
+    previous_execution_truth = (
+        previous_feedback.get("execution_truth") if isinstance(previous_feedback.get("execution_truth"), dict) else {}
+    )
+    current_execution_truth = (
+        feedback_payload.get("execution_truth") if isinstance(feedback_payload.get("execution_truth"), dict) else {}
+    )
+    previous_truth_label = _compact_text(previous_execution_truth.get("label"))
+    current_truth_label = _compact_text(current_execution_truth.get("label"))
+    if previous_truth_label and current_truth_label and previous_truth_label != current_truth_label:
+        changes.append(
+            {
+                "kind": "weekly_strategy_execution_truth_changed",
+                "headline": f"Weekly strategy execution truth shifted from `{previous_truth_label}` to `{current_truth_label}`.",
+                "detail": _compact_text(current_execution_truth.get("note")) or None,
+            }
+        )
+
+    previous_lane_guidance = {
+        _compact_text(item.get("lane")): item
+        for item in (previous_feedback.get("lane_guidance") or [])
+        if isinstance(item, dict) and _compact_text(item.get("lane"))
+    }
+    for item in feedback_payload.get("lane_guidance") or []:
+        if not isinstance(item, dict):
+            continue
+        lane = _compact_text(item.get("lane"))
+        decision = _compact_text(item.get("decision"))
+        if not lane or not decision:
+            continue
+        previous_item = previous_lane_guidance.get(lane, {})
+        previous_decision = _compact_text(previous_item.get("decision"))
+        if not previous_decision or previous_decision == decision:
+            continue
+        detail = _compact_text(item.get("summary")) or _compact_text(item.get("evidence")) or None
+        if decision == "ready_to_scale":
+            changes.append(
+                {
+                    "kind": "weekly_strategy_lane_ready_to_scale",
+                    "headline": f"`{lane}` now has enough repeated clean wins to scale more confidently.",
+                    "detail": detail,
+                }
+            )
+        elif decision == "pull_back":
+            changes.append(
+                {
+                    "kind": "weekly_strategy_lane_pull_back",
+                    "headline": f"`{lane}` should not absorb more calendar volume until execution stabilizes.",
+                    "detail": detail,
+                }
+            )
 
     def _titles(items: Any) -> list[str]:
         return [
@@ -656,9 +766,29 @@ def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
                 f"- Awaiting slots: `{summary.get('weekly_strategy_awaiting_slot_count') or 0}`",
                 f"- Missed slots: `{summary.get('weekly_strategy_no_post_observed_count') or 0}`",
                 f"- Review slots: `{summary.get('weekly_strategy_review_slot_count') or 0}`",
+                f"- Execution truth label: `{summary.get('weekly_strategy_execution_truth_label') or 'unknown'}`",
+                f"- Lane guidance: `ready_to_scale={summary.get('weekly_strategy_lane_ready_to_scale_count') or 0}`, `keep_anchor={summary.get('weekly_strategy_lane_keep_anchor_count') or 0}`, `fallback_only={summary.get('weekly_strategy_lane_fallback_only_count') or 0}`, `experiment_only={summary.get('weekly_strategy_lane_experiment_only_count') or 0}`, `pull_back={summary.get('weekly_strategy_lane_pull_back_count') or 0}`",
                 "",
             ]
         )
+        if summary.get("weekly_strategy_execution_truth_note"):
+            lines.append(f"- Execution truth: {summary.get('weekly_strategy_execution_truth_note')}")
+            lines.append("")
+        lane_guidance = weekly_strategy_feedback.get("lane_guidance") or []
+        if lane_guidance:
+            lines.append("### Lane Guidance")
+            lines.append("")
+            for item in lane_guidance[:5]:
+                lines.append(
+                    f"- `{item.get('lane') or 'unknown'}` | `{item.get('decision') or 'unknown'}` | {_compact_text(item.get('title')) or _compact_text(item.get('summary')) or 'No summary.'}"
+                )
+                if item.get("summary"):
+                    lines.append(f"  Summary: {item.get('summary')}")
+                if item.get("evidence"):
+                    lines.append(f"  Evidence: {item.get('evidence')}")
+                if item.get("recommended_action"):
+                    lines.append(f"  Recommended action: {item.get('recommended_action')}")
+            lines.append("")
         for item in weekly_strategy_feedback.get("slot_outcomes") or []:
             slot = item.get("slot") or "Weekly slot"
             calendar_parts = [item.get("calendar_label"), item.get("calendar_date")]

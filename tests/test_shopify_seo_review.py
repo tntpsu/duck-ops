@@ -253,6 +253,56 @@ class ShopifySeoReviewTests(unittest.TestCase):
                 "Already strong description that should stay in place for this test resource.",
             )
 
+    def test_short_product_titles_keep_duck_keyword_and_avoid_duplicate_brand_padding(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review_state_dir = root / "state" / "shopify_seo_review"
+            review_run_dir = review_state_dir / "runs"
+            output_path = root / "output" / "operator" / "shopify_seo_review.md"
+
+            audit_payload = {
+                "generated_at": "2026-04-20T23:00:00-04:00",
+                "shopify_domain": "example.myshopify.com",
+                "resources": [
+                    {
+                        "id": "gid://shopify/Product/8",
+                        "kind": "product",
+                        "title": "Cow Duck – Farmyard Rubber Duck Collectible for Dash, Farm & Gifts",
+                        "resource_url": "/products/cow-duck",
+                        "seo_title": "",
+                        "seo_description": "Shop Cow Duck at MyJeepDuck for dashboard decor, gift-ready ducking fun, and playful collectible style that helps your flock stand out anywhere.",
+                        "issues": [{"code": "missing_seo_title", "message": "Missing SEO title."}],
+                    },
+                    {
+                        "id": "gid://shopify/Product/9",
+                        "kind": "product",
+                        "title": "E.D.T. – Extra-Duck Terrestrial Alien Duck for Vehicle Dashboard and Sci-Fi Fans",
+                        "resource_url": "/products/edt-duck",
+                        "seo_title": "",
+                        "seo_description": "Shop E.D.T. at MyJeepDuck for dashboard decor, gift-ready ducking fun, and playful collectible style that helps your flock stand out anywhere.",
+                        "issues": [{"code": "missing_seo_title", "message": "Missing SEO title."}],
+                    },
+                ],
+            }
+
+            with patch.object(shopify_seo_review, "REVIEW_STATE_DIR", review_state_dir), patch.object(
+                shopify_seo_review, "REVIEW_RUN_DIR", review_run_dir
+            ), patch.object(shopify_seo_review, "REVIEW_OUTPUT_MD", output_path), patch.object(
+                shopify_seo_review, "build_shopify_seo_audit", return_value=audit_payload
+            ):
+                payload = shopify_seo_review.build_shopify_seo_review(
+                    limit=0,
+                    force_audit=True,
+                    review_type="issue_category_batch",
+                    issue_category="missing_title",
+                )
+
+            proposed_titles = [item["proposed_seo_title"] for item in payload["items"]]
+            self.assertTrue(any("Cow Duck" in title for title in proposed_titles))
+            self.assertTrue(any("E.D.T. Duck" in title for title in proposed_titles))
+            self.assertFalse(any("MyJeepDuck gift idea MyJeepDuck" in title for title in proposed_titles))
+            self.assertFalse(any("collectible ducks and gift" in title.lower() for title in proposed_titles))
+
 
 if __name__ == "__main__":
     unittest.main()

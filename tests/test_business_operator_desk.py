@@ -453,6 +453,23 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                 "awaiting_audit_refresh_count": 0,
                 "traffic_signal_available_count": 0,
                 "traffic_signal_note": "No search-click or traffic collector is wired into Duck Ops yet.",
+                "verification_truth": {
+                    "headline": "Some applied SEO fixes are not staying resolved cleanly.",
+                    "note": "`1` targeted issue is still present in the latest audit.",
+                    "recommended_action": "Prioritize the reopening categories before sending more broad SEO apply batches.",
+                },
+                "category_guidance": [
+                    {
+                        "category_label": "Missing SEO titles",
+                        "decision": "fix_now",
+                        "summary": "This category still shows targeted SEO issues after an apply, so the current copy or apply path needs inspection before more volume.",
+                    },
+                    {
+                        "category_label": "SEO titles too short",
+                        "decision": "watch_window",
+                        "summary": "The targeted issues are currently cleared, but the fixes are still too fresh to call them durable.",
+                    },
+                ],
                 "attention_items": [
                     {
                         "title": "Open Duck",
@@ -490,6 +507,9 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Open Duck", markdown)
         self.assertIn("issue_still_present", markdown)
         self.assertIn("No search-click or traffic collector is wired", markdown)
+        self.assertIn("Outcome truth:", markdown)
+        self.assertIn("Category guidance:", markdown)
+        self.assertIn("fix_now", markdown)
 
     def test_operator_desk_surfaces_weekly_strategy_packet(self) -> None:
         with patch(
@@ -514,6 +534,11 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                 "stable_pattern_count": 1,
                 "experimental_idea_count": 1,
                 "do_not_copy_count": 1,
+                "strategy_frames": {
+                    "stable_patterns": {"headline": "Stable patterns are the defaults to keep this week."},
+                    "experimental_ideas": {"headline": "Experimental ideas are one bounded tests, not a whole-calendar rewrite."},
+                    "do_not_copy_patterns": {"headline": "Do-not-copy items are guardrails, not inspiration."},
+                },
                 "recommendation_count": 2,
                 "watchout_count": 1,
                 "recommendations": [{"title": "Keep testing the `evening` posting window"}],
@@ -537,6 +562,30 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                         "no_post_observed": 0,
                         "review_slot": 0,
                     },
+                    "execution_truth": {
+                        "label": "mixed_on_plan",
+                        "headline": "The weekly plan is landing, but some slots are resolving through fallbacks.",
+                        "note": "`1` planned slot landed cleanly and `1` slot resolved through a planned fallback.",
+                    },
+                    "lane_guidance_summary": {
+                        "ready_to_scale": 0,
+                        "keep_anchor": 1,
+                        "fallback_only": 1,
+                        "experiment_only": 0,
+                        "pull_back": 0,
+                    },
+                    "lane_guidance": [
+                        {
+                            "lane": "meme",
+                            "decision": "keep_anchor",
+                            "summary": "This lane still has enough direct proof to stay in the mix, but the evidence is not clean enough to expand it aggressively.",
+                        },
+                        {
+                            "lane": "jeepfact",
+                            "decision": "fallback_only",
+                            "summary": "Keep this lane available as a fallback or rescue lane until it lands clean planned-slot wins of its own.",
+                        },
+                    ],
                     "ready_this_week": [
                         {
                             "slot": "Slot 1",
@@ -640,6 +689,8 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("## Weekly Strategy Packet", markdown)
         self.assertIn("Keep testing the `evening` posting window", markdown)
         self.assertIn("Competitor coverage relied on cached fallback.", markdown)
+        self.assertIn("Stable-pattern rule:", markdown)
+        self.assertIn("Experimental ideas are one bounded tests", markdown)
         self.assertIn("## This Week's Social Plan", markdown)
         self.assertIn("Keep meme in evening and run one bounded music test.", markdown)
         self.assertIn("Slot 1: Early week", markdown)
@@ -650,6 +701,10 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Lane reason:", markdown)
         self.assertIn("Alternate: `jeepfact`", markdown)
         self.assertIn("Execution feedback: `recommended=1`, `alternate=1`", markdown)
+        self.assertIn("Execution truth:", markdown)
+        self.assertIn("Lane guidance:", markdown)
+        self.assertIn("Lane calls:", markdown)
+        self.assertIn("fallback_only", markdown)
         self.assertIn("Outcome: `alternate_lane_executed`", markdown)
         self.assertIn("Performance: `watch`", markdown)
         self.assertIn("Readiness: `ready_with_approval`", markdown)
@@ -992,6 +1047,18 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                     "awaiting_audit_refresh_count": 0,
                     "traffic_signal_available_count": 0,
                     "traffic_signal_note": "No search-click or traffic collector is wired into Duck Ops yet.",
+                    "verification_truth": {
+                        "headline": "Some applied SEO fixes are not staying resolved cleanly.",
+                        "note": "`1` targeted issue is still present in the latest audit.",
+                        "recommended_action": "Prioritize the reopening categories before sending more broad SEO apply batches.",
+                    },
+                    "category_guidance": [
+                        {
+                            "category_label": "Missing SEO titles",
+                            "decision": "fix_now",
+                            "summary": "This category still shows targeted SEO issues after an apply, so the current copy or apply path needs inspection before more volume.",
+                        }
+                    ],
                     "attention_items": [
                         {
                             "title": "Open Duck",
@@ -1017,6 +1084,8 @@ class BusinessOperatorDeskTests(unittest.TestCase):
 
         self.assertIn("Duck Ops SEO Outcomes", output)
         self.assertIn("Applied fixes tracked: 3", output)
+        self.assertIn("Outcome truth:", output)
+        self.assertIn("Category guidance:", output)
         self.assertIn("Open Duck | Missing SEO titles | issue_still_present", output)
         self.assertIn("Signal note:", output)
 

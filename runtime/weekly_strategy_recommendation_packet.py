@@ -366,6 +366,23 @@ def _do_not_copy_patterns(
     return guardrails[:4]
 
 
+def _strategy_frames() -> dict[str, dict[str, str]]:
+    return {
+        "stable_patterns": {
+            "headline": "Stable patterns are the defaults to keep this week.",
+            "operator_rule": "Use them as the baseline calendar shape unless the change focus or fresh execution truth says they broke.",
+        },
+        "experimental_ideas": {
+            "headline": "Experimental ideas are one bounded tests, not a whole-calendar rewrite.",
+            "operator_rule": "Run one idea at a time, compare it against the anchor lane, and avoid stacking too many experiments into the same week.",
+        },
+        "do_not_copy_patterns": {
+            "headline": "Do-not-copy items are guardrails, not inspiration.",
+            "operator_rule": "Use them to prevent drift when competitor patterns look tempting but do not yet fit our evidence or brand boundaries.",
+        },
+    }
+
+
 def _workflow_labels(social_payload: dict[str, Any]) -> list[str]:
     labels: list[str] = []
     for item in ((social_payload.get("rollups") or {}).get("by_workflow") or []):
@@ -981,6 +998,232 @@ def _execution_feedback_summary(slots: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def _execution_truth(slots: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = _execution_feedback_summary(slots)
+    recommended = int(counts.get("recommended_lane_executed") or 0)
+    alternate = int(counts.get("alternate_lane_executed") or 0)
+    different = int(counts.get("different_lane_executed") or 0)
+    missed = int(counts.get("no_post_observed") or 0)
+    awaiting = int(counts.get("awaiting_slot") or 0)
+    review = int(counts.get("review_slot") or 0)
+    completed = recommended + alternate + different + missed
+
+    if completed == 0:
+        label = "pending"
+        headline = "This week’s plan is still waiting on enough executed slots to judge."
+        note = (
+            f"No completed slot outcomes landed yet; `{awaiting}` slot(s) are still ahead and `{review}` review checkpoint(s) remain."
+        )
+    elif recommended >= 2 and different == 0 and missed == 0:
+        label = "validated"
+        headline = "The weekly plan is holding on executed slots."
+        note = (
+            f"`{recommended}` planned slot(s) landed as recommended, with no missed slots and no lane drift observed yet."
+        )
+        if alternate:
+            note = f"{note} `{alternate}` slot(s) still used a planned fallback, so keep those bounded."
+    elif recommended + alternate > 0 and different == 0 and missed == 0:
+        label = "mixed_on_plan"
+        headline = "The weekly plan is landing, but some slots are resolving through fallbacks."
+        note = (
+            f"`{recommended}` planned slot(s) landed cleanly and `{alternate}` slot(s) resolved through planned fallback lanes."
+        )
+    elif recommended == 0 and different + missed > 0:
+        label = "drifting"
+        headline = "The weekly plan is not holding cleanly yet."
+        note = (
+            f"`{different}` slot(s) drifted into different lanes and `{missed}` slot(s) still have no observed post, so do not scale this plan yet."
+        )
+    else:
+        label = "mixed"
+        headline = "The weekly plan has mixed execution truth."
+        note = (
+            f"`{recommended}` planned slot(s) landed cleanly, `{alternate}` used fallbacks, `{different}` drifted into different lanes, and `{missed}` still have no observed post."
+        )
+
+    return {
+        "label": label,
+        "headline": headline,
+        "note": note,
+        "completed_slot_count": completed,
+        "awaiting_slot_count": awaiting,
+        "review_slot_count": review,
+    }
+
+
+def _lane_guidance(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stats: dict[str, dict[str, int]] = {}
+
+    def _ensure(lane: str) -> dict[str, int]:
+        bucket = stats.get(lane)
+        if bucket is None:
+            bucket = {
+                "planned_slot_count": 0,
+                "manual_slot_count": 0,
+                "recommended_win_count": 0,
+                "planned_slip_count": 0,
+                "missed_slot_count": 0,
+                "alternate_win_count": 0,
+                "different_win_count": 0,
+                "observed_result_count": 0,
+                "strong_result_count": 0,
+                "supportive_result_count": 0,
+                "weak_result_count": 0,
+            }
+            stats[lane] = bucket
+        return bucket
+
+    for item in slots:
+        if str(item.get("execution_mode") or "").strip() == "review":
+            continue
+
+        suggested_lane = _compact_text(item.get("suggested_lane"))
+        alternate_lane = _compact_text(item.get("alternate_lane"))
+        actual_lane = _compact_text(item.get("actual_lane"))
+        tracking_status = _compact_text(item.get("tracking_status"))
+        performance_label = _compact_text(item.get("performance_label"))
+        execution_mode = _compact_text(item.get("execution_mode"))
+
+        if suggested_lane:
+            suggested_stats = _ensure(suggested_lane)
+            suggested_stats["planned_slot_count"] += 1
+            if execution_mode == "manual_experiment":
+                suggested_stats["manual_slot_count"] += 1
+            if tracking_status == "recommended_lane_executed":
+                suggested_stats["recommended_win_count"] += 1
+            elif tracking_status in {"alternate_lane_executed", "different_lane_executed"}:
+                suggested_stats["planned_slip_count"] += 1
+            elif tracking_status == "no_post_observed":
+                suggested_stats["missed_slot_count"] += 1
+
+        if alternate_lane and tracking_status == "alternate_lane_executed":
+            _ensure(alternate_lane)["alternate_win_count"] += 1
+
+        if actual_lane:
+            actual_stats = _ensure(actual_lane)
+            actual_stats["observed_result_count"] += 1
+            if tracking_status == "different_lane_executed":
+                actual_stats["different_win_count"] += 1
+            if performance_label == "strong":
+                actual_stats["strong_result_count"] += 1
+            elif performance_label in {"watch", "limited"}:
+                actual_stats["supportive_result_count"] += 1
+            elif performance_label == "weak":
+                actual_stats["weak_result_count"] += 1
+
+    decision_priority = {
+        "pull_back": 0,
+        "ready_to_scale": 1,
+        "keep_anchor": 2,
+        "fallback_only": 3,
+        "experiment_only": 4,
+    }
+    items: list[dict[str, Any]] = []
+    for lane, lane_stats in stats.items():
+        planned = int(lane_stats.get("planned_slot_count") or 0)
+        manual = int(lane_stats.get("manual_slot_count") or 0)
+        recommended = int(lane_stats.get("recommended_win_count") or 0)
+        slipped = int(lane_stats.get("planned_slip_count") or 0)
+        missed = int(lane_stats.get("missed_slot_count") or 0)
+        alternate = int(lane_stats.get("alternate_win_count") or 0)
+        different = int(lane_stats.get("different_win_count") or 0)
+        observed = int(lane_stats.get("observed_result_count") or 0)
+        strong = int(lane_stats.get("strong_result_count") or 0)
+        supportive = int(lane_stats.get("supportive_result_count") or 0)
+        weak = int(lane_stats.get("weak_result_count") or 0)
+
+        if lane == "manual_social_experiment" or (manual > 0 and planned == manual and recommended == 0 and alternate == 0):
+            decision = "experiment_only"
+            title = f"`{lane}` stays experiment-only for now."
+            summary = "Keep this lane to one bounded test at a time until it proves it deserves a first-class workflow."
+            recommended_action = "Treat this as a one-off experiment and compare it against the anchor lane before adding more volume."
+        elif recommended >= 2 and strong + supportive >= 2 and slipped == 0 and missed == 0 and weak == 0:
+            decision = "ready_to_scale"
+            title = f"`{lane}` has enough repeated clean wins to scale carefully."
+            summary = "This lane is earning repeated planned-slot wins, so it can absorb a little more weekly volume without becoming the whole calendar."
+            recommended_action = f"Promote `{lane}` into a stronger weekly anchor while continuing to watch for drift."
+        elif alternate >= 1 and recommended == 0 and weak == 0 and (missed + slipped) <= 1:
+            decision = "fallback_only"
+            title = f"`{lane}` is helping as a fallback, but it has not won planned slots directly yet."
+            summary = "Keep this lane available as a fallback or rescue lane until it lands clean planned-slot wins of its own."
+            recommended_action = f"Keep `{lane}` as a fallback-only lane until it validates planned slots directly."
+        elif weak > 0 or (planned >= 2 and recommended == 0 and alternate == 0) or (missed + slipped) >= 2:
+            decision = "pull_back"
+            title = f"`{lane}` should not absorb more calendar volume yet."
+            summary = "Recent misses, weak results, or lane drift mean this lane should stay constrained until execution stabilizes."
+            recommended_action = f"Do not scale `{lane}` right now; tighten the concept or scheduling fit before giving it more volume."
+        elif recommended >= 1:
+            decision = "keep_anchor"
+            title = f"`{lane}` should stay in the weekly anchor mix, but not scale yet."
+            summary = "This lane still has enough direct proof to stay in the weekly anchor mix, but the evidence is not clean enough to expand it aggressively."
+            recommended_action = f"Keep `{lane}` in the weekly plan, but wait for another clean win before scaling it."
+        else:
+            decision = "experiment_only"
+            title = f"`{lane}` still needs more outcome evidence."
+            summary = "There is not enough repeated execution truth here yet to justify more calendar weight."
+            recommended_action = f"Keep `{lane}` bounded until it lands stronger or repeated observed results."
+
+        confidence = "medium"
+        if recommended + alternate + observed >= 3:
+            confidence = "high"
+        elif recommended + alternate + observed <= 1:
+            confidence = "low_medium"
+
+        evidence_parts = [
+            f"planned={planned}",
+            f"recommended={recommended}",
+            f"fallback={alternate}",
+            f"slipped={slipped}",
+            f"missed={missed}",
+            f"strong={strong}",
+            f"supportive={supportive}",
+            f"weak={weak}",
+        ]
+        if different:
+            evidence_parts.append(f"different={different}")
+
+        items.append(
+            {
+                "lane": lane,
+                "decision": decision,
+                "title": title,
+                "summary": summary,
+                "recommended_action": recommended_action,
+                "confidence": confidence,
+                "evidence": ", ".join(evidence_parts),
+                "planned_slot_count": planned,
+                "recommended_win_count": recommended,
+                "alternate_win_count": alternate,
+                "planned_slip_count": slipped,
+                "missed_slot_count": missed,
+                "strong_result_count": strong,
+                "supportive_result_count": supportive,
+                "weak_result_count": weak,
+                "observed_result_count": observed,
+            }
+        )
+
+    items.sort(
+        key=lambda item: (
+            decision_priority.get(str(item.get("decision") or ""), 99),
+            -int(item.get("recommended_win_count") or 0),
+            -int(item.get("alternate_win_count") or 0),
+            str(item.get("lane") or ""),
+        )
+    )
+    return items[:5]
+
+
+def _lane_guidance_summary(items: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "ready_to_scale": sum(1 for item in items if str(item.get("decision") or "") == "ready_to_scale"),
+        "keep_anchor": sum(1 for item in items if str(item.get("decision") or "") == "keep_anchor"),
+        "fallback_only": sum(1 for item in items if str(item.get("decision") or "") == "fallback_only"),
+        "experiment_only": sum(1 for item in items if str(item.get("decision") or "") == "experiment_only"),
+        "pull_back": sum(1 for item in items if str(item.get("decision") or "") == "pull_back"),
+    }
+
+
 def _social_plan_slots(
     *,
     anchor_window: str,
@@ -1161,6 +1404,9 @@ def _social_plan(
     items = [item.get("action") for item in slots if _compact_text(item.get("action"))]
     ready_this_week = _ready_this_week(slots)
     execution_feedback = _execution_feedback_summary(slots)
+    execution_truth = _execution_truth(slots)
+    lane_guidance = _lane_guidance(slots)
+    lane_guidance_summary = _lane_guidance_summary(lane_guidance)
     readiness_counts = {
         "ready_now": sum(1 for item in slots if str(item.get("execution_readiness") or "") == "ready_now"),
         "ready_with_approval": sum(1 for item in slots if str(item.get("execution_readiness") or "") == "ready_with_approval"),
@@ -1175,6 +1421,9 @@ def _social_plan(
         "slot_count": len(slots),
         "readiness_counts": readiness_counts,
         "execution_feedback": execution_feedback,
+        "execution_truth": execution_truth,
+        "lane_guidance_summary": lane_guidance_summary,
+        "lane_guidance": lane_guidance,
         "ready_this_week": ready_this_week,
         "slots": slots,
         "items": items[:5],
@@ -1313,6 +1562,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
         do_not_copy_patterns,
         packet_now=packet_now,
     )
+    strategy_frames = _strategy_frames()
     stability_note = "Competitor history is still too short to call any pattern stable."
     if _compact_text(stability.get("stable_top_account")):
         stability_note = (
@@ -1339,6 +1589,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
         "stable_patterns": stable_patterns,
         "experimental_ideas": experimental_ideas,
         "do_not_copy_patterns": do_not_copy_patterns,
+        "strategy_frames": strategy_frames,
         "change_focus": _change_focus(current_learnings_payload),
         "social_plan": social_plan,
         "recommendations": _recommendations(
@@ -1432,6 +1683,21 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                 f"`awaiting={execution_feedback.get('awaiting_slot', 0)}`, "
                 f"`no_post={execution_feedback.get('no_post_observed', 0)}`, "
                 f"`review={execution_feedback.get('review_slot', 0)}`"
+            )
+        execution_truth = social_plan.get("execution_truth") or {}
+        if execution_truth.get("headline"):
+            lines.append(f"- Execution truth: {_compact_text(execution_truth.get('headline'))}")
+        if execution_truth.get("note"):
+            lines.append(f"- Execution note: {_compact_text(execution_truth.get('note'))}")
+        lane_guidance_summary = social_plan.get("lane_guidance_summary") or {}
+        if lane_guidance_summary:
+            lines.append(
+                "- Lane guidance: "
+                f"`ready_to_scale={lane_guidance_summary.get('ready_to_scale', 0)}`, "
+                f"`keep_anchor={lane_guidance_summary.get('keep_anchor', 0)}`, "
+                f"`fallback_only={lane_guidance_summary.get('fallback_only', 0)}`, "
+                f"`experiment_only={lane_guidance_summary.get('experiment_only', 0)}`, "
+                f"`pull_back={lane_guidance_summary.get('pull_back', 0)}`"
             )
         slots = social_plan.get("slots") or []
         if slots:
@@ -1539,7 +1805,37 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                 lines.append(f"  Performance note: {item.get('performance_note')}")
         lines.append("")
 
-    lines.extend(["## Stable Competitor Patterns", ""])
+    strategy_frames = payload.get("strategy_frames") if isinstance(payload.get("strategy_frames"), dict) else {}
+    stable_frame = strategy_frames.get("stable_patterns") if isinstance(strategy_frames.get("stable_patterns"), dict) else {}
+    experiment_frame = strategy_frames.get("experimental_ideas") if isinstance(strategy_frames.get("experimental_ideas"), dict) else {}
+    guardrail_frame = strategy_frames.get("do_not_copy_patterns") if isinstance(strategy_frames.get("do_not_copy_patterns"), dict) else {}
+
+    lines.extend(["## Lane Guidance", ""])
+    lane_guidance = social_plan.get("lane_guidance") or []
+    if not lane_guidance:
+        lines.append("No lane guidance is available yet.")
+        lines.append("")
+    else:
+        for item in lane_guidance[:5]:
+            lines.extend(
+                [
+                    f"### {_humanize_label(item.get('decision'))} · `{item.get('lane')}`",
+                    "",
+                    f"- Confidence: `{item.get('confidence')}`",
+                    f"- Why: {item.get('summary')}",
+                    f"- Evidence: {item.get('evidence')}",
+                    f"- Recommended action: {item.get('recommended_action')}",
+                    "",
+                ]
+            )
+
+    lines.extend(["## Stable Patterns To Keep", ""])
+    if stable_frame.get("headline"):
+        lines.append(stable_frame.get("headline"))
+        lines.append("")
+    if stable_frame.get("operator_rule"):
+        lines.append(f"Operator rule: {stable_frame.get('operator_rule')}")
+        lines.append("")
     stable_patterns = payload.get("stable_patterns") or []
     if not stable_patterns:
         lines.append("No stable patterns are available yet.")
@@ -1558,7 +1854,13 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                 ]
             )
 
-    lines.extend(["## Experimental Ideas", ""])
+    lines.extend(["## One-Time Experiments", ""])
+    if experiment_frame.get("headline"):
+        lines.append(experiment_frame.get("headline"))
+        lines.append("")
+    if experiment_frame.get("operator_rule"):
+        lines.append(f"Operator rule: {experiment_frame.get('operator_rule')}")
+        lines.append("")
     experiments = payload.get("experimental_ideas") or []
     if not experiments:
         lines.append("No experimental ideas are staged yet.")
@@ -1578,6 +1880,12 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
             )
 
     lines.extend(["## Do Not Copy", ""])
+    if guardrail_frame.get("headline"):
+        lines.append(guardrail_frame.get("headline"))
+        lines.append("")
+    if guardrail_frame.get("operator_rule"):
+        lines.append(f"Operator rule: {guardrail_frame.get('operator_rule')}")
+        lines.append("")
     guardrails = payload.get("do_not_copy_patterns") or []
     if not guardrails:
         lines.append("No explicit do-not-copy guardrails are staged yet.")

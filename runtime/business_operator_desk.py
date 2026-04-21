@@ -967,6 +967,7 @@ def _load_weekly_strategy_packet() -> dict[str, Any]:
     recommendations = list(payload.get("recommendations") or [])
     watchouts = list(payload.get("watchouts") or [])
     social_plan = payload.get("social_plan") if isinstance(payload.get("social_plan"), dict) else {}
+    strategy_frames = payload.get("strategy_frames") if isinstance(payload.get("strategy_frames"), dict) else {}
     stable_patterns = list(payload.get("stable_patterns") or [])
     experimental_ideas = list(payload.get("experimental_ideas") or [])
     do_not_copy_patterns = list(payload.get("do_not_copy_patterns") or [])
@@ -983,6 +984,11 @@ def _load_weekly_strategy_packet() -> dict[str, Any]:
         "stable_pattern_count": len(stable_patterns),
         "experimental_idea_count": len(experimental_ideas),
         "do_not_copy_count": len(do_not_copy_patterns),
+        "strategy_frames": {
+            key: dict(strategy_frames.get(key) or {})
+            for key in ("stable_patterns", "experimental_ideas", "do_not_copy_patterns")
+            if isinstance(strategy_frames.get(key), dict)
+        },
         "recommendation_count": len(recommendations),
         "watchout_count": len(watchouts),
         "recommendations": recommendations[:4],
@@ -997,6 +1003,9 @@ def _load_weekly_strategy_packet() -> dict[str, Any]:
             "slot_count": int(social_plan.get("slot_count") or len(social_plan.get("slots") or [])),
             "readiness_counts": dict(social_plan.get("readiness_counts") or {}),
             "execution_feedback": dict(social_plan.get("execution_feedback") or {}),
+            "execution_truth": dict(social_plan.get("execution_truth") or {}),
+            "lane_guidance_summary": dict(social_plan.get("lane_guidance_summary") or {}),
+            "lane_guidance": list(social_plan.get("lane_guidance") or [])[:5],
             "ready_this_week": list(social_plan.get("ready_this_week") or [])[:5],
             "slots": list(social_plan.get("slots") or [])[:5],
             "items": list(social_plan.get("items") or [])[:5],
@@ -1031,6 +1040,8 @@ def _load_seo_outcome_surface() -> dict[str, Any]:
         "writeback_failed_count": int(summary.get("writeback_failed_count") or 0),
         "traffic_signal_available_count": int(summary.get("traffic_signal_available_count") or 0),
         "traffic_signal_note": summary.get("traffic_signal_note"),
+        "verification_truth": dict(payload.get("verification_truth") or {}),
+        "category_guidance": list(payload.get("category_guidance") or [])[:4],
         "attention_items": list(payload.get("attention_items") or [])[:4],
         "recent_wins": list(payload.get("recent_wins") or [])[:4],
     }
@@ -1970,6 +1981,20 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Traffic signals available: `{seo_outcomes.get('traffic_signal_available_count', 0)}`")
         if seo_outcomes.get("traffic_signal_note"):
             lines.append(f"- Signal note: {_trim_text(seo_outcomes.get('traffic_signal_note'), 180)}")
+        verification_truth = seo_outcomes.get("verification_truth") or {}
+        if verification_truth.get("headline"):
+            lines.append(f"- Outcome truth: {_trim_text(verification_truth.get('headline'), 180)}")
+        if verification_truth.get("note"):
+            lines.append(f"- Outcome note: {_trim_text(verification_truth.get('note'), 180)}")
+        if verification_truth.get("recommended_action"):
+            lines.append(f"- Outcome action: {_trim_text(verification_truth.get('recommended_action'), 180)}")
+        category_guidance = seo_outcomes.get("category_guidance") or []
+        if category_guidance:
+            lines.append("- Category guidance:")
+            for item in category_guidance[:3]:
+                lines.append(
+                    f"  - {item.get('category_label') or item.get('seo_category') or 'SEO review'} | `{item.get('decision') or 'unknown'}` | {_trim_text(item.get('summary'), 150)}"
+                )
         if seo_items:
             lines.append("- Top SEO follow-through items:")
             for item in seo_items:
@@ -1994,6 +2019,16 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Stable patterns: `{weekly_strategy_packet.get('stable_pattern_count', len(weekly_strategy_packet.get('stable_patterns') or []))}`")
         lines.append(f"- Experimental ideas: `{weekly_strategy_packet.get('experimental_idea_count', len(weekly_strategy_packet.get('experimental_ideas') or []))}`")
         lines.append(f"- Do-not-copy guardrails: `{weekly_strategy_packet.get('do_not_copy_count', len(weekly_strategy_packet.get('do_not_copy_patterns') or []))}`")
+        strategy_frames = weekly_strategy_packet.get("strategy_frames") or {}
+        stable_frame = strategy_frames.get("stable_patterns") if isinstance(strategy_frames.get("stable_patterns"), dict) else {}
+        experiment_frame = strategy_frames.get("experimental_ideas") if isinstance(strategy_frames.get("experimental_ideas"), dict) else {}
+        guardrail_frame = strategy_frames.get("do_not_copy_patterns") if isinstance(strategy_frames.get("do_not_copy_patterns"), dict) else {}
+        if stable_frame.get("headline"):
+            lines.append(f"- Stable-pattern rule: {_trim_text(stable_frame.get('headline'), 180)}")
+        if experiment_frame.get("headline"):
+            lines.append(f"- Experiment rule: {_trim_text(experiment_frame.get('headline'), 180)}")
+        if guardrail_frame.get("headline"):
+            lines.append(f"- Guardrail rule: {_trim_text(guardrail_frame.get('headline'), 180)}")
         if weekly_strategy_packet.get("own_signal_note"):
             lines.append(f"- Own-signal note: {_trim_text(weekly_strategy_packet.get('own_signal_note'), 180)}")
         if weekly_strategy_packet.get("competitor_signal_note"):
@@ -2046,6 +2081,28 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 f"`no_post={execution_feedback.get('no_post_observed', 0)}`, "
                 f"`review={execution_feedback.get('review_slot', 0)}`"
             )
+        execution_truth = social_plan.get("execution_truth") or {}
+        if execution_truth.get("headline"):
+            lines.append(f"- Execution truth: {_trim_text(execution_truth.get('headline'), 180)}")
+        if execution_truth.get("note"):
+            lines.append(f"- Execution note: {_trim_text(execution_truth.get('note'), 180)}")
+        lane_guidance_summary = social_plan.get("lane_guidance_summary") or {}
+        if lane_guidance_summary:
+            lines.append(
+                "- Lane guidance: "
+                f"`ready_to_scale={lane_guidance_summary.get('ready_to_scale', 0)}`, "
+                f"`keep_anchor={lane_guidance_summary.get('keep_anchor', 0)}`, "
+                f"`fallback_only={lane_guidance_summary.get('fallback_only', 0)}`, "
+                f"`experiment_only={lane_guidance_summary.get('experiment_only', 0)}`, "
+                f"`pull_back={lane_guidance_summary.get('pull_back', 0)}`"
+            )
+        lane_guidance = social_plan.get("lane_guidance") or []
+        if lane_guidance:
+            lines.append("- Lane calls:")
+            for item in lane_guidance[:4]:
+                lines.append(
+                    f"  - `{item.get('lane') or 'unknown'}` | `{item.get('decision') or 'unknown'}` | {_trim_text(item.get('summary'), 150)}"
+                )
         slots = (sections.get("weekly_social_plan") or []) or list(social_plan.get("slots") or [])
         if slots and isinstance(slots[0], dict):
             lines.append("- Suggested slots:")
@@ -2864,6 +2921,21 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             lines.append(f"Traffic signals available: {seo_outcomes.get('traffic_signal_available_count', 0)}")
             if seo_outcomes.get("traffic_signal_note"):
                 lines.append(f"Signal note: {_trim_text(seo_outcomes.get('traffic_signal_note'), 180)}")
+            verification_truth = seo_outcomes.get("verification_truth") or {}
+            if verification_truth.get("headline"):
+                lines.append(f"Outcome truth: {_trim_text(verification_truth.get('headline'), 180)}")
+            if verification_truth.get("note"):
+                lines.append(f"Outcome note: {_trim_text(verification_truth.get('note'), 180)}")
+            if verification_truth.get("recommended_action"):
+                lines.append(f"Outcome action: {_trim_text(verification_truth.get('recommended_action'), 180)}")
+            category_guidance = seo_outcomes.get("category_guidance") or []
+            if category_guidance:
+                lines.append("")
+                lines.append("Category guidance:")
+                for item in category_guidance[:3]:
+                    lines.append(
+                        f"- {item.get('category_label') or item.get('seo_category') or 'SEO review'} | {item.get('decision') or 'unknown'} | {_trim_text(item.get('summary'), 160)}"
+                    )
             lines.append("")
             if seo_items:
                 for item in seo_items:
@@ -2893,6 +2965,16 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             lines.append(f"Stable patterns: {weekly_strategy_packet.get('stable_pattern_count', len(weekly_strategy_packet.get('stable_patterns') or []))}")
             lines.append(f"Experimental ideas: {weekly_strategy_packet.get('experimental_idea_count', len(weekly_strategy_packet.get('experimental_ideas') or []))}")
             lines.append(f"Do-not-copy guardrails: {weekly_strategy_packet.get('do_not_copy_count', len(weekly_strategy_packet.get('do_not_copy_patterns') or []))}")
+            strategy_frames = weekly_strategy_packet.get("strategy_frames") or {}
+            stable_frame = strategy_frames.get("stable_patterns") if isinstance(strategy_frames.get("stable_patterns"), dict) else {}
+            experiment_frame = strategy_frames.get("experimental_ideas") if isinstance(strategy_frames.get("experimental_ideas"), dict) else {}
+            guardrail_frame = strategy_frames.get("do_not_copy_patterns") if isinstance(strategy_frames.get("do_not_copy_patterns"), dict) else {}
+            if stable_frame.get("headline"):
+                lines.append(f"Stable-pattern rule: {_trim_text(stable_frame.get('headline'), 180)}")
+            if experiment_frame.get("headline"):
+                lines.append(f"Experiment rule: {_trim_text(experiment_frame.get('headline'), 180)}")
+            if guardrail_frame.get("headline"):
+                lines.append(f"Guardrail rule: {_trim_text(guardrail_frame.get('headline'), 180)}")
             if weekly_strategy_packet.get("own_signal_note"):
                 lines.append(f"Own-signal note: {_trim_text(weekly_strategy_packet.get('own_signal_note'), 180)}")
             if weekly_strategy_packet.get("competitor_signal_note"):
@@ -2950,6 +3032,29 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                     f"no_post={execution_feedback.get('no_post_observed', 0)}, "
                     f"review={execution_feedback.get('review_slot', 0)}"
                 )
+            execution_truth = social_plan.get("execution_truth") or {}
+            if execution_truth.get("headline"):
+                lines.append(f"Execution truth: {_trim_text(execution_truth.get('headline'), 180)}")
+            if execution_truth.get("note"):
+                lines.append(f"Execution note: {_trim_text(execution_truth.get('note'), 180)}")
+            lane_guidance_summary = social_plan.get("lane_guidance_summary") or {}
+            if lane_guidance_summary:
+                lines.append(
+                    "Lane guidance: "
+                    f"ready_to_scale={lane_guidance_summary.get('ready_to_scale', 0)}, "
+                    f"keep_anchor={lane_guidance_summary.get('keep_anchor', 0)}, "
+                    f"fallback_only={lane_guidance_summary.get('fallback_only', 0)}, "
+                    f"experiment_only={lane_guidance_summary.get('experiment_only', 0)}, "
+                    f"pull_back={lane_guidance_summary.get('pull_back', 0)}"
+                )
+            lane_guidance = social_plan.get("lane_guidance") or []
+            if lane_guidance:
+                lines.append("")
+                lines.append("Lane calls:")
+                for item in lane_guidance[:4]:
+                    lines.append(
+                        f"- {item.get('lane') or 'unknown'} | {item.get('decision') or 'unknown'} | {_trim_text(item.get('summary'), 160)}"
+                    )
             lines.append("")
             if items and isinstance(items[0], dict):
                 for item in items:

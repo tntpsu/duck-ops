@@ -36,6 +36,7 @@ DESCRIPTION_ISSUE_CODES = {
 CATEGORY_TARGET_ISSUES = {
     "missing_title": {"missing_seo_title"},
     "missing_description": {"missing_seo_description"},
+    "missing_title_and_description": {"missing_seo_title", "missing_seo_description"},
     "long_title": {"long_seo_title"},
     "long_description": {"long_seo_description"},
     "short_title": {"short_seo_title"},
@@ -43,6 +44,18 @@ CATEGORY_TARGET_ISSUES = {
     "near_duplicate_title": {"near_duplicate_seo_title"},
     "weak_title": {"seo_title_matches_raw_title", "weak_generic_seo_title"},
     "weak_description": {"low_value_seo_copy", "weak_generic_seo_description"},
+}
+CATEGORY_LABELS = {
+    "missing_title": "Missing SEO titles",
+    "missing_description": "Missing SEO descriptions",
+    "missing_title_and_description": "Missing SEO titles + descriptions",
+    "long_title": "SEO titles too long",
+    "long_description": "SEO descriptions too long",
+    "short_title": "SEO titles too short",
+    "duplicate_title": "Duplicate SEO titles",
+    "near_duplicate_title": "Near-duplicate SEO titles",
+    "weak_title": "Weak SEO titles",
+    "weak_description": "Weak SEO descriptions",
 }
 STATUS_ORDER = {
     "writeback_verification_failed": -1,
@@ -53,6 +66,14 @@ STATUS_ORDER = {
     "monitoring": 4,
     "writeback_verified": 5,
 }
+GUIDANCE_ORDER = {
+    "fix_now": 0,
+    "investigate_audit": 1,
+    "refresh_audit": 2,
+    "watch_window": 3,
+    "keep_running": 4,
+    "validated": 5,
+}
 
 
 def _normalize_text(value: Any) -> str:
@@ -60,7 +81,10 @@ def _normalize_text(value: Any) -> str:
 
 
 def _humanize_category(value: Any) -> str:
-    text = _normalize_text(value).replace("_", " ")
+    key = _normalize_text(value).lower()
+    if key in CATEGORY_LABELS:
+        return CATEGORY_LABELS[key]
+    text = key.replace("_", " ")
     return text.title() if text else "SEO review"
 
 
@@ -108,6 +132,16 @@ def _target_issue_codes(run_payload: dict[str, Any], item: dict[str, Any]) -> li
     return sorted(codes)
 
 
+def _infer_issue_family_category(target_issue_codes: list[str]) -> tuple[str | None, str | None]:
+    codes = {code for code in target_issue_codes if _normalize_text(code)}
+    if not codes:
+        return None, None
+    for category, expected in CATEGORY_TARGET_ISSUES.items():
+        if codes == set(expected):
+            return category, _humanize_category(category)
+    return None, None
+
+
 def _applied_fields(item: dict[str, Any]) -> list[str]:
     fields: list[str] = []
     if bool(item.get("apply_seo_title", True)):
@@ -147,6 +181,7 @@ def _build_outcome_item(
     )
     age_days = _age_days(applied_at, now=now)
     target_issue_codes = _target_issue_codes(run_payload, item)
+    inferred_category, inferred_category_label = _infer_issue_family_category(target_issue_codes)
     current_resource = resources_by_id.get(str(item.get("id") or ""))
     current_issue_codes = sorted(_issue_codes(current_resource or {}))
     remaining_codes = sorted(code for code in target_issue_codes if code in current_issue_codes)
@@ -165,10 +200,15 @@ def _build_outcome_item(
         status = "stable"
 
     category = _normalize_text(run_payload.get("seo_category"))
+    category_label = _normalize_text(run_payload.get("category_label"))
+    if not category or category in {"seo_review", "seo review"}:
+        category = inferred_category or category
+    if not category_label or category_label.lower() in {"seo review"}:
+        category_label = inferred_category_label or _humanize_category(category)
     return {
         "run_id": _normalize_text(run_payload.get("run_id")) or None,
         "seo_category": category or None,
-        "category_label": _normalize_text(run_payload.get("category_label")) or _humanize_category(category),
+        "category_label": category_label or _humanize_category(category),
         "status": status,
         "title": _normalize_text(item.get("title")) or _normalize_text(item.get("resource_url")) or "SEO resource",
         "kind": _normalize_text(item.get("kind")) or None,
@@ -289,6 +329,142 @@ def _category_summary(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(grouped.values(), key=lambda item: (-int(item.get("applied_item_count") or 0), str(item.get("seo_category") or "")))
 
 
+def _verification_truth(monitored_items: list[dict[str, Any]], writeback_items: list[dict[str, Any]]) -> dict[str, Any]:
+    writeback_failed_count = sum(1 for item in writeback_items if item.get("status") == "writeback_verification_failed")
+    writeback_verified_count = sum(1 for item in writeback_items if item.get("status") == "writeback_verified")
+    stable_count = sum(1 for item in monitored_items if item.get("status") == "stable")
+    monitoring_count = sum(1 for item in monitored_items if item.get("status") == "monitoring")
+    issue_still_present_count = sum(1 for item in monitored_items if item.get("status") == "issue_still_present")
+    missing_from_audit_count = sum(1 for item in monitored_items if item.get("status") == "missing_from_audit")
+    awaiting_audit_refresh_count = sum(1 for item in monitored_items if item.get("status") == "awaiting_audit_refresh")
+
+    if writeback_failed_count > 0:
+        label = "writeback_failing"
+        headline = "Immediate Shopify SEO verification is still catching failures."
+        note = (
+            f"`{writeback_failed_count}` writeback receipt(s) failed immediate verification, so do not trust the longer-term audit view alone yet."
+        )
+        recommended_action = "Fix the writeback verification failures first, then use the audit monitor to judge whether those fixes stay resolved."
+    elif issue_still_present_count > 0 or missing_from_audit_count > 0:
+        label = "reopened"
+        headline = "Some applied SEO fixes are not staying resolved cleanly."
+        note = (
+            f"`{issue_still_present_count}` targeted issue(s) are still present and `{missing_from_audit_count}` item(s) could not be verified from the latest audit."
+        )
+        recommended_action = "Prioritize the reopening categories before sending more broad SEO apply batches."
+    elif awaiting_audit_refresh_count > 0 and stable_count == 0 and monitoring_count == 0:
+        label = "awaiting_recheck"
+        headline = "Recent SEO applies are waiting on a fresh audit."
+        note = (
+            f"`{awaiting_audit_refresh_count}` item(s) were applied after the latest audit, so the lane is waiting for recheck truth rather than showing durable wins yet."
+        )
+        recommended_action = "Refresh the SEO audit before drawing conclusions from the latest apply run."
+    elif monitoring_count > 0 and stable_count == 0:
+        label = "monitoring"
+        headline = "SEO fixes are clearing so far, but they are still inside the observation window."
+        note = (
+            f"`{monitoring_count}` item(s) are currently clear, but they have not aged beyond the {MONITORING_WINDOW_DAYS:.0f}-day monitoring window yet."
+        )
+        recommended_action = "Let the monitoring window finish before treating these categories as durable wins."
+    elif monitoring_count > 0 or stable_count > 0 or writeback_verified_count > 0:
+        label = "healthy_with_watch"
+        headline = "SEO cleanup is moving in the right direction."
+        note = (
+            f"`{stable_count}` stable item(s), `{monitoring_count}` monitored item(s), and `{writeback_verified_count}` immediate writeback confirmation(s) show the lane is improving even though traffic lift is not wired yet."
+        )
+        recommended_action = "Keep the current SEO review/apply rhythm, but use category guidance to decide where to focus the next batch."
+    else:
+        label = "idle"
+        headline = "No applied SEO fixes are being tracked yet."
+        note = "Duck Ops has not observed any applied SEO review runs or writeback receipts yet."
+        recommended_action = "Run an SEO apply batch first so outcome monitoring has something real to judge."
+
+    return {
+        "label": label,
+        "headline": headline,
+        "note": note,
+        "recommended_action": recommended_action,
+    }
+
+
+def _category_guidance(category_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in category_rows:
+        category = _normalize_text(item.get("seo_category")) or "uncategorized"
+        label = _normalize_text(item.get("category_label")) or _humanize_category(category)
+        total = int(item.get("applied_item_count") or 0)
+        stable = int(item.get("stable_count") or 0)
+        monitoring = int(item.get("monitoring_count") or 0)
+        open_count = int(item.get("issue_still_present_count") or 0)
+        missing = int(item.get("missing_from_audit_count") or 0)
+        awaiting = int(item.get("awaiting_audit_refresh_count") or 0)
+
+        if open_count > 0:
+            decision = "fix_now"
+            title = f"`{label}` is reopening after apply."
+            summary = "This category still shows targeted SEO issues after an apply, so the current copy or apply path needs inspection before more volume."
+            recommended_action = f"Spot-check `{label}` items first and tighten the apply logic or copy before sending another batch in this category."
+        elif missing > 0:
+            decision = "investigate_audit"
+            title = f"`{label}` is missing from the latest audit coverage."
+            summary = "Duck Ops cannot verify whether these fixes held because the latest audit did not include the resources."
+            recommended_action = f"Confirm why `{label}` items are missing from the SEO audit before treating this category as healthy."
+        elif awaiting > 0:
+            decision = "refresh_audit"
+            title = f"`{label}` needs a fresh audit before it can be judged."
+            summary = "Recent applies landed after the latest audit snapshot, so this category is waiting on recheck truth rather than durable outcome evidence."
+            recommended_action = f"Refresh the SEO audit before making more decisions about `{label}`."
+        elif monitoring > 0 and stable == 0:
+            decision = "watch_window"
+            title = f"`{label}` is clear so far, but still in the monitoring window."
+            summary = "The targeted issues are currently cleared, but the fixes are still too fresh to call them durable."
+            recommended_action = f"Keep `{label}` in watch mode until some of these fixes age into stable wins."
+        elif monitoring > 0 and stable > 0:
+            decision = "keep_running"
+            title = f"`{label}` has older wins and newer fixes still under watch."
+            summary = "This category already has some durable proof, and the newer fixes are still progressing through the observation window."
+            recommended_action = f"Keep `{label}` in the normal rotation while watching the newest fixes age into stable outcomes."
+        else:
+            decision = "validated"
+            title = f"`{label}` is proving durable."
+            summary = "Tracked fixes in this category are staying resolved cleanly enough to count as durable outcome evidence."
+            recommended_action = f"Keep `{label}` in the normal monthly SEO rotation."
+
+        confidence = "high" if total >= 10 or open_count > 0 or stable >= 3 else "medium"
+        items.append(
+            {
+                "seo_category": category,
+                "category_label": label,
+                "decision": decision,
+                "title": title,
+                "summary": summary,
+                "recommended_action": recommended_action,
+                "confidence": confidence,
+                "evidence": (
+                    f"total={total}, stable={stable}, monitoring={monitoring}, "
+                    f"open={open_count}, missing={missing}, awaiting={awaiting}"
+                ),
+                "applied_item_count": total,
+                "stable_count": stable,
+                "monitoring_count": monitoring,
+                "issue_still_present_count": open_count,
+                "missing_from_audit_count": missing,
+                "awaiting_audit_refresh_count": awaiting,
+            }
+        )
+
+    items.sort(
+        key=lambda entry: (
+            GUIDANCE_ORDER.get(str(entry.get("decision") or ""), 99),
+            -int(entry.get("issue_still_present_count") or 0),
+            -int(entry.get("awaiting_audit_refresh_count") or 0),
+            -int(entry.get("applied_item_count") or 0),
+            str(entry.get("category_label") or ""),
+        )
+    )
+    return items[:5]
+
+
 def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
     audit_payload = load_json(SEO_AUDIT_PATH, {})
     if not isinstance(audit_payload, dict):
@@ -321,6 +497,9 @@ def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
         for receipt in _latest_writeback_receipts()
         if isinstance(receipt, dict)
     ]
+    category_summary = _category_summary(monitored_items)
+    verification_truth = _verification_truth(monitored_items, writeback_items)
+    category_guidance = _category_guidance(category_summary)
     monitored_items.sort(
         key=lambda item: (
             STATUS_ORDER.get(str(item.get("status") or ""), 9),
@@ -361,9 +540,11 @@ def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
             "traffic_signal_available_count": 0,
             "traffic_signal_note": "No search-click or traffic collector is wired into Duck Ops yet, so this monitor currently measures durable SEO cleanup rather than organic lift.",
         },
+        "verification_truth": verification_truth,
+        "category_guidance": category_guidance,
         "attention_items": attention_items,
         "recent_wins": recent_wins[:5],
-        "by_category": _category_summary(monitored_items),
+        "by_category": category_summary,
         "items": monitored_items,
         "paths": {
             "seo_audit": str(SEO_AUDIT_PATH),
@@ -396,9 +577,32 @@ def render_shopify_seo_outcomes_markdown(payload: dict[str, Any]) -> str:
         "",
         str(summary.get("traffic_signal_note") or ""),
         "",
-        "## Needs Attention",
+        "## Outcome Truth",
         "",
     ]
+
+    verification_truth = payload.get("verification_truth") if isinstance(payload.get("verification_truth"), dict) else {}
+    if verification_truth.get("headline"):
+        lines.append(f"- Headline: {verification_truth.get('headline')}")
+    if verification_truth.get("note"):
+        lines.append(f"- Note: {verification_truth.get('note')}")
+    if verification_truth.get("recommended_action"):
+        lines.append(f"- Recommended action: {verification_truth.get('recommended_action')}")
+    lines.extend(["", "## Category Guidance", ""])
+
+    category_guidance = payload.get("category_guidance") if isinstance(payload.get("category_guidance"), list) else []
+    if not category_guidance:
+        lines.append("No category guidance is available yet.")
+        lines.append("")
+    else:
+        for item in category_guidance:
+            lines.append(f"- {item.get('category_label')} | `{item.get('decision')}` | `{item.get('confidence')}`")
+            lines.append(f"  Why: {item.get('summary')}")
+            lines.append(f"  Evidence: {item.get('evidence')}")
+            lines.append(f"  Recommended action: {item.get('recommended_action')}")
+            lines.append("")
+
+    lines.extend(["## Needs Attention", ""])
 
     attention_items = payload.get("attention_items") if isinstance(payload.get("attention_items"), list) else []
     if not attention_items:

@@ -101,6 +101,38 @@ class CurrentLearningsTests(unittest.TestCase):
                                 "no_post_observed": 1,
                                 "review_slot": 1,
                             },
+                            "execution_truth": {
+                                "label": "mixed",
+                                "headline": "The weekly plan has mixed execution truth.",
+                                "note": "`1` planned slot landed cleanly, `1` used fallback, and `1` still has no observed post.",
+                            },
+                            "lane_guidance_summary": {
+                                "ready_to_scale": 0,
+                                "keep_anchor": 1,
+                                "fallback_only": 1,
+                                "experiment_only": 0,
+                                "pull_back": 0,
+                            },
+                            "lane_guidance": [
+                                {
+                                    "lane": "meme",
+                                    "decision": "keep_anchor",
+                                    "title": "`meme` should stay in the weekly anchor mix, but not scale yet.",
+                                    "summary": "This lane still has enough direct proof to stay in the mix, but the evidence is not clean enough to expand it aggressively.",
+                                    "recommended_action": "Keep `meme` in the weekly plan, but wait for another clean win before scaling it.",
+                                    "evidence": "planned=2, recommended=1, fallback=0, slipped=1, missed=0, strong=1, supportive=0, weak=0",
+                                    "confidence": "medium",
+                                },
+                                {
+                                    "lane": "jeepfact",
+                                    "decision": "fallback_only",
+                                    "title": "`jeepfact` is helping as a fallback, but it has not won planned slots directly yet.",
+                                    "summary": "Keep this lane available as a fallback or rescue lane until it lands clean planned-slot wins of its own.",
+                                    "recommended_action": "Keep `jeepfact` as a fallback-only lane until it validates planned slots directly.",
+                                    "evidence": "planned=1, recommended=0, fallback=1, slipped=0, missed=1, strong=0, supportive=1, weak=0",
+                                    "confidence": "medium",
+                                },
+                            ],
                             "slots": [
                                 {
                                     "slot": "Slot 1",
@@ -160,7 +192,7 @@ class CurrentLearningsTests(unittest.TestCase):
             ):
                 payload = current_learnings.build_current_learnings()
 
-            self.assertEqual(len(payload["current_beliefs"]), 5)
+            self.assertEqual(len(payload["current_beliefs"]), 6)
             self.assertEqual(len(payload["changes_since_previous"]), 7)
             self.assertIn(
                 "competitor_social_freshness_degraded",
@@ -177,6 +209,9 @@ class CurrentLearningsTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["weekly_strategy_recommended_lane_executed_count"], 1)
             self.assertEqual(payload["summary"]["weekly_strategy_alternate_lane_executed_count"], 1)
             self.assertEqual(payload["summary"]["weekly_strategy_no_post_observed_count"], 1)
+            self.assertEqual(payload["summary"]["weekly_strategy_execution_truth_label"], "mixed")
+            self.assertEqual(payload["summary"]["weekly_strategy_lane_keep_anchor_count"], 1)
+            self.assertEqual(payload["summary"]["weekly_strategy_lane_fallback_only_count"], 1)
             self.assertTrue(payload["weekly_strategy_feedback"]["available"])
             self.assertEqual(payload["paths"]["weekly_strategy_packet"], str(weekly_strategy_path))
             self.assertTrue(state_path.exists())
@@ -186,6 +221,9 @@ class CurrentLearningsTests(unittest.TestCase):
             self.assertIn("## Competitor Social Freshness", markdown)
             self.assertIn("## Weekly Strategy Follow-Through", markdown)
             self.assertIn("Planned lane wins", markdown)
+            self.assertIn("Execution truth label", markdown)
+            self.assertIn("### Lane Guidance", markdown)
+            self.assertIn("fallback_only", markdown)
             self.assertIn("Slot 2 shifted into alternate `jeepfact` instead of planned `meme`.", markdown)
             self.assertIn("Hard failure truth", markdown)
             self.assertIn("Cached fallback accounts", markdown)
@@ -566,6 +604,118 @@ class CurrentLearningsTests(unittest.TestCase):
             self.assertIn("weekly_strategy_stable_pattern_changed", kinds)
             self.assertIn("weekly_strategy_experiment_changed", kinds)
             self.assertIn("weekly_strategy_guardrail_changed", kinds)
+
+    def test_build_current_learnings_surfaces_lane_guidance_changes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            social_path = root / "state" / "social_performance_rollups.json"
+            competitor_path = root / "state" / "social_competitor_benchmark.json"
+            competitor_social_path = root / "state" / "competitor_social_benchmark.json"
+            competitor_snapshots_path = root / "state" / "competitor_social_snapshots.json"
+            weekly_strategy_path = root / "state" / "weekly_strategy_recommendation_packet.json"
+            state_path = root / "state" / "current_learnings.json"
+            operator_json_path = root / "output" / "operator" / "current_learnings.json"
+            markdown_path = root / "output" / "operator" / "current_learnings.md"
+            social_path.parent.mkdir(parents=True, exist_ok=True)
+            social_path.write_text(json.dumps({"summary": {"post_count": 6, "metrics_coverage_pct": 100.0}}), encoding="utf-8")
+            competitor_path.write_text(json.dumps({"summary": {}}), encoding="utf-8")
+            competitor_social_path.write_text(json.dumps({"summary": {"post_count": 8}}), encoding="utf-8")
+            competitor_snapshots_path.write_text(
+                json.dumps({"generated_at": "2026-04-16T09:00:00-04:00", "summary": {"post_count": 8, "collected_account_count": 3, "live_account_count": 3}}),
+                encoding="utf-8",
+            )
+            weekly_strategy_path.write_text(
+                json.dumps(
+                    {
+                        "social_plan": {
+                            "headline": "Use execution truth before changing the calendar.",
+                            "execution_feedback": {
+                                "recommended_lane_executed": 2,
+                                "alternate_lane_executed": 0,
+                                "different_lane_executed": 0,
+                                "awaiting_slot": 0,
+                                "no_post_observed": 0,
+                                "review_slot": 0,
+                            },
+                            "execution_truth": {
+                                "label": "validated",
+                                "headline": "The weekly plan is holding on executed slots.",
+                                "note": "`meme` is now winning planned slots repeatedly without drift or misses.",
+                            },
+                            "lane_guidance_summary": {
+                                "ready_to_scale": 1,
+                                "keep_anchor": 0,
+                                "fallback_only": 0,
+                                "experiment_only": 0,
+                                "pull_back": 1,
+                            },
+                            "lane_guidance": [
+                                {
+                                    "lane": "meme",
+                                    "decision": "ready_to_scale",
+                                    "title": "`meme` has enough repeated clean wins to scale carefully.",
+                                    "summary": "This lane is earning repeated planned-slot wins, so it can absorb a little more weekly volume without becoming the whole calendar.",
+                                    "recommended_action": "Promote `meme` into a stronger weekly anchor while continuing to watch for drift.",
+                                    "evidence": "planned=2, recommended=2, fallback=0, slipped=0, missed=0, strong=2, supportive=0, weak=0",
+                                    "confidence": "high",
+                                },
+                                {
+                                    "lane": "jeepfact",
+                                    "decision": "pull_back",
+                                    "title": "`jeepfact` should not absorb more calendar volume yet.",
+                                    "summary": "Recent misses, weak results, or lane drift mean this lane should stay constrained until execution stabilizes.",
+                                    "recommended_action": "Do not scale `jeepfact` right now; tighten the concept or scheduling fit before giving it more volume.",
+                                    "evidence": "planned=2, recommended=0, fallback=0, slipped=1, missed=1, strong=0, supportive=0, weak=1",
+                                    "confidence": "high",
+                                },
+                            ],
+                            "slots": [],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "summary": {"competitor_social_freshness_label": "live"},
+                        "weekly_strategy_feedback": {
+                            "execution_truth": {"label": "mixed"},
+                            "lane_guidance": [
+                                {"lane": "meme", "decision": "keep_anchor"},
+                                {"lane": "jeepfact", "decision": "fallback_only"},
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(current_learnings, "SOCIAL_ROLLUPS_PATH", social_path), patch.object(
+                current_learnings, "COMPETITOR_BENCHMARK_PATH", competitor_path
+            ), patch.object(
+                current_learnings, "COMPETITOR_SOCIAL_BENCHMARK_PATH", competitor_social_path
+            ), patch.object(
+                current_learnings, "COMPETITOR_SOCIAL_SNAPSHOTS_PATH", competitor_snapshots_path
+            ), patch.object(
+                current_learnings, "WEEKLY_STRATEGY_PACKET_PATH", weekly_strategy_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_STATE_PATH", state_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_OPERATOR_JSON_PATH", operator_json_path
+            ), patch.object(
+                current_learnings, "CURRENT_LEARNINGS_MD_PATH", markdown_path
+            ):
+                payload = current_learnings.build_current_learnings()
+
+            notifier = payload["change_notifier"]
+            kinds = {item["kind"] for item in notifier["items"]}
+            self.assertIn("weekly_strategy_execution_truth_changed", kinds)
+            self.assertIn("weekly_strategy_lane_ready_to_scale", kinds)
+            self.assertIn("weekly_strategy_lane_pull_back", kinds)
+            markdown = markdown_path.read_text(encoding="utf-8")
+            self.assertIn("ready_to_scale", markdown)
+            self.assertIn("pull_back", markdown)
 
 
 if __name__ == "__main__":

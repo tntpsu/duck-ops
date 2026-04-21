@@ -51,6 +51,7 @@ Detailed execution sequence:
 - Shopify SEO audit now flags low-value SEO copy in addition to generic/duplicate/title-overlap issues.
 - Newduck listing policy now enforces internal/external Shopify links and structured Etsy titles.
 - Blog, newduck activation, and Shopify SEO apply now record writeback-verification receipts so failed SEO mutations stop looking like clean success.
+- Shopify SEO outcomes now summarize verification truth and category-level follow-through so the business desk can show what is reopening, what still needs audit refresh, and what is just aging through the monitoring window.
 
 ### 6. GTDF / Weekly / Review / Creative Health
 - GTDF winner now reports upstream blockers honestly instead of fake failures.

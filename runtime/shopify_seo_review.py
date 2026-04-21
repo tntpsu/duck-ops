@@ -157,7 +157,7 @@ def _trim_to_range(text: str, *, min_len: int, max_len: int, extras: list[str]) 
     if len(value) < min_len:
         room = max_len - len(value) - 1
         if room > 0:
-            padding = _normalize_text("MyJeepDuck collectible ducks and gift ideas.")
+            padding = _normalize_text("collectible duck gift idea")
             padding = padding[: room + 1].rsplit(" ", 1)[0].strip() or padding[:room].strip()
             if padding:
                 value = _normalize_text(f"{value} {padding}")
@@ -228,6 +228,15 @@ def _clean_product_title(title: str) -> str:
         value = value[:41].rsplit(" ", 1)[0].strip() or value[:40].strip()
     value = value.replace(" - ", " ")
     return _normalize_text(value)
+
+
+def _ensure_duck_keyword(value: str) -> str:
+    normalized = _normalize_text(value)
+    if not normalized:
+        return "Duck"
+    if re.search(r"(?i)\bduck\b", normalized):
+        return normalized
+    return _normalize_text(f"{normalized} Duck")
 
 
 def _title_with_brand(base: str, suffixes: list[str], *, min_len: int = 45, max_len: int = 70) -> str:
@@ -308,12 +317,13 @@ def _default_title_for_resource(resource: dict[str, Any]) -> str:
     elif kind == "article":
         base = f"{title} | MyJeepDuck Blog"
     else:
-        clean_name = _clean_product_title(title)
+        clean_name = _ensure_duck_keyword(_clean_product_title(title))
         base = _title_with_brand(
             clean_name,
             [
+                "| MyJeepDuck Dashboard Decor Duck Gift",
                 "| MyJeepDuck Collectible Duck Gift",
-                "| MyJeepDuck Dashboard Duck Gift",
+                "| MyJeepDuck Duck Gift Idea",
                 "| MyJeepDuck",
             ],
         )
