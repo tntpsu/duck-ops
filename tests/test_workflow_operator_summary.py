@@ -310,6 +310,59 @@ class WorkflowOperatorSummaryTests(unittest.TestCase):
             self.assertIn("Weekly snapshot refresh failed.", items[0]["root_cause"])
             self.assertIn("sale monitor: No module named 'workflow_control'", items[0]["root_cause"])
 
+    def test_newduck_seo_writeback_failure_surfaces_root_cause_and_fix_hint(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            receipt_dir = state_dir / "receipts"
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            receipt_path = receipt_dir / "newduck-seo.json"
+            receipt_path.write_text(
+                json.dumps(
+                    {
+                        "payload": {
+                            "shopify_product_id": 8546991767735,
+                            "receipt_id": "receipt-123",
+                            "failure_codes": ["seo_title_mismatch"],
+                            "updates_applied": ["refreshed Shopify SEO"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (state_dir / "newduck.json").write_text(
+                json.dumps(
+                    {
+                        "lane": "newduck",
+                        "display_label": "Orange Cat Duck",
+                        "state": "blocked",
+                        "state_reason": "seo_writeback_verification_failed",
+                        "next_action": "Repair the Shopify SEO or body link writeback before activating this product.",
+                        "updated_at": "2026-04-21T23:06:13-04:00",
+                        "metadata": {"duck_name": "Orange Cat Duck"},
+                        "last_verification": {
+                            "kind": "shopify_seo_writeback",
+                            "status": "failed",
+                            "receipt_id": "receipt-123",
+                            "failure_codes": ["seo_title_mismatch"],
+                        },
+                        "latest_receipt": {
+                            "receipt_id": "receipt-123",
+                            "recorded_at": "2026-04-21T23:06:13-04:00",
+                            "path": str(receipt_path),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            items = build_workflow_followthrough_items(limit=5, state_dir=state_dir)
+
+            self.assertEqual(items[0]["lane"], "newduck")
+            self.assertIn("seo_title_mismatch", items[0]["root_cause"])
+            self.assertIn("rerun Shopify activation", items[0]["fix_hint"])
+
 
 if __name__ == "__main__":
     unittest.main()

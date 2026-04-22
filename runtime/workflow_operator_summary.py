@@ -198,6 +198,22 @@ def _review_execution_root_cause(item: dict[str, Any]) -> str | None:
     return None
 
 
+def _newduck_root_cause(item: dict[str, Any]) -> str | None:
+    if str(item.get("state_reason") or "").strip() != "seo_writeback_verification_failed":
+        return None
+    verification = item.get("last_verification") or {}
+    receipt_payload = _load_receipt_payload(item)
+    payload = receipt_payload.get("payload") or {}
+    failure_codes = [
+        str(code).strip()
+        for code in list(payload.get("failure_codes") or verification.get("failure_codes") or [])
+        if str(code).strip()
+    ]
+    if failure_codes:
+        return f"Shopify activation stopped because the final SEO/link verification failed: {', '.join(failure_codes)}."
+    return "Shopify activation stopped because the final SEO/link verification did not pass."
+
+
 def _quality_gate_urgent_items(quality_gate_state_path: Path | None = None) -> list[dict[str, Any]]:
     state_path = quality_gate_state_path or QUALITY_GATE_STATE_PATH
     payload = load_json(state_path, {})
@@ -243,6 +259,8 @@ def _fix_hint(item: dict[str, Any], root_cause: str | None) -> str | None:
     metadata = item.get("metadata") or {}
     if lane == "meme" and root_cause:
         return "Check the Facebook page/object permissions in Meta, retry after the transient Instagram error clears, then rerun Meme Monday publish."
+    if lane == "newduck" and root_cause:
+        return "Open the latest Shopify activation receipt, confirm the final SEO snapshot and required links, then rerun Shopify activation."
     if lane == "review_execution" and root_cause:
         artifact_id = str(metadata.get("artifact_id") or item.get("entity_id") or "").strip()
         transaction_id = str(metadata.get("transaction_id") or "").strip()
@@ -333,6 +351,8 @@ def _root_cause(item: dict[str, Any], *, quality_gate_state_path: Path | None = 
         return _meme_root_cause(_load_receipt_payload(item))
     if lane == "weekly" and str(item.get("state_reason") or "").strip() == "stale_input":
         return _weekly_root_cause(item)
+    if lane == "newduck":
+        return _newduck_root_cause(item)
     if lane == "review_execution":
         return _review_execution_root_cause(item)
     if lane == "quality_gate":
