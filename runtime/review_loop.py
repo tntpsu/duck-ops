@@ -27,6 +27,7 @@ from business_operator_desk import render_business_section
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, write_decision
 from ops_control import sync_ops_control
 from trend_ranker import build_trend_concepts
+from workflow_control import list_workflow_states
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,6 +112,7 @@ ACTION_ALIASES = {
     "have": "same_as",
 }
 CUSTOMER_SHORT_ID_PATTERN = re.compile(r"^c\d+$", re.IGNORECASE)
+NEWDUCK_RUN_FAMILY_PATTERN = re.compile(r"^(?P<stem>.+)-(?P<date>\d{4}-\d{2}-\d{2})-(?P<time>\d{4,6})$")
 RECOMMENDED_ACTION_BY_DECISION = {
     "publish_ready": "approve",
     "needs_revision": "needs_changes",
@@ -186,6 +188,34 @@ def decision_age_days(decision: dict[str, Any]) -> float | None:
         if parsed:
             return max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds() / 86400.0)
     return item_age_days(decision.get("created_at"))
+
+
+def normalize_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def newduck_run_family(run_id: str | None) -> str:
+    value = str(run_id or "").strip()
+    if not value:
+        return ""
+    match = NEWDUCK_RUN_FAMILY_PATTERN.fullmatch(value)
+    if match:
+        return normalize_text(match.group("stem"))
+    return normalize_text(value)
+
+
+def newduck_run_sort_key(run_id: str | None) -> tuple[int, str, str]:
+    value = str(run_id or "").strip()
+    if not value:
+        return (0, "", "")
+    match = NEWDUCK_RUN_FAMILY_PATTERN.fullmatch(value)
+    if not match:
+        return (0, "", value)
+    return (
+        1,
+        str(match.group("date") or ""),
+        str(match.group("time") or "").zfill(6),
+    )
 
 
 def item_sort_key(item: dict[str, Any]) -> tuple[str, str, int, int]:
@@ -273,6 +303,59 @@ def duckagent_publish_reconciliation(decision: dict[str, Any]) -> dict[str, Any]
     return None
 
 
+def newer_newduck_run_reconciliation(decision: dict[str, Any]) -> dict[str, Any] | None:
+    flow = str(decision.get("flow") or "").strip()
+    artifact_type = str(decision.get("artifact_type") or "").strip()
+    run_id = str(decision.get("run_id") or "").strip()
+    if flow != "newduck" and artifact_type != "listing":
+        return None
+    if not run_id:
+        return None
+
+    current_family = newduck_run_family(run_id)
+    current_sort_key = newduck_run_sort_key(run_id)
+    if not current_family:
+        return None
+
+    replacement: dict[str, Any] | None = None
+    replacement_sort_key = current_sort_key
+    for item in list_workflow_states():
+        if str(item.get("lane") or "").strip() != "newduck":
+            continue
+        candidate_run_id = str(item.get("run_id") or item.get("entity_id") or "").strip()
+        if not candidate_run_id or candidate_run_id == run_id:
+            continue
+        if newduck_run_family(candidate_run_id) != current_family:
+            continue
+        candidate_sort_key = newduck_run_sort_key(candidate_run_id)
+        if candidate_sort_key <= current_sort_key:
+            continue
+        if replacement is None or candidate_sort_key > replacement_sort_key:
+            replacement = item
+            replacement_sort_key = candidate_sort_key
+
+    if replacement is None:
+        return None
+
+    replacement_run_id = str(replacement.get("run_id") or replacement.get("entity_id") or "").strip()
+    replacement_state = str(replacement.get("state") or "").strip()
+    replacement_reason = str(replacement.get("state_reason") or "").strip()
+    replacement_path = str(replacement.get("_path") or "workflow_control")
+    state_label = replacement_state or "tracked"
+    if replacement_reason:
+        state_label = f"{state_label}/{replacement_reason}"
+    return {
+        "recorded_at": str(replacement.get("updated_at") or now_iso()),
+        "resolution": "superseded",
+        "replacement_run_id": replacement_run_id,
+        "note": (
+            f"Superseded automatically because a newer newduck run `{replacement_run_id}` "
+            f"already exists for this duck (`{state_label}`)."
+        ),
+        "source": replacement_path,
+    }
+
+
 def apply_reconciled_review_status(
     record: dict[str, Any],
     decision: dict[str, Any],
@@ -355,6 +438,26 @@ def reconcile_quality_gate_state(state: dict[str, Any]) -> bool:
                 note=str(published_state.get("note") or "Reconciled from DuckAgent publish state."),
                 source=str(published_state.get("source") or "duckagent_state"),
             )
+            changed = True
+            continue
+
+        superseded_state = newer_newduck_run_reconciliation(decision)
+        if superseded_state:
+            apply_reconciled_review_status(
+                record,
+                decision,
+                review_status="archived",
+                action="reconcile",
+                resolution=str(superseded_state.get("resolution") or "superseded"),
+                recorded_at=str(superseded_state.get("recorded_at") or now_iso()),
+                note=str(superseded_state.get("note") or "Reconciled from newer newduck workflow state."),
+                source=str(superseded_state.get("source") or "workflow_control"),
+            )
+            decision["archive_reason"] = "superseded by newer newduck run"
+            decision["superseded_at"] = str(superseded_state.get("recorded_at") or now_iso())
+            decision["superseded_by_run_id"] = str(superseded_state.get("replacement_run_id") or "")
+            record["decision"] = decision
+            record["superseded_by_run_id"] = decision["superseded_by_run_id"]
             changed = True
 
     return changed
