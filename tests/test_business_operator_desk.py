@@ -315,6 +315,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
             return_value={
                 "available": True,
                 "path": "/tmp/repo_ci_status.md",
+                "source": "local_repo_ci_mirror",
                 "headline": "1 repo CI mirror result is behind the current commit.",
                 "recommended_action": "Rerun the local CI mirror for the repo that moved after the last check.",
                 "repo_count": 2,
@@ -333,6 +334,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                         "headline": "duckAgent has new commits after the last CI mirror result.",
                         "summary": "clean workspace | last check covered `abc1234` but current head is `def5678`",
                         "recommended_action": "Rerun `python3 runtime/repo_ci_status.py --run-checks --repo duckAgent` so the CI mirror matches the current head.",
+                        "status_source_note": "Private repo: business desk reflects the local mirror.",
                         "attention_needed": True,
                         "rerun_command": "python3 runtime/repo_ci_status.py --run-checks --repo duckAgent",
                         "branch": "codex/test-agent",
@@ -346,6 +348,7 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                         "headline": "duck-ops local CI mirror is green.",
                         "summary": "clean workspace | Compiled 47 Python files.",
                         "recommended_action": "No immediate action is needed.",
+                        "status_source_note": "Public repo: business desk still uses the local mirror.",
                         "attention_needed": False,
                         "rerun_command": "python3 runtime/repo_ci_status.py --run-checks --repo duck-ops",
                         "branch": "codex/test-ops",
@@ -389,8 +392,10 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertEqual(action["command"], "python3 runtime/repo_ci_status.py --run-checks --repo duckAgent")
         self.assertIn("## Repo CI Status", markdown)
         self.assertIn("duckAgent | `OUTDATED`", markdown)
+        self.assertIn("local_repo_ci_mirror", markdown)
         self.assertIn("Duck Ops Repo CI Status", ci_section)
         self.assertIn("Need attention: 1", ci_section)
+        self.assertIn("Private repo: business desk reflects the local mirror.", ci_section)
 
     def test_operator_desk_surfaces_current_learnings(self) -> None:
         with patch(

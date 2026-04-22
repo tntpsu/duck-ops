@@ -363,6 +363,56 @@ class WorkflowOperatorSummaryTests(unittest.TestCase):
             self.assertIn("seo_title_mismatch", items[0]["root_cause"])
             self.assertIn("rerun Shopify activation", items[0]["fix_hint"])
 
+    def test_newduck_followthrough_auto_reconciles_when_run_state_is_already_verified(self) -> None:
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_dir = root / "workflow_control"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            duckagent_root = root / "duckAgent"
+            run_dir = duckagent_root / "runs" / "orange-cat-duck-2026-04-21-2308"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state_newduck.json").write_text(
+                json.dumps(
+                    {
+                        "newduck": {"duck_name": "Orange Cat Duck", "images": [{"path": "/tmp/orange.png"}]},
+                        "shopify_product_id": 8546991767735,
+                        "etsy_listing_id": 123456789,
+                        "newduck_shopify_activated": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (state_dir / "newduck-orange-cat-duck-2026-04-21-2308.json").write_text(
+                json.dumps(
+                    {
+                        "workflow_id": "newduck::orange-cat-duck-2026-04-21-2308",
+                        "lane": "newduck",
+                        "display_label": "Orange Cat Duck",
+                        "entity_id": "orange-cat-duck-2026-04-21-2308",
+                        "run_id": "orange-cat-duck-2026-04-21-2308",
+                        "state": "blocked",
+                        "state_reason": "seo_writeback_verification_failed",
+                        "next_action": "Repair the Shopify SEO or body link writeback before activating this product.",
+                        "updated_at": "2026-04-21T23:06:13-04:00",
+                        "metadata": {"duck_name": "Orange Cat Duck"},
+                        "history": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("workflow_operator_summary.DUCKAGENT_ROOT", duckagent_root):
+                items = build_workflow_followthrough_items(limit=5, state_dir=state_dir)
+
+            self.assertEqual(items, [])
+            saved = json.loads((state_dir / "newduck-orange-cat-duck-2026-04-21-2308.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["state"], "verified")
+            self.assertEqual(saved["state_reason"], "shopify_activated")
+            self.assertIsNone(saved["next_action"])
+
 
 if __name__ == "__main__":
     unittest.main()

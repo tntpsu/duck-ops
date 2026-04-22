@@ -1442,14 +1442,31 @@ def dedupe_phrases(values: list[str]) -> list[str]:
     return kept
 
 
-def public_reply_detail_lines(review_text: str) -> list[str]:
+def _review_recipient(review_text: str) -> str:
     lowered = review_text.lower()
-    details: list[str] = []
+    return next(
+        (
+            term
+            for term in ("friend", "daughter", "son", "wife", "husband", "mom", "mother", "dad", "father", "sister", "brother")
+            if term in lowered
+        ),
+        "",
+    )
 
-    if "gift" in lowered and "friend" in lowered:
-        details.append("I hope your friend loves it.")
+
+def public_reply_detail_lines(review_text: str, draft_text: str = "") -> list[str]:
+    lowered = review_text.lower()
+    draft_lowered = draft_text.lower()
+    details: list[str] = []
+    recipient = _review_recipient(review_text)
+
+    if "gift" in lowered and recipient:
+        details.append(f"I'm so glad it made such a great gift for your {recipient}.")
     elif "gift" in lowered:
-        details.append("I'm so glad it made a great gift.")
+        details.append("I'm so glad it made such a great gift.")
+
+    if any(term in lowered for term in ("fast shipping", "quick shipping", "arrived quickly", "arrived fast", "shipping was fast")):
+        details.append("I'm so glad it arrived quickly.")
 
     if "jeep" in lowered or "dash" in lowered:
         details.append("I'm glad it looks right at home on the dash.")
@@ -1460,7 +1477,7 @@ def public_reply_detail_lines(review_text: str) -> list[str]:
     if "recommend" in lowered:
         details.append("I really appreciate the recommendation.")
 
-    if "love" in lowered:
+    if "love" in lowered and not any("great gift" in detail.lower() for detail in details):
         details.append("I'm so glad you love it.")
 
     if "quality" in lowered and any(term in lowered for term in ("cute", "adorable", "fun", "funny")):
@@ -1468,13 +1485,16 @@ def public_reply_detail_lines(review_text: str) -> list[str]:
     elif "quality" in lowered:
         details.append("I'm glad the quality came through.")
 
-    if "daughter" in lowered or "son" in lowered or "kids" in lowered:
+    if recipient in {"daughter", "son"} or "kids" in lowered:
         details.append("I'm glad it got such a good reaction.")
 
     if "laugh" in lowered or "cracking up" in lowered or "funny" in lowered:
         details.append("I'm glad it got a laugh.")
     elif "cute" in lowered or "adorable" in lowered:
         details.append("I'm glad it gave you a smile.")
+
+    if draft_lowered and "arrived quickly" in draft_lowered and not any("arrived quickly" in detail.lower() for detail in details):
+        details.append("I'm so glad it arrived quickly.")
 
     if "perfect" in lowered and not any("perfect" in detail.lower() for detail in details):
         details.append("I'm so glad it was a perfect fit.")
@@ -1547,19 +1567,21 @@ def build_rewrite_suggestion_text(item: dict[str, Any], hint: str = "") -> str |
     elif warmer:
         opening = "Thank you so much for the kind review!"
 
-    details = public_reply_detail_lines(review_text)
+    details = public_reply_detail_lines(review_text, draft_text)
     if shorter and details:
         details = details[:1]
     elif len(details) > 2:
         details = details[:2]
 
-    closing = "I really appreciate your support."
+    closing = "Thanks again for the kind review."
     if shorter:
-        closing = "Thanks again for the support."
-    if any("recommendation" in detail.lower() or "support" in detail.lower() for detail in details):
-        closing = "Thanks again for supporting my shop."
+        closing = "Thanks again for the review."
+    if any("recommendation" in detail.lower() for detail in details):
+        closing = "Thanks again for the recommendation."
 
-    parts = [opening, *details, closing]
+    parts = [opening, *details]
+    if len(parts) < 3:
+        parts.append(closing)
     return " ".join(dedupe_phrases(parts))
 
 

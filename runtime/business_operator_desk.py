@@ -1309,6 +1309,7 @@ def _load_repo_ci_surface() -> dict[str, Any]:
                 "visibility": str(item.get("visibility") or "").strip() or None,
                 "workflow_name": str(item.get("workflow_name") or "").strip() or None,
                 "job_name": str(item.get("job_name") or "").strip() or None,
+                "status_source_note": str(item.get("status_source_note") or "").strip() or None,
                 "branch": str(git.get("branch") or "").strip() or None,
                 "head_sha_short": str(git.get("head_sha_short") or "").strip() or None,
                 "upstream": str(git.get("upstream") or "").strip() or None,
@@ -1329,6 +1330,7 @@ def _load_repo_ci_surface() -> dict[str, Any]:
     return {
         "available": True,
         "path": str(REPO_CI_MD_PATH),
+        "source": payload.get("source"),
         "generated_at": payload.get("generated_at"),
         "headline": payload.get("headline"),
         "recommended_action": payload.get("recommended_action"),
@@ -2115,6 +2117,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         lines.append("Repo CI status is not available yet.")
     else:
         lines.append(f"- Page: `{repo_ci_surface.get('path')}`")
+        lines.append(f"- Source: `{repo_ci_surface.get('source') or 'local_repo_ci_mirror'}`")
         lines.append(f"- Tracked repos: `{repo_ci_surface.get('repo_count', len(repo_ci_items))}`")
         lines.append(f"- Need attention: `{repo_ci_surface.get('attention_count', 0)}`")
         lines.append(f"- Failing: `{repo_ci_surface.get('failing_count', 0)}`")
@@ -2134,6 +2137,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 )
                 if item.get("summary"):
                     lines.append(f"    Why: {_trim_text(item.get('summary'), 170)}")
+                if item.get("status_source_note"):
+                    lines.append(f"    Source: {_trim_text(item.get('status_source_note'), 170)}")
                 if item.get("recommended_action"):
                     lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
                 if item.get("check_finished_at"):
@@ -2899,6 +2904,7 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             lines.append("Repo CI status is not available yet.")
         else:
             lines.append(f"Page: {repo_ci_surface.get('path')}")
+            lines.append(f"Source: {repo_ci_surface.get('source') or 'local_repo_ci_mirror'}")
             lines.append(f"Tracked repos: {repo_ci_surface.get('repo_count', len(repo_ci_items))}")
             lines.append(f"Need attention: {repo_ci_surface.get('attention_count', 0)}")
             lines.append(f"Failing: {repo_ci_surface.get('failing_count', 0)}")
@@ -2919,6 +2925,8 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                     )
                     if item.get("summary"):
                         lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
+                    if item.get("status_source_note"):
+                        lines.append(f"  Source: {_trim_text(item.get('status_source_note'), 180)}")
                     if item.get("recommended_action"):
                         lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
                     if item.get("check_finished_at"):

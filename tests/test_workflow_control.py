@@ -64,6 +64,36 @@ class WorkflowControlTests(unittest.TestCase):
             self.assertEqual(len(states), 1)
             self.assertEqual(states[0]["workflow_id"], "review_execution::artifact-1")
 
+    def test_record_transition_can_clear_stale_next_action(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp_root = Path(tmp_dir)
+            state_dir = tmp_root / "workflow_control"
+            workflow_control.record_workflow_transition(
+                workflow_id="newduck::orange-cat-duck",
+                lane="newduck",
+                display_label="Orange Cat Duck",
+                entity_id="orange-cat-duck",
+                state="blocked",
+                state_reason="seo_writeback_verification_failed",
+                next_action="Repair the Shopify SEO or body link writeback before activating this product.",
+                state_dir=state_dir,
+            )
+
+            state = workflow_control.record_workflow_transition(
+                workflow_id="newduck::orange-cat-duck",
+                lane="newduck",
+                display_label="Orange Cat Duck",
+                entity_id="orange-cat-duck",
+                state="verified",
+                state_reason="shopify_activated",
+                clear_next_action=True,
+                state_dir=state_dir,
+            )
+
+            self.assertIsNone(state["next_action"])
+            saved = workflow_control.load_workflow_state("newduck::orange-cat-duck", state_dir=state_dir)
+            self.assertIsNone(saved["next_action"])
+
 
 if __name__ == "__main__":
     unittest.main()

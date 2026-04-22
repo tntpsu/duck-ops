@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -60,8 +61,13 @@ TRACKED_REPOS: dict[str, dict[str, Any]] = {
         "job_name": "runtime-tests",
         "check_label": "creative-runtime",
         "check_description": "Mirrors the GitHub creative runtime workflow locally for this private repo.",
+        "status_source_note": "Private repo: the business desk reflects the local pytest mirror, not the remote GitHub Actions page.",
         "stale_after_hours": 24.0,
         "timeout_seconds": 900,
+        "env_overrides": {
+            "PYTHONPATH": "creative_agent/runtime/src:.",
+            "3D_AI_STUDIO_KEY": "local-ci-mirror",
+        },
         "command_builder": _duckagent_check_command,
     },
     "duck-ops": {
@@ -71,6 +77,7 @@ TRACKED_REPOS: dict[str, dict[str, Any]] = {
         "job_name": "py-compile",
         "check_label": "py-compile",
         "check_description": "Mirrors the GitHub runtime compile workflow locally.",
+        "status_source_note": "Public repo: the business desk still uses the local mirror so operator visibility stays fast and consistent.",
         "stale_after_hours": 24.0,
         "timeout_seconds": 300,
         "command_builder": _duckops_check_command,
@@ -200,6 +207,9 @@ def _run_repo_check(repo_name: str, config: dict[str, Any], git_snapshot: dict[s
     started_at = now_local_iso()
     started = time.monotonic()
     repo_path = Path(config["path"])
+    env = os.environ.copy()
+    for key, value in dict(config.get("env_overrides") or {}).items():
+        env[str(key)] = str(value)
 
     if not command:
         finished_at = now_local_iso()
@@ -239,6 +249,7 @@ def _run_repo_check(repo_name: str, config: dict[str, Any], git_snapshot: dict[s
             text=True,
             check=False,
             timeout=int(config.get("timeout_seconds") or 300),
+            env=env,
         )
         status = "passed" if result.returncode == 0 else "failed"
         stdout_tail = _tail_lines(result.stdout)
@@ -366,6 +377,7 @@ def _normalize_repo_item(
         "job_name": str(config.get("job_name") or ""),
         "check_label": str(config.get("check_label") or "local-ci"),
         "check_description": str(config.get("check_description") or ""),
+        "status_source_note": str(config.get("status_source_note") or "").strip() or None,
         "status": status,
         "status_label": status.upper().replace("_", " "),
         "headline": _status_headline(status, repo_name),
@@ -513,6 +525,7 @@ def render_repo_ci_status_markdown(payload: dict[str, Any]) -> str:
                 f"- Summary: {item.get('summary') or ''}",
                 f"- Check label: `{item.get('check_label') or 'local-ci'}`",
                 f"- Check description: {item.get('check_description') or ''}",
+                f"- Source note: {item.get('status_source_note') or 'Local mirror result.'}",
                 f"- Check command: `{check.get('command') or item.get('rerun_command') or ''}`",
                 f"- Check finished: `{check.get('finished_at') or 'never'}`",
                 f"- Check duration: `{check.get('duration_seconds')}` second(s)",

@@ -30,6 +30,7 @@ class RepoCiStatusTests(unittest.TestCase):
                     "job_name": "runtime-tests",
                     "check_label": "creative-runtime",
                     "check_description": "test mirror",
+                    "status_source_note": "Private repo mirror",
                     "stale_after_hours": 24.0,
                     "timeout_seconds": 30,
                     "command_builder": lambda: ["echo", "ok"],
@@ -41,6 +42,7 @@ class RepoCiStatusTests(unittest.TestCase):
                     "job_name": "py-compile",
                     "check_label": "py-compile",
                     "check_description": "test mirror",
+                    "status_source_note": "Public repo mirror",
                     "stale_after_hours": 24.0,
                     "timeout_seconds": 30,
                     "command_builder": lambda: ["echo", "ok"],
@@ -109,6 +111,8 @@ class RepoCiStatusTests(unittest.TestCase):
                 repo_ci_status, "_git_snapshot", side_effect=git_snapshots
             ), patch.object(
                 repo_ci_status, "_run_repo_check", side_effect=run_results
+            ), patch.object(
+                repo_ci_status, "age_hours", return_value=1.0
             ):
                 payload = repo_ci_status.build_repo_ci_status(run_checks=True)
 
@@ -123,6 +127,7 @@ class RepoCiStatusTests(unittest.TestCase):
             self.assertIn("Repo CI Status", markdown)
             self.assertIn("duck-ops", markdown)
             self.assertIn("FAILED", markdown)
+            self.assertIn("Source note: Private repo mirror", markdown)
             saved = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["summary"]["failing_count"], 1)
 
@@ -162,6 +167,7 @@ class RepoCiStatusTests(unittest.TestCase):
                     "job_name": "runtime-tests",
                     "check_label": "creative-runtime",
                     "check_description": "test mirror",
+                    "status_source_note": "Private repo mirror",
                     "stale_after_hours": 24.0,
                     "timeout_seconds": 30,
                     "command_builder": lambda: ["echo", "ok"],
@@ -196,6 +202,7 @@ class RepoCiStatusTests(unittest.TestCase):
             self.assertTrue(item["attention_needed"])
             self.assertIn("new commits", item["headline"].lower())
             self.assertEqual(payload["summary"]["outdated_count"], 1)
+            self.assertEqual(item["status_source_note"], "Private repo mirror")
 
 
 if __name__ == "__main__":

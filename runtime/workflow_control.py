@@ -114,6 +114,7 @@ def record_workflow_transition(
     last_side_effect: dict[str, Any] | None = None,
     last_verification: dict[str, Any] | None = None,
     next_action: str | None = None,
+    clear_next_action: bool = False,
     metadata: dict[str, Any] | None = None,
     receipt_kind: str | None = None,
     receipt_payload: dict[str, Any] | None = None,
@@ -127,6 +128,8 @@ def record_workflow_transition(
     merged_metadata = dict(current.get("metadata") or {})
     if metadata:
         merged_metadata.update(metadata)
+
+    resolved_next_action = None if clear_next_action else (next_action if next_action is not None else current.get("next_action"))
 
     next_state: dict[str, Any] = {
         "workflow_id": workflow_id,
@@ -144,7 +147,7 @@ def record_workflow_transition(
         "input_freshness": input_freshness if input_freshness is not None else current.get("input_freshness"),
         "last_side_effect": last_side_effect if last_side_effect is not None else current.get("last_side_effect"),
         "last_verification": last_verification if last_verification is not None else current.get("last_verification"),
-        "next_action": next_action if next_action is not None else current.get("next_action"),
+        "next_action": resolved_next_action,
         "updated_at": updated_at,
         "metadata": merged_metadata,
         "history": list(current.get("history") or []),

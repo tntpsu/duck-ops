@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from workflow_control import list_workflow_states, load_json
+from workflow_control import list_workflow_states, load_json, record_workflow_transition
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +53,12 @@ def _trim_text(value: Any, limit: int = 260) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3].rstrip() + "..."
+
+
+def _workflow_receipt_root_for_state_dir(state_dir: Path | None) -> Path | None:
+    if state_dir is None:
+        return None
+    return Path(state_dir).parent / "workflow_receipts"
 
 
 def _status_rank(item: dict[str, Any]) -> tuple[int, datetime]:
@@ -212,6 +218,97 @@ def _newduck_root_cause(item: dict[str, Any]) -> str | None:
     if failure_codes:
         return f"Shopify activation stopped because the final SEO/link verification failed: {', '.join(failure_codes)}."
     return "Shopify activation stopped because the final SEO/link verification did not pass."
+
+
+def _load_newduck_run_state(run_id: str) -> tuple[dict[str, Any], Path]:
+    path = DUCKAGENT_ROOT / "runs" / run_id / "state_newduck.json"
+    payload = load_json(path, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    return payload, path
+
+
+def _same_next_action(current: dict[str, Any], desired_next_action: str | None) -> bool:
+    current_action = str(current.get("next_action") or "").strip()
+    desired_action = str(desired_next_action or "").strip()
+    return current_action == desired_action
+
+
+def _reconcile_newduck_workflow_states(*, state_dir: Path | None = None) -> None:
+    for item in list_workflow_states(state_dir=state_dir):
+        if str(item.get("lane") or "").strip() != "newduck":
+            continue
+
+        run_id = str(item.get("run_id") or item.get("entity_id") or "").strip()
+        if not run_id:
+            continue
+
+        run_state, run_state_path = _load_newduck_run_state(run_id)
+        if not run_state:
+            continue
+
+        metadata = dict(item.get("metadata") or {})
+        newduck = run_state.get("newduck") if isinstance(run_state.get("newduck"), dict) else {}
+        metadata.update(
+            {
+                "duck_name": metadata.get("duck_name") or newduck.get("duck_name"),
+                "image_count": len(newduck.get("images") or []),
+                "shopify_product_id": run_state.get("shopify_product_id"),
+                "etsy_listing_id": run_state.get("etsy_listing_id"),
+                "shopify_activated": bool(run_state.get("newduck_shopify_activated")),
+                "shopify_activation_emailed": bool(run_state.get("newduck_shopify_activation_emailed")),
+            }
+        )
+
+        desired_state: str | None = None
+        desired_reason: str | None = None
+        desired_next_action: str | None = None
+        clear_next_action = False
+
+        if run_state.get("newduck_shopify_activated") and run_state.get("shopify_product_id") and run_state.get("etsy_listing_id"):
+            desired_state = "verified"
+            desired_reason = "shopify_activated"
+            clear_next_action = True
+        elif run_state.get("newduck_shopify_activated"):
+            desired_state = "blocked"
+            desired_reason = "etsy_followup_pending"
+            desired_next_action = "Shopify is live. Finish the Etsy listing manually before treating this new-duck package as fully complete."
+
+        if not desired_state or not desired_reason:
+            continue
+        if (
+            str(item.get("state") or "").strip() == desired_state
+            and str(item.get("state_reason") or "").strip() == desired_reason
+            and (
+                (clear_next_action and not str(item.get("next_action") or "").strip())
+                or (not clear_next_action and _same_next_action(item, desired_next_action))
+            )
+        ):
+            continue
+
+        record_workflow_transition(
+            workflow_id=str(item.get("workflow_id") or f"newduck::{run_id}"),
+            lane="newduck",
+            display_label=str(item.get("display_label") or f"New Duck {run_id}"),
+            entity_id=str(item.get("entity_id") or run_id),
+            run_id=run_id,
+            state=desired_state,
+            state_reason=desired_reason,
+            requires_confirmation=False,
+            next_action=desired_next_action,
+            clear_next_action=clear_next_action,
+            metadata=metadata,
+            receipt_kind="state_reconciliation",
+            receipt_payload={
+                "source": str(run_state_path),
+                "shopify_product_id": run_state.get("shopify_product_id"),
+                "etsy_listing_id": run_state.get("etsy_listing_id"),
+                "newduck_shopify_activated": bool(run_state.get("newduck_shopify_activated")),
+            },
+            history_summary="state reconciliation",
+            state_dir=state_dir,
+            receipt_root=_workflow_receipt_root_for_state_dir(state_dir),
+        )
 
 
 def _quality_gate_urgent_items(quality_gate_state_path: Path | None = None) -> list[dict[str, Any]]:
@@ -406,6 +503,7 @@ def build_workflow_followthrough_items(
     state_dir=None,
     quality_gate_state_path: Path | None = None,
 ) -> list[dict[str, Any]]:
+    _reconcile_newduck_workflow_states(state_dir=state_dir)
     latest_by_lane: dict[str, dict[str, Any]] = {}
     for item in list_workflow_states(state_dir=state_dir):
         lane = str(item.get("lane") or "").strip()
