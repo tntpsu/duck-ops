@@ -37,6 +37,9 @@ PUBLISH_CANDIDATES_PATH = NORMALIZED_DIR / "publish_candidates.json"
 DECISION_HISTORY_PATH = STATE_DIR / "decision_history.jsonl"
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
 EVALUATOR_VERSION = 4
+QUALITY_GATE_PENDING_REVIEW_STATUSES = {"pending"}
+QUALITY_GATE_REVISION_REVIEW_STATUSES = {"needs_revision"}
+QUALITY_GATE_RESOLVED_REVIEW_STATUSES = {"approved", "rejected", "archived", "overridden"}
 
 
 def now_iso() -> str:
@@ -909,30 +912,67 @@ def load_state() -> dict[str, Any]:
     )
 
 
-def sync_quality_gate_control(state: dict[str, Any]) -> dict[str, Any]:
+def _artifact_review_status(artifact: dict[str, Any]) -> str:
+    decision = artifact.get("decision") or {}
+    return str(
+        decision.get("review_status")
+        or artifact.get("review_status")
+        or artifact.get("status")
+        or ""
+    ).strip().lower()
+
+
+def _prune_stale_alerts(state: dict[str, Any]) -> dict[str, Any]:
     artifacts = state.get("artifacts") or {}
     alerts = state.get("alerts") or {}
+    if not isinstance(alerts, dict):
+        state["alerts"] = {}
+        return {}
+
+    active: dict[str, Any] = {}
+    for raw_key, payload in alerts.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        artifact_id, _, input_hash = key.partition("::")
+        artifact = artifacts.get(artifact_id)
+        if not isinstance(artifact, dict):
+            continue
+        review_status = _artifact_review_status(artifact)
+        if review_status not in QUALITY_GATE_PENDING_REVIEW_STATUSES:
+            continue
+        current_input_hash = str(artifact.get("input_hash") or "").strip()
+        if input_hash and current_input_hash and input_hash != current_input_hash:
+            continue
+        active[key] = payload
+
+    if active != alerts:
+        state["alerts"] = active
+    return active
+
+
+def sync_quality_gate_control(state: dict[str, Any]) -> dict[str, Any]:
+    artifacts = state.get("artifacts") or {}
+    alerts = _prune_stale_alerts(state)
     reviewed_count = 0
     needs_revision_count = 0
     pending_count = 0
+    unknown_count = 0
     latest_artifact_dt: datetime | None = None
 
     for artifact in artifacts.values():
         if not isinstance(artifact, dict):
             continue
         decision = artifact.get("decision") or {}
-        review_status = str(
-            decision.get("review_status")
-            or artifact.get("review_status")
-            or artifact.get("status")
-            or ""
-        ).strip().lower()
-        if review_status == "approved":
+        review_status = _artifact_review_status(artifact)
+        if review_status in QUALITY_GATE_RESOLVED_REVIEW_STATUSES:
             reviewed_count += 1
-        elif review_status == "needs_revision":
+        elif review_status in QUALITY_GATE_REVISION_REVIEW_STATUSES:
             needs_revision_count += 1
-        elif review_status:
+        elif review_status in QUALITY_GATE_PENDING_REVIEW_STATUSES:
             pending_count += 1
+        elif review_status:
+            unknown_count += 1
         artifact_dt = parse_timestamp(
             artifact.get("evaluated_at")
             or artifact.get("reviewed_at")
@@ -959,6 +999,10 @@ def sync_quality_gate_control(state: dict[str, Any]) -> dict[str, Any]:
         control_state = "observed"
         reason = "awaiting_operator_resolution"
         next_action = "Review the pending quality-gate items and approve, revise, or discard them."
+    elif unknown_count:
+        control_state = "observed"
+        reason = "unknown_review_status"
+        next_action = "Normalize the quality-gate review statuses so the operator queue reflects real pending work."
     elif needs_revision_count:
         control_state = "observed"
         reason = "revision_pressure"
@@ -990,6 +1034,7 @@ def sync_quality_gate_control(state: dict[str, Any]) -> dict[str, Any]:
             "pending_count": pending_count,
             "needs_revision_count": needs_revision_count,
             "reviewed_count": reviewed_count,
+            "unknown_status_count": unknown_count,
         },
         receipt_kind="state_sync",
         receipt_payload={
@@ -998,6 +1043,7 @@ def sync_quality_gate_control(state: dict[str, Any]) -> dict[str, Any]:
             "pending_count": pending_count,
             "needs_revision_count": needs_revision_count,
             "reviewed_count": reviewed_count,
+            "unknown_status_count": unknown_count,
         },
         history_summary=reason.replace("_", " "),
     )

@@ -66,6 +66,17 @@ Current customer-thread refresh pattern:
 - launchd should schedule the Etsy inbox sync locally; do not commit machine-specific plist files
 - recommended cadence is every 2 hours during the day/evening plus one guaranteed `6:30 PM` pass
 
+Current local morning observe/review pattern:
+
+- morning Duck Ops observer jobs use `/Users/philtullai/ai-agents/duckAgent_runtime/run_duck_ops_observe_review.sh`
+- the wrapper is the standard local pattern because it adds:
+  - lock protection
+  - stale-lock cleanup
+  - timeout enforcement
+  - local stdout/stderr log files
+- `shopify_seo_kickoff.py` is now installed locally in launchd for a `7:35 AM` pass
+- local plist files stay in `~/Library/LaunchAgents`; do not commit them into repo
+
 ## Local-Only Runtime Paths
 
 These stay local on this Mac and should not be treated as git homes:

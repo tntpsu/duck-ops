@@ -817,6 +817,10 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                 "business_operator_desk._load_review_reply_execution_surface",
                 return_value={"available": False},
             ),
+            patch(
+                "business_operator_desk._load_seo_outcome_surface",
+                return_value={"available": False},
+            ),
         ):
             payload = build_business_operator_desk(
                 customer_packets={"items": []},
@@ -882,6 +886,10 @@ class BusinessOperatorDeskTests(unittest.TestCase):
             ),
             patch(
                 "business_operator_desk._load_review_reply_execution_surface",
+                return_value={"available": False},
+            ),
+            patch(
+                "business_operator_desk._load_seo_outcome_surface",
                 return_value={"available": False},
             ),
             patch(
@@ -1286,6 +1294,86 @@ class BusinessOperatorDeskTests(unittest.TestCase):
 
         self.assertIn("Detail: why 221", output)
         self.assertIn("Decide: approve 221 because ...", output)
+
+    def test_render_business_section_surfaces_approval_chains(self) -> None:
+        output = render_business_section(
+            {
+                "approval_chain_surface": {
+                    "available": True,
+                    "awaiting_review_count": 1,
+                    "ready_count": 1,
+                    "blocked_count": 0,
+                    "active_count": 0,
+                    "observing_count": 1,
+                    "headline": "One approval chain is waiting on a human reply.",
+                    "recommended_action": "Reply to the open review email first.",
+                },
+                "sections": {
+                    "approval_chains": [
+                        {
+                            "title": "Shopify SEO category chain",
+                            "chain_state": "awaiting_review",
+                            "progress_label": "Duplicate SEO titles",
+                            "summary": "Duplicate SEO titles is currently waiting for a reply apply decision.",
+                            "recommended_action": "Reply `apply` to the current Shopify SEO review email.",
+                        }
+                    ]
+                },
+            },
+            "approval",
+        )
+
+        self.assertIn("Duck Ops Approval Chains", output)
+        self.assertIn("Awaiting review: 1", output)
+        self.assertIn("Shopify SEO category chain | awaiting_review | Duplicate SEO titles", output)
+        self.assertIn("Next: Reply `apply` to the current Shopify SEO review email.", output)
+
+    def test_render_business_section_seo_includes_review_chain_summary(self) -> None:
+        output = render_business_section(
+            {
+                "seo_outcomes": {
+                    "available": True,
+                    "path": "/tmp/shopify_seo_outcomes.md",
+                    "applied_item_count": 2,
+                    "stable_count": 1,
+                    "monitoring_count": 1,
+                    "issue_still_present_count": 0,
+                    "missing_from_audit_count": 0,
+                    "awaiting_audit_refresh_count": 0,
+                    "writeback_receipt_count": 0,
+                    "writeback_failed_count": 0,
+                    "traffic_signal_available_count": 0,
+                    "verification_truth": {"headline": "SEO cleanup is moving in the right direction."},
+                    "review_chain": {
+                        "available": True,
+                        "headline": "Duplicate SEO titles is currently waiting for a reply apply decision.",
+                        "current_review": {
+                            "run_id": "shopify_seo_duplicate_title_1",
+                            "category_label": "Duplicate SEO titles",
+                            "status": "awaiting_review",
+                            "item_count": 2,
+                        },
+                        "last_applied": {
+                            "run_id": "shopify_seo_missing_title_1",
+                            "category_label": "Missing SEO titles",
+                            "item_count": 5,
+                        },
+                        "remaining_count": 4,
+                    },
+                    "category_guidance": [],
+                    "attention_items": [],
+                    "recent_wins": [],
+                },
+                "sections": {"seo_outcomes": []},
+            },
+            "seo",
+        )
+
+        self.assertIn("Duck Ops SEO Outcomes", output)
+        self.assertIn("Review chain: Duplicate SEO titles is currently waiting for a reply apply decision.", output)
+        self.assertIn("Current review: Duplicate SEO titles | awaiting_review | items 2", output)
+        self.assertIn("Last applied: Missing SEO titles | items 5", output)
+        self.assertIn("Remaining SEO categories in audit: 4", output)
 
 
 if __name__ == "__main__":

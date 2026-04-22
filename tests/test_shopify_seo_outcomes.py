@@ -400,6 +400,96 @@ class ShopifySeoOutcomesTests(unittest.TestCase):
             markdown = markdown_path.read_text(encoding="utf-8")
             self.assertIn("Immediate writeback failures: `1`", markdown)
 
+    def test_build_shopify_seo_outcomes_surfaces_review_chain_status(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit_path = root / "state" / "shopify_seo_audit.json"
+            latest_review_path = root / "state" / "shopify_seo_review" / "latest.json"
+            review_run_dir = root / "state" / "shopify_seo_review" / "runs"
+            state_path = root / "state" / "shopify_seo_outcomes.json"
+            operator_json_path = root / "output" / "operator" / "shopify_seo_outcomes.json"
+            markdown_path = root / "output" / "operator" / "shopify_seo_outcomes.md"
+            review_run_dir.mkdir(parents=True, exist_ok=True)
+
+            now = datetime.now().astimezone()
+            audit_path.write_text(
+                json.dumps(
+                    {
+                        "generated_at": now.isoformat(),
+                        "resources": [
+                            {
+                                "id": "gid://shopify/Product/10",
+                                "title": "Open Duck",
+                                "resource_url": "/products/open-duck",
+                                "seo_title": "Same title",
+                                "seo_description": "Needs more detail.",
+                                "issues": [{"code": "missing_seo_description"}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            latest_review_path.parent.mkdir(parents=True, exist_ok=True)
+            latest_review_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": "shopify_seo_duplicate_title_1",
+                        "generated_at": now.isoformat(),
+                        "status": "awaiting_review",
+                        "seo_category": "duplicate_title",
+                        "category_label": "Duplicate SEO titles",
+                        "item_count": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            review_run_dir.joinpath("applied.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "applied",
+                        "seo_category": "missing_title",
+                        "category_label": "Missing SEO titles",
+                        "status": "applied",
+                        "apply_result": {"applied_at": (now - timedelta(days=9)).isoformat()},
+                        "items": [
+                            {
+                                "id": "gid://shopify/Product/99",
+                                "kind": "product",
+                                "title": "Closed Duck",
+                                "resource_url": "/products/closed-duck",
+                                "issues": [{"code": "missing_seo_title"}],
+                                "apply_seo_title": True,
+                                "apply_seo_description": False,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(shopify_seo_outcomes, "SEO_AUDIT_PATH", audit_path), patch.object(
+                shopify_seo_outcomes, "SEO_REVIEW_LATEST_PATH", latest_review_path
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_REVIEW_RUN_DIR", review_run_dir
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_STATE_PATH", state_path
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_OPERATOR_JSON_PATH", operator_json_path
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_MD_PATH", markdown_path
+            ):
+                payload = shopify_seo_outcomes.build_shopify_seo_outcomes()
+
+            review_chain = payload["review_chain"]
+            self.assertEqual(review_chain["chain_state"], "awaiting_review")
+            self.assertEqual(review_chain["current_review"]["category_label"], "Duplicate SEO titles")
+            self.assertEqual(review_chain["remaining_count"], 1)
+            markdown = markdown_path.read_text(encoding="utf-8")
+            self.assertIn("## Review Chain", markdown)
+            self.assertIn("Current review: `Duplicate SEO titles` | status `awaiting_review` | items `2`", markdown)
+            self.assertIn("Remaining categories: `1`", markdown)
+
 
 if __name__ == "__main__":
     unittest.main()

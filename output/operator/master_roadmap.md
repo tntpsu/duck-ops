@@ -45,6 +45,7 @@ Detailed execution sequence:
 - Email review -> reply apply loop works.
 - Missing-only bulk SEO backfill is working and already applied successfully.
 - New category-batch workflow is now live for monthly cleanup beyond one top-10 review.
+- Morning Shopify SEO kickoff scheduling is now installed locally so the next category email can keep advancing without manual batching.
 - Newduck now writes SEO into Shopify instead of only generating it.
 - Blog and newduck flows now have stronger SEO validation rules.
 - Shopify MCP connectivity groundwork and SEO audit flow are in place.
@@ -52,6 +53,8 @@ Detailed execution sequence:
 - Newduck listing policy now enforces internal/external Shopify links and structured Etsy titles.
 - Blog, newduck activation, and Shopify SEO apply now record writeback-verification receipts so failed SEO mutations stop looking like clean success.
 - Shopify SEO outcomes now summarize verification truth and category-level follow-through so the business desk can show what is reopening, what still needs audit refresh, and what is just aging through the monitoring window.
+- Duplicate-title fallback logic now special-cases the privacy-choices page so the chain stops proposing the same privacy title twice.
+- The business desk now shows Shopify SEO review-chain status inside a generic approval-chain surface instead of hiding that state inside the raw SEO report only.
 
 ### 6. GTDF / Weekly / Review / Creative Health
 - GTDF winner now reports upstream blockers honestly instead of fake failures.
@@ -59,6 +62,8 @@ Detailed execution sequence:
 - Weekly/workflow health is more root-cause-aware than before.
 - Blog and ops health now treat healthy idle/backlog states as operator truth instead of fake warnings.
 - Etsy review auto-execution cooldown now degrades into a paused lane instead of crashing the sidecar.
+- Quality-gate control now prunes stale alerts and treats archived/overridden review items as resolved instead of counting them as still pending.
+- Business desk creative-review counts now separate currently surfaced items from older backlog so the queue reads more honestly.
 
 ### 7. Shopify Draft Activation Controls
 - Newduck is now a two-step Shopify flow:
@@ -91,7 +96,8 @@ Detailed execution sequence:
 ### 1. Shopify SEO Category Workflow
 - Category emails can now be sent in sequence.
 - After a successful category apply, DuckAgent can auto-send the next remaining SEO category email.
-- First category batch sent: Missing SEO titles.
+- Missing-title and missing-description category batches have already applied successfully.
+- Duplicate-title is the current open category awaiting review/apply, with the next morning kickoff now installed locally once the chain is ready to advance.
 
 ### 2. Etsy Inbox Truth Sync
 - Launchd-installed daytime refresh is live.

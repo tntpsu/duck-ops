@@ -10,6 +10,7 @@ from governance_review_common import OUTPUT_OPERATOR_DIR, STATE_DIR, load_json, 
 
 SEO_AUDIT_PATH = STATE_DIR / "shopify_seo_audit.json"
 SEO_REVIEW_RUN_DIR = STATE_DIR / "shopify_seo_review" / "runs"
+SEO_REVIEW_LATEST_PATH = STATE_DIR / "shopify_seo_review" / "latest.json"
 SEO_WRITEBACK_RECEIPT_DIR = STATE_DIR / "shopify_seo_writeback" / "receipts"
 SEO_OUTCOMES_STATE_PATH = STATE_DIR / "shopify_seo_outcomes.json"
 SEO_OUTCOMES_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "shopify_seo_outcomes.json"
@@ -57,6 +58,17 @@ CATEGORY_LABELS = {
     "weak_title": "Weak SEO titles",
     "weak_description": "Weak SEO descriptions",
 }
+CATEGORY_REVIEW_ORDER = [
+    "missing_title",
+    "missing_description",
+    "long_title",
+    "long_description",
+    "short_title",
+    "duplicate_title",
+    "near_duplicate_title",
+    "weak_title",
+    "weak_description",
+]
 STATUS_ORDER = {
     "writeback_verification_failed": -1,
     "issue_still_present": 0,
@@ -248,6 +260,122 @@ def _review_runs() -> list[dict[str, Any]]:
         payload.setdefault("run_id", path.stem)
         runs.append(payload)
     return runs
+
+
+def _latest_review_run() -> dict[str, Any]:
+    payload = load_json(SEO_REVIEW_LATEST_PATH, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _remaining_review_categories(audit_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    resources = audit_payload.get("resources") if isinstance(audit_payload.get("resources"), list) else []
+    remaining: list[dict[str, Any]] = []
+    for category in CATEGORY_REVIEW_ORDER:
+        target_codes = set(CATEGORY_TARGET_ISSUES.get(category) or set())
+        if not target_codes:
+            continue
+        matching_resources: list[dict[str, Any]] = []
+        for resource in resources:
+            if not isinstance(resource, dict):
+                continue
+            codes = _issue_codes(resource)
+            if codes & target_codes:
+                matching_resources.append(resource)
+        if not matching_resources:
+            continue
+        issue_count = 0
+        for resource in matching_resources:
+            issue_count += len(_issue_codes(resource) & target_codes)
+        remaining.append(
+            {
+                "seo_category": category,
+                "category_label": _humanize_category(category),
+                "resource_count": len(matching_resources),
+                "issue_count": issue_count,
+            }
+        )
+    return remaining
+
+
+def _latest_applied_run(applied_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    latest: dict[str, Any] | None = None
+    latest_dt: datetime | None = None
+    for run_payload in applied_runs:
+        result = (run_payload.get("apply_result") or {}) if isinstance(run_payload.get("apply_result"), dict) else {}
+        candidate_dt = parse_iso(result.get("applied_at")) or parse_iso(run_payload.get("generated_at"))
+        if candidate_dt is None:
+            continue
+        if latest is None or latest_dt is None or candidate_dt >= latest_dt:
+            latest = run_payload
+            latest_dt = candidate_dt
+    return latest or {}
+
+
+def _review_chain_surface(audit_payload: dict[str, Any], applied_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    latest_review = _latest_review_run()
+    latest_status = _normalize_text(latest_review.get("status")).lower()
+    latest_category = _normalize_text(latest_review.get("seo_category")) or None
+    latest_label = _normalize_text(latest_review.get("category_label")) or _humanize_category(latest_category)
+    remaining_categories = _remaining_review_categories(audit_payload)
+    latest_applied = _latest_applied_run(applied_runs)
+    latest_applied_result = (latest_applied.get("apply_result") or {}) if isinstance(latest_applied.get("apply_result"), dict) else {}
+
+    if latest_status == "awaiting_review":
+        chain_state = "awaiting_review"
+        headline = f"{latest_label} is currently waiting for a reply apply decision."
+        recommended_action = "Reply `apply` to the current Shopify SEO review email after you spot-check the examples."
+    elif latest_status == "apply_attempted":
+        chain_state = "apply_attention"
+        headline = f"{latest_label} needs manual attention before the chain continues."
+        recommended_action = "Resolve the latest Shopify SEO apply failures before sending another category batch."
+    elif remaining_categories:
+        next_category = remaining_categories[0]
+        chain_state = "ready_to_send_next"
+        headline = f"{next_category.get('category_label')} is the next Shopify SEO category still open in the audit."
+        recommended_action = "Run `python runtime/shopify_seo_kickoff.py` to send the next Shopify SEO category review email now, or let the morning kickoff do it."
+    elif applied_runs:
+        chain_state = "all_clear"
+        headline = "The Shopify SEO category chain is clear for now."
+        recommended_action = "Keep watching the monitoring window and only restart the chain when a new audit shows a real category backlog again."
+    else:
+        chain_state = "idle"
+        headline = "The Shopify SEO category chain has not started yet."
+        recommended_action = "Run `python runtime/shopify_seo_kickoff.py --force-audit` to send the first Shopify SEO category review email."
+
+    return {
+        "available": True,
+        "chain_state": chain_state,
+        "headline": headline,
+        "recommended_action": recommended_action,
+        "current_review": (
+            {
+                "run_id": latest_review.get("run_id"),
+                "seo_category": latest_category,
+                "category_label": latest_label,
+                "status": latest_status or None,
+                "item_count": int(latest_review.get("item_count") or 0),
+                "generated_at": latest_review.get("generated_at"),
+                "approval_action": latest_review.get("approval_action"),
+                "email_subject": latest_review.get("email_subject"),
+            }
+            if latest_review
+            else {}
+        ),
+        "last_applied": (
+            {
+                "run_id": latest_applied.get("run_id"),
+                "seo_category": _normalize_text(latest_applied.get("seo_category")) or None,
+                "category_label": _normalize_text(latest_applied.get("category_label")) or _humanize_category(latest_applied.get("seo_category")),
+                "applied_at": latest_applied_result.get("applied_at") or latest_applied.get("generated_at"),
+                "item_count": int(latest_applied.get("item_count") or len(latest_applied.get("items") or [])),
+            }
+            if latest_applied
+            else {}
+        ),
+        "remaining_categories": remaining_categories[:5],
+        "remaining_count": len(remaining_categories),
+        "kickoff_command": "python runtime/shopify_seo_kickoff.py",
+    }
 
 
 def _latest_writeback_receipts() -> list[dict[str, Any]]:
@@ -500,6 +628,7 @@ def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
     category_summary = _category_summary(monitored_items)
     verification_truth = _verification_truth(monitored_items, writeback_items)
     category_guidance = _category_guidance(category_summary)
+    review_chain = _review_chain_surface(audit_payload, applied_runs)
     monitored_items.sort(
         key=lambda item: (
             STATUS_ORDER.get(str(item.get("status") or ""), 9),
@@ -541,6 +670,7 @@ def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
             "traffic_signal_note": "No search-click or traffic collector is wired into Duck Ops yet, so this monitor currently measures durable SEO cleanup rather than organic lift.",
         },
         "verification_truth": verification_truth,
+        "review_chain": review_chain,
         "category_guidance": category_guidance,
         "attention_items": attention_items,
         "recent_wins": recent_wins[:5],
@@ -588,6 +718,36 @@ def render_shopify_seo_outcomes_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Note: {verification_truth.get('note')}")
     if verification_truth.get("recommended_action"):
         lines.append(f"- Recommended action: {verification_truth.get('recommended_action')}")
+    lines.extend(["", "## Review Chain", ""])
+
+    review_chain = payload.get("review_chain") if isinstance(payload.get("review_chain"), dict) else {}
+    if not review_chain.get("available"):
+        lines.append("Shopify SEO review-chain status is not available yet.")
+        lines.append("")
+    else:
+        lines.append(f"- State: `{review_chain.get('chain_state') or 'unknown'}`")
+        if review_chain.get("headline"):
+            lines.append(f"- Headline: {review_chain.get('headline')}")
+        if review_chain.get("recommended_action"):
+            lines.append(f"- Recommended action: {review_chain.get('recommended_action')}")
+        current_review = review_chain.get("current_review") if isinstance(review_chain.get("current_review"), dict) else {}
+        if current_review.get("run_id"):
+            lines.append(
+                f"- Current review: `{current_review.get('category_label') or current_review.get('seo_category')}` | status `{current_review.get('status')}` | items `{current_review.get('item_count') or 0}`"
+            )
+        last_applied = review_chain.get("last_applied") if isinstance(review_chain.get("last_applied"), dict) else {}
+        if last_applied.get("run_id"):
+            lines.append(
+                f"- Last applied: `{last_applied.get('category_label') or last_applied.get('seo_category')}` | items `{last_applied.get('item_count') or 0}` | applied `{last_applied.get('applied_at') or 'unknown'}`"
+            )
+        lines.append(f"- Remaining categories: `{review_chain.get('remaining_count') or 0}`")
+        remaining_categories = review_chain.get("remaining_categories") if isinstance(review_chain.get("remaining_categories"), list) else []
+        if remaining_categories:
+            for item in remaining_categories:
+                lines.append(
+                    f"  - {item.get('category_label')} | resources `{item.get('resource_count') or 0}` | issues `{item.get('issue_count') or 0}`"
+                )
+        lines.append("")
     lines.extend(["", "## Category Guidance", ""])
 
     category_guidance = payload.get("category_guidance") if isinstance(payload.get("category_guidance"), list) else []

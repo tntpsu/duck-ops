@@ -303,6 +303,72 @@ class ShopifySeoReviewTests(unittest.TestCase):
             self.assertFalse(any("MyJeepDuck gift idea MyJeepDuck" in title for title in proposed_titles))
             self.assertFalse(any("collectible ducks and gift" in title.lower() for title in proposed_titles))
 
+    def test_privacy_choices_page_gets_distinct_default_title(self) -> None:
+        title = shopify_seo_review._default_title_for_resource(
+            {
+                "kind": "page",
+                "title": "Your Privacy Choices",
+                "resource_url": "/pages/data-sharing-opt-out",
+                "issues": [{"code": "duplicate_seo_title", "message": "Duplicate title."}],
+            }
+        )
+
+        self.assertEqual(title, "Your Privacy Choices | MyJeepDuck Data Sharing Opt-Out")
+        self.assertNotEqual(title, "MyJeepDuck Privacy Policy for Collectible Duck Orders")
+
+    def test_issue_category_batch_supersedes_older_open_run_for_same_category(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review_state_dir = root / "state" / "shopify_seo_review"
+            review_run_dir = review_state_dir / "runs"
+            output_path = root / "output" / "operator" / "shopify_seo_review.md"
+            review_run_dir.mkdir(parents=True, exist_ok=True)
+            review_run_dir.joinpath("older.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "older",
+                        "review_type": "issue_category_batch",
+                        "seo_category": "duplicate_title",
+                        "category_label": "Duplicate SEO titles",
+                        "status": "awaiting_review",
+                        "items": [{"id": "gid://shopify/Page/1"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            audit_payload = {
+                "generated_at": "2026-04-20T23:50:00-04:00",
+                "shopify_domain": "example.myshopify.com",
+                "resources": [
+                    {
+                        "id": "gid://shopify/Page/1",
+                        "kind": "page",
+                        "title": "Duck Agent - Privacy Policy",
+                        "resource_url": "/pages/privacy-policy",
+                        "seo_title": "Same title",
+                        "seo_description": "Strong description.",
+                        "issues": [{"code": "duplicate_seo_title", "message": "Duplicate title."}],
+                    }
+                ],
+            }
+
+            with patch.object(shopify_seo_review, "REVIEW_STATE_DIR", review_state_dir), patch.object(
+                shopify_seo_review, "REVIEW_RUN_DIR", review_run_dir
+            ), patch.object(shopify_seo_review, "REVIEW_OUTPUT_MD", output_path), patch.object(
+                shopify_seo_review, "build_shopify_seo_audit", return_value=audit_payload
+            ):
+                payload = shopify_seo_review.build_shopify_seo_review(
+                    limit=0,
+                    force_audit=True,
+                    review_type="issue_category_batch",
+                    issue_category="duplicate_title",
+                )
+
+            older_payload = json.loads(review_run_dir.joinpath("older.json").read_text(encoding="utf-8"))
+            self.assertEqual(older_payload["status"], "superseded")
+            self.assertEqual(older_payload["superseded_by_run_id"], payload["run_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

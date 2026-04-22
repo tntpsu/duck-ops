@@ -890,6 +890,149 @@ def _review_reply_execution_promotion_candidate(surface: dict[str, Any]) -> dict
     }
 
 
+def _seo_review_chain_item(seo_outcomes: dict[str, Any]) -> dict[str, Any] | None:
+    if not seo_outcomes.get("available"):
+        return None
+    review_chain = seo_outcomes.get("review_chain") if isinstance(seo_outcomes.get("review_chain"), dict) else {}
+    if not review_chain.get("available"):
+        return None
+
+    chain_state = str(review_chain.get("chain_state") or "idle").strip() or "idle"
+    current_review = review_chain.get("current_review") if isinstance(review_chain.get("current_review"), dict) else {}
+    remaining_categories = list(review_chain.get("remaining_categories") or [])
+    remaining_count = int(review_chain.get("remaining_count") or len(remaining_categories))
+
+    if chain_state == "awaiting_review":
+        action_title = "Apply current Shopify SEO batch"
+        progress_label = current_review.get("category_label") or current_review.get("seo_category") or "awaiting review"
+    elif chain_state == "apply_attention":
+        action_title = "Fix Shopify SEO chain issue"
+        progress_label = current_review.get("category_label") or current_review.get("seo_category") or "manual attention"
+    elif chain_state == "ready_to_send_next":
+        action_title = "Kick off next Shopify SEO batch"
+        progress_label = f"{remaining_count} category(ies) still open"
+    elif chain_state == "all_clear":
+        action_title = "Shopify SEO chain clear"
+        progress_label = "monitoring only"
+    else:
+        action_title = "Start Shopify SEO chain"
+        progress_label = "not started"
+
+    blockers: list[str] = []
+    if chain_state == "apply_attention" and current_review.get("category_label"):
+        blockers.append(str(current_review.get("category_label")))
+    if remaining_categories and chain_state in {"ready_to_send_next", "apply_attention"}:
+        next_label = str((remaining_categories[0] or {}).get("category_label") or "").strip()
+        if next_label:
+            blockers.append(next_label)
+
+    return {
+        "chain_id": "shopify_seo_category_review",
+        "chain_kind": "review_apply",
+        "lane": "shopify_seo",
+        "title": "Shopify SEO category chain",
+        "action_title": action_title,
+        "chain_state": chain_state,
+        "summary": str(review_chain.get("headline") or "").strip() or "Shopify SEO chain status is available.",
+        "recommended_action": str(review_chain.get("recommended_action") or "").strip() or None,
+        "secondary_action": str(review_chain.get("kickoff_command") or "").strip() or str(seo_outcomes.get("path") or "").strip() or None,
+        "source_path": str(seo_outcomes.get("path") or "").strip() or None,
+        "updated_at": current_review.get("generated_at") or seo_outcomes.get("generated_at"),
+        "progress_label": progress_label,
+        "blockers": blockers[:2],
+    }
+
+
+def _approval_chain_item_priority(item: dict[str, Any]) -> tuple[int, str]:
+    state = str(item.get("chain_state") or "").strip()
+    order = {
+        "awaiting_review": 0,
+        "ready_to_send_next": 1,
+        "ready": 2,
+        "apply_attention": 3,
+        "blocked": 4,
+        "observing": 5,
+        "active": 6,
+        "all_clear": 7,
+        "idle": 8,
+    }
+    return order.get(state, 99), str(item.get("title") or "")
+
+
+def _load_approval_chain_surface(
+    *,
+    seo_outcomes: dict[str, Any] | None = None,
+    promotion_watch_surface: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seo_surface = seo_outcomes or _load_seo_outcome_surface()
+    promotion_surface = promotion_watch_surface or _load_promotion_watch_surface()
+
+    items: list[dict[str, Any]] = []
+    seo_item = _seo_review_chain_item(seo_surface)
+    if seo_item:
+        items.append(seo_item)
+
+    for item in list(promotion_surface.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        items.append(
+            {
+                "chain_id": item.get("promotion_id") or item.get("title"),
+                "chain_kind": "promotion",
+                "lane": item.get("lane") or "promotion_watch",
+                "title": item.get("title") or "Promotion chain",
+                "action_title": item.get("action_title") or item.get("title") or "Promotion chain",
+                "chain_state": item.get("promotion_state") or "observing",
+                "summary": item.get("summary"),
+                "recommended_action": item.get("recommended_action"),
+                "secondary_action": item.get("secondary_action"),
+                "source_path": item.get("source_path"),
+                "updated_at": item.get("updated_at"),
+                "progress_label": item.get("progress_label"),
+                "blockers": list(item.get("blockers") or [])[:2],
+            }
+        )
+
+    items.sort(key=_approval_chain_item_priority)
+    awaiting_items = [item for item in items if item.get("chain_state") == "awaiting_review"]
+    ready_items = [item for item in items if item.get("chain_state") in {"ready_to_send_next", "ready"}]
+    blocked_items = [item for item in items if item.get("chain_state") in {"apply_attention", "blocked"}]
+    active_items = [item for item in items if item.get("chain_state") == "active"]
+    observing_items = [item for item in items if item.get("chain_state") == "observing"]
+
+    if awaiting_items:
+        headline = f"{len(awaiting_items)} approval chain(s) are waiting on a human reply."
+        recommended_action = "Work the open approval email or reply chain first so the downstream automation can keep moving."
+    elif ready_items:
+        headline = f"{len(ready_items)} approval chain(s) are ready for the next step."
+        recommended_action = "Kick off the next chain step or promote the ready lane after you review the evidence."
+    elif blocked_items:
+        headline = f"{len(blocked_items)} approval chain(s) are blocked and need cleanup."
+        recommended_action = "Clear the blocked chain before relying on it overnight."
+    elif active_items:
+        headline = f"{len(active_items)} approval chain(s) are already active."
+        recommended_action = "Monitor the live chain and only split out extra guardrails if the behavior starts drifting."
+    elif observing_items:
+        headline = f"{len(observing_items)} approval chain(s) are still collecting evidence."
+        recommended_action = "Keep the manual lane running until the evidence threshold is met."
+    else:
+        headline = "Approval chains are not available yet."
+        recommended_action = "Build a review/apply or promotion chain surface before relying on it."
+
+    return {
+        "available": bool(items),
+        "item_count": len(items),
+        "awaiting_review_count": len(awaiting_items),
+        "ready_count": len(ready_items),
+        "blocked_count": len(blocked_items),
+        "active_count": len(active_items),
+        "observing_count": len(observing_items),
+        "headline": headline,
+        "recommended_action": recommended_action,
+        "items": items[:8],
+    }
+
+
 def _trim_text(value: str | None, limit: int = 160) -> str:
     text = str(value or "").strip()
     if len(text) <= limit:
@@ -1041,9 +1184,35 @@ def _load_seo_outcome_surface() -> dict[str, Any]:
         "traffic_signal_available_count": int(summary.get("traffic_signal_available_count") or 0),
         "traffic_signal_note": summary.get("traffic_signal_note"),
         "verification_truth": dict(payload.get("verification_truth") or {}),
+        "review_chain": dict(payload.get("review_chain") or {}),
         "category_guidance": list(payload.get("category_guidance") or [])[:4],
         "attention_items": list(payload.get("attention_items") or [])[:4],
         "recent_wins": list(payload.get("recent_wins") or [])[:4],
+    }
+
+
+def _review_queue_summary(review_queue: dict[str, Any] | None, review_items: list[dict[str, Any]]) -> dict[str, Any]:
+    payload = review_queue if isinstance(review_queue, dict) else {}
+    all_items = list(payload.get("items") or [])
+    surfaced_items = list(payload.get("surfaced_items") or [])
+    surfaced_count = int(payload.get("pending_count") or len(surfaced_items) or len(review_items))
+    backlog_total = int(payload.get("pending_count_all") or len(all_items) or len(review_items))
+    older_backlog_count = max(0, backlog_total - surfaced_count)
+
+    decision_counts: dict[str, int] = {}
+    flow_counts: dict[str, int] = {}
+    for item in all_items or review_items:
+        decision = str(item.get("decision") or "unknown").strip() or "unknown"
+        flow = str(item.get("flow") or item.get("state_source") or "unknown").strip() or "unknown"
+        decision_counts[decision] = decision_counts.get(decision, 0) + 1
+        flow_counts[flow] = flow_counts.get(flow, 0) + 1
+
+    return {
+        "surfaced_count": surfaced_count,
+        "backlog_total": backlog_total,
+        "older_backlog_count": older_backlog_count,
+        "decision_counts": decision_counts,
+        "flow_counts": flow_counts,
     }
 
 
@@ -1437,6 +1606,32 @@ def _promotion_watch_action_item(promotion_surface: dict[str, Any]) -> dict[str,
     return None
 
 
+def _approval_chain_action_item(approval_chain_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not approval_chain_surface.get("available"):
+        return None
+    items = list(approval_chain_surface.get("items") or [])
+    if not items:
+        return None
+    top = items[0]
+    blockers = [str(value).strip() for value in list(top.get("blockers") or [])[:2] if str(value).strip()]
+    summary = " | ".join(
+        part
+        for part in [
+            str(top.get("progress_label") or "").strip(),
+            " / ".join(blockers) if blockers else "",
+            _trim_text(top.get("summary"), 90),
+        ]
+        if part
+    )
+    return {
+        "lane": top.get("lane") or "approval_chain",
+        "title": top.get("action_title") or top.get("title") or "Approval chain",
+        "summary": summary,
+        "command": top.get("recommended_action") or approval_chain_surface.get("recommended_action"),
+        "secondary_command": top.get("secondary_action"),
+    }
+
+
 def _learning_change_action_item(learning_surface: dict[str, Any]) -> dict[str, Any] | None:
     if not learning_surface.get("available"):
         return None
@@ -1476,6 +1671,7 @@ def _build_next_actions(
     governance_surface: dict[str, Any],
     repo_ci_surface: dict[str, Any],
     promotion_watch_surface: dict[str, Any],
+    approval_chain_surface: dict[str, Any],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     if customer_items:
@@ -1592,9 +1788,9 @@ def _build_next_actions(
     repo_ci_action = _repo_ci_action_item(repo_ci_surface)
     if repo_ci_action:
         actions.append(repo_ci_action)
-    promotion_action = _promotion_watch_action_item(promotion_watch_surface)
-    if promotion_action:
-        actions.append(promotion_action)
+    approval_chain_action = _approval_chain_action_item(approval_chain_surface)
+    if approval_chain_action:
+        actions.append(approval_chain_action)
     for item in workflow_items[:3]:
         actions.append(
             {
@@ -1620,6 +1816,7 @@ def build_business_operator_desk(
     workflow_followthrough: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     review_items = _review_queue_items(review_queue)
+    review_queue_summary = _review_queue_summary(review_queue, review_items)
     customer_items = _customer_action_items(customer_packets)
     browser_items = _browser_review_items(etsy_browser_sync)
     build_items = _custom_build_items(custom_build_candidates)
@@ -1641,6 +1838,10 @@ def build_business_operator_desk(
         review_carousel_policy_surface=review_carousel_policy_surface,
         jeepfact_policy_surface=jeepfact_policy_surface,
     )
+    approval_chain_surface = _load_approval_chain_surface(
+        seo_outcomes=seo_outcomes,
+        promotion_watch_surface=promotion_watch_surface,
+    )
     social_plan = weekly_strategy_packet.get("social_plan") or {}
     ready_counts = social_plan.get("readiness_counts") if isinstance(social_plan, dict) else {}
     social_ready_slots = 0
@@ -1648,7 +1849,7 @@ def build_business_operator_desk(
         social_ready_slots = sum(int(ready_counts.get(key) or 0) for key in ("ready_now", "ready_with_approval", "manual_experiment"))
     counts = (nightly_summary or {}).get("counts") or {}
     pack_items = list(((nightly_summary or {}).get("sections") or {}).get("orders_to_pack") or [])
-    review_queue_backlog = int((review_queue or {}).get("pending_count_all") or len((review_queue or {}).get("items") or []))
+    review_queue_backlog = int(review_queue_summary.get("backlog_total") or 0)
     return {
         "generated_at": datetime.now().astimezone().isoformat(),
         "strategy_focus": load_master_roadmap_focus(),
@@ -1669,12 +1870,18 @@ def build_business_operator_desk(
             "active_weekly_sale_items": len(weekly_sale_items),
             "weak_weekly_sale_items": sum(1 for item in weekly_sale_items if str(item.get("effectiveness") or "") == "weak"),
             "review_queue_items": len(review_items),
+            "review_queue_surfaced": int(review_queue_summary.get("surfaced_count") or 0),
             "review_queue_backlog": review_queue_backlog,
+            "review_queue_older_backlog": int(review_queue_summary.get("older_backlog_count") or 0),
             "usps_live_customer_items": sum(1 for item in customer_items if str(item.get("tracking_live_label") or "").strip()),
             "workflow_followthrough_items": len(workflow_items),
             "promotion_candidates": int(promotion_watch_surface.get("item_count") or 0),
             "promotion_ready_candidates": int(promotion_watch_surface.get("ready_count") or 0),
             "promotion_blocked_candidates": int(promotion_watch_surface.get("blocked_count") or 0),
+            "approval_chain_items": int(approval_chain_surface.get("item_count") or 0),
+            "approval_chain_awaiting_review": int(approval_chain_surface.get("awaiting_review_count") or 0),
+            "approval_chain_ready": int(approval_chain_surface.get("ready_count") or 0),
+            "approval_chain_blocked": int(approval_chain_surface.get("blocked_count") or 0),
             "weekly_sale_policy_clean_streak": int(weekly_sale_policy_surface.get("clean_gated_streak") or 0),
             "weekly_sale_policy_blocked_recent": int(weekly_sale_policy_surface.get("blocked_recent_count") or 0),
             "weekly_sale_policy_promote_ready": 1 if weekly_sale_policy_surface.get("promote_ready") else 0,
@@ -1718,6 +1925,7 @@ def build_business_operator_desk(
             governance_surface=governance_surface,
             repo_ci_surface=repo_ci_surface,
             promotion_watch_surface=promotion_watch_surface,
+            approval_chain_surface=approval_chain_surface,
         ),
         "governance_surface": governance_surface,
         "repo_ci_surface": repo_ci_surface,
@@ -1726,6 +1934,7 @@ def build_business_operator_desk(
         "review_carousel_policy_surface": review_carousel_policy_surface,
         "jeepfact_policy_surface": jeepfact_policy_surface,
         "promotion_watch_surface": promotion_watch_surface,
+        "approval_chain_surface": approval_chain_surface,
         "sections": {
             "customer_packets": customer_items[:6],
             "etsy_browser_threads": browser_items[:6],
@@ -1735,6 +1944,7 @@ def build_business_operator_desk(
             "weekly_sale_monitor": weekly_sale_items[:6],
             "review_queue": review_items[:6],
             "workflow_followthrough": workflow_items[:6],
+            "approval_chains": list(approval_chain_surface.get("items") or [])[:6],
             "promotion_watch": list(promotion_watch_surface.get("items") or [])[:4],
             "weekly_sale_policy": list(weekly_sale_policy_surface.get("recent_runs") or [])[:4],
             "meme_policy": list(meme_policy_surface.get("recent_runs") or [])[:4],
@@ -1789,9 +1999,10 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Active weekly sale items: `{counts.get('active_weekly_sale_items', 0)}`",
         f"- Weak weekly sale items: `{counts.get('weak_weekly_sale_items', 0)}`",
         f"- Creative/operator review items: `{counts.get('review_queue_items', 0)}`",
-        f"- Older creative/operator backlog: `{max(0, int(counts.get('review_queue_backlog', 0)) - int(counts.get('review_queue_items', 0)))}`",
+        f"- Older creative/operator backlog: `{counts.get('review_queue_older_backlog', max(0, int(counts.get('review_queue_backlog', 0)) - int(counts.get('review_queue_items', 0))))}`",
         f"- Customer cases with live USPS context: `{counts.get('usps_live_customer_items', 0)}`",
         f"- Workflow follow-through items: `{counts.get('workflow_followthrough_items', 0)}`",
+        f"- Approval chains surfaced: `{counts.get('approval_chain_items', 0)}`",
         f"- Promotion candidates surfaced: `{counts.get('promotion_candidates', 0)}`",
         f"- Promotion-ready candidates: `{counts.get('promotion_ready_candidates', 0)}`",
         f"- Promotion-blocked candidates: `{counts.get('promotion_blocked_candidates', 0)}`",
@@ -1835,6 +2046,35 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append("- Next major steps:")
             for step in next_steps:
                 lines.append(f"  - {step.get('title')}: {_trim_text(step.get('summary'), 160)}")
+    lines.extend([
+        "",
+        "## Approval Chains",
+        "",
+    ])
+    approval_chain_surface = payload.get("approval_chain_surface") or {}
+    approval_chain_items = sections.get("approval_chains") or []
+    if not approval_chain_surface.get("available"):
+        lines.append("Approval chains are not available yet.")
+    else:
+        lines.append(f"- Awaiting review: `{approval_chain_surface.get('awaiting_review_count', 0)}`")
+        lines.append(f"- Ready for next step: `{approval_chain_surface.get('ready_count', 0)}`")
+        lines.append(f"- Blocked: `{approval_chain_surface.get('blocked_count', 0)}`")
+        lines.append(f"- Active: `{approval_chain_surface.get('active_count', 0)}`")
+        lines.append(f"- Observing: `{approval_chain_surface.get('observing_count', 0)}`")
+        if approval_chain_surface.get("headline"):
+            lines.append(f"- Status: {_trim_text(approval_chain_surface.get('headline'), 180)}")
+        if approval_chain_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(approval_chain_surface.get('recommended_action'), 180)}")
+        if approval_chain_items:
+            lines.append("- Chain items:")
+            for item in approval_chain_items[:6]:
+                lines.append(
+                    f"  - {_trim_text(item.get('title'), 90)} | `{item.get('chain_state') or 'unknown'}` | {_trim_text(item.get('progress_label'), 80)}"
+                )
+                if item.get("summary"):
+                    lines.append(f"    Why: {_trim_text(item.get('summary'), 170)}")
+                if item.get("recommended_action"):
+                    lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
     lines.extend([
         "",
         "## Promotion Watch",
@@ -1988,6 +2228,21 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- Outcome note: {_trim_text(verification_truth.get('note'), 180)}")
         if verification_truth.get("recommended_action"):
             lines.append(f"- Outcome action: {_trim_text(verification_truth.get('recommended_action'), 180)}")
+        review_chain = seo_outcomes.get("review_chain") if isinstance(seo_outcomes.get("review_chain"), dict) else {}
+        if review_chain.get("headline"):
+            lines.append(f"- Review chain: {_trim_text(review_chain.get('headline'), 180)}")
+        current_review = review_chain.get("current_review") if isinstance(review_chain.get("current_review"), dict) else {}
+        if current_review.get("run_id"):
+            lines.append(
+                f"- Current SEO review: `{current_review.get('category_label') or current_review.get('seo_category') or 'SEO batch'}` | `{current_review.get('status') or 'unknown'}` | items `{current_review.get('item_count') or 0}`"
+            )
+        last_applied = review_chain.get("last_applied") if isinstance(review_chain.get("last_applied"), dict) else {}
+        if last_applied.get("run_id"):
+            lines.append(
+                f"- Last applied SEO batch: `{last_applied.get('category_label') or last_applied.get('seo_category') or 'SEO batch'}` | items `{last_applied.get('item_count') or 0}`"
+            )
+        if review_chain.get("remaining_count") is not None:
+            lines.append(f"- Remaining SEO categories in audit: `{review_chain.get('remaining_count') or 0}`")
         category_guidance = seo_outcomes.get("category_guidance") or []
         if category_guidance:
             lines.append("- Category guidance:")
@@ -2462,6 +2717,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
 
     lines.extend(["", "## Creative Review Queue", ""])
     review_items = sections.get("review_queue") or []
+    lines.append(f"- Surfaced now: `{counts.get('review_queue_surfaced', len(review_items))}`")
+    lines.append(f"- Older backlog: `{counts.get('review_queue_older_backlog', 0)}`")
     if not review_items:
         backlog_total = int(counts.get("review_queue_backlog", 0))
         if backlog_total > 0:
@@ -2526,6 +2783,11 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "promotion": "promotion_watch",
         "promotions": "promotion_watch",
         "promotion_watch": "promotion_watch",
+        "approval": "approval_chains",
+        "approval_chain": "approval_chains",
+        "approval_chains": "approval_chains",
+        "chain": "approval_chains",
+        "chains": "approval_chains",
         "policy": "weekly_sale_policy",
         "sale_policy": "weekly_sale_policy",
         "weekly_sale_policy": "weekly_sale_policy",
@@ -2701,6 +2963,35 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 for item in promotion_items[:6]:
                     lines.append(
                         f"- {_trim_text(item.get('title'), 100)} | {item.get('promotion_state') or 'unknown'} | {_trim_text(item.get('progress_label'), 100)}"
+                    )
+                    if item.get("summary"):
+                        lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
+                    if item.get("recommended_action"):
+                        lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
+        return "\n".join(lines)
+
+    if normalized == "approval_chains":
+        lines = ["Duck Ops Approval Chains", ""]
+        approval_chain_surface = payload.get("approval_chain_surface") or {}
+        approval_chain_items = (sections.get("approval_chains") or []) or list(approval_chain_surface.get("items") or [])
+        if not approval_chain_surface.get("available"):
+            lines.append("Approval chains are not available yet.")
+        else:
+            lines.append(f"Awaiting review: {approval_chain_surface.get('awaiting_review_count', 0)}")
+            lines.append(f"Ready for next step: {approval_chain_surface.get('ready_count', 0)}")
+            lines.append(f"Blocked: {approval_chain_surface.get('blocked_count', 0)}")
+            lines.append(f"Active: {approval_chain_surface.get('active_count', 0)}")
+            lines.append(f"Observing: {approval_chain_surface.get('observing_count', 0)}")
+            if approval_chain_surface.get("headline"):
+                lines.append(f"Status: {_trim_text(approval_chain_surface.get('headline'), 180)}")
+            if approval_chain_surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(approval_chain_surface.get('recommended_action'), 180)}")
+            if approval_chain_items:
+                lines.append("")
+                lines.append("Chain items:")
+                for item in approval_chain_items[:8]:
+                    lines.append(
+                        f"- {_trim_text(item.get('title'), 100)} | {item.get('chain_state') or 'unknown'} | {_trim_text(item.get('progress_label'), 100)}"
                     )
                     if item.get("summary"):
                         lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
@@ -2928,6 +3219,21 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append(f"Outcome note: {_trim_text(verification_truth.get('note'), 180)}")
             if verification_truth.get("recommended_action"):
                 lines.append(f"Outcome action: {_trim_text(verification_truth.get('recommended_action'), 180)}")
+            review_chain = seo_outcomes.get("review_chain") if isinstance(seo_outcomes.get("review_chain"), dict) else {}
+            if review_chain.get("headline"):
+                lines.append(f"Review chain: {_trim_text(review_chain.get('headline'), 180)}")
+            current_review = review_chain.get("current_review") if isinstance(review_chain.get("current_review"), dict) else {}
+            if current_review.get("run_id"):
+                lines.append(
+                    f"Current review: {current_review.get('category_label') or current_review.get('seo_category') or 'SEO batch'} | {current_review.get('status') or 'unknown'} | items {current_review.get('item_count') or 0}"
+                )
+            last_applied = review_chain.get("last_applied") if isinstance(review_chain.get("last_applied"), dict) else {}
+            if last_applied.get("run_id"):
+                lines.append(
+                    f"Last applied: {last_applied.get('category_label') or last_applied.get('seo_category') or 'SEO batch'} | items {last_applied.get('item_count') or 0}"
+                )
+            if review_chain.get("remaining_count") is not None:
+                lines.append(f"Remaining SEO categories in audit: {review_chain.get('remaining_count') or 0}")
             category_guidance = seo_outcomes.get("category_guidance") or []
             if category_guidance:
                 lines.append("")
@@ -3152,6 +3458,7 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "weekly_sale_monitor": "Weekly Sale Monitor",
         "review_queue": "Creative Review Queue",
         "workflow_followthrough": "Workflow Follow-Through",
+        "approval_chains": "Approval Chains",
     }
     lines = [f"Duck Ops {title_map.get(normalized, normalized)}", ""]
     if not items:
@@ -3203,11 +3510,26 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             lines.append(f"  Recommendation: {item.get('recommendation')}")
             lines.append(f"  Marketing: {_trim_text(item.get('marketing_recommendation'), 120)}")
         elif normalized == "review_queue":
+            if item is items[0]:
+                lines.append(
+                    f"Surfaced now: {(payload.get('counts') or {}).get('review_queue_surfaced', len(items))}"
+                )
+                lines.append(
+                    f"Older backlog: {(payload.get('counts') or {}).get('review_queue_older_backlog', 0)}"
+                )
             lines.append(f"- {item.get('short_id')} | {item.get('decision')} | {item.get('title')}")
             if item.get("detail_command"):
                 lines.append(f"  Detail: {item.get('detail_command')}")
             if item.get("approve_command"):
                 lines.append(f"  Decide: {item.get('approve_command')}")
+        elif normalized == "approval_chains":
+            lines.append(
+                f"- {_trim_text(item.get('title'), 100)} | {item.get('chain_state') or 'unknown'} | {_trim_text(item.get('progress_label'), 100)}"
+            )
+            if item.get("summary"):
+                lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
+            if item.get("recommended_action"):
+                lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
         elif normalized == "workflow_followthrough":
             lines.append(
                 f"- {item.get('lane')}: {item.get('title')} | {_trim_text(item.get('summary'), 120)}"

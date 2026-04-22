@@ -144,6 +144,35 @@ def _load_json(path: Path, default: Any) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _supersede_open_category_reviews(
+    *,
+    review_type: str,
+    issue_category: str | None,
+    replacement_run_id: str,
+    superseded_at: str,
+) -> None:
+    normalized_category = _normalize_text(issue_category).lower()
+    if review_type != "issue_category_batch" or not normalized_category or not REVIEW_RUN_DIR.exists():
+        return
+    for path in REVIEW_RUN_DIR.glob("*.json"):
+        payload = _load_json(path, {})
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("run_id") or "").strip() == replacement_run_id:
+            continue
+        if _normalize_text(payload.get("review_type")).lower() != "issue_category_batch":
+            continue
+        if _normalize_text(payload.get("seo_category")).lower() != normalized_category:
+            continue
+        if _normalize_text(payload.get("status")).lower() != "awaiting_review":
+            continue
+        payload["status"] = "superseded"
+        payload["superseded_at"] = superseded_at
+        payload["superseded_by_run_id"] = replacement_run_id
+        payload["superseded_reason"] = "A newer Shopify SEO review batch replaced this category email."
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def _trim_to_range(text: str, *, min_len: int, max_len: int, extras: list[str]) -> str:
     value = _normalize_text(text)
     if len(value) > max_len:
@@ -295,8 +324,11 @@ def _default_title_for_resource(resource: dict[str, Any]) -> str:
     title = _normalize_text(resource.get("title"))
     kind = str(resource.get("kind") or "")
     lowered = title.lower()
+    resource_url = _normalize_text(resource.get("resource_url")).lower()
     if kind == "page":
-        if "about" in lowered:
+        if "data-sharing-opt-out" in resource_url or "privacy choices" in lowered:
+            base = "Your Privacy Choices | MyJeepDuck Data Sharing Opt-Out"
+        elif "about" in lowered:
             base = "About MyJeepDuck Collectible Ducks and Gift Ideas"
         elif "contact" in lowered:
             base = "Contact MyJeepDuck for Collectible Duck Order Help"
@@ -334,6 +366,7 @@ def _default_description_for_resource(resource: dict[str, Any]) -> str:
     title = _normalize_text(resource.get("title"))
     kind = str(resource.get("kind") or "")
     lowered = title.lower()
+    resource_url = _normalize_text(resource.get("resource_url")).lower()
     if kind == "product":
         clean_name = _clean_product_title(title)
         base = (
@@ -360,6 +393,11 @@ def _default_description_for_resource(resource: dict[str, Any]) -> str:
         base = (
             "Review the MyJeepDuck privacy policy to learn how collectible duck orders, customer details, "
             "and store communications are handled and protected for shoppers and gift buyers."
+        )
+    elif kind == "page" and ("data-sharing-opt-out" in resource_url or "privacy choices" in lowered):
+        base = (
+            "Manage your MyJeepDuck privacy choices and data-sharing preferences, including opt-out options "
+            "for ads, customer personalization, and store communications."
         )
     elif kind == "page" and "terms" in lowered:
         base = (
@@ -698,6 +736,12 @@ def build_shopify_seo_review(
 
     REVIEW_RUN_DIR.mkdir(parents=True, exist_ok=True)
     _review_run_path(run_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _supersede_open_category_reviews(
+        review_type=review_type,
+        issue_category=issue_category,
+        replacement_run_id=run_id,
+        superseded_at=generated_at,
+    )
     _latest_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
     REVIEW_OUTPUT_MD.parent.mkdir(parents=True, exist_ok=True)
     REVIEW_OUTPUT_MD.write_text(render_shopify_seo_review_markdown(payload), encoding="utf-8")
