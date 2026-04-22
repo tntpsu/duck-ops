@@ -22,6 +22,7 @@ class EngineeringGovernanceDigestTests(unittest.TestCase):
             tech_debt_path = root / "state" / "tech_debt_triage.json"
             reliability_path = root / "state" / "reliability_review.json"
             data_model_path = root / "state" / "data_model_governance_review.json"
+            documentation_path = root / "state" / "documentation_governance_review.json"
             tech_debt_path.parent.mkdir(parents=True, exist_ok=True)
             tech_debt_path.write_text(
                 json.dumps(
@@ -69,19 +70,38 @@ class EngineeringGovernanceDigestTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            documentation_path.write_text(
+                json.dumps(
+                    {
+                        "reviews": [
+                            {
+                                "review_kind": "canonical_doc",
+                                "label": "Roadmap execution sequence",
+                                "exists": True,
+                                "issues": ["Required canonical coverage is missing: weekly documentation cadence."],
+                                "recommended_updates": ["Update the canonical document and any dependent guidance so the roadmap/policy/runbook truth stays aligned."],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             with patch.object(engineering_governance_digest, "TECH_DEBT_TRIAGE_PATH", tech_debt_path), patch.object(
                 engineering_governance_digest, "RELIABILITY_REVIEW_PATH", reliability_path
             ), patch.object(
                 engineering_governance_digest, "DATA_MODEL_GOVERNANCE_REVIEW_PATH", data_model_path
+            ), patch.object(
+                engineering_governance_digest, "DOCUMENTATION_GOVERNANCE_REVIEW_PATH", documentation_path
             ):
                 recommendations = engineering_governance_digest._review_recommendations()
 
-        self.assertEqual(len(recommendations), 3)
+        self.assertEqual(len(recommendations), 4)
         self.assertEqual(recommendations[0]["priority"], "P1")
         self.assertTrue(any(item["source"] == "tech_debt_triage" for item in recommendations))
         self.assertTrue(any(item["source"] == "reliability_review" for item in recommendations))
         self.assertTrue(any(item["source"] == "data_model_governance_review" for item in recommendations))
+        self.assertTrue(any(item["source"] == "documentation_governance_review" for item in recommendations))
 
     def test_competitor_snapshot_status_classifies_live_cached_and_hard_failing(self) -> None:
         with TemporaryDirectory() as tmp:

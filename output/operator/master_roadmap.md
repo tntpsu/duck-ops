@@ -80,6 +80,11 @@ Detailed execution sequence:
 - `duck-documentation-governance` now exists so canonical roadmap, governance, and current-system docs can be reviewed for drift and cleanup.
 - Agent/skill governance policy now exists to define power tiers, recommendation flow, and review/push expectations.
 - Engineering governance digest lane now exists and is scheduled for the morning.
+- The observe-only engineering review loop is now complete:
+  - nightly tech-debt triage
+  - weekly reliability review
+  - weekly data-model governance review
+  - weekly documentation-governance review
 - Governance digest email delivery is smoke-tested, so the observe/propose recommendation channel is live.
 
 ### 9. Social Strategy Intelligence Layer

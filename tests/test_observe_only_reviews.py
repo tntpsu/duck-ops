@@ -13,6 +13,7 @@ if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
 import data_model_governance_review
+import documentation_governance_review
 import reliability_review
 import tech_debt_triage
 
@@ -116,6 +117,65 @@ class ObserveOnlyReviewTests(unittest.TestCase):
 
             self.assertEqual(payload["issue_count"], 1)
             self.assertIn("out of sync", payload["surfaces"][0]["issues"][0].lower())
+            self.assertTrue(output_path.exists())
+
+    def test_documentation_governance_review_detects_missing_schedule(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = root / "state" / "documentation_governance_review.json"
+            output_path = root / "output" / "operator" / "documentation_governance_review.md"
+            roadmap_path = root / "output" / "operator" / "master_roadmap.md"
+            roadmap_path.parent.mkdir(parents=True, exist_ok=True)
+            roadmap_path.write_text(
+                "\n".join(
+                    [
+                        "# Master Roadmap",
+                        "## Completed Major Work",
+                        "## Active Operational Lanes",
+                        "## Highest-Value Open Work",
+                        "## Recommended Next 3 Steps",
+                        "duck-documentation-governance",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            schedule_path = root / "launchd" / "documentation_governance.plist"
+            schedule_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with patch.object(documentation_governance_review, "DOCUMENTATION_GOVERNANCE_STATE_PATH", state_path), patch.object(
+                documentation_governance_review, "DOCUMENTATION_GOVERNANCE_OUTPUT_PATH", output_path
+            ), patch.object(
+                documentation_governance_review,
+                "CANONICAL_DOC_SPECS",
+                [
+                    {
+                        "review_id": "master_roadmap",
+                        "label": "Duck Ops master roadmap",
+                        "path": roadmap_path,
+                        "required_fragments": [
+                            ("completed major work section", "## Completed Major Work"),
+                            ("active operational lanes section", "## Active Operational Lanes"),
+                            ("highest-value open work section", "## Highest-Value Open Work"),
+                            ("recommended next steps section", "## Recommended Next 3 Steps"),
+                        ],
+                    }
+                ],
+            ), patch.object(
+                documentation_governance_review,
+                "LAUNCH_AGENT_SPECS",
+                [
+                    {
+                        "review_id": "documentation_governance_weekly_schedule",
+                        "label": "Weekly documentation governance schedule",
+                        "path": schedule_path,
+                    }
+                ],
+            ):
+                payload = documentation_governance_review.build_documentation_governance_review()
+
+            self.assertEqual(payload["issue_count"], 1)
+            schedule_review = next(item for item in payload["reviews"] if item["review_kind"] == "local_schedule")
+            self.assertIn("missing", schedule_review["issues"][0].lower())
             self.assertTrue(output_path.exists())
 
 

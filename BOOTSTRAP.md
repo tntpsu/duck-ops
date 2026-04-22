@@ -74,6 +74,11 @@ Current local morning observe/review pattern:
   - stale-lock cleanup
   - timeout enforcement
   - local stdout/stderr log files
+- the observe-only engineering review loop now includes:
+  - nightly `tech_debt_triage.py`
+  - weekly `reliability_review.py`
+  - weekly `data_model_governance_review.py`
+  - weekly `documentation_governance_review.py`
 - `shopify_seo_kickoff.py` is now installed locally in launchd for a `7:35 AM` pass
 - local plist files stay in `~/Library/LaunchAgents`; do not commit them into repo
 

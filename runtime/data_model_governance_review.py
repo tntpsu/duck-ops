@@ -46,6 +46,12 @@ SURFACES = [
         "markdown": OUTPUT_OPERATOR_DIR / "data_model_governance_review.md",
     },
     {
+        "surface": "documentation_governance_review",
+        "state_json": STATE_DIR / "documentation_governance_review.json",
+        "operator_json": None,
+        "markdown": OUTPUT_OPERATOR_DIR / "documentation_governance_review.md",
+    },
+    {
         "surface": "weekly_sale_monitor",
         "state_json": STATE_DIR / "weekly_sale_monitor.json",
         "operator_json": OUTPUT_OPERATOR_DIR / "weekly_sale_monitor.json",

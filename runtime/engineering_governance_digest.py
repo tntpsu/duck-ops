@@ -28,6 +28,7 @@ SKILLS_ROOT = Path("/Users/philtullai/.codex/skills")
 TECH_DEBT_TRIAGE_PATH = STATE_DIR / "tech_debt_triage.json"
 RELIABILITY_REVIEW_PATH = STATE_DIR / "reliability_review.json"
 DATA_MODEL_GOVERNANCE_REVIEW_PATH = STATE_DIR / "data_model_governance_review.json"
+DOCUMENTATION_GOVERNANCE_REVIEW_PATH = STATE_DIR / "documentation_governance_review.json"
 COMPETITOR_SOCIAL_SNAPSHOTS_PATH = STATE_DIR / "competitor_social_snapshots.json"
 BUSINESS_OPERATOR_DESK_PATH = STATE_DIR / "business_operator_desk.json"
 BUSINESS_OPERATOR_DESK_MD_PATH = DUCK_OPS_ROOT / "output" / "operator" / "business_operator_desk.md"
@@ -39,6 +40,7 @@ REQUIRED_SKILLS = [
     "duck-architecture-guard",
     "duck-reliability-review",
     "duck-data-model-governance",
+    "duck-documentation-governance",
     "duck-automation-safety",
     "duck-tech-debt-triage",
     "duck-social-insights",
@@ -182,6 +184,7 @@ def _observe_review_statuses() -> list[dict[str, Any]]:
         ("tech_debt_triage", TECH_DEBT_TRIAGE_PATH, "items"),
         ("reliability_review", RELIABILITY_REVIEW_PATH, "reviews"),
         ("data_model_governance_review", DATA_MODEL_GOVERNANCE_REVIEW_PATH, "surfaces"),
+        ("documentation_governance_review", DOCUMENTATION_GOVERNANCE_REVIEW_PATH, "reviews"),
     ]
     items: list[dict[str, Any]] = []
     for name, path, key in surfaces:
@@ -371,6 +374,38 @@ def _review_recommendations() -> list[dict[str, Any]]:
                     "next_action": f"Refresh the canonical writer/reader contract for {surface_name} and rebuild the operator-facing artifact set.",
                     "recommendation_type": "data model cleanup",
                     "suggested_owner_skill": "duck-data-model-governance",
+                }
+            )
+
+    documentation_payload = _load_json(DOCUMENTATION_GOVERNANCE_REVIEW_PATH, {})
+    documentation_reviews = documentation_payload.get("reviews") if isinstance(documentation_payload, dict) else []
+    if isinstance(documentation_reviews, list):
+        for review in documentation_reviews:
+            if not isinstance(review, dict):
+                continue
+            issues = [str(item).strip() for item in list(review.get("issues") or []) if str(item).strip()]
+            if not issues:
+                continue
+            review_kind = str(review.get("review_kind") or "").strip()
+            priority = "P1" if review_kind == "local_schedule" or not bool(review.get("exists")) else "P2"
+            label = str(review.get("label") or "documentation surface").strip() or "documentation surface"
+            recommended_updates = [
+                str(item).strip() for item in list(review.get("recommended_updates") or []) if str(item).strip()
+            ]
+            recommendations.append(
+                {
+                    "priority": priority,
+                    "source": "documentation_governance_review",
+                    "mode": "propose-only",
+                    "title": f"{label} documentation drift risk",
+                    "summary": issues[0],
+                    "next_action": str(
+                        recommended_updates[0]
+                        if recommended_updates
+                        else "Update the canonical documentation and any dependent runbook/schedule guidance."
+                    ),
+                    "recommendation_type": "documentation cleanup" if review_kind == "canonical_doc" else "scheduler/safety hardening",
+                    "suggested_owner_skill": "duck-documentation-governance" if review_kind == "canonical_doc" else "duck-reliability-review",
                 }
             )
 
