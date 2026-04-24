@@ -29,6 +29,7 @@ What belongs here:
 - operator runtime
 - queue/review logic
 - contracts
+- shared compact interface-contract helpers for dashboards/widgets/companion readers
 - duck operator config
 - roadmaps, checklists, and operator docs
 
@@ -80,6 +81,10 @@ Current local morning observe/review pattern:
   - weekly `data_model_governance_review.py`
   - weekly `documentation_governance_review.py`
 - `shopify_seo_kickoff.py` is now installed locally in launchd for a `7:35 AM` pass
+- Etsy Playwright scheduling now belongs to the dedicated Etsy batch planner/checker wrappers in
+  `/Users/philtullai/ai-agents/openclaw_runtime`, not ad hoc launchd intervals
+- lightweight reader payloads such as the Even/PhilsHome widget should read
+  `runtime/operator_interface_contracts.py` instead of rebuilding Duck Ops state summaries on their own
 - local plist files stay in `~/Library/LaunchAgents`; do not commit them into repo
 
 ## Local-Only Runtime Paths

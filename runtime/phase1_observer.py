@@ -57,6 +57,7 @@ from open_order_intelligence import (
     build_shopify_open_orders_snapshot,
 )
 from ops_control import sync_ops_control
+from scheduler_health import build_scheduler_health, render_scheduler_health_markdown
 from usps_tracking import enrich_cases_with_usps_tracking
 from weekly_sale_monitor import (
     build_weekly_sale_monitor,
@@ -102,6 +103,9 @@ WEEKLY_SALE_MONITOR_PATH = STATE_DIR / "weekly_sale_monitor.json"
 WEEKLY_SALE_MONITOR_HISTORY_PATH = STATE_DIR / "weekly_sale_monitor_history.jsonl"
 WEEKLY_SALE_MONITOR_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "weekly_sale_monitor.json"
 WEEKLY_SALE_MONITOR_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "weekly_sale_monitor.md"
+SCHEDULER_HEALTH_PATH = STATE_DIR / "scheduler_health.json"
+SCHEDULER_HEALTH_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "scheduler_health.json"
+SCHEDULER_HEALTH_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "scheduler_health.md"
 
 PILOT_PUBLISH_FLOWS = {"newduck", "weekly_sale", "meme", "jeepfact"}
 INITIAL_MAILBOX_BOOTSTRAP_LIMIT = 75
@@ -2077,6 +2081,14 @@ def write_weekly_sale_monitor_outputs(payload: dict[str, Any]) -> None:
         handle.write("\n")
 
 
+def write_scheduler_health_outputs(payload: dict[str, Any]) -> None:
+    OUTPUT_DIR.joinpath("operator").mkdir(parents=True, exist_ok=True)
+    markdown = render_scheduler_health_markdown(payload)
+    write_json(SCHEDULER_HEALTH_PATH, payload)
+    write_json(SCHEDULER_HEALTH_OPERATOR_JSON_PATH, payload)
+    SCHEDULER_HEALTH_OPERATOR_MD_PATH.write_text(markdown + "\n", encoding="utf-8")
+
+
 def observe_mailbox(
     config: dict[str, Any],
     registry: dict[str, dict[str, Any]],
@@ -2390,6 +2402,7 @@ def main() -> int:
         custom_build_task_candidates=custom_build_task_candidates,
         etsy_browser_sync=etsy_conversation_browser_sync,
     )
+    scheduler_health = build_scheduler_health(write_outputs=False)
     review_queue = load_json(REVIEW_QUEUE_STATE_PATH)
     business_operator_desk = build_business_operator_desk(
         customer_packets=customer_operator_payload,
@@ -2410,6 +2423,7 @@ def main() -> int:
     write_etsy_conversation_browser_sync_outputs(etsy_conversation_browser_sync)
     write_nightly_action_summary_outputs(nightly_action_summary)
     write_weekly_sale_monitor_outputs(weekly_sale_monitor)
+    write_scheduler_health_outputs(scheduler_health)
     write_business_operator_desk_outputs(business_operator_desk)
 
     summary = {

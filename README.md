@@ -79,15 +79,28 @@ Unified desk commands now run through the main operator loop too:
 - `python3 runtime/review_loop.py handle --text 'desk show reviews'`
 - `python3 runtime/review_loop.py handle --text 'status all'`
 
+Shared operator interface contracts now live in:
+
+- `runtime/operator_interface_contracts.py`
+
+Use that module as the canonical compact surface for lightweight readers like the
+Business Desk, Even/PhilsHome widget API, and any future companion app payloads.
+Keep those readers as thin adapters instead of recomputing counts from
+normalized state in multiple places.
+
 Etsy inbox truth-sync is now available as a dedicated OpenClaw lane:
 
 - `python3 runtime/customer_inbox_refresh.py --limit 8 --skip-outside-hours --start-hour 7 --start-minute 30 --end-hour 23 --end-minute 59`
 
 Recommended local scheduling for that lane:
 
-- every 2 hours during the day/evening
-- one guaranteed `6:30 PM` run before nightly review
-- no runs between midnight and `7:30 AM`
+- plan exactly 3 Etsy Playwright windows per day
+- use one morning, one afternoon, and one evening window with a jittered run time inside each window
+- cap each session instead of draining the full backlog:
+  - customer read: up to 2 threads
+  - review reply: up to 2 approved replies
+  - relist: up to 1 listing in one randomly chosen session per day
+- keep `notifier.py` read-only by skipping Etsy customer refresh preflight from the sidecar
 
 This lane is intentionally read-only against Etsy:
 

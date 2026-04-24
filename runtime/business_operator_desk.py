@@ -15,7 +15,9 @@ from typing import Any
 
 from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
+from operator_interface_contracts import build_interface_contract_summary
 from repo_ci_status import REPO_CI_MD_PATH, build_repo_ci_status
+from scheduler_health import SCHEDULER_HEALTH_MD_PATH, build_scheduler_health
 from workflow_control import list_workflow_states, load_json
 from workflow_operator_summary import build_workflow_followthrough_items
 
@@ -27,6 +29,7 @@ SHOPIFY_SEO_OUTCOMES_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/sho
 SHOPIFY_SEO_OUTCOMES_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/shopify_seo_outcomes.md")
 ENGINEERING_GOVERNANCE_DIGEST_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/engineering_governance_digest.json")
 ENGINEERING_GOVERNANCE_DIGEST_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/engineering_governance_digest.md")
+INTERFACE_CONTRACT_MODULE_PATH = Path("/Users/philtullai/ai-agents/duck-ops/runtime/operator_interface_contracts.py")
 WEEKLY_SALE_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/weekly_sale_execution.json")
 MEME_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/meme_execution.json")
 REVIEW_CAROUSEL_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/review_carousel_execution.json")
@@ -1149,6 +1152,8 @@ def _load_weekly_strategy_packet() -> dict[str, Any]:
             "execution_truth": dict(social_plan.get("execution_truth") or {}),
             "lane_guidance_summary": dict(social_plan.get("lane_guidance_summary") or {}),
             "lane_guidance": list(social_plan.get("lane_guidance") or [])[:5],
+            "current_focus": dict(social_plan.get("current_focus") or {}),
+            "at_a_glance": list(social_plan.get("at_a_glance") or [])[:5],
             "ready_this_week": list(social_plan.get("ready_this_week") or [])[:5],
             "slots": list(social_plan.get("slots") or [])[:5],
             "items": list(social_plan.get("items") or [])[:5],
@@ -1343,6 +1348,148 @@ def _load_repo_ci_surface() -> dict[str, Any]:
         "stale_count": int(summary.get("stale_count") or 0),
         "passed_count": int(summary.get("passed_count") or 0),
         "items": normalized_items[:4],
+    }
+
+
+def _load_scheduler_health_surface() -> dict[str, Any]:
+    try:
+        payload = build_scheduler_health(write_outputs=False)
+    except Exception:
+        return {
+            "available": False,
+            "path": str(SCHEDULER_HEALTH_MD_PATH),
+            "headline": None,
+            "recommended_action": None,
+            "tracked_jobs": 0,
+            "attention_count": 0,
+            "bad_count": 0,
+            "warn_count": 0,
+            "items": [],
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "path": str(SCHEDULER_HEALTH_MD_PATH),
+            "headline": None,
+            "recommended_action": None,
+            "tracked_jobs": 0,
+            "attention_count": 0,
+            "bad_count": 0,
+            "warn_count": 0,
+            "items": [],
+        }
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    normalized_items: list[dict[str, Any]] = []
+    for item in list(payload.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        normalized_items.append(
+            {
+                "job_name": str(item.get("job_name") or "").strip() or "job",
+                "label": str(item.get("label") or "").strip() or None,
+                "status": str(item.get("status") or "unknown").strip() or "unknown",
+                "severity": str(item.get("severity") or "warn").strip() or "warn",
+                "summary": str(item.get("summary") or "").strip() or None,
+                "recommended_action": str(item.get("recommended_action") or "").strip() or None,
+                "attention_needed": bool(item.get("attention_needed")),
+                "last_start_at": item.get("last_start_at"),
+                "last_finished_at": item.get("last_finished_at"),
+                "last_exit_code": item.get("last_exit_code"),
+                "duration_seconds": item.get("duration_seconds"),
+                "elapsed_seconds": item.get("elapsed_seconds"),
+                "timeout_seconds": item.get("timeout_seconds"),
+                "expected_at": item.get("expected_at"),
+                "next_expected_at": item.get("next_expected_at"),
+                "pid": item.get("pid"),
+                "pid_alive": item.get("pid_alive"),
+                "receipt_path": item.get("receipt_path"),
+                "log_path": item.get("log_path"),
+            }
+        )
+
+    return {
+        "available": True,
+        "path": str(SCHEDULER_HEALTH_MD_PATH),
+        "source": payload.get("source"),
+        "generated_at": payload.get("generated_at"),
+        "status": payload.get("status"),
+        "headline": payload.get("headline"),
+        "recommended_action": payload.get("recommended_action"),
+        "tracked_jobs": int(summary.get("tracked_jobs") or len(normalized_items)),
+        "attention_count": int(summary.get("attention_count") or 0),
+        "bad_count": int(summary.get("bad_count") or 0),
+        "warn_count": int(summary.get("warn_count") or 0),
+        "healthy_count": int(summary.get("healthy_count") or 0),
+        "missed_count": int(summary.get("missed_count") or 0),
+        "failed_count": int(summary.get("failed_count") or 0),
+        "timeout_count": int(summary.get("timeout_count") or 0),
+        "hung_count": int(summary.get("hung_count") or 0),
+        "orphaned_count": int(summary.get("orphaned_count") or 0),
+        "slow_count": int(summary.get("slow_count") or 0),
+        "running_count": int(summary.get("running_count") or 0),
+        "items": normalized_items[:8],
+    }
+
+
+def _load_interface_contract_surface() -> dict[str, Any]:
+    try:
+        payload = build_interface_contract_summary()
+    except Exception:
+        return {
+            "available": False,
+            "path": str(INTERFACE_CONTRACT_MODULE_PATH),
+            "surface_version": None,
+            "ducks_to_pack_today": 0,
+            "customers_to_reply": 0,
+            "pending_approvals_count": 0,
+            "trend_ideas_count": 0,
+            "top_tasks_count": 0,
+            "custom_builds_count": 0,
+            "pending_approvals": [],
+            "top_tasks": [],
+            "trend_ideas": [],
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "path": str(INTERFACE_CONTRACT_MODULE_PATH),
+            "surface_version": None,
+            "ducks_to_pack_today": 0,
+            "customers_to_reply": 0,
+            "pending_approvals_count": 0,
+            "trend_ideas_count": 0,
+            "top_tasks_count": 0,
+            "custom_builds_count": 0,
+            "pending_approvals": [],
+            "top_tasks": [],
+            "trend_ideas": [],
+        }
+
+    return {
+        "available": True,
+        "path": str(INTERFACE_CONTRACT_MODULE_PATH),
+        "surface_version": payload.get("surface_version"),
+        "generated_at": payload.get("generated_at"),
+        "source_label": payload.get("source_label"),
+        "source_paths": dict(payload.get("source_paths") or {}),
+        "ducks_to_pack_today": int(payload.get("ducks_to_pack_today") or 0),
+        "customers_to_reply": int(payload.get("customers_to_reply") or 0),
+        "pending_approvals_count": int(payload.get("pending_approvals_count") or 0),
+        "trend_ideas_count": int(payload.get("trend_ideas_count") or 0),
+        "top_tasks_count": int(payload.get("top_tasks_count") or 0),
+        "custom_builds_count": int(payload.get("custom_builds_count") or 0),
+        "post_agent": dict(payload.get("post_agent") or {}),
+        "packing": dict(payload.get("packing") or {}),
+        "weekly_insights": dict(payload.get("weekly_insights") or {}),
+        "weekly_sales": dict(payload.get("weekly_sales") or {}),
+        "sales_trends": dict(payload.get("sales_trends") or {}),
+        "shipments_stuck": dict(payload.get("shipments_stuck") or {}),
+        "pending_approvals": list(payload.get("pending_approvals") or [])[:4],
+        "top_tasks": list(payload.get("top_tasks") or [])[:3],
+        "trend_ideas": list(payload.get("trend_ideas") or [])[:4],
     }
 
 
@@ -1571,6 +1718,37 @@ def _repo_ci_action_item(repo_ci_surface: dict[str, Any]) -> dict[str, Any] | No
     }
 
 
+def _scheduler_health_action_item(scheduler_health_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not scheduler_health_surface.get("available"):
+        return None
+
+    items = [item for item in list(scheduler_health_surface.get("items") or []) if isinstance(item, dict)]
+    attention_items = [item for item in items if item.get("attention_needed")]
+    if not attention_items:
+        return None
+
+    severity_rank = {"bad": 0, "warn": 1, "ok": 2}
+    attention_items.sort(
+        key=lambda item: (
+            severity_rank.get(str(item.get("severity") or "warn"), 9),
+            str(item.get("job_name") or ""),
+        )
+    )
+    top = attention_items[0]
+    summary_bits = [
+        str(top.get("job_name") or "job"),
+        str(top.get("status") or "unknown"),
+        _trim_text(str(top.get("summary") or ""), 90),
+    ]
+    return {
+        "lane": "scheduler_health",
+        "title": f"Scheduler attention: {top.get('job_name') or 'job'}",
+        "summary": " | ".join(bit for bit in summary_bits if bit),
+        "command": str(top.get("recommended_action") or scheduler_health_surface.get("recommended_action") or "").strip() or None,
+        "secondary_command": str(top.get("log_path") or scheduler_health_surface.get("path") or "").strip() or None,
+    }
+
+
 def _promotion_watch_action_item(promotion_surface: dict[str, Any]) -> dict[str, Any] | None:
     if not promotion_surface.get("available"):
         return None
@@ -1672,6 +1850,7 @@ def _build_next_actions(
     weekly_strategy_packet: dict[str, Any],
     governance_surface: dict[str, Any],
     repo_ci_surface: dict[str, Any],
+    scheduler_health_surface: dict[str, Any],
     promotion_watch_surface: dict[str, Any],
     approval_chain_surface: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -1790,6 +1969,9 @@ def _build_next_actions(
     repo_ci_action = _repo_ci_action_item(repo_ci_surface)
     if repo_ci_action:
         actions.append(repo_ci_action)
+    scheduler_action = _scheduler_health_action_item(scheduler_health_surface)
+    if scheduler_action:
+        actions.append(scheduler_action)
     approval_chain_action = _approval_chain_action_item(approval_chain_surface)
     if approval_chain_action:
         actions.append(approval_chain_action)
@@ -1830,6 +2012,8 @@ def build_business_operator_desk(
     seo_outcomes = _load_seo_outcome_surface()
     governance_surface = _load_governance_surface()
     repo_ci_surface = _load_repo_ci_surface()
+    scheduler_health_surface = _load_scheduler_health_surface()
+    interface_contract_surface = _load_interface_contract_surface()
     weekly_sale_policy_surface = _load_weekly_sale_policy_surface()
     meme_policy_surface = _load_meme_policy_surface()
     review_carousel_policy_surface = _load_review_carousel_policy_surface()
@@ -1902,6 +2086,21 @@ def build_business_operator_desk(
             "repo_ci_tracked_repos": int(repo_ci_surface.get("repo_count") or 0),
             "repo_ci_attention_items": int(repo_ci_surface.get("attention_count") or 0),
             "repo_ci_failing_repos": int(repo_ci_surface.get("failing_count") or 0),
+            "scheduler_tracked_jobs": int(scheduler_health_surface.get("tracked_jobs") or 0),
+            "scheduler_attention_jobs": int(scheduler_health_surface.get("attention_count") or 0),
+            "scheduler_bad_jobs": int(scheduler_health_surface.get("bad_count") or 0),
+            "scheduler_warn_jobs": int(scheduler_health_surface.get("warn_count") or 0),
+            "scheduler_missed_jobs": int(scheduler_health_surface.get("missed_count") or 0),
+            "scheduler_hung_jobs": int(scheduler_health_surface.get("hung_count") or 0),
+            "scheduler_orphaned_jobs": int(scheduler_health_surface.get("orphaned_count") or 0),
+            "scheduler_failed_jobs": int(scheduler_health_surface.get("failed_count") or 0),
+            "scheduler_timeout_jobs": int(scheduler_health_surface.get("timeout_count") or 0),
+            "interface_contract_surface_version": int(interface_contract_surface.get("surface_version") or 0),
+            "interface_contract_ducks_to_pack_today": int(interface_contract_surface.get("ducks_to_pack_today") or 0),
+            "interface_contract_customers_to_reply": int(interface_contract_surface.get("customers_to_reply") or 0),
+            "interface_contract_pending_approvals": int(interface_contract_surface.get("pending_approvals_count") or 0),
+            "interface_contract_trend_ideas": int(interface_contract_surface.get("trend_ideas_count") or 0),
+            "interface_contract_top_tasks": int(interface_contract_surface.get("top_tasks_count") or 0),
             "learning_beliefs": len(learning_surface.get("items") or []),
             "learning_changes": int(learning_surface.get("change_count") or 0),
             "learning_material_changes": int(learning_surface.get("material_change_count") or 0),
@@ -1926,11 +2125,14 @@ def build_business_operator_desk(
             weekly_strategy_packet=weekly_strategy_packet,
             governance_surface=governance_surface,
             repo_ci_surface=repo_ci_surface,
+            scheduler_health_surface=scheduler_health_surface,
             promotion_watch_surface=promotion_watch_surface,
             approval_chain_surface=approval_chain_surface,
         ),
         "governance_surface": governance_surface,
         "repo_ci_surface": repo_ci_surface,
+        "scheduler_health_surface": scheduler_health_surface,
+        "interface_contract_surface": interface_contract_surface,
         "weekly_sale_policy_surface": weekly_sale_policy_surface,
         "meme_policy_surface": meme_policy_surface,
         "review_carousel_policy_surface": review_carousel_policy_surface,
@@ -1954,6 +2156,10 @@ def build_business_operator_desk(
             "jeepfact_policy": list(jeepfact_policy_surface.get("recent_runs") or [])[:4],
             "engineering_governance": list(governance_surface.get("recommendations") or [])[:4],
             "repo_ci_status": list(repo_ci_surface.get("items") or [])[:4],
+            "scheduler_health": list(scheduler_health_surface.get("items") or [])[:6],
+            "interface_contract_pending_approvals": list(interface_contract_surface.get("pending_approvals") or [])[:4],
+            "interface_contract_top_tasks": list(interface_contract_surface.get("top_tasks") or [])[:3],
+            "interface_contract_trend_ideas": list(interface_contract_surface.get("trend_ideas") or [])[:4],
             "learning_surface": list(learning_surface.get("items") or [])[:4],
             "weekly_strategy_packet": list(weekly_strategy_packet.get("recommendations") or [])[:4],
             "weekly_social_plan": list(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or []))[:5],
@@ -1968,6 +2174,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     strategy_focus = payload.get("strategy_focus") or {}
     governance_surface = payload.get("governance_surface") or {}
     repo_ci_surface = payload.get("repo_ci_surface") or {}
+    scheduler_health_surface = payload.get("scheduler_health_surface") or {}
+    interface_contract_surface = payload.get("interface_contract_surface") or {}
     promotion_watch_surface = payload.get("promotion_watch_surface") or {}
     weekly_sale_policy_surface = payload.get("weekly_sale_policy_surface") or {}
     meme_policy_surface = payload.get("meme_policy_surface") or {}
@@ -2026,6 +2234,14 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Repo CI tracked repos: `{counts.get('repo_ci_tracked_repos', 0)}`",
         f"- Repo CI items needing attention: `{counts.get('repo_ci_attention_items', 0)}`",
         f"- Repo CI failing repos: `{counts.get('repo_ci_failing_repos', 0)}`",
+        f"- Scheduler tracked jobs: `{counts.get('scheduler_tracked_jobs', 0)}`",
+        f"- Scheduler jobs needing attention: `{counts.get('scheduler_attention_jobs', 0)}`",
+        f"- Scheduler bad jobs: `{counts.get('scheduler_bad_jobs', 0)}`",
+        f"- Scheduler warn jobs: `{counts.get('scheduler_warn_jobs', 0)}`",
+        f"- Interface contract surface version: `{counts.get('interface_contract_surface_version', 0)}`",
+        f"- Interface contract ducks to pack: `{counts.get('interface_contract_ducks_to_pack_today', 0)}`",
+        f"- Interface contract customers to reply: `{counts.get('interface_contract_customers_to_reply', 0)}`",
+        f"- Interface contract pending approvals: `{counts.get('interface_contract_pending_approvals', 0)}`",
         f"- Learning beliefs surfaced: `{counts.get('learning_beliefs') or len(learning_items)}`",
         f"- Learning changes surfaced: `{counts.get('learning_changes') or learning_surface.get('change_count') or 0}`",
         f"- Material learning changes: `{counts.get('learning_material_changes') or learning_surface.get('material_change_count') or 0}`",
@@ -2048,6 +2264,45 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append("- Next major steps:")
             for step in next_steps:
                 lines.append(f"  - {step.get('title')}: {_trim_text(step.get('summary'), 160)}")
+    lines.extend([
+        "",
+        "## Interface Contracts",
+        "",
+    ])
+    if not interface_contract_surface.get("available"):
+        interface_contract_surface = _load_interface_contract_surface()
+    interface_pending = sections.get("interface_contract_pending_approvals") or list(interface_contract_surface.get("pending_approvals") or [])
+    interface_tasks = sections.get("interface_contract_top_tasks") or list(interface_contract_surface.get("top_tasks") or [])
+    interface_trends = sections.get("interface_contract_trend_ideas") or list(interface_contract_surface.get("trend_ideas") or [])
+    if not interface_contract_surface.get("available"):
+        lines.append("Shared operator interface contracts are not available yet.")
+    else:
+        lines.append(f"- Contract module: `{interface_contract_surface.get('path')}`")
+        lines.append(f"- Surface version: `{interface_contract_surface.get('surface_version') or 0}`")
+        lines.append(f"- Source label: `{interface_contract_surface.get('source_label') or 'Duck Ops local'}`")
+        lines.append(f"- Ducks to pack today: `{interface_contract_surface.get('ducks_to_pack_today', 0)}`")
+        lines.append(f"- Customers to reply: `{interface_contract_surface.get('customers_to_reply', 0)}`")
+        lines.append(f"- Pending approvals: `{interface_contract_surface.get('pending_approvals_count', len(interface_pending))}`")
+        lines.append(f"- Trend ideas: `{interface_contract_surface.get('trend_ideas_count', len(interface_trends))}`")
+        lines.append(f"- Top tasks: `{interface_contract_surface.get('top_tasks_count', len(interface_tasks))}`")
+        if interface_pending:
+            lines.append("- Pending approvals:")
+            for item in interface_pending[:4]:
+                lines.append(
+                    f"  - {_trim_text(item.get('title'), 90)} | `{item.get('flow') or 'unknown'}` | {_trim_text(item.get('body_preview'), 100)}"
+                )
+        if interface_tasks:
+            lines.append("- Compact top tasks:")
+            for item in interface_tasks[:3]:
+                lines.append(
+                    f"  - {item.get('id') or '?'} | `{item.get('type') or 'reply'}` | {_trim_text(item.get('summary'), 120)}"
+                )
+        if interface_trends:
+            lines.append("- Trend ideas:")
+            for item in interface_trends[:4]:
+                lines.append(
+                    f"  - {_trim_text(item.get('title'), 80)} | score `{item.get('score')}` | `{item.get('status') or 'unknown'}`"
+                )
     lines.extend([
         "",
         "## Approval Chains",
@@ -2143,6 +2398,42 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
                 if item.get("check_finished_at"):
                     lines.append(f"    Checked: `{item.get('check_finished_at')}`")
+    lines.extend([
+        "",
+        "## Scheduler Health",
+        "",
+    ])
+    if not scheduler_health_surface.get("available"):
+        scheduler_health_surface = _load_scheduler_health_surface()
+    scheduler_items = (sections.get("scheduler_health") or []) or list(scheduler_health_surface.get("items") or [])
+    if not scheduler_health_surface.get("available"):
+        lines.append("Scheduler health is not available yet.")
+    else:
+        lines.append(f"- Page: `{scheduler_health_surface.get('path')}`")
+        lines.append(f"- Source: `{scheduler_health_surface.get('source') or 'duckagent_launchd_scheduler'}`")
+        lines.append(f"- Status: `{scheduler_health_surface.get('status') or 'unknown'}`")
+        lines.append(f"- Tracked jobs: `{scheduler_health_surface.get('tracked_jobs', len(scheduler_items))}`")
+        lines.append(f"- Need attention: `{scheduler_health_surface.get('attention_count', 0)}`")
+        lines.append(f"- Bad: `{scheduler_health_surface.get('bad_count', 0)}`")
+        lines.append(f"- Warn: `{scheduler_health_surface.get('warn_count', 0)}`")
+        if scheduler_health_surface.get("headline"):
+            lines.append(f"- Headline: {_trim_text(scheduler_health_surface.get('headline'), 180)}")
+        if scheduler_health_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(scheduler_health_surface.get('recommended_action'), 180)}")
+        if scheduler_items:
+            lines.append("- Scheduler jobs:")
+            for item in scheduler_items[:6]:
+                lines.append(
+                    f"  - {item.get('job_name')} | `{item.get('status') or 'unknown'}` | {_trim_text(item.get('summary'), 140)}"
+                )
+                if item.get("last_start_at"):
+                    lines.append(f"    Last start: `{item.get('last_start_at')}`")
+                if item.get("last_finished_at"):
+                    lines.append(f"    Last finish: `{item.get('last_finished_at')}`")
+                if item.get("expected_at"):
+                    lines.append(f"    Expected: `{item.get('expected_at')}`")
+                if item.get("recommended_action") and item.get("attention_needed"):
+                    lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
     lines.extend([
         "",
         "## Engineering Governance",
@@ -2321,6 +2612,28 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- Anchor workflow: `{social_plan.get('anchor_workflow')}`")
         if social_plan.get("watch_account"):
             lines.append(f"- Watch account: `{social_plan.get('watch_account')}`")
+        current_focus = social_plan.get("current_focus") or {}
+        if current_focus.get("headline"):
+            lines.append(f"- Current focus: {_trim_text(current_focus.get('headline'), 180)}")
+            if current_focus.get("primary_move"):
+                lines.append(f"  Move: {_trim_text(current_focus.get('primary_move'), 180)}")
+            if current_focus.get("operator_brief"):
+                lines.append(f"  Operator: {_trim_text(current_focus.get('operator_brief'), 180)}")
+            if current_focus.get("status_label"):
+                lines.append(f"  Status: `{current_focus.get('status_label')}`")
+            if current_focus.get("status_note"):
+                lines.append(f"  Note: {_trim_text(current_focus.get('status_note'), 180)}")
+        at_a_glance = social_plan.get("at_a_glance") or []
+        if at_a_glance:
+            lines.append("- Week at a glance:")
+            for item in at_a_glance[:5]:
+                lines.append(
+                    f"  - `{item.get('calendar_label') or item.get('target_day') or 'This week'}` | {_trim_text(item.get('primary_move'), 160)} | `{item.get('status_label') or 'planned'}`"
+                )
+                if item.get("operator_brief"):
+                    lines.append(f"    Operator: {_trim_text(item.get('operator_brief'), 180)}")
+                if item.get("backup_move"):
+                    lines.append(f"    Backup: {_trim_text(item.get('backup_move'), 180)}")
         readiness_counts = social_plan.get("readiness_counts") or {}
         if readiness_counts:
             lines.append(
@@ -2819,6 +3132,17 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "repo_ci": "repo_ci_status",
         "repo_ci_status": "repo_ci_status",
         "github_checks": "repo_ci_status",
+        "scheduler": "scheduler_health",
+        "schedule": "scheduler_health",
+        "scheduler_health": "scheduler_health",
+        "processes": "scheduler_health",
+        "process_health": "scheduler_health",
+        "interface": "interface_contracts",
+        "interfaces": "interface_contracts",
+        "contracts": "interface_contracts",
+        "interface_contracts": "interface_contracts",
+        "widget": "interface_contracts",
+        "even": "interface_contracts",
         "learning": "learning_surface",
         "learnings": "learning_surface",
         "seo": "seo_outcomes",
@@ -2857,6 +3181,46 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append("")
                 for step in next_steps:
                     lines.append(f"- {step.get('title')}: {_trim_text(step.get('summary'), 160)}")
+        return "\n".join(lines)
+    if normalized == "interface_contracts":
+        lines = ["Duck Ops Interface Contracts", ""]
+        surface = payload.get("interface_contract_surface") or {}
+        if not surface.get("available"):
+            surface = _load_interface_contract_surface()
+        if not surface.get("available"):
+            lines.append("Shared operator interface contracts are not available yet.")
+            return "\n".join(lines)
+        lines.append(f"Contract module: {surface.get('path')}")
+        lines.append(f"Surface version: {surface.get('surface_version') or 0}")
+        lines.append(f"Ducks to pack today: {surface.get('ducks_to_pack_today', 0)}")
+        lines.append(f"Customers to reply: {surface.get('customers_to_reply', 0)}")
+        lines.append(f"Pending approvals: {surface.get('pending_approvals_count', 0)}")
+        lines.append(f"Trend ideas: {surface.get('trend_ideas_count', 0)}")
+        lines.append(f"Top tasks: {surface.get('top_tasks_count', 0)}")
+        pending = list(surface.get("pending_approvals") or [])
+        if pending:
+            lines.append("")
+            lines.append("Pending approvals:")
+            for item in pending[:4]:
+                lines.append(
+                    f"- {item.get('title')} | {item.get('flow') or 'unknown'} | {_trim_text(item.get('body_preview'), 120)}"
+                )
+        tasks = list(surface.get("top_tasks") or [])
+        if tasks:
+            lines.append("")
+            lines.append("Top tasks:")
+            for item in tasks[:3]:
+                lines.append(
+                    f"- {item.get('id') or '?'} | {item.get('type') or 'reply'} | {_trim_text(item.get('summary'), 120)}"
+                )
+        trends = list(surface.get("trend_ideas") or [])
+        if trends:
+            lines.append("")
+            lines.append("Trend ideas:")
+            for item in trends[:4]:
+                lines.append(
+                    f"- {_trim_text(item.get('title'), 80)} | score {item.get('score')} | {item.get('status') or 'unknown'}"
+                )
         return "\n".join(lines)
     if normalized == "engineering_governance":
         lines = ["Duck Ops Engineering Governance", ""]
@@ -2931,6 +3295,42 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
                     if item.get("check_finished_at"):
                         lines.append(f"  Checked: {item.get('check_finished_at')}")
+        return "\n".join(lines)
+    if normalized == "scheduler_health":
+        lines = ["Duck Ops Scheduler Health", ""]
+        scheduler_health_surface = payload.get("scheduler_health_surface") or {}
+        if not scheduler_health_surface.get("available"):
+            scheduler_health_surface = _load_scheduler_health_surface()
+        scheduler_items = (sections.get("scheduler_health") or []) or list(scheduler_health_surface.get("items") or [])
+        if not scheduler_health_surface.get("available"):
+            lines.append("Scheduler health is not available yet.")
+        else:
+            lines.append(f"Page: {scheduler_health_surface.get('path')}")
+            lines.append(f"Source: {scheduler_health_surface.get('source') or 'duckagent_launchd_scheduler'}")
+            lines.append(f"Status: {scheduler_health_surface.get('status') or 'unknown'}")
+            lines.append(f"Tracked jobs: {scheduler_health_surface.get('tracked_jobs', len(scheduler_items))}")
+            lines.append(f"Need attention: {scheduler_health_surface.get('attention_count', 0)}")
+            lines.append(f"Bad: {scheduler_health_surface.get('bad_count', 0)}")
+            lines.append(f"Warn: {scheduler_health_surface.get('warn_count', 0)}")
+            if scheduler_health_surface.get("headline"):
+                lines.append(f"Headline: {_trim_text(scheduler_health_surface.get('headline'), 180)}")
+            if scheduler_health_surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(scheduler_health_surface.get('recommended_action'), 180)}")
+            if scheduler_items:
+                lines.append("")
+                lines.append("Scheduler jobs:")
+                for item in scheduler_items[:8]:
+                    lines.append(
+                        f"- {item.get('job_name')} | {item.get('status') or 'unknown'} | {_trim_text(item.get('summary'), 160)}"
+                    )
+                    if item.get("last_start_at"):
+                        lines.append(f"  Last start: {item.get('last_start_at')}")
+                    if item.get("last_finished_at"):
+                        lines.append(f"  Last finish: {item.get('last_finished_at')}")
+                    if item.get("expected_at"):
+                        lines.append(f"  Expected: {item.get('expected_at')}")
+                    if item.get("recommended_action") and item.get("attention_needed"):
+                        lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
         return "\n".join(lines)
     if normalized == "learning_surface":
         lines = ["Duck Ops Current Learnings", ""]
@@ -3326,6 +3726,29 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append(f"Anchor workflow: {social_plan.get('anchor_workflow')}")
             if social_plan.get("watch_account"):
                 lines.append(f"Watch account: {social_plan.get('watch_account')}")
+            current_focus = social_plan.get("current_focus") or {}
+            if current_focus.get("headline"):
+                lines.append(f"Current focus: {_trim_text(current_focus.get('headline'), 180)}")
+                if current_focus.get("primary_move"):
+                    lines.append(f"Move: {_trim_text(current_focus.get('primary_move'), 180)}")
+                if current_focus.get("operator_brief"):
+                    lines.append(f"Operator: {_trim_text(current_focus.get('operator_brief'), 180)}")
+                if current_focus.get("status_label"):
+                    lines.append(f"Status: {current_focus.get('status_label')}")
+                if current_focus.get("status_note"):
+                    lines.append(f"Note: {_trim_text(current_focus.get('status_note'), 180)}")
+            at_a_glance = social_plan.get("at_a_glance") or []
+            if at_a_glance:
+                lines.append("")
+                lines.append("Week at a glance:")
+                for item in at_a_glance[:5]:
+                    lines.append(
+                        f"- {item.get('calendar_label') or item.get('target_day') or 'This week'} | {_trim_text(item.get('primary_move'), 180)} | {item.get('status_label') or 'planned'}"
+                    )
+                    if item.get("operator_brief"):
+                        lines.append(f"  Operator: {_trim_text(item.get('operator_brief'), 180)}")
+                    if item.get("backup_move"):
+                        lines.append(f"  Backup: {_trim_text(item.get('backup_move'), 180)}")
             readiness_counts = social_plan.get("readiness_counts") or {}
             if readiness_counts:
                 lines.append(

@@ -209,6 +209,53 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("weekly: Spring Ducks", markdown)
         self.assertIn("Refresh the weekly draft", markdown)
 
+    def test_operator_desk_surfaces_scheduler_health_attention(self) -> None:
+        with patch(
+            "business_operator_desk._load_scheduler_health_surface",
+            return_value={
+                "available": True,
+                "path": "/tmp/scheduler_health.md",
+                "source": "duckagent_launchd_scheduler",
+                "status": "bad",
+                "headline": "Scheduler health needs attention.",
+                "recommended_action": "Resolve the stuck run.",
+                "tracked_jobs": 2,
+                "attention_count": 1,
+                "bad_count": 1,
+                "warn_count": 0,
+                "items": [
+                    {
+                        "job_name": "jeepfact_wednesday",
+                        "status": "hung",
+                        "severity": "bad",
+                        "summary": "Run started 1h ago and has not finished.",
+                        "recommended_action": "Inspect the PID and scheduler log.",
+                        "attention_needed": True,
+                        "last_start_at": "2026-04-22T09:00:00-04:00",
+                        "expected_at": "2026-04-22T09:00:00-04:00",
+                        "log_path": "/tmp/duckagent_scheduler.log",
+                    }
+                ],
+            },
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        next_actions = payload.get("next_actions") or []
+
+        self.assertEqual(payload["counts"]["scheduler_attention_jobs"], 1)
+        self.assertIn("## Scheduler Health", markdown)
+        self.assertIn("jeepfact_wednesday", markdown)
+        self.assertTrue(any(item.get("lane") == "scheduler_health" for item in next_actions))
+
     def test_operator_desk_workflow_followthrough_shows_root_cause(self) -> None:
         payload = build_business_operator_desk(
             customer_packets={"items": []},
@@ -552,6 +599,28 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                     "anchor_window": "evening",
                     "anchor_workflow": "meme",
                     "watch_account": "f3dprinted",
+                    "current_focus": {
+                        "label": "next_up",
+                        "headline": "Next up: Wednesday evening is the next planned move.",
+                        "primary_move": "Review the last few hooks and formats from `f3dprinted` before drafting one bounded post test.",
+                        "operator_brief": "Run Meme Flow, then reply `publish` to the review email after the content looks right.",
+                        "status_label": "upcoming",
+                    },
+                    "at_a_glance": [
+                        {
+                            "calendar_label": "Monday evening",
+                            "primary_move": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
+                            "operator_brief": "Run Meme Flow, then reply `publish` to the review email after the content looks right.",
+                            "status_label": "completed strong",
+                        },
+                        {
+                            "calendar_label": "Wednesday evening",
+                            "primary_move": "Review the last few hooks and formats from `f3dprinted` before drafting one bounded post test.",
+                            "operator_brief": "Run Meme Flow, then reply `publish` to the review email after the content looks right.",
+                            "backup_move": "`jeepfact` if the borrowed account pattern needs more story than `meme` can carry cleanly, move the concept into `jeepfact` instead.",
+                            "status_label": "upcoming",
+                        },
+                    ],
                     "slot_count": 2,
                     "readiness_counts": {
                         "ready_now": 0,
@@ -698,6 +767,10 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Experimental ideas are one bounded tests", markdown)
         self.assertIn("## This Week's Social Plan", markdown)
         self.assertIn("Keep meme in evening and run one bounded music test.", markdown)
+        self.assertIn("Current focus:", markdown)
+        self.assertIn("Next up: Wednesday evening is the next planned move.", markdown)
+        self.assertIn("Week at a glance:", markdown)
+        self.assertIn("Monday evening", markdown)
         self.assertIn("Slot 1: Early week", markdown)
         self.assertIn("Lane: `meme`", markdown)
         self.assertIn("Date: `2026-04-13`", markdown)
@@ -1112,6 +1185,28 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                         "anchor_window": "evening",
                         "anchor_workflow": "meme",
                         "watch_account": "f3dprinted",
+                        "current_focus": {
+                            "label": "next_up",
+                            "headline": "Next up: Wednesday evening is the next planned move.",
+                            "primary_move": "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
+                            "operator_brief": "Run Meme Flow, then reply `publish` to the review email after the content looks right.",
+                            "status_label": "upcoming",
+                        },
+                        "at_a_glance": [
+                            {
+                                "calendar_label": "Monday evening",
+                                "primary_move": "Run one `meme` post in the `evening` window to keep the week grounded in our best current signal.",
+                                "operator_brief": "Run Meme Flow, then reply `publish` to the review email after the content looks right.",
+                                "status_label": "completed strong",
+                            },
+                            {
+                                "calendar_label": "Wednesday evening",
+                                "primary_move": "Use `f3dprinted` as the competitor account to watch before drafting one new post.",
+                                "operator_brief": "Run Meme Flow, then reply `publish` to the review email after the content looks right.",
+                                "backup_move": "`jeepfact` if the borrowed account pattern needs more story than `meme` can carry cleanly, move the concept into `jeepfact` instead.",
+                                "status_label": "upcoming",
+                            },
+                        ],
                         "readiness_counts": {
                             "ready_now": 0,
                             "ready_with_approval": 2,
@@ -1263,6 +1358,9 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Keep meme in evening and run one bounded music test.", output)
         self.assertIn("Anchor window: evening", output)
         self.assertIn("Watch account: f3dprinted", output)
+        self.assertIn("Current focus: Next up: Wednesday evening is the next planned move.", output)
+        self.assertIn("Week at a glance:", output)
+        self.assertIn("Monday evening | Run one `meme` post", output)
         self.assertIn("Execution feedback: recommended=1, alternate=1", output)
         self.assertIn("Slot 1: Early week", output)
         self.assertIn("Lane: meme", output)
@@ -1379,6 +1477,58 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Current review: Duplicate SEO titles | awaiting_review | items 2", output)
         self.assertIn("Last applied: Missing SEO titles | items 5", output)
         self.assertIn("Remaining SEO categories in audit: 4", output)
+
+    def test_operator_desk_surfaces_shared_interface_contract_summary(self) -> None:
+        with patch(
+            "business_operator_desk._load_interface_contract_surface",
+            return_value={
+                "available": True,
+                "path": "/tmp/operator_interface_contracts.py",
+                "surface_version": 1,
+                "source_label": "Duck Ops local",
+                "ducks_to_pack_today": 4,
+                "customers_to_reply": 2,
+                "pending_approvals_count": 1,
+                "trend_ideas_count": 2,
+                "top_tasks_count": 1,
+                "pending_approvals": [
+                    {
+                        "title": "Orange Cat Duck Meme",
+                        "flow": "meme",
+                        "body_preview": "Fresh orange cat duck energy.",
+                    }
+                ],
+                "top_tasks": [
+                    {
+                        "id": "C301",
+                        "type": "reply",
+                        "summary": "Need a quick order update.",
+                    }
+                ],
+                "trend_ideas": [
+                    {"title": "Orange pet ducks", "score": 9.0, "status": "partial"}
+                ],
+            },
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+            )
+            markdown = render_business_operator_desk_markdown(payload)
+            section_output = render_business_section(payload, "widget")
+
+        self.assertEqual(payload["counts"]["interface_contract_pending_approvals"], 1)
+        self.assertEqual(payload["counts"]["interface_contract_ducks_to_pack_today"], 4)
+        self.assertIn("## Interface Contracts", markdown)
+        self.assertIn("Orange Cat Duck Meme", markdown)
+        self.assertIn("Duck Ops Interface Contracts", section_output)
+        self.assertIn("Ducks to pack today: 4", section_output)
+        self.assertIn("Orange pet ducks | score 9.0 | partial", section_output)
 
 
 if __name__ == "__main__":

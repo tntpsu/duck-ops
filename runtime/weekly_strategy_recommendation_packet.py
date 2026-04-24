@@ -783,6 +783,157 @@ def _calendar_target_for_slot(
     }
 
 
+def _slot_status_label(slot: dict[str, Any], *, packet_now: datetime) -> tuple[str, str]:
+    tracking_status = _compact_text(slot.get("tracking_status"))
+    performance_label = _compact_text(slot.get("performance_label"))
+    calendar_date = _compact_text(slot.get("calendar_date"))
+    today = packet_now.date().isoformat()
+
+    if tracking_status == "review_slot":
+        return "review", "review checkpoint"
+    if tracking_status == "awaiting_slot":
+        if calendar_date == today:
+            return "today", "due today"
+        return "upcoming", "upcoming"
+    if tracking_status == "no_post_observed":
+        if calendar_date == today:
+            return "today", "waiting today"
+        return "missed", "missed"
+    if tracking_status == "recommended_lane_executed":
+        if performance_label == "strong":
+            return "completed", "completed strong"
+        if performance_label == "watch":
+            return "completed", "completed watch"
+        return "completed", "completed"
+    if tracking_status == "alternate_lane_executed":
+        return "fallback", "fallback used"
+    if tracking_status == "different_lane_executed":
+        return "drifted", "lane drift"
+    if tracking_status:
+        return tracking_status, _humanize_label(tracking_status).lower()
+    return "planned", "planned"
+
+
+def _slot_operator_brief(slot: dict[str, Any]) -> str | None:
+    execution_mode = _compact_text(slot.get("execution_mode"))
+    operator_action = _compact_text(slot.get("operator_action_label"))
+    approval_followthrough = _compact_text(slot.get("approval_followthrough"))
+    next_step = _compact_text(slot.get("next_step"))
+    schedule_reference = _compact_text(slot.get("schedule_reference"))
+    action = _compact_text(slot.get("action"))
+
+    if execution_mode == "review":
+        return next_step or action or "Review the week before changing the next calendar."
+    if execution_mode == "manual_test":
+        return next_step or "Optional manual test only; do not treat this like a core recurring lane yet."
+    if operator_action and approval_followthrough:
+        return f"{operator_action}, then {approval_followthrough[0].lower() + approval_followthrough[1:]}" if len(approval_followthrough) > 1 else f"{operator_action}, then {approval_followthrough}"
+    if operator_action and next_step:
+        return f"{operator_action}, then {_compact_text(next_step)}"
+    if operator_action:
+        return operator_action
+    if next_step:
+        return next_step
+    if schedule_reference:
+        return schedule_reference
+    if action:
+        return action
+    return None
+
+
+def _slot_backup_move(slot: dict[str, Any]) -> str | None:
+    alternate_lane = _compact_text(slot.get("alternate_lane"))
+    alternate_lane_reason = _compact_text(slot.get("alternate_lane_reason"))
+    if alternate_lane and alternate_lane_reason:
+        lowered_reason = alternate_lane_reason[0].lower() + alternate_lane_reason[1:] if len(alternate_lane_reason) > 1 else alternate_lane_reason.lower()
+        if lowered_reason.startswith("if "):
+            return f"`{alternate_lane}` {lowered_reason}"
+        return f"`{alternate_lane}` if {lowered_reason}"
+    if alternate_lane:
+        return f"`{alternate_lane}` as the fallback lane."
+    return None
+
+
+def _week_at_a_glance(slots: list[dict[str, Any]], *, packet_now: datetime) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for slot in slots:
+        status, status_label = _slot_status_label(slot, packet_now=packet_now)
+        lane = _compact_text(slot.get("suggested_lane")) or _compact_text(slot.get("workflow")) or "unknown"
+        items.append(
+            {
+                "slot": _compact_text(slot.get("slot")) or "slot",
+                "target_day": _compact_text(slot.get("target_day")) or "This week",
+                "calendar_date": _compact_text(slot.get("calendar_date")) or None,
+                "calendar_label": _compact_text(slot.get("calendar_label")) or _compact_text(slot.get("timing_hint")) or "this week",
+                "lane": lane,
+                "goal": _compact_text(slot.get("goal")) or None,
+                "primary_move": _compact_text(slot.get("action")) or _compact_text(slot.get("goal")) or f"Run `{lane}`.",
+                "operator_brief": _slot_operator_brief(slot),
+                "backup_move": _slot_backup_move(slot),
+                "status": status,
+                "status_label": status_label,
+                "status_note": _compact_text(slot.get("tracking_note")) or _compact_text(slot.get("performance_note")) or None,
+            }
+        )
+    return items[:5]
+
+
+def _current_focus(
+    at_a_glance: list[dict[str, Any]],
+    *,
+    packet_now: datetime,
+) -> dict[str, Any]:
+    if not at_a_glance:
+        return {}
+
+    today = packet_now.date().isoformat()
+    today_item = next(
+        (
+            item
+            for item in at_a_glance
+            if str(item.get("calendar_date") or "") == today and str(item.get("status") or "") != "completed"
+        ),
+        None,
+    )
+    if today_item:
+        return {
+            "label": "today",
+            "headline": f"Today’s move: {today_item.get('calendar_label')} should focus on `{today_item.get('lane')}`.",
+            "primary_move": today_item.get("primary_move"),
+            "operator_brief": today_item.get("operator_brief"),
+            "status_label": today_item.get("status_label"),
+            "status_note": today_item.get("status_note"),
+        }
+
+    upcoming_item = next(
+        (
+            item
+            for item in at_a_glance
+            if str(item.get("status") or "") in {"upcoming", "review"}
+        ),
+        None,
+    )
+    if upcoming_item:
+        return {
+            "label": "next_up",
+            "headline": f"Next up: {upcoming_item.get('calendar_label')} is the next planned move.",
+            "primary_move": upcoming_item.get("primary_move"),
+            "operator_brief": upcoming_item.get("operator_brief"),
+            "status_label": upcoming_item.get("status_label"),
+            "status_note": upcoming_item.get("status_note"),
+        }
+
+    latest_item = at_a_glance[0]
+    return {
+        "label": "watch",
+        "headline": f"Latest observed slot: {latest_item.get('calendar_label')} already landed.",
+        "primary_move": latest_item.get("primary_move"),
+        "operator_brief": latest_item.get("operator_brief"),
+        "status_label": latest_item.get("status_label"),
+        "status_note": latest_item.get("status_note"),
+    }
+
+
 def _post_group_summary(workflow: str, items: list[dict[str, Any]]) -> dict[str, Any]:
     representative = max(items, key=lambda item: _safe_float(item.get("engagement_score")) or 0.0)
     timestamps = [parsed for parsed in (parse_iso(item.get("published_at")) for item in items) if parsed is not None]
@@ -1407,6 +1558,8 @@ def _social_plan(
     execution_truth = _execution_truth(slots)
     lane_guidance = _lane_guidance(slots)
     lane_guidance_summary = _lane_guidance_summary(lane_guidance)
+    at_a_glance = _week_at_a_glance(slots, packet_now=packet_now)
+    current_focus = _current_focus(at_a_glance, packet_now=packet_now)
     readiness_counts = {
         "ready_now": sum(1 for item in slots if str(item.get("execution_readiness") or "") == "ready_now"),
         "ready_with_approval": sum(1 for item in slots if str(item.get("execution_readiness") or "") == "ready_with_approval"),
@@ -1424,6 +1577,8 @@ def _social_plan(
         "execution_truth": execution_truth,
         "lane_guidance_summary": lane_guidance_summary,
         "lane_guidance": lane_guidance,
+        "current_focus": current_focus,
+        "at_a_glance": at_a_glance,
         "ready_this_week": ready_this_week,
         "slots": slots,
         "items": items[:5],
@@ -1665,6 +1820,28 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
         lines.append(f"- Anchor workflow: `{social_plan.get('anchor_workflow') or 'unknown'}`")
         if social_plan.get("watch_account"):
             lines.append(f"- Watch account: `{social_plan.get('watch_account')}`")
+        current_focus = social_plan.get("current_focus") or {}
+        if current_focus.get("headline"):
+            lines.append(f"- Current focus: {_compact_text(current_focus.get('headline'))}")
+            if current_focus.get("primary_move"):
+                lines.append(f"  Move: {_compact_text(current_focus.get('primary_move'))}")
+            if current_focus.get("operator_brief"):
+                lines.append(f"  Operator: {_compact_text(current_focus.get('operator_brief'))}")
+            if current_focus.get("status_label"):
+                lines.append(f"  Status: `{_compact_text(current_focus.get('status_label'))}`")
+            if current_focus.get("status_note"):
+                lines.append(f"  Note: {_compact_text(current_focus.get('status_note'))}")
+        at_a_glance = social_plan.get("at_a_glance") or []
+        if at_a_glance:
+            lines.append("- Week at a glance:")
+            for item in at_a_glance[:5]:
+                lines.append(
+                    f"  - {item.get('calendar_label')}: {_compact_text(item.get('primary_move'))} | `{item.get('status_label') or 'planned'}`"
+                )
+                if item.get("operator_brief"):
+                    lines.append(f"    Operator: {_compact_text(item.get('operator_brief'))}")
+                if item.get("backup_move"):
+                    lines.append(f"    Backup: {_compact_text(item.get('backup_move'))}")
         readiness_counts = social_plan.get("readiness_counts") or {}
         lines.append(
             "- Readiness: "
