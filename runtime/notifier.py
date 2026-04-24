@@ -2066,7 +2066,7 @@ def main() -> int:
     state.setdefault("sent", {})
     try:
         customer_preflight_cfg = settings.get("customer_inbox_refresh_preflight") or {}
-        customer_preflight_enabled = bool(customer_preflight_cfg.get("enabled", True))
+        customer_preflight_enabled = bool(customer_preflight_cfg.get("enabled", False))
         refresh_nightly_action_summary_sources(
             skip_order_refresh=args.skip_order_refresh,
             skip_customer_refresh_preflight=(not customer_preflight_enabled) or args.skip_customer_refresh_preflight,

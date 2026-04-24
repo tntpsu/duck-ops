@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -14,6 +15,7 @@ SPEC.loader.exec_module(etsy_expired_relist)
 
 class EtsyExpiredRelistTests(unittest.TestCase):
     def test_build_relist_queue_applies_sales_and_daily_cap(self) -> None:
+        today = datetime.now().astimezone().date().isoformat()
         expired_payload = {
             "generated_at": "2026-04-13T12:00:00-04:00",
             "items": [
@@ -43,7 +45,7 @@ class EtsyExpiredRelistTests(unittest.TestCase):
         }
         history = [
             {
-                "date_local": "2026-04-13",
+                "date_local": today,
                 "listing_id": "3",
                 "status": "renewed",
             }
@@ -61,6 +63,7 @@ class EtsyExpiredRelistTests(unittest.TestCase):
         self.assertEqual(queue["remaining_today"], 2)
 
     def test_build_relist_queue_blocks_when_daily_limit_is_spent(self) -> None:
+        today = datetime.now().astimezone().date().isoformat()
         expired_payload = {
             "generated_at": "2026-04-13T12:00:00-04:00",
             "items": [
@@ -70,9 +73,9 @@ class EtsyExpiredRelistTests(unittest.TestCase):
         }
         sales_counts = {"generated_at": "2026-04-13T11:00:00-04:00", "counts": {"1": 1, "2": 1}}
         history = [
-            {"date_local": "2026-04-13", "listing_id": "10", "status": "renewed"},
-            {"date_local": "2026-04-13", "listing_id": "11", "status": "renewed"},
-            {"date_local": "2026-04-13", "listing_id": "12", "status": "renewed"},
+            {"date_local": today, "listing_id": "10", "status": "renewed"},
+            {"date_local": today, "listing_id": "11", "status": "renewed"},
+            {"date_local": today, "listing_id": "12", "status": "renewed"},
         ]
 
         queue = etsy_expired_relist.build_relist_queue(expired_payload, sales_counts, history, daily_limit=3)

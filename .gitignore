@@ -1,5 +1,6 @@
 output/
 state/
+logs/
 runtime/__pycache__/
 runtime/*.pyc
 **/__pycache__/

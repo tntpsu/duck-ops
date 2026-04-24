@@ -1073,8 +1073,14 @@ def queue_review_reply(
     }
 
 
-def auto_enqueue_publish_ready(*, queued_by: str = "phase2_sidecar_auto_enqueue") -> dict[str, Any]:
+def auto_enqueue_publish_ready(
+    *,
+    queued_by: str = "phase2_sidecar_auto_enqueue",
+    policy_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     policy = load_execution_policy()
+    if isinstance(policy_override, dict):
+        policy = {**policy, **policy_override}
     if not policy.get("auto_execution_enabled"):
         return {"ok": True, "status": "disabled", "message": "Review auto-execution is disabled by policy.", "queued": []}
     if not policy.get("auto_queue_publish_ready_positive"):
@@ -2722,8 +2728,11 @@ def drain_queue(
     max_items: int | None = None,
     keep_browser_open: bool | None = None,
     send_summary: bool | None = None,
+    policy_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     policy = load_execution_policy()
+    if isinstance(policy_override, dict):
+        policy = {**policy, **policy_override}
     if not policy.get("auto_execution_enabled"):
         return {"ok": True, "status": "disabled", "message": "Review auto-execution is disabled by policy.", "results": []}
     if not policy.get("auto_drain_enabled"):

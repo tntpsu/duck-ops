@@ -478,7 +478,7 @@ class NotifierWhatsAppTests(unittest.TestCase):
         self.assertEqual(result, 0)
         refresh_summary_mock.assert_called_once_with(
             skip_order_refresh=True,
-            skip_customer_refresh_preflight=False,
+            skip_customer_refresh_preflight=True,
         )
 
 

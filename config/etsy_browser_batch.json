@@ -1,0 +1,47 @@
+{
+  "enabled": true,
+  "checker_interval_minutes": 15,
+  "due_grace_minutes": 20,
+  "session_timeout_seconds": 720,
+  "windows": [
+    {
+      "slot_id": "morning",
+      "label": "Morning",
+      "start_hour": 9,
+      "start_minute": 0,
+      "end_hour": 10,
+      "end_minute": 30
+    },
+    {
+      "slot_id": "afternoon",
+      "label": "Afternoon",
+      "start_hour": 13,
+      "start_minute": 30,
+      "end_hour": 15,
+      "end_minute": 30
+    },
+    {
+      "slot_id": "evening",
+      "label": "Evening",
+      "start_hour": 18,
+      "start_minute": 30,
+      "end_hour": 20,
+      "end_minute": 30
+    }
+  ],
+  "customer_read": {
+    "enabled": true,
+    "max_threads_per_session": 2
+  },
+  "review_reply": {
+    "enabled": true,
+    "queue_publish_ready": true,
+    "max_replies_per_session": 2
+  },
+  "relist": {
+    "enabled": true,
+    "max_renewals_per_day": 1,
+    "max_per_session": 1,
+    "force_sales_refresh": false
+  }
+}
