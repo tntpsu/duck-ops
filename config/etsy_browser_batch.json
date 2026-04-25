@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "checker_interval_minutes": 15,
   "due_grace_minutes": 20,
   "session_timeout_seconds": 720,

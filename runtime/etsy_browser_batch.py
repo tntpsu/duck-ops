@@ -310,6 +310,63 @@ def _mark_missed_slots(schedule: dict[str, Any], now: datetime) -> bool:
     return changed
 
 
+def _reconcile_stale_running_slots(schedule: dict[str, Any], config: dict[str, Any], now: datetime) -> bool:
+    timeout_seconds = int(config.get("session_timeout_seconds") or 720)
+    if timeout_seconds <= 0:
+        timeout_seconds = 720
+    changed = False
+    latest = _load_latest()
+    latest_slot_id = str(latest.get("slot_id") or "")
+    latest_finished_at = _parse_iso(latest.get("finished_at"))
+
+    for slot in list(schedule.get("slots") or []):
+        if str(slot.get("status") or "") != "running":
+            continue
+        slot_id = str(slot.get("slot_id") or "")
+        started_at = _parse_iso(slot.get("started_at")) or _parse_iso(slot.get("scheduled_for"))
+        if started_at is None:
+            continue
+        if latest_slot_id == slot_id and latest_finished_at and latest_finished_at >= started_at:
+            continue
+        if now <= started_at + timedelta(seconds=timeout_seconds):
+            continue
+
+        finished_at = now.isoformat()
+        slot["status"] = "failed"
+        slot["finished_at"] = finished_at
+        slot["receipt_status"] = "failed"
+        slot["failure_message"] = "Slot exceeded timeout without writing a completion receipt."
+        changed = True
+
+        synthesized_receipt = {
+            "generated_at": finished_at,
+            "date_local": schedule.get("date_local"),
+            "slot_id": slot_id,
+            "scheduled_for": slot.get("scheduled_for"),
+            "started_at": slot.get("started_at"),
+            "finished_at": finished_at,
+            "status": "failed",
+            "customer_read": _result_if_not_run("slot_recovered_after_timeout"),
+            "review_reply": _result_if_not_run("slot_recovered_after_timeout"),
+            "relist": _result_if_not_run("slot_recovered_after_timeout"),
+            "cleanup": {"closed": False, "reason": "process_exited_without_cleanup"},
+            "error": {
+                "type": "RecoveredTimeout",
+                "message": "Slot stayed in running past the configured timeout without a completion receipt.",
+            },
+        }
+        _save_latest(synthesized_receipt, schedule)
+        _record_batch_transition(
+            target=slot,
+            overall_status="failed",
+            customer_result=synthesized_receipt["customer_read"],
+            review_result=synthesized_receipt["review_reply"],
+            relist_result=synthesized_receipt["relist"],
+            receipt=synthesized_receipt,
+        )
+    return changed
+
+
 def find_due_slot(schedule: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any] | None:
     now = now or _local_now()
     if _mark_missed_slots(schedule, now):
@@ -359,6 +416,8 @@ def check_and_run(
         }
 
     schedule = ensure_today_schedule(config=config, now=now)
+    if _reconcile_stale_running_slots(schedule, config, now):
+        _save_schedule(schedule)
     due_slot = find_due_slot(schedule, now=now)
     if not due_slot:
         return {"ok": True, "status": "idle", "message": "No Etsy browser slot is due right now."}
@@ -396,6 +455,29 @@ def _review_reply_policy_override(config: dict[str, Any]) -> dict[str, Any]:
     policy["auto_drain_max_submits_per_run"] = int(review_cfg.get("max_replies_per_session") or 2)
     policy["auto_queue_publish_ready_positive"] = bool(review_cfg.get("queue_publish_ready", True))
     return policy
+
+
+def _run_customer_read_batch(config: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    customer_cfg = config.get("customer_read") or {}
+    if not bool(customer_cfg.get("enabled", True)):
+        return {"status": "disabled", "attempted": 0, "refreshed": 0, "failed": 0}
+
+    window_start = _parse_iso(target.get("window_start"))
+    window_end = _parse_iso(target.get("window_end"))
+    start_hour = int(window_start.hour if window_start is not None else 0)
+    start_minute = int(window_start.minute if window_start is not None else 0)
+    end_hour = int(window_end.hour if window_end is not None else 23)
+    end_minute = int(window_end.minute if window_end is not None else 59)
+
+    return customer_inbox_refresh.run_refresh(
+        limit=int(customer_cfg.get("max_threads_per_session") or 2),
+        include_waiting=bool(customer_cfg.get("include_waiting", False)),
+        skip_outside_hours=False,
+        start_hour=start_hour,
+        start_minute=start_minute,
+        end_hour=end_hour,
+        end_minute=end_minute,
+    )
 
 
 def _run_review_reply_batch(config: dict[str, Any]) -> dict[str, Any]:
@@ -476,12 +558,18 @@ def _run_relist_batch(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _close_primary_browser_session() -> dict[str, Any]:
-    session_name, _ = choose_session()
     try:
+        session_name, _ = choose_session()
         run_pw_command(session_name, "close")
         return {"session_name": session_name, "closed": True}
     except subprocess.CalledProcessError as exc:
         return {"session_name": session_name, "closed": False, "error": exc.stderr.strip() or exc.stdout.strip()}
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "session_name": locals().get("session_name", ""),
+            "closed": False,
+            "error": str(exc),
+        }
 
 
 def _overall_status(customer: dict[str, Any], review: dict[str, Any], relist: dict[str, Any]) -> str:
@@ -493,6 +581,49 @@ def _overall_status(customer: dict[str, Any], review: dict[str, Any], relist: di
     return "completed"
 
 
+def _result_if_not_run(reason: str) -> dict[str, Any]:
+    return {"status": "not_run", "reason": reason}
+
+
+def _record_batch_transition(
+    *,
+    target: dict[str, Any],
+    overall_status: str,
+    customer_result: dict[str, Any],
+    review_result: dict[str, Any],
+    relist_result: dict[str, Any],
+    receipt: dict[str, Any],
+) -> None:
+    state = {
+        "completed": "verified",
+        "blocked": "blocked",
+        "failed": "failed",
+    }.get(overall_status, "observed")
+    state_reason = {
+        "completed": "browser_batch_completed",
+        "blocked": "browser_batch_blocked",
+        "failed": "browser_batch_failed",
+    }.get(overall_status, "browser_batch_observed")
+    record_workflow_transition(
+        workflow_id=WORKFLOW_ID,
+        lane=WORKFLOW_LANE,
+        display_label="Etsy Browser Batch",
+        entity_id=str(target.get("slot_id") or "slot"),
+        state=state,
+        state_reason=state_reason,
+        next_action="Wait for the next planned Etsy browser window." if overall_status == "completed" else "Inspect the Etsy browser batch receipt before retrying.",
+        last_verification={
+            "customer_refreshed": int(customer_result.get("refreshed") or 0),
+            "review_posted": int(((review_result.get("drain") or {}).get("posted_count") or 0)),
+            "relisted": int(relist_result.get("renewed_count") or 0),
+        },
+        metadata={"slot_id": target.get("slot_id"), "scheduled_for": target.get("scheduled_for")},
+        receipt_kind="etsy_browser_batch",
+        receipt_payload=receipt,
+        history_summary="etsy browser batch",
+    )
+
+
 def run_slot(
     *,
     slot_id: str | None = None,
@@ -502,6 +633,8 @@ def run_slot(
     config = config or load_config()
     now = now or _local_now()
     schedule = ensure_today_schedule(config=config, now=now)
+    if _reconcile_stale_running_slots(schedule, config, now):
+        _save_schedule(schedule)
 
     recovery = _recovery_pause(now)
     if recovery.get("blocked"):
@@ -535,23 +668,37 @@ def run_slot(
     target["started_at"] = now.isoformat()
     _save_schedule(schedule)
 
-    customer_cfg = config.get("customer_read") or {}
-    if bool(customer_cfg.get("enabled", True)):
-        customer_result = customer_inbox_refresh.run_refresh(
-            limit=int(customer_cfg.get("max_threads_per_session") or 2),
-            include_waiting=False,
-        )
-    else:
-        customer_result = {"status": "disabled", "attempted": 0, "refreshed": 0, "failed": 0}
+    customer_result: dict[str, Any] = _result_if_not_run("slot_not_started")
+    review_result: dict[str, Any] = _result_if_not_run("slot_not_started")
+    relist_result: dict[str, Any] = _result_if_not_run("slot_not_started")
+    cleanup_result: dict[str, Any] = {"closed": False, "reason": "slot_not_finished"}
+    overall_status = "failed"
+    error_payload: dict[str, Any] | None = None
 
-    review_result = _run_review_reply_batch(config)
-    if str(target.get("slot_id") or "") == str(schedule.get("relist_slot_id") or ""):
-        relist_result = _run_relist_batch(config)
-    else:
-        relist_result = {"status": "idle", "reason": "not_relist_slot", "results": []}
+    try:
+        customer_result = _run_customer_read_batch(config, target)
+        review_result = _run_review_reply_batch(config)
+        if str(target.get("slot_id") or "") == str(schedule.get("relist_slot_id") or ""):
+            relist_result = _run_relist_batch(config)
+        else:
+            relist_result = {"status": "idle", "reason": "not_relist_slot", "results": []}
+        overall_status = _overall_status(customer_result, review_result, relist_result)
+    except Exception as exc:  # noqa: BLE001
+        error_payload = {
+            "type": exc.__class__.__name__,
+            "message": str(exc),
+        }
+        overall_status = "failed"
+    finally:
+        cleanup_result = _close_primary_browser_session()
+        if not cleanup_result.get("closed"):
+            overall_status = "failed"
+            if error_payload is None:
+                error_payload = {
+                    "type": "CleanupFailure",
+                    "message": str(cleanup_result.get("error") or "Primary Etsy browser session did not close cleanly."),
+                }
 
-    cleanup_result = _close_primary_browser_session()
-    overall_status = _overall_status(customer_result, review_result, relist_result)
     finished_at = now_local_iso()
 
     receipt = {
@@ -567,40 +714,23 @@ def run_slot(
         "relist": relist_result,
         "cleanup": cleanup_result,
     }
+    if error_payload:
+        receipt["error"] = error_payload
 
     target["status"] = overall_status
     target["finished_at"] = finished_at
     target["receipt_status"] = overall_status
+    if error_payload:
+        target["failure_message"] = str(error_payload.get("message") or "")
     _save_schedule(schedule)
     _save_latest(receipt, schedule)
-
-    state = {
-        "completed": "verified",
-        "blocked": "blocked",
-        "failed": "failed",
-    }.get(overall_status, "observed")
-    state_reason = {
-        "completed": "browser_batch_completed",
-        "blocked": "browser_batch_blocked",
-        "failed": "browser_batch_failed",
-    }.get(overall_status, "browser_batch_observed")
-    record_workflow_transition(
-        workflow_id=WORKFLOW_ID,
-        lane=WORKFLOW_LANE,
-        display_label="Etsy Browser Batch",
-        entity_id=str(target.get("slot_id") or "slot"),
-        state=state,
-        state_reason=state_reason,
-        next_action="Wait for the next planned Etsy browser window." if overall_status == "completed" else "Inspect the Etsy browser batch receipt before retrying.",
-        last_verification={
-            "customer_refreshed": int(customer_result.get("refreshed") or 0),
-            "review_posted": int(((review_result.get("drain") or {}).get("posted_count") or 0)),
-            "relisted": int(relist_result.get("renewed_count") or 0),
-        },
-        metadata={"slot_id": target.get("slot_id"), "scheduled_for": target.get("scheduled_for")},
-        receipt_kind="etsy_browser_batch",
-        receipt_payload=receipt,
-        history_summary="etsy browser batch",
+    _record_batch_transition(
+        target=target,
+        overall_status=overall_status,
+        customer_result=customer_result,
+        review_result=review_result,
+        relist_result=relist_result,
+        receipt=receipt,
     )
     return {"ok": overall_status != "failed", **receipt}
 
@@ -632,6 +762,8 @@ def main(argv: list[str] | None = None) -> int:
         result = plan_schedule(force=bool(args.force))
     elif args.command == "status":
         payload = ensure_today_schedule()
+        if _reconcile_stale_running_slots(payload, load_config(), _local_now()):
+            _save_schedule(payload)
         result = {"ok": True, "status": "loaded", "schedule": payload, "latest": _load_latest()}
         if not args.json:
             print(render_schedule_markdown(payload, result["latest"]).rstrip())
