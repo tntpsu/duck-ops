@@ -165,7 +165,7 @@ def approve_publish_candidate(artifact_id: str, dry_run: bool = False) -> dict[s
     run_id = run_id_from_state_source(state_source) or summary.get("publish_token") or "?"
 
     subject = f"Re: MJD: [{flow}] {title} | FLOW:{flow} | RUN:{run_id} | ACTION:publish"
-    body = "publish\n\n(approved via PhilsHome glasses dashboard)\n"
+    body = "publish\n\n(approved via Pulse glasses dashboard)\n"
 
     creds = _load_smtp_creds()
     missing = [key for key in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS") if not creds.get(key)]

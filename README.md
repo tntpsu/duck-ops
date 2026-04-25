@@ -84,7 +84,7 @@ Shared operator interface contracts now live in:
 - `runtime/operator_interface_contracts.py`
 
 Use that module as the canonical compact surface for lightweight readers like the
-Business Desk, Even/PhilsHome widget API, and any future companion app payloads.
+Business Desk, Even/Pulse widget API, and any future companion app payloads.
 Keep those readers as thin adapters instead of recomputing counts from
 normalized state in multiple places.
 
