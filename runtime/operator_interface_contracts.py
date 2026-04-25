@@ -452,8 +452,12 @@ def _weekly_insights(receipts: dict[str, Any] | None, catalog: dict[str, Any] | 
         for tx in receipt.get("transactions") or []:
             title = tx.get("title") or "Unknown"
             title_counts[title] = title_counts.get(title, 0) + int(tx.get("quantity") or 0)
+    # Use _short_duck_name (not _short_title) so titles like
+    # "Graduation Duck – 3D-Printed Duck Figurine - Custom Gift" collapse
+    # to "Graduation Duck" — splits on |, –, - separators and takes the
+    # leading product-name segment.
     top_sellers = [
-        {"title": _short_title(title), "units": units}
+        {"title": _short_duck_name(title), "units": units}
         for title, units in sorted(
             title_counts.items(), key=lambda item: item[1], reverse=True
         )[:3]
