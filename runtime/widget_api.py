@@ -46,10 +46,41 @@ def _load_smtp_creds() -> dict[str, str]:
     return creds
 
 
-def _operator_rejected_ids() -> set[str]:
+REJECTION_TTL_DAYS = 30
+
+
+def _operator_rejected_entries() -> list[dict[str, Any]]:
+    """Returns the raw rejected list, normalized to the dict shape so the
+    writer can append idempotently without losing legacy entries."""
     data = load_json_file(OPERATOR_REJECTED_PATH) or {}
-    ids = data.get("rejected") if isinstance(data, dict) else None
-    return set(str(value) for value in (ids or []))
+    raw = data.get("rejected") if isinstance(data, dict) else None
+    out: list[dict[str, Any]] = []
+    for value in raw or []:
+        if isinstance(value, str):
+            out.append({"artifactId": value, "rejectedAt": None})
+        elif isinstance(value, dict) and value.get("artifactId"):
+            out.append({
+                "artifactId": str(value["artifactId"]),
+                "rejectedAt": value.get("rejectedAt"),
+            })
+    return out
+
+
+def _operator_rejected_ids() -> set[str]:
+    cutoff = datetime.now(timezone.utc).timestamp() - REJECTION_TTL_DAYS * 24 * 3600
+    out: set[str] = set()
+    for entry in _operator_rejected_entries():
+        rejected_at = entry.get("rejectedAt")
+        if rejected_at is None:
+            out.add(entry["artifactId"])  # legacy: keep
+            continue
+        try:
+            ts = datetime.fromisoformat(rejected_at.replace("Z", "+00:00")).timestamp()
+        except (AttributeError, ValueError, TypeError):
+            ts = cutoff + 1
+        if ts >= cutoff:
+            out.add(entry["artifactId"])
+    return out
 
 
 def _find_candidate_by_artifact(artifact_id: str) -> dict[str, Any] | None:
@@ -75,11 +106,33 @@ def reject_publish_candidate(artifact_id: str) -> dict[str, Any]:
     candidate = _find_candidate_by_artifact(artifact_id)
     if not candidate:
         return {"ok": False, "error": f"artifact not found: {artifact_id}"}
-    current = _operator_rejected_ids()
-    if artifact_id in current:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cutoff = datetime.now(timezone.utc).timestamp() - REJECTION_TTL_DAYS * 24 * 3600
+
+    # Re-read on every write so we don't trample concurrent edits, and prune
+    # entries that aged past the TTL while we're here.
+    existing = _operator_rejected_entries()
+    pruned: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for entry in existing:
+        if entry["artifactId"] in seen_ids:
+            continue
+        rejected_at = entry.get("rejectedAt")
+        if rejected_at is not None:
+            try:
+                ts = datetime.fromisoformat(rejected_at.replace("Z", "+00:00")).timestamp()
+                if ts < cutoff:
+                    continue
+            except (AttributeError, ValueError, TypeError):
+                pass
+        pruned.append(entry)
+        seen_ids.add(entry["artifactId"])
+
+    if artifact_id in seen_ids:
         return {"ok": True, "alreadyRejected": True, "artifactId": artifact_id}
-    current.add(artifact_id)
-    payload = {"updated_at": datetime.now(timezone.utc).isoformat(), "rejected": sorted(current)}
+
+    pruned.append({"artifactId": artifact_id, "rejectedAt": now_iso})
+    payload = {"updated_at": now_iso, "rejected": pruned}
     try:
         OPERATOR_REJECTED_PATH.parent.mkdir(parents=True, exist_ok=True)
         with OPERATOR_REJECTED_PATH.open("w", encoding="utf-8") as fh:
@@ -229,7 +282,24 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     args = parser.parse_args()
 
-    server = ThreadingHTTPServer((args.host, args.port), WidgetHandler)
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), WidgetHandler)
+    except OSError as exc:
+        # Fail loudly + quickly rather than produce a giant traceback — launchd
+        # KeepAlive would otherwise respawn-loop us every 10s. Exit code 2
+        # means "don't restart" per plist convention.
+        if getattr(exc, "errno", None) == 48:
+            # Clean-exit 0 so launchd's KeepAlive.SuccessfulExit=false stops
+            # respawning us — another copy is already serving, nothing to do.
+            sys.stderr.write(
+                f"[widget_api] port {args.port} already in use. Another copy is "
+                f"already running (likely launchd or a stale nohup). "
+                f"Run: pkill -f widget_api.py  then launchctl kickstart -k "
+                f"gui/$(id -u)/com.philtullai.duck-ops-widget\n"
+            )
+            return 0
+        raise
+
     sys.stderr.write(f"[widget_api] serving http://{args.host}:{args.port}/widget-status.json\n")
     try:
         server.serve_forever()

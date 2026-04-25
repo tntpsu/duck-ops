@@ -97,7 +97,9 @@ def _packing_breakdown(packing: dict[str, Any] | None) -> dict[str, Any]:
     etsy = sum(int(((order.get("by_channel") or {}).get("etsy") or 0)) for order in orders)
     shopify = sum(int(((order.get("by_channel") or {}).get("shopify") or 0)) for order in orders)
 
+    # Aggregate qty + earliest expected ship date per title.
     qty_by_short: dict[str, int] = {}
+    earliest_ship_by_short: dict[str, str] = {}
     order_for_title: dict[str, int] = {}
     for idx, order in enumerate(orders):
         title = order.get("product_title") or ""
@@ -109,13 +111,26 @@ def _packing_breakdown(packing: dict[str, Any] | None) -> dict[str, Any]:
         )
         qty_by_short[short] = qty_by_short.get(short, 0) + qty
         order_for_title.setdefault(short, idx)
+        ship_iso = order.get("earliest_expected_ship_iso") or ""
+        if ship_iso:
+            current = earliest_ship_by_short.get(short)
+            if current is None or ship_iso < current:
+                earliest_ship_by_short[short] = ship_iso
+
+    # Sort: items with a ship date come first (earliest first), then the rest
+    # by qty desc — so the operator's pack queue is naturally urgency-ordered.
+    def sort_key(title: str) -> tuple[int, str, int]:
+        ship = earliest_ship_by_short.get(title) or ""
+        has_date = 0 if ship else 1  # has-date sorts before no-date
+        return (has_date, ship, -qty_by_short.get(title, 0))
 
     pack_items = [
-        {"title": title, "qty": qty}
-        for title, qty in sorted(
-            qty_by_short.items(),
-            key=lambda item: (-item[1], order_for_title.get(item[0], 0)),
-        )
+        {
+            "title": title,
+            "qty": qty_by_short[title],
+            "shipBy": earliest_ship_by_short.get(title) or None,
+        }
+        for title in sorted(qty_by_short.keys(), key=sort_key)
     ]
     duck_names = [item["title"] for item in pack_items]
     return {
@@ -132,10 +147,69 @@ def _customers_to_reply(cases: dict[str, Any] | None) -> int:
     return sum(1 for item in items if (item.get("response_recommendation") or {}).get("label"))
 
 
+REJECTION_TTL_DAYS = 30
+
+
+def _stable_reject_key(artifact_id: str) -> str:
+    """Stable key derived from the artifact_id that survives pipeline re-runs.
+
+    artifact_id format: 'publish::<flow>::<run_id>::<slug>'. The <run_id>
+    segment mutates across re-generations (e.g. adds `_hardened2` suffix),
+    which used to let rejected drafts come back because the filter matched
+    only exact ids. We key on <flow>::<slug> instead, which is stable for a
+    given semantic draft. Returns '' for unparseable inputs."""
+    if not artifact_id:
+        return ""
+    parts = artifact_id.split("::")
+    if len(parts) < 3:
+        return ""
+    flow = parts[1] if parts[0] == "publish" and len(parts) > 2 else parts[0]
+    slug = parts[-1]
+    if not flow or not slug:
+        return ""
+    return f"{flow}::{slug}"
+
+
 def _operator_rejected_ids() -> set[str]:
+    """Returns currently-active rejected keys (BOTH exact artifactIds AND
+    their stable <flow>::<slug> derivations). Entries older than
+    REJECTION_TTL_DAYS are filtered out so dismissed drafts can re-surface
+    later. Supports both legacy (list of strings) and current (list of
+    {artifactId, rejectedAt}) shapes for backward compat.
+
+    Including the stable key in the returned set lets the pendingApprovals
+    filter reject an artifact whose id has mutated across re-generations
+    (see _stable_reject_key)."""
     data = load_json_file(OPERATOR_REJECTED_PATH) or {}
     ids = data.get("rejected") if isinstance(data, dict) else None
-    return set(str(value) for value in (ids or []))
+    if not ids:
+        return set()
+    cutoff = datetime.now(timezone.utc).timestamp() - REJECTION_TTL_DAYS * 24 * 3600
+    out: set[str] = set()
+
+    def add_with_stable(artifact_id: str) -> None:
+        out.add(artifact_id)
+        stable = _stable_reject_key(artifact_id)
+        if stable:
+            out.add(stable)
+
+    for value in ids:
+        if isinstance(value, str):
+            add_with_stable(value)  # legacy entries: never expire
+            continue
+        if not isinstance(value, dict):
+            continue
+        artifact_id = value.get("artifactId")
+        if not artifact_id:
+            continue
+        rejected_at = value.get("rejectedAt")
+        try:
+            ts = datetime.fromisoformat(rejected_at.replace("Z", "+00:00")).timestamp()
+        except (AttributeError, ValueError, TypeError):
+            ts = cutoff + 1  # malformed → keep it (fail-open)
+        if ts >= cutoff:
+            add_with_stable(str(artifact_id))
+    return out
 
 
 def _pending_approvals(publish: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -152,6 +226,11 @@ def _pending_approvals(publish: dict[str, Any] | None) -> list[dict[str, Any]]:
             continue
         artifact_id = str(item.get("artifact_id") or "")
         if artifact_id and artifact_id in rejected:
+            continue
+        # Also block if the stable <flow>::<slug> was rejected — survives
+        # pipeline re-runs that mint a fresh artifact_id for the same draft.
+        stable = _stable_reject_key(artifact_id)
+        if stable and stable in rejected:
             continue
 
         summary = item.get("candidate_summary") or {}
@@ -373,10 +452,13 @@ def _weekly_insights(receipts: dict[str, Any] | None, catalog: dict[str, Any] | 
         for tx in receipt.get("transactions") or []:
             title = tx.get("title") or "Unknown"
             title_counts[title] = title_counts.get(title, 0) + int(tx.get("quantity") or 0)
-    best_seller = None
-    if title_counts:
-        top_title, top_units = max(title_counts.items(), key=lambda item: item[1])
-        best_seller = {"title": _short_title(top_title), "units": top_units}
+    top_sellers = [
+        {"title": _short_title(title), "units": units}
+        for title, units in sorted(
+            title_counts.items(), key=lambda item: item[1], reverse=True
+        )[:3]
+    ]
+    best_seller = top_sellers[0] if top_sellers else None
 
     sold_listing_ids: set[int] = set()
     for receipt in items:
@@ -412,6 +494,7 @@ def _weekly_insights(receipts: dict[str, Any] | None, catalog: dict[str, Any] | 
         "last_week_units": last_week_units,
         "week_over_week_pct": wow_pct,
         "best_seller_this_week": best_seller,
+        "top_sellers_this_week": top_sellers,
         "avg_units_per_order_today": round(avg_units_today, 1),
         "today_orders": len(today),
         "unsold_in_window": {
@@ -659,7 +742,14 @@ def build_widget_status_payload(surface: dict[str, Any] | None = None) -> dict[s
             "shopify": int(packing.get("shopify") or 0),
             "uniqueTitles": int(packing.get("unique_titles") or 0),
             "duckNames": list(packing.get("duck_names") or []),
-            "packItems": list(packing.get("pack_items") or []),
+            "packItems": [
+                {
+                    "title": item.get("title"),
+                    "qty": int(item.get("qty") or 0),
+                    "shipBy": item.get("shipBy") or item.get("ship_by"),
+                }
+                for item in list(packing.get("pack_items") or [])
+            ],
         },
         "shipmentsStuck": dict(payload.get("shipments_stuck") or {}),
         "trendIdeas": list(payload.get("trend_ideas") or []),
@@ -680,6 +770,7 @@ def build_widget_status_payload(surface: dict[str, Any] | None = None) -> dict[s
             "lastWeekUnits": int(weekly_insights.get("last_week_units") or 0),
             "weekOverWeekPct": weekly_insights.get("week_over_week_pct"),
             "bestSellerThisWeek": weekly_insights.get("best_seller_this_week"),
+            "topSellersThisWeek": weekly_insights.get("top_sellers_this_week") or [],
             "avgUnitsPerOrderToday": float(weekly_insights.get("avg_units_per_order_today") or 0.0),
             "todayOrders": int(weekly_insights.get("today_orders") or 0),
             "unsoldInWindow": {
