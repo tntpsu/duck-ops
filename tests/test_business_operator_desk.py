@@ -444,6 +444,100 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Need attention: 1", ci_section)
         self.assertIn("Private repo: business desk reflects the local mirror.", ci_section)
 
+    def test_operator_desk_surfaces_roi_triage(self) -> None:
+        with patch(
+            "business_operator_desk._load_roi_triage_surface",
+            return_value={
+                "available": True,
+                "path": "/tmp/roi_triage.md",
+                "generated_at": "2026-04-26T08:00:00-04:00",
+                "candidate_count": 2,
+                "top_priority_count": 1,
+                "top_score": 4.4,
+                "headline": "Top ROI slice: Semantic visual QA.",
+                "recommended_action": "Run the checker.",
+                "recommendations": [
+                    {
+                        "rank": 1,
+                        "title": "Semantic visual QA",
+                        "why_now": "Image drift needs a real gate.",
+                        "recommended_next_slice": "Run the checker.",
+                        "score_breakdown": {"roi_score": 4.4, "impact": 5},
+                        "owner_skill": "duck-reliability-review",
+                    }
+                ],
+            },
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        roi_section = render_business_section(payload, "roi")
+        action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "roi_triage")
+
+        self.assertEqual(payload["counts"]["roi_triage_candidates"], 2)
+        self.assertEqual(payload["counts"]["roi_triage_top_priority_items"], 1)
+        self.assertEqual(action["title"], "Semantic visual QA")
+        self.assertIn("## ROI Triage", markdown)
+        self.assertIn("Semantic visual QA", roi_section)
+
+    def test_operator_desk_surfaces_maintenance_freshness(self) -> None:
+        with patch(
+            "business_operator_desk._load_maintenance_freshness_surface",
+            return_value={
+                "available": True,
+                "generated_at": "2026-04-26T08:00:00-04:00",
+                "item_count": 2,
+                "attention_count": 1,
+                "stale_count": 1,
+                "missing_count": 0,
+                "unknown_count": 0,
+                "headline": "1 maintenance surface is stale.",
+                "recommended_action": "Refresh the stale producer.",
+                "items": [
+                    {
+                        "surface_id": "roi_triage",
+                        "label": "ROI triage",
+                        "status": "stale",
+                        "attention_needed": True,
+                        "age_hours": 55.0,
+                        "max_age_hours": 48,
+                        "summary": "Last update is stale.",
+                        "recommended_action": "Refresh ROI triage.",
+                        "path": "/tmp/roi_triage.md",
+                    }
+                ],
+            },
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        freshness_section = render_business_section(payload, "freshness")
+        action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "maintenance_freshness")
+
+        self.assertEqual(payload["counts"]["maintenance_freshness_attention_items"], 1)
+        self.assertEqual(payload["counts"]["maintenance_freshness_stale_items"], 1)
+        self.assertIn("## Maintenance Freshness", markdown)
+        self.assertIn("ROI triage", freshness_section)
+        self.assertEqual(action["title"], "Refresh maintenance surface: ROI triage")
+
     def test_operator_desk_surfaces_current_learnings(self) -> None:
         with patch(
             "business_operator_desk._load_learning_surface",

@@ -77,6 +77,8 @@ Unified desk commands now run through the main operator loop too:
 - `python3 runtime/review_loop.py handle --text 'desk show packing'`
 - `python3 runtime/review_loop.py handle --text 'desk show stock'`
 - `python3 runtime/review_loop.py handle --text 'desk show reviews'`
+- `python3 runtime/review_loop.py handle --text 'desk show roi'`
+- `python3 runtime/review_loop.py handle --text 'desk show freshness'`
 - `python3 runtime/review_loop.py handle --text 'status all'`
 
 Shared operator interface contracts now live in:
@@ -87,6 +89,12 @@ Use that module as the canonical compact surface for lightweight readers like th
 Business Desk, Even/Pulse widget API, and any future companion app payloads.
 Keep those readers as thin adapters instead of recomputing counts from
 normalized state in multiple places.
+
+ROI triage and maintenance freshness are now first-class Business Desk surfaces:
+
+- `runtime/roi_triage.py` ranks the next DuckAgent/Duck Ops work by impact, urgency, confidence, and effort.
+- `state/roi_triage.json` and `output/operator/roi_triage.md` are the canonical ROI triage outputs.
+- Business Desk surfaces `ROI Triage` and `Maintenance Freshness` so the morning email can show both the highest-return next slice and whether OS reports are fresh enough to trust.
 
 Etsy inbox truth-sync is now available as a dedicated OpenClaw lane:
 

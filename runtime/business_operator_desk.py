@@ -17,6 +17,9 @@ from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
 from operator_interface_contracts import build_interface_contract_summary
 from repo_ci_status import REPO_CI_MD_PATH, build_repo_ci_status
+from roi_triage import OUTPUT_MD_PATH as ROI_TRIAGE_MD_PATH
+from roi_triage import STATE_PATH as ROI_TRIAGE_PATH
+from roi_triage import build_roi_triage
 from scheduler_health import SCHEDULER_HEALTH_MD_PATH, build_scheduler_health
 from workflow_control import list_workflow_states, load_json
 from workflow_operator_summary import build_workflow_followthrough_items
@@ -1351,6 +1354,40 @@ def _load_repo_ci_surface() -> dict[str, Any]:
     }
 
 
+def _load_roi_triage_surface() -> dict[str, Any]:
+    try:
+        payload = build_roi_triage(write_outputs=False)
+    except Exception:
+        payload = _load_json(ROI_TRIAGE_PATH)
+
+    if not isinstance(payload, dict) or not payload:
+        return {
+            "available": False,
+            "path": str(ROI_TRIAGE_MD_PATH),
+            "recommendations": [],
+            "candidate_count": 0,
+            "top_priority_count": 0,
+            "headline": None,
+            "recommended_action": None,
+        }
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    recommendations = [item for item in list(payload.get("recommendations") or []) if isinstance(item, dict)]
+    return {
+        "available": True,
+        "path": str(ROI_TRIAGE_MD_PATH),
+        "state_path": str(ROI_TRIAGE_PATH),
+        "generated_at": payload.get("generated_at"),
+        "surface_version": int(payload.get("surface_version") or 0),
+        "candidate_count": int(summary.get("candidate_count") or len(recommendations)),
+        "top_priority_count": sum(1 for item in recommendations if int((item.get("score_breakdown") or {}).get("impact") or 0) >= 5),
+        "top_score": summary.get("top_score"),
+        "headline": summary.get("headline"),
+        "recommended_action": summary.get("recommended_action"),
+        "recommendations": recommendations[:8],
+    }
+
+
 def _load_scheduler_health_surface() -> dict[str, Any]:
     try:
         payload = build_scheduler_health(write_outputs=False)
@@ -1490,6 +1527,160 @@ def _load_interface_contract_surface() -> dict[str, Any]:
         "pending_approvals": list(payload.get("pending_approvals") or [])[:4],
         "top_tasks": list(payload.get("top_tasks") or [])[:3],
         "trend_ideas": list(payload.get("trend_ideas") or [])[:4],
+    }
+
+
+def _surface_age_hours(generated_at: Any) -> float | None:
+    parsed = _parse_iso(generated_at)
+    if parsed == datetime.min.replace(tzinfo=timezone.utc):
+        return None
+    now = datetime.now(timezone.utc).astimezone(parsed.tzinfo or timezone.utc)
+    return round(max(0.0, (now - parsed).total_seconds() / 3600), 1)
+
+
+def _freshness_item(
+    *,
+    surface_id: str,
+    label: str,
+    surface: dict[str, Any],
+    designed_cadence_hours: float,
+    max_age_hours: float,
+    path: str | None = None,
+) -> dict[str, Any]:
+    available = bool(surface.get("available"))
+    generated_at = surface.get("generated_at")
+    age_hours = _surface_age_hours(generated_at)
+    if not available:
+        status = "missing"
+        attention_needed = True
+        summary = "Surface is not available."
+    elif age_hours is None:
+        status = "unknown"
+        attention_needed = True
+        summary = "Surface is available but does not expose a generated_at timestamp."
+    elif age_hours > max_age_hours:
+        status = "stale"
+        attention_needed = True
+        summary = f"Last update is {age_hours}h old, above the {max_age_hours:g}h freshness target."
+    else:
+        status = "fresh"
+        attention_needed = False
+        summary = f"Last update is {age_hours}h old, within the {max_age_hours:g}h freshness target."
+    return {
+        "surface_id": surface_id,
+        "label": label,
+        "status": status,
+        "attention_needed": attention_needed,
+        "generated_at": generated_at,
+        "age_hours": age_hours,
+        "designed_cadence_hours": designed_cadence_hours,
+        "max_age_hours": max_age_hours,
+        "path": path or surface.get("path"),
+        "summary": summary,
+        "recommended_action": (
+            f"Refresh `{label}` or fix its producer so the Business Desk is not making decisions from stale data."
+            if attention_needed
+            else "No action needed."
+        ),
+    }
+
+
+def _load_maintenance_freshness_surface(
+    *,
+    learning_surface: dict[str, Any],
+    weekly_strategy_packet: dict[str, Any],
+    seo_outcomes: dict[str, Any],
+    governance_surface: dict[str, Any],
+    roi_triage_surface: dict[str, Any],
+    repo_ci_surface: dict[str, Any],
+    scheduler_health_surface: dict[str, Any],
+    interface_contract_surface: dict[str, Any],
+) -> dict[str, Any]:
+    items = [
+        _freshness_item(
+            surface_id="scheduler_health",
+            label="Scheduler health",
+            surface=scheduler_health_surface,
+            designed_cadence_hours=3,
+            max_age_hours=8,
+        ),
+        _freshness_item(
+            surface_id="repo_ci_status",
+            label="Repo CI status",
+            surface=repo_ci_surface,
+            designed_cadence_hours=24,
+            max_age_hours=72,
+        ),
+        _freshness_item(
+            surface_id="engineering_governance",
+            label="Engineering governance",
+            surface=governance_surface,
+            designed_cadence_hours=24,
+            max_age_hours=72,
+        ),
+        _freshness_item(
+            surface_id="roi_triage",
+            label="ROI triage",
+            surface=roi_triage_surface,
+            designed_cadence_hours=24,
+            max_age_hours=48,
+        ),
+        _freshness_item(
+            surface_id="current_learnings",
+            label="Current learnings",
+            surface=learning_surface,
+            designed_cadence_hours=24,
+            max_age_hours=72,
+        ),
+        _freshness_item(
+            surface_id="weekly_strategy_packet",
+            label="Weekly strategy packet",
+            surface=weekly_strategy_packet,
+            designed_cadence_hours=168,
+            max_age_hours=192,
+        ),
+        _freshness_item(
+            surface_id="shopify_seo_outcomes",
+            label="Shopify SEO outcomes",
+            surface=seo_outcomes,
+            designed_cadence_hours=168,
+            max_age_hours=192,
+        ),
+        _freshness_item(
+            surface_id="interface_contracts",
+            label="Interface contracts",
+            surface=interface_contract_surface,
+            designed_cadence_hours=24,
+            max_age_hours=72,
+        ),
+    ]
+    attention_items = [item for item in items if item.get("attention_needed")]
+    stale_items = [item for item in items if item.get("status") == "stale"]
+    missing_items = [item for item in items if item.get("status") == "missing"]
+    unknown_items = [item for item in items if item.get("status") == "unknown"]
+    if stale_items:
+        headline = f"{len(stale_items)} maintenance surface(s) are stale."
+        recommended_action = "Refresh the stale producer before relying on the morning Business Desk decisions."
+    elif missing_items:
+        headline = f"{len(missing_items)} maintenance surface(s) are missing."
+        recommended_action = "Restore the missing producer or mark the surface intentionally unavailable."
+    elif unknown_items:
+        headline = f"{len(unknown_items)} maintenance surface(s) need generated_at timestamps."
+        recommended_action = "Add generated_at to the producer so freshness can be judged against its designed cadence."
+    else:
+        headline = "Maintenance surfaces are fresh enough for the designed cadence."
+        recommended_action = "No maintenance freshness action is needed right now."
+    return {
+        "available": True,
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "item_count": len(items),
+        "attention_count": len(attention_items),
+        "stale_count": len(stale_items),
+        "missing_count": len(missing_items),
+        "unknown_count": len(unknown_items),
+        "headline": headline,
+        "recommended_action": recommended_action,
+        "items": items,
     }
 
 
@@ -1718,6 +1909,34 @@ def _repo_ci_action_item(repo_ci_surface: dict[str, Any]) -> dict[str, Any] | No
     }
 
 
+def _roi_triage_action_item(roi_triage_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not roi_triage_surface.get("available"):
+        return None
+
+    recommendations = [item for item in list(roi_triage_surface.get("recommendations") or []) if isinstance(item, dict)]
+    if not recommendations:
+        return None
+
+    top = sorted(
+        recommendations,
+        key=lambda item: float((item.get("score_breakdown") or {}).get("roi_score") or 0),
+        reverse=True,
+    )[0]
+    score = (top.get("score_breakdown") or {}).get("roi_score")
+    summary_bits = [
+        f"score {score}" if score is not None else "",
+        str(top.get("owner_skill") or "").strip(),
+        _trim_text(str(top.get("why_now") or ""), 90),
+    ]
+    return {
+        "lane": "roi_triage",
+        "title": str(top.get("title") or "Next highest ROI slice"),
+        "summary": " | ".join(bit for bit in summary_bits if bit),
+        "command": str(top.get("recommended_next_slice") or roi_triage_surface.get("recommended_action") or "").strip() or None,
+        "secondary_command": str(roi_triage_surface.get("path") or "").strip() or None,
+    }
+
+
 def _scheduler_health_action_item(scheduler_health_surface: dict[str, Any]) -> dict[str, Any] | None:
     if not scheduler_health_surface.get("available"):
         return None
@@ -1746,6 +1965,37 @@ def _scheduler_health_action_item(scheduler_health_surface: dict[str, Any]) -> d
         "summary": " | ".join(bit for bit in summary_bits if bit),
         "command": str(top.get("recommended_action") or scheduler_health_surface.get("recommended_action") or "").strip() or None,
         "secondary_command": str(top.get("log_path") or scheduler_health_surface.get("path") or "").strip() or None,
+    }
+
+
+def _maintenance_freshness_action_item(maintenance_freshness_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not maintenance_freshness_surface.get("available"):
+        return None
+
+    items = [item for item in list(maintenance_freshness_surface.get("items") or []) if isinstance(item, dict)]
+    attention_items = [item for item in items if item.get("attention_needed")]
+    if not attention_items:
+        return None
+
+    status_rank = {"stale": 0, "missing": 1, "unknown": 2}
+    attention_items.sort(
+        key=lambda item: (
+            status_rank.get(str(item.get("status") or "unknown"), 9),
+            str(item.get("label") or ""),
+        )
+    )
+    top = attention_items[0]
+    summary_bits = [
+        str(top.get("status") or "unknown"),
+        f"age {top.get('age_hours')}h" if top.get("age_hours") is not None else "",
+        _trim_text(str(top.get("summary") or ""), 90),
+    ]
+    return {
+        "lane": "maintenance_freshness",
+        "title": f"Refresh maintenance surface: {top.get('label') or 'surface'}",
+        "summary": " | ".join(bit for bit in summary_bits if bit),
+        "command": str(top.get("recommended_action") or maintenance_freshness_surface.get("recommended_action") or "").strip() or None,
+        "secondary_command": str(top.get("path") or "").strip() or None,
     }
 
 
@@ -1849,8 +2099,10 @@ def _build_next_actions(
     learning_surface: dict[str, Any],
     weekly_strategy_packet: dict[str, Any],
     governance_surface: dict[str, Any],
+    roi_triage_surface: dict[str, Any],
     repo_ci_surface: dict[str, Any],
     scheduler_health_surface: dict[str, Any],
+    maintenance_freshness_surface: dict[str, Any],
     promotion_watch_surface: dict[str, Any],
     approval_chain_surface: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -1966,12 +2218,18 @@ def _build_next_actions(
     governance_action = _governance_action_item(governance_surface)
     if governance_action:
         actions.append(governance_action)
+    roi_triage_action = _roi_triage_action_item(roi_triage_surface)
+    if roi_triage_action:
+        actions.append(roi_triage_action)
     repo_ci_action = _repo_ci_action_item(repo_ci_surface)
     if repo_ci_action:
         actions.append(repo_ci_action)
     scheduler_action = _scheduler_health_action_item(scheduler_health_surface)
     if scheduler_action:
         actions.append(scheduler_action)
+    maintenance_action = _maintenance_freshness_action_item(maintenance_freshness_surface)
+    if maintenance_action:
+        actions.append(maintenance_action)
     approval_chain_action = _approval_chain_action_item(approval_chain_surface)
     if approval_chain_action:
         actions.append(approval_chain_action)
@@ -2011,9 +2269,20 @@ def build_business_operator_desk(
     weekly_strategy_packet = _load_weekly_strategy_packet()
     seo_outcomes = _load_seo_outcome_surface()
     governance_surface = _load_governance_surface()
+    roi_triage_surface = _load_roi_triage_surface()
     repo_ci_surface = _load_repo_ci_surface()
     scheduler_health_surface = _load_scheduler_health_surface()
     interface_contract_surface = _load_interface_contract_surface()
+    maintenance_freshness_surface = _load_maintenance_freshness_surface(
+        learning_surface=learning_surface,
+        weekly_strategy_packet=weekly_strategy_packet,
+        seo_outcomes=seo_outcomes,
+        governance_surface=governance_surface,
+        roi_triage_surface=roi_triage_surface,
+        repo_ci_surface=repo_ci_surface,
+        scheduler_health_surface=scheduler_health_surface,
+        interface_contract_surface=interface_contract_surface,
+    )
     weekly_sale_policy_surface = _load_weekly_sale_policy_surface()
     meme_policy_surface = _load_meme_policy_surface()
     review_carousel_policy_surface = _load_review_carousel_policy_surface()
@@ -2083,6 +2352,8 @@ def build_business_operator_desk(
             "governance_findings": int(governance_surface.get("finding_count") or 0),
             "governance_recommendations": int(governance_surface.get("recommendation_count") or 0),
             "governance_top_priority_items": int(governance_surface.get("top_priority_count") or 0),
+            "roi_triage_candidates": int(roi_triage_surface.get("candidate_count") or 0),
+            "roi_triage_top_priority_items": int(roi_triage_surface.get("top_priority_count") or 0),
             "repo_ci_tracked_repos": int(repo_ci_surface.get("repo_count") or 0),
             "repo_ci_attention_items": int(repo_ci_surface.get("attention_count") or 0),
             "repo_ci_failing_repos": int(repo_ci_surface.get("failing_count") or 0),
@@ -2095,6 +2366,10 @@ def build_business_operator_desk(
             "scheduler_orphaned_jobs": int(scheduler_health_surface.get("orphaned_count") or 0),
             "scheduler_failed_jobs": int(scheduler_health_surface.get("failed_count") or 0),
             "scheduler_timeout_jobs": int(scheduler_health_surface.get("timeout_count") or 0),
+            "maintenance_freshness_items": int(maintenance_freshness_surface.get("item_count") or 0),
+            "maintenance_freshness_attention_items": int(maintenance_freshness_surface.get("attention_count") or 0),
+            "maintenance_freshness_stale_items": int(maintenance_freshness_surface.get("stale_count") or 0),
+            "maintenance_freshness_missing_items": int(maintenance_freshness_surface.get("missing_count") or 0),
             "interface_contract_surface_version": int(interface_contract_surface.get("surface_version") or 0),
             "interface_contract_ducks_to_pack_today": int(interface_contract_surface.get("ducks_to_pack_today") or 0),
             "interface_contract_customers_to_reply": int(interface_contract_surface.get("customers_to_reply") or 0),
@@ -2124,14 +2399,18 @@ def build_business_operator_desk(
             learning_surface=learning_surface,
             weekly_strategy_packet=weekly_strategy_packet,
             governance_surface=governance_surface,
+            roi_triage_surface=roi_triage_surface,
             repo_ci_surface=repo_ci_surface,
             scheduler_health_surface=scheduler_health_surface,
+            maintenance_freshness_surface=maintenance_freshness_surface,
             promotion_watch_surface=promotion_watch_surface,
             approval_chain_surface=approval_chain_surface,
         ),
         "governance_surface": governance_surface,
+        "roi_triage_surface": roi_triage_surface,
         "repo_ci_surface": repo_ci_surface,
         "scheduler_health_surface": scheduler_health_surface,
+        "maintenance_freshness_surface": maintenance_freshness_surface,
         "interface_contract_surface": interface_contract_surface,
         "weekly_sale_policy_surface": weekly_sale_policy_surface,
         "meme_policy_surface": meme_policy_surface,
@@ -2155,8 +2434,10 @@ def build_business_operator_desk(
             "review_carousel_policy": list(review_carousel_policy_surface.get("recent_runs") or [])[:4],
             "jeepfact_policy": list(jeepfact_policy_surface.get("recent_runs") or [])[:4],
             "engineering_governance": list(governance_surface.get("recommendations") or [])[:4],
+            "roi_triage": list(roi_triage_surface.get("recommendations") or [])[:5],
             "repo_ci_status": list(repo_ci_surface.get("items") or [])[:4],
             "scheduler_health": list(scheduler_health_surface.get("items") or [])[:6],
+            "maintenance_freshness": list(maintenance_freshness_surface.get("items") or [])[:8],
             "interface_contract_pending_approvals": list(interface_contract_surface.get("pending_approvals") or [])[:4],
             "interface_contract_top_tasks": list(interface_contract_surface.get("top_tasks") or [])[:3],
             "interface_contract_trend_ideas": list(interface_contract_surface.get("trend_ideas") or [])[:4],
@@ -2173,8 +2454,10 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     sections = payload.get("sections") or {}
     strategy_focus = payload.get("strategy_focus") or {}
     governance_surface = payload.get("governance_surface") or {}
+    roi_triage_surface = payload.get("roi_triage_surface") or {}
     repo_ci_surface = payload.get("repo_ci_surface") or {}
     scheduler_health_surface = payload.get("scheduler_health_surface") or {}
+    maintenance_freshness_surface = payload.get("maintenance_freshness_surface") or {}
     interface_contract_surface = payload.get("interface_contract_surface") or {}
     promotion_watch_surface = payload.get("promotion_watch_surface") or {}
     weekly_sale_policy_surface = payload.get("weekly_sale_policy_surface") or {}
@@ -2231,6 +2514,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Governance findings surfaced: `{counts.get('governance_findings', 0)}`",
         f"- Governance recommendations surfaced: `{counts.get('governance_recommendations', 0)}`",
         f"- Top-priority governance items: `{counts.get('governance_top_priority_items', 0)}`",
+        f"- ROI triage candidates surfaced: `{counts.get('roi_triage_candidates', 0)}`",
+        f"- Top-impact ROI items: `{counts.get('roi_triage_top_priority_items', 0)}`",
         f"- Repo CI tracked repos: `{counts.get('repo_ci_tracked_repos', 0)}`",
         f"- Repo CI items needing attention: `{counts.get('repo_ci_attention_items', 0)}`",
         f"- Repo CI failing repos: `{counts.get('repo_ci_failing_repos', 0)}`",
@@ -2238,6 +2523,9 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Scheduler jobs needing attention: `{counts.get('scheduler_attention_jobs', 0)}`",
         f"- Scheduler bad jobs: `{counts.get('scheduler_bad_jobs', 0)}`",
         f"- Scheduler warn jobs: `{counts.get('scheduler_warn_jobs', 0)}`",
+        f"- Maintenance freshness surfaces: `{counts.get('maintenance_freshness_items', 0)}`",
+        f"- Maintenance freshness attention items: `{counts.get('maintenance_freshness_attention_items', 0)}`",
+        f"- Stale maintenance surfaces: `{counts.get('maintenance_freshness_stale_items', 0)}`",
         f"- Interface contract surface version: `{counts.get('interface_contract_surface_version', 0)}`",
         f"- Interface contract ducks to pack: `{counts.get('interface_contract_ducks_to_pack_today', 0)}`",
         f"- Interface contract customers to reply: `{counts.get('interface_contract_customers_to_reply', 0)}`",
@@ -2362,6 +2650,37 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
     lines.extend([
         "",
+        "## ROI Triage",
+        "",
+    ])
+    if not roi_triage_surface.get("available"):
+        roi_triage_surface = _load_roi_triage_surface()
+    roi_items = (sections.get("roi_triage") or []) or list(roi_triage_surface.get("recommendations") or [])
+    if not roi_triage_surface.get("available"):
+        lines.append("ROI triage is not available yet.")
+    else:
+        lines.append(f"- Page: `{roi_triage_surface.get('path')}`")
+        lines.append(f"- Generated at: `{roi_triage_surface.get('generated_at')}`")
+        lines.append(f"- Candidate count: `{roi_triage_surface.get('candidate_count', len(roi_items))}`")
+        lines.append(f"- Top-impact items: `{roi_triage_surface.get('top_priority_count', 0)}`")
+        lines.append(f"- Top score: `{roi_triage_surface.get('top_score', 0)}`")
+        if roi_triage_surface.get("headline"):
+            lines.append(f"- Headline: {_trim_text(roi_triage_surface.get('headline'), 180)}")
+        if roi_triage_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(roi_triage_surface.get('recommended_action'), 180)}")
+        if roi_items:
+            lines.append("- Highest ROI slices:")
+            for item in roi_items[:5]:
+                score = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
+                lines.append(
+                    f"  - {item.get('rank') or '?'} | `{score.get('roi_score')}` | {_trim_text(item.get('title'), 100)} | skill `{item.get('owner_skill') or 'unknown'}`"
+                )
+                if item.get("why_now"):
+                    lines.append(f"    Why: {_trim_text(item.get('why_now'), 160)}")
+                if item.get("recommended_next_slice"):
+                    lines.append(f"    Next: {_trim_text(item.get('recommended_next_slice'), 180)}")
+    lines.extend([
+        "",
         "## Repo CI Status",
         "",
     ])
@@ -2398,6 +2717,34 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
                 if item.get("check_finished_at"):
                     lines.append(f"    Checked: `{item.get('check_finished_at')}`")
+    lines.extend([
+        "",
+        "## Maintenance Freshness",
+        "",
+    ])
+    maintenance_items = (sections.get("maintenance_freshness") or []) or list(maintenance_freshness_surface.get("items") or [])
+    if not maintenance_freshness_surface.get("available"):
+        lines.append("Maintenance freshness is not available yet.")
+    else:
+        lines.append(f"- Generated at: `{maintenance_freshness_surface.get('generated_at')}`")
+        lines.append(f"- Surfaces tracked: `{maintenance_freshness_surface.get('item_count', len(maintenance_items))}`")
+        lines.append(f"- Need attention: `{maintenance_freshness_surface.get('attention_count', 0)}`")
+        lines.append(f"- Stale: `{maintenance_freshness_surface.get('stale_count', 0)}`")
+        lines.append(f"- Missing: `{maintenance_freshness_surface.get('missing_count', 0)}`")
+        lines.append(f"- Unknown timestamp: `{maintenance_freshness_surface.get('unknown_count', 0)}`")
+        if maintenance_freshness_surface.get("headline"):
+            lines.append(f"- Headline: {_trim_text(maintenance_freshness_surface.get('headline'), 180)}")
+        if maintenance_freshness_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(maintenance_freshness_surface.get('recommended_action'), 180)}")
+        if maintenance_items:
+            lines.append("- Surface freshness:")
+            for item in maintenance_items[:8]:
+                age = f"{item.get('age_hours')}h" if item.get("age_hours") is not None else "unknown age"
+                lines.append(
+                    f"  - {item.get('label')} | `{item.get('status') or 'unknown'}` | {age} | target `{item.get('max_age_hours')}h`"
+                )
+                if item.get("summary"):
+                    lines.append(f"    Why: {_trim_text(item.get('summary'), 160)}")
     lines.extend([
         "",
         "## Scheduler Health",
@@ -3128,6 +3475,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "engineering": "engineering_governance",
         "digest": "engineering_governance",
         "governance_digest": "engineering_governance",
+        "roi": "roi_triage",
+        "roi_triage": "roi_triage",
+        "next_roi": "roi_triage",
+        "highest_roi": "roi_triage",
         "ci": "repo_ci_status",
         "repo_ci": "repo_ci_status",
         "repo_ci_status": "repo_ci_status",
@@ -3137,6 +3488,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "scheduler_health": "scheduler_health",
         "processes": "scheduler_health",
         "process_health": "scheduler_health",
+        "freshness": "maintenance_freshness",
+        "maintenance": "maintenance_freshness",
+        "maintenance_freshness": "maintenance_freshness",
+        "os_freshness": "maintenance_freshness",
         "interface": "interface_contracts",
         "interfaces": "interface_contracts",
         "contracts": "interface_contracts",
@@ -3258,6 +3613,37 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                     if item.get("next_action"):
                         lines.append(f"  Next: {_trim_text(item.get('next_action'), 180)}")
         return "\n".join(lines)
+    if normalized == "roi_triage":
+        lines = ["Duck Ops ROI Triage", ""]
+        roi_triage_surface = payload.get("roi_triage_surface") or {}
+        if not roi_triage_surface.get("available"):
+            roi_triage_surface = _load_roi_triage_surface()
+        roi_items = (sections.get("roi_triage") or []) or list(roi_triage_surface.get("recommendations") or [])
+        if not roi_triage_surface.get("available"):
+            lines.append("ROI triage is not available yet.")
+        else:
+            lines.append(f"Page: {roi_triage_surface.get('path')}")
+            lines.append(f"Generated at: {roi_triage_surface.get('generated_at')}")
+            lines.append(f"Candidate count: {roi_triage_surface.get('candidate_count', len(roi_items))}")
+            lines.append(f"Top-impact items: {roi_triage_surface.get('top_priority_count', 0)}")
+            lines.append(f"Top score: {roi_triage_surface.get('top_score', 0)}")
+            if roi_triage_surface.get("headline"):
+                lines.append(f"Headline: {_trim_text(roi_triage_surface.get('headline'), 180)}")
+            if roi_triage_surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(roi_triage_surface.get('recommended_action'), 180)}")
+            if roi_items:
+                lines.append("")
+                lines.append("Highest ROI slices:")
+                for item in roi_items[:8]:
+                    score = item.get("score_breakdown") if isinstance(item.get("score_breakdown"), dict) else {}
+                    lines.append(
+                        f"- {item.get('rank') or '?'} | {score.get('roi_score')} | {_trim_text(item.get('title'), 120)} | skill {item.get('owner_skill') or 'unknown'}"
+                    )
+                    if item.get("why_now"):
+                        lines.append(f"  Why: {_trim_text(item.get('why_now'), 180)}")
+                    if item.get("recommended_next_slice"):
+                        lines.append(f"  Next: {_trim_text(item.get('recommended_next_slice'), 180)}")
+        return "\n".join(lines)
     if normalized == "repo_ci_status":
         lines = ["Duck Ops Repo CI Status", ""]
         repo_ci_surface = payload.get("repo_ci_surface") or {}
@@ -3295,6 +3681,34 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
                     if item.get("check_finished_at"):
                         lines.append(f"  Checked: {item.get('check_finished_at')}")
+        return "\n".join(lines)
+    if normalized == "maintenance_freshness":
+        lines = ["Duck Ops Maintenance Freshness", ""]
+        maintenance_freshness_surface = payload.get("maintenance_freshness_surface") or {}
+        maintenance_items = (sections.get("maintenance_freshness") or []) or list(maintenance_freshness_surface.get("items") or [])
+        if not maintenance_freshness_surface.get("available"):
+            lines.append("Maintenance freshness is not available yet.")
+        else:
+            lines.append(f"Generated at: {maintenance_freshness_surface.get('generated_at')}")
+            lines.append(f"Surfaces tracked: {maintenance_freshness_surface.get('item_count', len(maintenance_items))}")
+            lines.append(f"Need attention: {maintenance_freshness_surface.get('attention_count', 0)}")
+            lines.append(f"Stale: {maintenance_freshness_surface.get('stale_count', 0)}")
+            lines.append(f"Missing: {maintenance_freshness_surface.get('missing_count', 0)}")
+            lines.append(f"Unknown timestamp: {maintenance_freshness_surface.get('unknown_count', 0)}")
+            if maintenance_freshness_surface.get("headline"):
+                lines.append(f"Headline: {_trim_text(maintenance_freshness_surface.get('headline'), 180)}")
+            if maintenance_freshness_surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(maintenance_freshness_surface.get('recommended_action'), 180)}")
+            if maintenance_items:
+                lines.append("")
+                lines.append("Surface freshness:")
+                for item in maintenance_items[:8]:
+                    age = f"{item.get('age_hours')}h" if item.get("age_hours") is not None else "unknown age"
+                    lines.append(
+                        f"- {item.get('label')} | {item.get('status') or 'unknown'} | {age} | target {item.get('max_age_hours')}h"
+                    )
+                    if item.get("summary"):
+                        lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
         return "\n".join(lines)
     if normalized == "scheduler_health":
         lines = ["Duck Ops Scheduler Health", ""]
