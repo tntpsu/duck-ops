@@ -1373,6 +1373,10 @@ def _load_roi_triage_surface() -> dict[str, Any]:
 
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     recommendations = [item for item in list(payload.get("recommendations") or []) if isinstance(item, dict)]
+    recently_completed = [item for item in list(payload.get("recently_completed") or []) if isinstance(item, dict)]
+    suppressed_recommendations = [
+        item for item in list(payload.get("suppressed_recommendations") or []) if isinstance(item, dict)
+    ]
     return {
         "available": True,
         "path": str(ROI_TRIAGE_MD_PATH),
@@ -1380,11 +1384,15 @@ def _load_roi_triage_surface() -> dict[str, Any]:
         "generated_at": payload.get("generated_at"),
         "surface_version": int(payload.get("surface_version") or 0),
         "candidate_count": int(summary.get("candidate_count") or len(recommendations)),
+        "completed_count": int(summary.get("completed_count") or len(recently_completed)),
+        "stale_recommendation_count": int(summary.get("stale_recommendation_count") or len(suppressed_recommendations)),
         "top_priority_count": sum(1 for item in recommendations if int((item.get("score_breakdown") or {}).get("impact") or 0) >= 5),
         "top_score": summary.get("top_score"),
         "headline": summary.get("headline"),
         "recommended_action": summary.get("recommended_action"),
         "recommendations": recommendations[:8],
+        "recently_completed": recently_completed[:8],
+        "suppressed_recommendations": suppressed_recommendations[:8],
     }
 
 
@@ -2353,6 +2361,8 @@ def build_business_operator_desk(
             "governance_recommendations": int(governance_surface.get("recommendation_count") or 0),
             "governance_top_priority_items": int(governance_surface.get("top_priority_count") or 0),
             "roi_triage_candidates": int(roi_triage_surface.get("candidate_count") or 0),
+            "roi_triage_completed_items": int(roi_triage_surface.get("completed_count") or 0),
+            "roi_triage_stale_suppressed_items": int(roi_triage_surface.get("stale_recommendation_count") or 0),
             "roi_triage_top_priority_items": int(roi_triage_surface.get("top_priority_count") or 0),
             "repo_ci_tracked_repos": int(repo_ci_surface.get("repo_count") or 0),
             "repo_ci_attention_items": int(repo_ci_surface.get("attention_count") or 0),
@@ -2662,6 +2672,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Page: `{roi_triage_surface.get('path')}`")
         lines.append(f"- Generated at: `{roi_triage_surface.get('generated_at')}`")
         lines.append(f"- Candidate count: `{roi_triage_surface.get('candidate_count', len(roi_items))}`")
+        lines.append(f"- Recently completed / filtered: `{roi_triage_surface.get('completed_count', 0)}`")
+        lines.append(f"- Stale governance signals suppressed: `{roi_triage_surface.get('stale_recommendation_count', 0)}`")
         lines.append(f"- Top-impact items: `{roi_triage_surface.get('top_priority_count', 0)}`")
         lines.append(f"- Top score: `{roi_triage_surface.get('top_score', 0)}`")
         if roi_triage_surface.get("headline"):
@@ -2679,6 +2691,16 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Why: {_trim_text(item.get('why_now'), 160)}")
                 if item.get("recommended_next_slice"):
                     lines.append(f"    Next: {_trim_text(item.get('recommended_next_slice'), 180)}")
+        completed_items = [item for item in list(roi_triage_surface.get("recently_completed") or []) if isinstance(item, dict)]
+        if completed_items:
+            lines.append("- Recently completed / no longer recommended:")
+            for item in completed_items[:4]:
+                lines.append(f"  - {_trim_text(item.get('title'), 100)}")
+        suppressed_items = [item for item in list(roi_triage_surface.get("suppressed_recommendations") or []) if isinstance(item, dict)]
+        if suppressed_items:
+            lines.append("- Suppressed stale governance signals:")
+            for item in suppressed_items[:4]:
+                lines.append(f"  - {_trim_text(item.get('title'), 100)}")
     lines.extend([
         "",
         "## Repo CI Status",
@@ -3625,6 +3647,8 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             lines.append(f"Page: {roi_triage_surface.get('path')}")
             lines.append(f"Generated at: {roi_triage_surface.get('generated_at')}")
             lines.append(f"Candidate count: {roi_triage_surface.get('candidate_count', len(roi_items))}")
+            lines.append(f"Recently completed / filtered: {roi_triage_surface.get('completed_count', 0)}")
+            lines.append(f"Stale governance signals suppressed: {roi_triage_surface.get('stale_recommendation_count', 0)}")
             lines.append(f"Top-impact items: {roi_triage_surface.get('top_priority_count', 0)}")
             lines.append(f"Top score: {roi_triage_surface.get('top_score', 0)}")
             if roi_triage_surface.get("headline"):
@@ -3643,6 +3667,18 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Why: {_trim_text(item.get('why_now'), 180)}")
                     if item.get("recommended_next_slice"):
                         lines.append(f"  Next: {_trim_text(item.get('recommended_next_slice'), 180)}")
+            completed_items = [item for item in list(roi_triage_surface.get("recently_completed") or []) if isinstance(item, dict)]
+            if completed_items:
+                lines.append("")
+                lines.append("Recently completed / no longer recommended:")
+                for item in completed_items[:6]:
+                    lines.append(f"- {_trim_text(item.get('title'), 120)}")
+            suppressed_items = [item for item in list(roi_triage_surface.get("suppressed_recommendations") or []) if isinstance(item, dict)]
+            if suppressed_items:
+                lines.append("")
+                lines.append("Suppressed stale governance signals:")
+                for item in suppressed_items[:6]:
+                    lines.append(f"- {_trim_text(item.get('title'), 120)}")
         return "\n".join(lines)
     if normalized == "repo_ci_status":
         lines = ["Duck Ops Repo CI Status", ""]

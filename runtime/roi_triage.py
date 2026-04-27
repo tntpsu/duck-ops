@@ -12,16 +12,47 @@ from nightly_action_summary import load_master_roadmap_focus
 
 
 DUCK_OPS_ROOT = Path("/Users/philtullai/ai-agents/duck-ops")
+DUCK_AGENT_ROOT = DUCK_OPS_ROOT.parent / "duckAgent"
 STATE_PATH = DUCK_OPS_ROOT / "state" / "roi_triage.json"
 OUTPUT_MD_PATH = DUCK_OPS_ROOT / "output" / "operator" / "roi_triage.md"
 GOVERNANCE_PATH = DUCK_OPS_ROOT / "state" / "engineering_governance_digest.json"
 SCHEDULER_HEALTH_PATH = DUCK_OPS_ROOT / "state" / "scheduler_health.json"
 REPO_CI_PATH = DUCK_OPS_ROOT / "state" / "repo_ci_status.json"
 CURRENT_LEARNINGS_PATH = DUCK_OPS_ROOT / "state" / "current_learnings.json"
+TECH_DEBT_TRIAGE_PATH = DUCK_OPS_ROOT / "state" / "tech_debt_triage.json"
+RELIABILITY_REVIEW_PATH = DUCK_OPS_ROOT / "state" / "reliability_review.json"
+DATA_MODEL_GOVERNANCE_REVIEW_PATH = DUCK_OPS_ROOT / "state" / "data_model_governance_review.json"
+DOCUMENTATION_GOVERNANCE_REVIEW_PATH = DUCK_OPS_ROOT / "state" / "documentation_governance_review.json"
+CREATIVE_POLICIES_PATH = DUCK_AGENT_ROOT / "creative_agent" / "runtime" / "src" / "duck_creative_agent" / "creative_policies.py"
+CREATIVE_TASKS_PATH = DUCK_AGENT_ROOT / "creative_agent" / "runtime" / "src" / "duck_creative_agent" / "tasks.py"
+CREATIVE_VIEWER_DATA_PATH = DUCK_AGENT_ROOT / "creative_agent" / "runtime" / "src" / "duck_creative_agent" / "viewer_data.py"
+CREATIVE_VIEWER_PATH = DUCK_AGENT_ROOT / "creative_agent" / "runtime" / "src" / "duck_creative_agent" / "viewer.py"
+DESIGN_BRIEF_QUEUE_DOC_PATH = DUCK_AGENT_ROOT / "docs" / "current_system" / "DESIGN_BRIEF_QUEUE_PLAN.md"
+BUSINESS_OPERATOR_DESK_PATH = DUCK_OPS_ROOT / "runtime" / "business_operator_desk.py"
+README_PATH = DUCK_OPS_ROOT / "README.md"
+
+GOVERNANCE_SOURCE_PATHS = {
+    "tech_debt_triage": TECH_DEBT_TRIAGE_PATH,
+    "reliability_review": RELIABILITY_REVIEW_PATH,
+    "data_model_governance_review": DATA_MODEL_GOVERNANCE_REVIEW_PATH,
+    "documentation_governance_review": DOCUMENTATION_GOVERNANCE_REVIEW_PATH,
+}
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat()
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed.astimezone(timezone.utc)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -30,6 +61,19 @@ def _load_json(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _payload_generated_at(path: Path) -> datetime | None:
+    payload = _load_json(path)
+    return _parse_iso(payload.get("generated_at"))
+
+
+def _file_contains(path: Path, markers: list[str]) -> bool:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    return all(marker in text for marker in markers)
 
 
 def _score(*, impact: int, urgency: int, confidence: int, effort: int) -> float:
@@ -49,6 +93,9 @@ def _candidate(
     owner_skill: str,
     constraints: list[str] | None = None,
     source: str = "curated",
+    lifecycle_status: str = "open",
+    lifecycle_reason: str | None = None,
+    evidence: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "candidate_id": candidate_id,
@@ -65,11 +112,101 @@ def _candidate(
         "owner_skill": owner_skill,
         "constraints": list(constraints or []),
         "source": source,
+        "lifecycle_status": lifecycle_status,
+        "lifecycle_reason": lifecycle_reason,
+        "evidence": list(evidence or []),
     }
+
+
+def _source_review_newer_than_digest(source: str, digest_generated_at: datetime | None) -> bool:
+    if digest_generated_at is None:
+        return False
+    source_path = GOVERNANCE_SOURCE_PATHS.get(source)
+    if source_path is None:
+        return False
+    source_generated_at = _payload_generated_at(source_path)
+    return bool(source_generated_at and source_generated_at > digest_generated_at)
+
+
+def _completion_evidence(candidate_id: str) -> dict[str, Any] | None:
+    if candidate_id == "semantic-visual-qa" and _file_contains(
+        CREATIVE_POLICIES_PATH,
+        ["def run_semantic_visual_qa", "semantic_visual_review", "DUCK_SEMANTIC_VISUAL_QA"],
+    ):
+        return {
+            "lifecycle_status": "completed",
+            "lifecycle_reason": "Semantic visual QA is implemented in the creative policy gate and now surfaces a semantic_visual_review check.",
+            "evidence": [str(CREATIVE_POLICIES_PATH)],
+        }
+
+    if candidate_id == "design-brief-source-hygiene" and _file_contains(
+        CREATIVE_TASKS_PATH,
+        ["def _filter_public_design_brief_input", "filtered_private_signals"],
+    ):
+        return {
+            "lifecycle_status": "completed",
+            "lifecycle_reason": "Design brief queue input now filters private custom-build signals before prompt/fallback construction.",
+            "evidence": [str(CREATIVE_TASKS_PATH), str(DESIGN_BRIEF_QUEUE_DOC_PATH)],
+        }
+
+    if candidate_id == "maintenance-freshness-desk" and _file_contains(
+        BUSINESS_OPERATOR_DESK_PATH,
+        ["def _load_maintenance_freshness_surface", "maintenance_freshness_surface"],
+    ):
+        return {
+            "lifecycle_status": "completed",
+            "lifecycle_reason": "Business Desk now has a maintenance freshness surface with generated-at age, stale flags, and top actions.",
+            "evidence": [str(BUSINESS_OPERATOR_DESK_PATH), str(README_PATH)],
+        }
+
+    if candidate_id == "concept-to-print-gated-workflow" and _file_contains(
+        CREATIVE_VIEWER_DATA_PATH,
+        ["def record_run_concept_image_reply", "concept_image_reply_receipt.json"],
+    ) and _file_contains(CREATIVE_VIEWER_PATH, ["characterPrintPipeline"]):
+        return {
+            "lifecycle_status": "active_followup",
+            "lifecycle_reason": "The approval gates exist; the remaining high-ROI slice is proving one real character concept through the gated path.",
+            "evidence": [str(CREATIVE_VIEWER_DATA_PATH), str(CREATIVE_VIEWER_PATH)],
+        }
+
+    return None
+
+
+def _apply_lifecycle(candidate: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = str(candidate.get("candidate_id") or "")
+    evidence = _completion_evidence(candidate_id)
+    if not evidence:
+        return candidate
+
+    updated = dict(candidate)
+    updated.update(evidence)
+    if evidence.get("lifecycle_status") == "active_followup" and candidate_id == "concept-to-print-gated-workflow":
+        updated.update(
+            {
+                "title": "First character concept-to-print pilot",
+                "why_now": (
+                    "The viewer gates are in place; the next return comes from proving one operator-approved "
+                    "character image can move cleanly toward paid 3D handoff and print review."
+                ),
+                "recommended_next_slice": (
+                    "Run one Little Lulu-style character duck through concept-image approval, 3D handoff readiness, "
+                    "paint-to-print conversion prep, and Bambu review without auto-spending credits."
+                ),
+                "score_breakdown": {
+                    "impact": 5,
+                    "urgency": 3,
+                    "confidence": 4,
+                    "effort": 4,
+                    "roi_score": _score(impact=5, urgency=3, confidence=4, effort=4),
+                },
+            }
+        )
+    return updated
 
 
 def _governance_candidates() -> list[dict[str, Any]]:
     payload = _load_json(GOVERNANCE_PATH)
+    digest_generated_at = _parse_iso(payload.get("generated_at"))
     recommendations = payload.get("review_recommendations") if isinstance(payload.get("review_recommendations"), list) else []
     items: list[dict[str, Any]] = []
     priority_map = {"P1": 5, "P2": 4, "P3": 3}
@@ -81,22 +218,53 @@ def _governance_candidates() -> list[dict[str, Any]]:
         title = str(item.get("title") or "Governance recommendation").strip()
         summary = str(item.get("summary") or item.get("next_action") or "").strip()
         owner_skill = str(item.get("suggested_owner_skill") or "duck-reliability-review").strip()
-        items.append(
-            _candidate(
-                candidate_id=f"governance-{idx}",
-                title=title,
-                why_now=summary or f"Engineering governance marked this as {priority}.",
-                recommended_next_slice=str(item.get("next_action") or "Turn this governance recommendation into a bounded implementation slice.").strip(),
-                impact=4 if priority == "P1" else 3,
-                urgency=urgency,
-                confidence=4,
-                effort=3,
-                owner_skill=owner_skill,
-                constraints=["Respect observe-only mode unless the recommendation explicitly calls for code changes."],
-                source="engineering_governance_digest",
+        source = str(item.get("source") or "engineering_governance_digest").strip()
+        lifecycle_status = "open"
+        lifecycle_reason = None
+        if _source_review_newer_than_digest(source, digest_generated_at):
+            lifecycle_status = "stale_source_superseded"
+            lifecycle_reason = (
+                f"Skipped because `{source}` was regenerated after the engineering governance digest; "
+                "the digest recommendation may no longer reflect the current source review."
             )
+        candidate = _candidate(
+            candidate_id=f"governance-{idx}",
+            title=title,
+            why_now=summary or f"Engineering governance marked this as {priority}.",
+            recommended_next_slice=str(item.get("next_action") or "Turn this governance recommendation into a bounded implementation slice.").strip(),
+            impact=4 if priority == "P1" else 3,
+            urgency=urgency,
+            confidence=4,
+            effort=3,
+            owner_skill=owner_skill,
+            constraints=["Respect observe-only mode unless the recommendation explicitly calls for code changes."],
+            source="engineering_governance_digest",
+            lifecycle_status=lifecycle_status,
+            lifecycle_reason=lifecycle_reason,
+            evidence=[str(GOVERNANCE_PATH), str(GOVERNANCE_SOURCE_PATHS.get(source))] if source in GOVERNANCE_SOURCE_PATHS else [str(GOVERNANCE_PATH)],
         )
+        candidate["source_review"] = source
+        items.append(candidate)
     return items
+
+
+def _governance_digest_refresh_candidate(suppressed_items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not suppressed_items:
+        return None
+    sources = sorted({str(item.get("source_review") or item.get("source") or "source") for item in suppressed_items})
+    return _candidate(
+        candidate_id="engineering-governance-digest-refresh",
+        title="Refresh engineering governance digest",
+        why_now="ROI suppressed stale governance recommendations because their source review files are newer than the digest.",
+        recommended_next_slice="Run `python3 runtime/engineering_governance_digest.py` after the observe-only reviews so ROI and Business Desk rank current findings.",
+        impact=3,
+        urgency=3,
+        confidence=5,
+        effort=5,
+        owner_skill="duck-data-model-governance",
+        constraints=[f"Stale source(s): {', '.join(sources)}."],
+        source="roi_triage_guard",
+    )
 
 
 def _scheduler_candidate() -> dict[str, Any] | None:
@@ -261,8 +429,24 @@ def build_roi_triage(*, write_outputs: bool = True) -> dict[str, Any]:
     candidates.extend(_roadmap_candidates())
     candidates.extend(_curated_candidates())
 
+    annotated_candidates = [_apply_lifecycle(candidate) for candidate in candidates]
+    completed_items = [
+        item for item in annotated_candidates if str(item.get("lifecycle_status") or "open") == "completed"
+    ]
+    suppressed_items = [
+        item for item in annotated_candidates if str(item.get("lifecycle_status") or "open") == "stale_source_superseded"
+    ]
+    active_candidates = [
+        item
+        for item in annotated_candidates
+        if str(item.get("lifecycle_status") or "open") not in {"completed", "stale_source_superseded"}
+    ]
+    refresh_candidate = _governance_digest_refresh_candidate(suppressed_items)
+    if refresh_candidate:
+        active_candidates.append(refresh_candidate)
+
     deduped: dict[str, dict[str, Any]] = {}
-    for candidate in candidates:
+    for candidate in active_candidates:
         key = str(candidate.get("title") or candidate.get("candidate_id") or "").lower()
         current = deduped.get(key)
         if not current or float(candidate["score_breakdown"]["roi_score"]) > float(current["score_breakdown"]["roi_score"]):
@@ -282,9 +466,11 @@ def build_roi_triage(*, write_outputs: bool = True) -> dict[str, Any]:
 
     payload = {
         "generated_at": generated_at,
-        "surface_version": 1,
+        "surface_version": 2,
         "summary": {
             "candidate_count": len(ranked),
+            "completed_count": len(completed_items),
+            "stale_recommendation_count": len(suppressed_items),
             "top_score": (ranked[0].get("score_breakdown") or {}).get("roi_score") if ranked else 0,
             "top_title": ranked[0].get("title") if ranked else None,
             "headline": (
@@ -299,6 +485,8 @@ def build_roi_triage(*, write_outputs: bool = True) -> dict[str, Any]:
             ),
         },
         "recommendations": ranked[:8],
+        "recently_completed": completed_items[:8],
+        "suppressed_recommendations": suppressed_items[:8],
     }
     if write_outputs:
         STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -315,6 +503,8 @@ def render_roi_triage_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- Generated at: `{payload.get('generated_at')}`",
         f"- Candidate count: `{summary.get('candidate_count', 0)}`",
+        f"- Recently completed / filtered: `{summary.get('completed_count', 0)}`",
+        f"- Stale governance signals suppressed: `{summary.get('stale_recommendation_count', 0)}`",
         f"- Top score: `{summary.get('top_score', 0)}`",
         f"- Headline: {summary.get('headline') or 'No headline.'}",
         f"- Recommended action: {summary.get('recommended_action') or 'No action available.'}",
@@ -331,6 +521,22 @@ def render_roi_triage_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"   - Next slice: {item.get('recommended_next_slice')}")
         if item.get("constraints"):
             lines.append(f"   - Constraints: {'; '.join(str(value) for value in item.get('constraints') or [])}")
+
+    completed_items = [item for item in list(payload.get("recently_completed") or []) if isinstance(item, dict)]
+    if completed_items:
+        lines.extend(["", "## Recently Completed / Filtered", ""])
+        for item in completed_items[:8]:
+            lines.append(f"- {item.get('title')} | `{item.get('candidate_id')}`")
+            if item.get("lifecycle_reason"):
+                lines.append(f"  - Reason: {item.get('lifecycle_reason')}")
+
+    suppressed_items = [item for item in list(payload.get("suppressed_recommendations") or []) if isinstance(item, dict)]
+    if suppressed_items:
+        lines.extend(["", "## Suppressed Stale Signals", ""])
+        for item in suppressed_items[:8]:
+            lines.append(f"- {item.get('title')} | source review `{item.get('source_review') or item.get('source')}`")
+            if item.get("lifecycle_reason"):
+                lines.append(f"  - Reason: {item.get('lifecycle_reason')}")
     return "\n".join(lines).rstrip() + "\n"
 
 

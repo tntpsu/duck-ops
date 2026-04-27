@@ -92,9 +92,9 @@ normalized state in multiple places.
 
 ROI triage and maintenance freshness are now first-class Business Desk surfaces:
 
-- `runtime/roi_triage.py` ranks the next DuckAgent/Duck Ops work by impact, urgency, confidence, and effort.
+- `runtime/roi_triage.py` ranks open DuckAgent/Duck Ops work by impact, urgency, confidence, and effort, while filtering completed slices and suppressing stale governance-digest recommendations when fresher source reviews disagree.
 - `state/roi_triage.json` and `output/operator/roi_triage.md` are the canonical ROI triage outputs.
-- Business Desk surfaces `ROI Triage` and `Maintenance Freshness` so the morning email can show both the highest-return next slice and whether OS reports are fresh enough to trust.
+- Business Desk surfaces `ROI Triage` and `Maintenance Freshness` so the morning email can show the highest-return next slice, recently completed work, stale signals that were ignored, and whether OS reports are fresh enough to trust.
 
 Etsy inbox truth-sync is now available as a dedicated OpenClaw lane:
 
