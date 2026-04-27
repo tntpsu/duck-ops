@@ -988,6 +988,10 @@ def render_promotion_readiness_markdown(payload: dict[str, Any]) -> str:
         )
         if item.get("summary"):
             lines.append(f"  Why: {item.get('summary')}")
+        if item.get("control_summary"):
+            lines.append(f"  Control: {item.get('control_summary')}")
+        if item.get("approval_boundary"):
+            lines.append(f"  Boundary: {item.get('approval_boundary')}")
         if item.get("recommended_action"):
             lines.append(f"  Next: {item.get('recommended_action')}")
         for entry in list(item.get("evidence") or [])[:4]:

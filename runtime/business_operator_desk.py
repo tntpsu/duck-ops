@@ -43,6 +43,49 @@ MEME_POLICY_PROMOTION_THRESHOLD = 3
 REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD = 3
 JEEPFACT_POLICY_PROMOTION_THRESHOLD = 3
 
+PROMOTION_CONTROL_METADATA = {
+    "weekly_sale_auto_apply": {
+        "owner": "duckAgent",
+        "target_mode": "auto_apply_shopify",
+        "allowed_tier": "Tier 3 after explicit operator promotion",
+        "risk_class": "approval-gated production mutation",
+        "side_effect": "Shopify sale updates",
+        "approval_boundary": "Duck Ops may recommend promotion, but DuckAgent must not flip the mode or apply Shopify changes without explicit operator approval.",
+    },
+    "meme_auto_schedule": {
+        "owner": "duckAgent",
+        "target_mode": "auto_schedule_meta",
+        "allowed_tier": "Tier 3 after explicit operator promotion",
+        "risk_class": "approval-gated production mutation",
+        "side_effect": "Meta post scheduling",
+        "approval_boundary": "Duck Ops may recommend promotion, but DuckAgent must not schedule without the lane's approved policy gate or explicit operator approval.",
+    },
+    "review_carousel_auto_schedule": {
+        "owner": "duckAgent",
+        "target_mode": "auto_schedule_instagram",
+        "allowed_tier": "Tier 3 after explicit operator promotion",
+        "risk_class": "approval-gated production mutation",
+        "side_effect": "Instagram review carousel scheduling",
+        "approval_boundary": "Duck Ops may recommend promotion, but DuckAgent must keep the email publish gate until the operator promotes the lane.",
+    },
+    "jeepfact_auto_schedule": {
+        "owner": "duckAgent",
+        "target_mode": "auto_schedule_meta",
+        "allowed_tier": "Tier 3 after explicit operator promotion",
+        "risk_class": "approval-gated production mutation",
+        "side_effect": "Meta Jeep Fact scheduling",
+        "approval_boundary": "Duck Ops may recommend promotion, but DuckAgent must keep the email publish gate until the operator promotes the lane.",
+    },
+    "review_reply_auto_execution": {
+        "owner": "duck-ops",
+        "target_mode": "auto_execution_enabled",
+        "allowed_tier": "Tier 3 manual only while Etsy browser risk remains elevated",
+        "risk_class": "browser-heavy Etsy mutation",
+        "side_effect": "Etsy review reply submission",
+        "approval_boundary": "Duck Ops may queue and review replies, but Etsy browser submission must stay manually supervised until cooldown and failure signals are clean.",
+    },
+}
+
 
 WEEKLY_SALE_POLICY_REASON_LABELS = {
     "approval_gated_mode": "Manual review mode is still the only remaining gate.",
@@ -129,6 +172,28 @@ def _jeepfact_policy_reason_text(value: Any) -> str:
     if not key:
         return ""
     return JEEPFACT_POLICY_REASON_LABELS.get(key, key.replace("_", " "))
+
+
+def _with_promotion_controls(candidate: dict[str, Any], *, current_mode: str | None = None) -> dict[str, Any]:
+    promotion_id = str(candidate.get("promotion_id") or "").strip()
+    metadata = PROMOTION_CONTROL_METADATA.get(promotion_id, {})
+    allowed_tier = str(metadata.get("allowed_tier") or "Tier 3 after explicit operator promotion")
+    side_effect = str(metadata.get("side_effect") or "production mutation")
+    candidate.update(
+        {
+            "promotion_owner": str(metadata.get("owner") or "duckAgent"),
+            "promotion_allowed_tier": allowed_tier,
+            "promotion_risk_class": str(metadata.get("risk_class") or "approval-gated production mutation"),
+            "promotion_side_effect": side_effect,
+            "promotion_requires_operator_approval": True,
+            "promotion_can_self_promote": False,
+            "current_mode": current_mode,
+            "target_mode": str(metadata.get("target_mode") or "").strip() or None,
+            "approval_boundary": str(metadata.get("approval_boundary") or "").strip() or None,
+            "control_summary": f"{allowed_tier}; operator approval required; {side_effect}.",
+        }
+    )
+    return candidate
 
 
 def _load_weekly_sale_policy_surface() -> dict[str, Any]:
@@ -268,7 +333,7 @@ def _weekly_sale_policy_promotion_candidate(policy_surface: dict[str, Any]) -> d
     elif review_reasons:
         evidence.extend(review_reasons[:2])
 
-    return {
+    return _with_promotion_controls({
         "promotion_id": "weekly_sale_auto_apply",
         "lane": "weekly_sale_policy",
         "title": "Weekly sale auto-apply",
@@ -289,7 +354,7 @@ def _weekly_sale_policy_promotion_candidate(policy_surface: dict[str, Any]) -> d
         "blockers": blockers[:3],
         "manual_review_reasons": review_reasons[:3],
         "evidence": evidence[:4],
-    }
+    }, current_mode=mode)
 
 
 def _load_meme_policy_surface() -> dict[str, Any]:
@@ -424,7 +489,7 @@ def _meme_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict[str
     elif review_reasons:
         evidence.extend(review_reasons[:2])
 
-    return {
+    return _with_promotion_controls({
         "promotion_id": "meme_auto_schedule",
         "lane": "meme_policy",
         "title": "Meme Monday auto-schedule",
@@ -445,7 +510,7 @@ def _meme_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict[str
         "blockers": blockers[:3],
         "manual_review_reasons": review_reasons[:3],
         "evidence": evidence[:4],
-    }
+    }, current_mode=mode)
 
 
 def _load_review_carousel_policy_surface() -> dict[str, Any]:
@@ -580,7 +645,7 @@ def _review_carousel_policy_promotion_candidate(policy_surface: dict[str, Any]) 
     elif review_reasons:
         evidence.extend(review_reasons[:2])
 
-    return {
+    return _with_promotion_controls({
         "promotion_id": "review_carousel_auto_schedule",
         "lane": "review_carousel_policy",
         "title": "Tuesday review carousel auto-schedule",
@@ -601,7 +666,7 @@ def _review_carousel_policy_promotion_candidate(policy_surface: dict[str, Any]) 
         "blockers": blockers[:3],
         "manual_review_reasons": review_reasons[:3],
         "evidence": evidence[:4],
-    }
+    }, current_mode=mode)
 
 
 def _load_jeepfact_policy_surface() -> dict[str, Any]:
@@ -736,7 +801,7 @@ def _jeepfact_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict
     elif review_reasons:
         evidence.extend(review_reasons[:2])
 
-    return {
+    return _with_promotion_controls({
         "promotion_id": "jeepfact_auto_schedule",
         "lane": "jeepfact_policy",
         "title": "Jeep Fact Wednesday auto-schedule",
@@ -757,7 +822,7 @@ def _jeepfact_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict
         "blockers": blockers[:3],
         "manual_review_reasons": review_reasons[:3],
         "evidence": evidence[:4],
-    }
+    }, current_mode=mode)
 
 
 def _load_promotion_watch_surface(
@@ -873,7 +938,8 @@ def _review_reply_execution_promotion_candidate(surface: dict[str, Any]) -> dict
             else "Browser guard is clear right now."
         ),
     ]
-    return {
+    current_mode = "auto_execution_enabled" if auto_execution_enabled else "manual_supervision"
+    return _with_promotion_controls({
         "promotion_id": "review_reply_auto_execution",
         "lane": "review_reply_execution",
         "title": "Etsy review auto-execution",
@@ -893,7 +959,7 @@ def _review_reply_execution_promotion_candidate(surface: dict[str, Any]) -> dict
         "blockers": [entry for entry in [block_reason, blocked_until] if entry],
         "manual_review_reasons": ["browser automation remains intentionally gated"] if not auto_execution_enabled else [],
         "evidence": evidence[:4],
-    }
+    }, current_mode=current_mode)
 
 
 def _seo_review_chain_item(seo_outcomes: dict[str, Any]) -> dict[str, Any] | None:
@@ -2628,6 +2694,10 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 )
                 if item.get("summary"):
                     lines.append(f"    Why: {_trim_text(item.get('summary'), 170)}")
+                if item.get("control_summary"):
+                    lines.append(f"    Control: {_trim_text(item.get('control_summary'), 170)}")
+                if item.get("approval_boundary"):
+                    lines.append(f"    Boundary: {_trim_text(item.get('approval_boundary'), 170)}")
                 if item.get("recommended_action"):
                     lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
     lines.extend([
@@ -3824,6 +3894,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                     )
                     if item.get("summary"):
                         lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
+                    if item.get("control_summary"):
+                        lines.append(f"  Control: {_trim_text(item.get('control_summary'), 180)}")
+                    if item.get("approval_boundary"):
+                        lines.append(f"  Boundary: {_trim_text(item.get('approval_boundary'), 180)}")
                     if item.get("recommended_action"):
                         lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
         return "\n".join(lines)

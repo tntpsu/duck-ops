@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-04-20
+Last updated: 2026-04-27
 
 Detailed execution sequence:
 - [ROADMAP_EXECUTION_SEQUENCE.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/ROADMAP_EXECUTION_SEQUENCE.md)
@@ -86,6 +86,7 @@ Detailed execution sequence:
   - weekly data-model governance review
   - weekly documentation-governance review
 - Governance digest email delivery is smoke-tested, so the observe/propose recommendation channel is live.
+- Business Desk promotion watch now covers the current approval-policy lanes and is being hardened into the explicit autonomy-readiness gate before any lane graduates toward auto-action.
 
 ### 9. Social Strategy Intelligence Layer
 - Own-post social performance collection is live from DuckAgent post receipts.
@@ -119,7 +120,23 @@ Detailed execution sequence:
 
 ## Highest-Value Open Work
 
-### Priority 1: Outcome Learning Layer Expansion
+### Priority 1: Agent OS Promotion Readiness Gate
+The highest-ROI Agent OS work is making Business Desk promotion readiness the explicit gate between supervised approval lanes and controlled auto-action.
+
+The promotion surface should show:
+1. which lane is being considered
+2. who owns the executor
+3. what side effect the promoted mode would allow
+4. what tier and approval boundary applies
+5. whether the lane is observing, blocked, ready, or already active
+6. which evidence and config path support the recommendation
+
+Why this is high value:
+- Weekly sale, Meme Monday, Tuesday review carousel, and Jeep Fact Wednesday are all converging on the same approval-policy pattern.
+- We need one place to answer “is this safe to automate?” instead of per-lane folklore.
+- Clean gated runs should notify the operator, not silently become permission to mutate production systems.
+
+### Priority 2: Outcome Learning Layer Expansion
 The social learning foundation is now live. The next high-value work is extending that same discipline into the remaining business outcomes:
 1. Feed weekly slot execution feedback into current learnings and change detection so the system shows what actually changed week over week.
 2. SEO outcome monitoring so we can see whether metadata changes move traffic, clicks, or ranking surfaces.
@@ -132,12 +149,12 @@ Why this is high value:
 - That makes it finally worth learning from outcomes instead of just automating actions.
 - It also gives us a disciplined way to borrow strong ideas from competitors instead of guessing when to shift content strategy.
 
-### Priority 2: Social Strategy Hardening
+### Priority 3: Social Strategy Hardening
 - Improve cross-channel post coverage so Instagram and Facebook outcomes stay comparable when both publish.
 - Feed weekly strategy execution truth into current learnings, governance digest, and change-notifier surfaces.
 - Turn manual experiments into first-class lanes only after repeated execution and outcome evidence justify it.
 
-### Priority 3: Expand SEO Audit Intelligence
+### Priority 4: Expand SEO Audit Intelligence
 Current audit checks:
 - missing SEO title
 - missing SEO description
@@ -153,18 +170,18 @@ Best next SEO heuristics to add:
 - SEO titles too close to raw product titles
 - low-value page/article SEO copy
 
-### Priority 4: Etsy Conversation Closure Truth
+### Priority 5: Etsy Conversation Closure Truth
 - We are much better at discovery and direct links now.
 - But manual Etsy replies still depend on the next inbox refresh to be fully recognized as waiting-on-customer or resolved.
 - Best next step here is a lightweight recapture/closure reconciliation pass for active customer threads.
 
-### Priority 5: Expired Etsy Relist Lane
+### Priority 6: Expired Etsy Relist Lane
 - Logic exists for safe relisting rules:
   - max 3 renewals per day
   - only listings with at least one prior sale
 - This still needs careful rollout around Etsy bot-sensitivity and browser pacing.
 
-### Priority 6: Operationalize Product Engineering Skills
+### Priority 7: Operationalize Product Engineering Skills
 The reusable skill layer now exists. The next job is to use it consistently instead of letting it sit as documentation.
 
 Key uses next:
@@ -202,9 +219,10 @@ Why this matters:
 - Use the steadier competitor signal plus the new learnings notifier to sharpen the weekly experiment list and promotion-readiness calls.
 - Keep the recommendations explicit: what stayed stable, what is worth testing once, and what should not be copied.
 
-### 3. Carry Approval-Policy Promotion Watch To The Next Safe Social Lane
-- Weekly sale and Meme Monday now share the policy/watch/promote pattern; the next step is to decide which social lane earns that treatment next without widening automation too fast.
-- Keep the same model: supervised first, evidence in workflow control, promotion surfaced in the business desk, and default-off until the streak is clean.
+### 3. Harden Promotion Watch Into The Autonomy Gate
+- Weekly sale, Meme Monday, Tuesday review carousel, and Jeep Fact Wednesday now share the policy/watch/promote pattern.
+- The next step is to ensure every promotion candidate names the owner, side effect, allowed tier, approval boundary, current mode, target mode, and source config before the operator is asked to promote anything.
+- Keep the same model: supervised first, evidence in workflow control, promotion surfaced in the business desk, and default-off until the operator explicitly approves the mode change.
 
 ## Lower-Priority / Nice-to-Have
 - Continue backfilling more exact Etsy `/messages/<id>` URLs.
