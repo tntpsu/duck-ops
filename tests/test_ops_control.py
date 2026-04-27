@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,13 +17,14 @@ import ops_control
 class OpsControlTests(unittest.TestCase):
     def test_sync_ops_control_marks_backlog_present(self) -> None:
         calls: list[dict] = []
+        generated_at = datetime.now().astimezone().isoformat()
         customer_queue = {
-            "generated_at": "2026-04-12T09:00:00-04:00",
+            "generated_at": generated_at,
             "counts": {"operator_queue_items": 3},
             "items": [{}, {}, {}],
         }
         review_queue = {
-            "generated_at": "2026-04-12T09:05:00-04:00",
+            "generated_at": generated_at,
             "pending_count": 1,
             "items": [{}],
         }
@@ -35,13 +37,14 @@ class OpsControlTests(unittest.TestCase):
 
     def test_sync_ops_control_marks_desk_ready(self) -> None:
         calls: list[dict] = []
+        generated_at = datetime.now().astimezone().isoformat()
         customer_queue = {
-            "generated_at": "2026-04-12T09:00:00-04:00",
+            "generated_at": generated_at,
             "counts": {"operator_queue_items": 0},
             "items": [],
         }
         review_queue = {
-            "generated_at": "2026-04-12T09:05:00-04:00",
+            "generated_at": generated_at,
             "pending_count": 0,
             "items": [],
         }

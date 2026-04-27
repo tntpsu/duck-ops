@@ -147,6 +147,11 @@ class NotifierEmailRenderingTests(unittest.TestCase):
                         "progress_label": "3/3 clean gated run(s)",
                         "summary": "Weekly sale policy is ready for promotion after 3 clean gated run(s).",
                         "recommended_action": "Flip the mode to auto_apply_shopify and supervise the next Sunday run.",
+                        "control_summary": "Tier 3 after explicit operator promotion; operator approval required; Shopify sale updates.",
+                        "approval_boundary": "Duck Ops may recommend promotion, but DuckAgent must not flip the mode without explicit operator approval.",
+                        "promotion_owner": "duckAgent",
+                        "current_mode": "approval_gated",
+                        "target_mode": "auto_apply_shopify",
                         "source_path": "/tmp/weekly_sale_execution.json",
                         "evidence": [
                             "Clean gated streak 3/3.",
@@ -160,6 +165,10 @@ class NotifierEmailRenderingTests(unittest.TestCase):
         self.assertIn("Weekly sale auto-apply", html)
         self.assertIn("3/3 clean gated run(s)", html)
         self.assertIn("Flip the mode to auto_apply_shopify", html)
+        self.assertIn("Tier 3 after explicit operator promotion", html)
+        self.assertIn("Duck Ops may recommend promotion", html)
+        self.assertIn("owner=duckAgent", html)
+        self.assertIn("target=auto_apply_shopify", html)
         self.assertNotIn("<pre", html)
 
     def test_learning_change_html_uses_change_cards(self) -> None:

@@ -356,7 +356,7 @@ class CompetitorSocialSnapshotCollectorTests(unittest.TestCase):
                             "max_accounts_per_run": 10,
                             "latest_posts_per_account": 2,
                             "refresh_bucket_count": 8,
-                            "force_refresh_after_hours": 96,
+                            "force_refresh_after_hours": 9999,
                         },
                         "seed_accounts": [
                             {
@@ -507,7 +507,7 @@ class CompetitorSocialSnapshotCollectorTests(unittest.TestCase):
                             "max_accounts_per_run": 10,
                             "latest_posts_per_account": 2,
                             "refresh_bucket_count": 1,
-                            "force_refresh_after_hours": 96,
+                            "force_refresh_after_hours": 9999,
                             "profile_only_backoff_hours": 168,
                         },
                         "seed_accounts": [
@@ -593,7 +593,7 @@ class CompetitorSocialSnapshotCollectorTests(unittest.TestCase):
                             "max_accounts_per_run": 10,
                             "latest_posts_per_account": 2,
                             "refresh_bucket_count": 1,
-                            "force_refresh_after_hours": 96,
+                            "force_refresh_after_hours": 9999,
                             "profile_only_backoff_hours": 168,
                             "max_live_canary_targets": 1,
                         },

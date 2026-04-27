@@ -1103,6 +1103,14 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertEqual(payload["counts"]["meme_policy_promote_ready"], 1)
         self.assertEqual(payload["counts"]["promotion_candidates"], 1)
         self.assertEqual(payload["counts"]["promotion_ready_candidates"], 1)
+        candidate = payload["promotion_watch_surface"]["items"][0]
+        self.assertEqual(candidate["promotion_id"], "meme_auto_schedule")
+        self.assertEqual(candidate["promotion_owner"], "duckAgent")
+        self.assertEqual(candidate["promotion_side_effect"], "Meta post scheduling")
+        self.assertEqual(candidate["current_mode"], "approval_gated")
+        self.assertEqual(candidate["target_mode"], "auto_schedule_meta")
+        self.assertFalse(candidate["promotion_can_self_promote"])
+        self.assertIn("Duck Ops may recommend promotion", candidate["approval_boundary"])
         action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "meme_policy")
         self.assertEqual(action["title"], "Promote Meme Monday auto-schedule")
         self.assertIn("3 clean gated run", action["summary"])
@@ -1110,6 +1118,145 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("ready for promotion after 3 clean gated run", markdown)
         self.assertIn("Duck Ops Meme Monday Policy", meme_policy_section)
         self.assertIn("Clean gated streak: 3", meme_policy_section)
+
+    def test_operator_desk_surfaces_review_carousel_policy_promotion_contract(self) -> None:
+        with (
+            patch("business_operator_desk._load_weekly_sale_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_meme_policy_surface", return_value={"available": False}),
+            patch(
+                "business_operator_desk._load_review_carousel_policy_surface",
+                return_value={
+                    "available": True,
+                    "path": "/tmp/review_carousel_execution.json",
+                    "mode": "approval_gated",
+                    "promotion_threshold": 3,
+                    "clean_gated_streak": 3,
+                    "blocked_recent_count": 0,
+                    "auto_schedule_eligible_recent_count": 0,
+                    "promote_ready": True,
+                    "readiness_headline": "Tuesday review carousel policy is ready for promotion after 3 clean gated run(s).",
+                    "recommended_action": "Flip `review_carousel_execution.json` from `approval_gated` to `auto_schedule_instagram`, then supervise the next Tuesday run.",
+                    "recent_runs": [{"decision": "manual_review_required", "manual_review_reasons": ["approval_gated_mode"]}],
+                },
+            ),
+            patch("business_operator_desk._load_jeepfact_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_review_reply_execution_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_seo_outcome_surface", return_value={"available": False}),
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        candidate = payload["promotion_watch_surface"]["items"][0]
+        self.assertEqual(candidate["promotion_id"], "review_carousel_auto_schedule")
+        self.assertEqual(candidate["promotion_state"], "ready")
+        self.assertEqual(candidate["promotion_owner"], "duckAgent")
+        self.assertEqual(candidate["promotion_side_effect"], "Instagram review carousel scheduling")
+        self.assertEqual(candidate["current_mode"], "approval_gated")
+        self.assertEqual(candidate["target_mode"], "auto_schedule_instagram")
+        self.assertFalse(candidate["promotion_can_self_promote"])
+        self.assertIn("email publish gate", candidate["approval_boundary"])
+        self.assertIn("Tuesday review carousel", render_business_section(payload, "promotion"))
+
+    def test_operator_desk_surfaces_jeepfact_policy_promotion_contract(self) -> None:
+        with (
+            patch("business_operator_desk._load_weekly_sale_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_meme_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_review_carousel_policy_surface", return_value={"available": False}),
+            patch(
+                "business_operator_desk._load_jeepfact_policy_surface",
+                return_value={
+                    "available": True,
+                    "path": "/tmp/jeepfact_execution.json",
+                    "mode": "approval_gated",
+                    "promotion_threshold": 3,
+                    "clean_gated_streak": 3,
+                    "blocked_recent_count": 0,
+                    "auto_schedule_eligible_recent_count": 0,
+                    "promote_ready": True,
+                    "readiness_headline": "Jeep Fact Wednesday policy is ready for promotion after 3 clean gated run(s).",
+                    "recommended_action": "Flip `jeepfact_execution.json` from `approval_gated` to `auto_schedule_meta`, then supervise the next Wednesday run.",
+                    "recent_runs": [{"decision": "manual_review_required", "manual_review_reasons": ["approval_gated_mode"]}],
+                },
+            ),
+            patch("business_operator_desk._load_review_reply_execution_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_seo_outcome_surface", return_value={"available": False}),
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        candidate = payload["promotion_watch_surface"]["items"][0]
+        self.assertEqual(candidate["promotion_id"], "jeepfact_auto_schedule")
+        self.assertEqual(candidate["promotion_state"], "ready")
+        self.assertEqual(candidate["promotion_owner"], "duckAgent")
+        self.assertEqual(candidate["promotion_side_effect"], "Meta Jeep Fact scheduling")
+        self.assertEqual(candidate["current_mode"], "approval_gated")
+        self.assertEqual(candidate["target_mode"], "auto_schedule_meta")
+        self.assertFalse(candidate["promotion_can_self_promote"])
+        self.assertIn("email publish gate", candidate["approval_boundary"])
+        self.assertIn("Jeep Fact Wednesday", render_business_section(payload, "promotion"))
+
+    def test_operator_desk_surfaces_etsy_review_execution_as_blocked_promotion_contract(self) -> None:
+        with (
+            patch("business_operator_desk._load_weekly_sale_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_meme_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_review_carousel_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_jeepfact_policy_surface", return_value={"available": False}),
+            patch(
+                "business_operator_desk._load_review_reply_execution_surface",
+                return_value={
+                    "available": True,
+                    "path": "/tmp/review_reply_execution.json",
+                    "auto_execution_enabled": False,
+                    "auto_queue_enabled": True,
+                    "auto_drain_enabled": False,
+                    "browser_guard": {
+                        "blocked": True,
+                        "blocked_until": "2026-04-27T12:00:00-04:00",
+                        "block_reason": "etsy_browser_cooldown",
+                    },
+                },
+            ),
+            patch("business_operator_desk._load_seo_outcome_surface", return_value={"available": False}),
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        candidate = payload["promotion_watch_surface"]["items"][0]
+        self.assertEqual(candidate["promotion_id"], "review_reply_auto_execution")
+        self.assertEqual(candidate["promotion_state"], "blocked")
+        self.assertEqual(candidate["promotion_owner"], "duck-ops")
+        self.assertEqual(candidate["promotion_allowed_tier"], "Tier 3 manual only while Etsy browser risk remains elevated")
+        self.assertEqual(candidate["promotion_risk_class"], "browser-heavy Etsy mutation")
+        self.assertEqual(candidate["promotion_side_effect"], "Etsy review reply submission")
+        self.assertEqual(candidate["current_mode"], "manual_supervision")
+        self.assertEqual(candidate["target_mode"], "auto_execution_enabled")
+        self.assertFalse(candidate["promotion_can_self_promote"])
+        self.assertIn("Etsy browser submission must stay manually supervised", candidate["approval_boundary"])
+        self.assertEqual(payload["counts"]["promotion_blocked_candidates"], 1)
 
     def test_operator_desk_adds_learning_next_action_when_material_changes_exist(self) -> None:
         with patch(
@@ -1161,6 +1308,16 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                     "change_count": 2,
                     "idea_count": 3,
                     "items": [{"headline": "Fallback belief should not be used."}],
+                    "weekly_strategy_feedback": {
+                        "available": True,
+                        "slot_feedback_items": [
+                            {
+                                "slot": "Slot 3",
+                                "tracking_status": "no_post_observed",
+                                "recommended_action": "Check whether the `jeepfact` slot failed to publish before reusing it.",
+                            }
+                        ],
+                    },
                 },
                 "sections": {
                     "learning_surface": [
@@ -1172,6 +1329,8 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         )
 
         self.assertIn("Duck Ops Current Learnings", output)
+        self.assertIn("Weekly slot feedback", output)
+        self.assertIn("no_post_observed", output)
         self.assertIn("Evening posts still outperform midday posts.", output)
         self.assertNotIn("Fallback belief should not be used.", output)
 

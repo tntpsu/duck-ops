@@ -235,6 +235,8 @@ class WorkflowOperatorSummaryTests(unittest.TestCase):
             self.assertIn("urgent quality gate", items[0]["root_cause"])
             self.assertEqual(items[0]["urgent_items"][0]["title"], "Weekly Sale Playbook")
             self.assertIn("archive or rerun", items[0]["fix_hint"])
+            self.assertIn("archive stale alerts", items[0]["next_action"])
+            self.assertIsNone(items[0]["command"])
 
     def test_weekly_sale_monitor_stale_input_explains_auto_refresh(self) -> None:
         from tempfile import TemporaryDirectory
@@ -260,6 +262,61 @@ class WorkflowOperatorSummaryTests(unittest.TestCase):
 
             self.assertEqual(items[0]["lane"], "weekly_sale_monitor")
             self.assertIn("refreshes the sale monitor automatically", items[0]["next_action"])
+            self.assertIsNone(items[0]["command"])
+            self.assertFalse(items[0]["actionable"])
+
+    def test_customer_inbox_refresh_cooldown_is_supervised_info_only(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "workflow"
+            receipt_dir = Path(tmp) / "workflow_receipts" / "customer-inbox-refresh"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            receipt_path = receipt_dir / "refresh.json"
+            receipt_path.write_text(
+                json.dumps(
+                    {
+                        "payload": {
+                            "attempted": 2,
+                            "refreshed": 0,
+                            "failed": 2,
+                            "failed_items": [
+                                {
+                                    "short_id": "C417",
+                                    "reason": "Etsy automation hit the shared pacing budget and is cooling down until 2026-04-24T14:24:09-04:00.",
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (state_dir / "customer-inbox-refresh.json").write_text(
+                json.dumps(
+                    {
+                        "lane": "customer_inbox_refresh",
+                        "display_label": "Customer Inbox Refresh",
+                        "state": "blocked",
+                        "state_reason": "refresh_failed",
+                        "next_action": "Retry a smaller refresh batch or inspect Etsy session state.",
+                        "updated_at": "2026-04-24T14:09:13-04:00",
+                        "latest_receipt": {
+                            "receipt_id": "refresh-run",
+                            "recorded_at": "2026-04-24T14:09:13-04:00",
+                            "path": str(receipt_path),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            items = build_workflow_followthrough_items(limit=5, state_dir=state_dir)
+
+            self.assertEqual(items[0]["lane"], "customer_inbox_refresh")
+            self.assertIn("pacing guard was cooling down", items[0]["root_cause"])
+            self.assertIn("Do not retry this from the overnight loop", items[0]["fix_hint"])
+            self.assertIn("No overnight browser action is needed", items[0]["next_action"])
             self.assertIsNone(items[0]["command"])
             self.assertFalse(items[0]["actionable"])
 

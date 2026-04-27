@@ -1126,6 +1126,7 @@ def _load_learning_surface() -> dict[str, Any]:
             "idea_count": 0,
             "material_change_count": 0,
             "change_notifier": {"available": False, "items": []},
+            "weekly_strategy_feedback": {"available": False, "slot_feedback_items": []},
         }
     try:
         payload = json.loads(CURRENT_LEARNINGS_PATH.read_text(encoding="utf-8"))
@@ -1138,6 +1139,7 @@ def _load_learning_surface() -> dict[str, Any]:
             "idea_count": 0,
             "material_change_count": 0,
             "change_notifier": {"available": False, "items": []},
+            "weekly_strategy_feedback": {"available": False, "slot_feedback_items": []},
         }
     if not isinstance(payload, dict):
         return {
@@ -1148,9 +1150,15 @@ def _load_learning_surface() -> dict[str, Any]:
             "idea_count": 0,
             "material_change_count": 0,
             "change_notifier": {"available": False, "items": []},
+            "weekly_strategy_feedback": {"available": False, "slot_feedback_items": []},
         }
     items = list(payload.get("current_beliefs") or [])
     notifier = payload.get("change_notifier") if isinstance(payload.get("change_notifier"), dict) else {}
+    weekly_strategy_feedback = (
+        payload.get("weekly_strategy_feedback")
+        if isinstance(payload.get("weekly_strategy_feedback"), dict)
+        else {}
+    )
     return {
         "available": True,
         "path": str(CURRENT_LEARNINGS_MD_PATH),
@@ -1164,6 +1172,12 @@ def _load_learning_surface() -> dict[str, Any]:
             "headline": notifier.get("headline"),
             "recommended_action": notifier.get("recommended_action"),
             "items": list(notifier.get("items") or [])[:3],
+        },
+        "weekly_strategy_feedback": {
+            "available": bool(weekly_strategy_feedback.get("available")),
+            "headline": weekly_strategy_feedback.get("headline"),
+            "execution_feedback": dict(weekly_strategy_feedback.get("execution_feedback") or {}),
+            "slot_feedback_items": list(weekly_strategy_feedback.get("slot_feedback_items") or [])[:3],
         },
     }
 
@@ -2917,10 +2931,23 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         lines.append("Current learnings page is not available yet.")
     else:
         change_notifier = learning_surface.get("change_notifier") if isinstance(learning_surface.get("change_notifier"), dict) else {}
+        weekly_feedback = (
+            learning_surface.get("weekly_strategy_feedback")
+            if isinstance(learning_surface.get("weekly_strategy_feedback"), dict)
+            else {}
+        )
         lines.append(f"- Page: `{learning_surface.get('path')}`")
         lines.append(f"- Changes since previous snapshot: `{learning_surface.get('change_count', 0)}`")
         lines.append(f"- Material changes needing review: `{learning_surface.get('material_change_count', 0)}`")
         lines.append(f"- Ideas worth testing: `{learning_surface.get('idea_count', 0)}`")
+        slot_feedback_items = list(weekly_feedback.get("slot_feedback_items") or [])
+        if slot_feedback_items:
+            lines.append("- Weekly slot feedback:")
+            for item in slot_feedback_items[:3]:
+                label = item.get("slot") or item.get("calendar_label") or "Weekly slot"
+                lines.append(
+                    f"  - {_trim_text(label, 80)} | {item.get('tracking_status') or 'unknown'} | {_trim_text(item.get('recommended_action'), 180)}"
+                )
         if change_notifier.get("headline"):
             lines.append(f"- Change notifier: {_trim_text(change_notifier.get('headline'), 180)}")
         if change_notifier.get("recommended_action"):
@@ -3861,9 +3888,23 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         if not learning_surface.get("available"):
             lines.append("Current learnings page is not available yet.")
         else:
+            weekly_feedback = (
+                learning_surface.get("weekly_strategy_feedback")
+                if isinstance(learning_surface.get("weekly_strategy_feedback"), dict)
+                else {}
+            )
             lines.append(f"Page: {learning_surface.get('path')}")
             lines.append(f"Changes since previous snapshot: {learning_surface.get('change_count', 0)}")
             lines.append(f"Ideas worth testing: {learning_surface.get('idea_count', 0)}")
+            slot_feedback_items = list(weekly_feedback.get("slot_feedback_items") or [])
+            if slot_feedback_items:
+                lines.append("")
+                lines.append("Weekly slot feedback:")
+                for item in slot_feedback_items[:3]:
+                    label = item.get("slot") or item.get("calendar_label") or "Weekly slot"
+                    lines.append(
+                        f"- {_trim_text(label, 80)} | {item.get('tracking_status') or 'unknown'} | {_trim_text(item.get('recommended_action'), 180)}"
+                    )
             lines.append("")
             for item in learning_items:
                 lines.append(f"- {_trim_text(item.get('headline'), 150)}")

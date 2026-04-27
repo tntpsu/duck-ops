@@ -205,6 +205,7 @@ def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
             "lane_guidance_summary": {},
             "lane_guidance": [],
             "slot_outcomes": [],
+            "slot_feedback_items": [],
             "stable_patterns": [],
             "experimental_ideas": [],
             "do_not_copy_patterns": [],
@@ -232,6 +233,53 @@ def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    slot_feedback_items: list[dict[str, Any]] = []
+    for item in slot_outcomes:
+        status = _compact_text(item.get("tracking_status")) or "unknown"
+        slot = _compact_text(item.get("slot")) or "Weekly slot"
+        planned = _compact_text(item.get("suggested_lane")) or "planned lane"
+        actual = _compact_text(item.get("actual_lane")) or None
+        performance = _compact_text(item.get("performance_label")) or None
+        if status == "recommended_lane_executed":
+            if performance == "strong":
+                action = f"Keep `{planned}` as a planned lane candidate next week; it has a clean execution win."
+                priority = "scale_signal"
+            else:
+                action = f"Keep `{planned}` in the mix, but wait for a stronger result before scaling it."
+                priority = "watch_signal"
+        elif status == "alternate_lane_executed" and actual:
+            action = f"Treat `{actual}` as the safer fallback for similar slots until `{planned}` lands cleanly."
+            priority = "fallback_signal"
+        elif status == "different_lane_executed" and actual:
+            action = f"Review why `{actual}` ran instead of `{planned}` before trusting this slot recommendation."
+            priority = "routing_drift"
+        elif status == "no_post_observed":
+            action = f"Check whether the `{planned}` slot failed to publish or simply lacks metrics before reusing the recommendation."
+            priority = "missed_slot"
+        elif status == "review_slot":
+            action = f"Keep `{planned}` manually reviewed until the approval path has cleaner outcome history."
+            priority = "review_needed"
+        elif status == "awaiting_slot":
+            action = f"Wait for the `{planned}` slot to run before changing the weekly recommendation."
+            priority = "wait"
+        else:
+            action = "Review the slot outcome before turning it into a strategy change."
+            priority = "review_needed"
+        slot_feedback_items.append(
+            {
+                "slot": slot,
+                "calendar_label": _compact_text(item.get("calendar_label")) or None,
+                "calendar_date": _compact_text(item.get("calendar_date")) or None,
+                "planned_lane": planned,
+                "actual_lane": actual,
+                "tracking_status": status,
+                "performance_label": performance,
+                "priority": priority,
+                "recommended_action": action,
+                "evidence": _compact_text(item.get("performance_note")) or _compact_text(item.get("tracking_note")) or None,
+            }
+        )
+
     return {
         "available": True,
         "headline": _compact_text(social_plan.get("headline")) or None,
@@ -252,6 +300,7 @@ def _weekly_strategy_feedback(packet_payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict) and _compact_text(item.get("lane"))
         ],
         "slot_outcomes": slot_outcomes[:5],
+        "slot_feedback_items": slot_feedback_items[:5],
         "stable_patterns": [
             {
                 "title": _compact_text(item.get("title")),
@@ -807,6 +856,22 @@ def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
                 lines.append(f"- Note: {item.get('tracking_note')}")
             if item.get("performance_note"):
                 lines.append(f"- Performance detail: {item.get('performance_note')}")
+            lines.append("")
+        slot_feedback_items = weekly_strategy_feedback.get("slot_feedback_items") or []
+        if slot_feedback_items:
+            lines.append("### Slot Feedback")
+            lines.append("")
+            for item in slot_feedback_items:
+                calendar_parts = [item.get("calendar_label"), item.get("calendar_date")]
+                calendar_label = " | ".join(part for part in calendar_parts if part)
+                heading = item.get("slot") or "Weekly slot"
+                if calendar_label:
+                    heading = f"{heading} ({calendar_label})"
+                lines.append(
+                    f"- `{heading}` | `{item.get('tracking_status') or 'unknown'}` | {item.get('recommended_action') or 'Review the slot outcome.'}"
+                )
+                if item.get("evidence"):
+                    lines.append(f"  Evidence: {item.get('evidence')}")
             lines.append("")
 
     lines.extend(

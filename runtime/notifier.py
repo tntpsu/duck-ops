@@ -551,6 +551,18 @@ def _render_promotion_readiness_html(subject: str, payload: dict[str, Any]) -> s
             summary_html += f"<div style=\"margin-bottom:8px;\"><strong>Why now:</strong> {_html_text(item.get('summary'))}</div>"
         if item.get("recommended_action"):
             summary_html += f"<div style=\"margin-bottom:8px;\"><strong>Promote with:</strong> {_html_text(item.get('recommended_action'))}</div>"
+        if item.get("control_summary"):
+            summary_html += f"<div style=\"margin-bottom:8px;\"><strong>Control:</strong> {_html_text(item.get('control_summary'))}</div>"
+        if item.get("approval_boundary"):
+            summary_html += f"<div style=\"margin-bottom:8px;\"><strong>Boundary:</strong> {_html_text(item.get('approval_boundary'))}</div>"
+        owner_bits = [
+            f"owner={item.get('promotion_owner')}" if item.get("promotion_owner") else "",
+            f"current={item.get('current_mode')}" if item.get("current_mode") else "",
+            f"target={item.get('target_mode')}" if item.get("target_mode") else "",
+        ]
+        owner_text = " | ".join(bit for bit in owner_bits if bit)
+        if owner_text:
+            summary_html += f"<div style=\"margin-bottom:8px;color:#4b5563;\"><strong>Mode:</strong> {_html_text(owner_text)}</div>"
         if item.get("source_path"):
             summary_html += f"<div><strong>Source:</strong> {_html_text(item.get('source_path'))}</div>"
         sections.append(

@@ -204,6 +204,35 @@ def _review_execution_root_cause(item: dict[str, Any]) -> str | None:
     return None
 
 
+def _customer_inbox_root_cause(item: dict[str, Any]) -> str | None:
+    payload = _load_receipt_payload(item)
+    receipt_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
+    if not isinstance(receipt_payload, dict):
+        receipt_payload = {}
+
+    attempted = receipt_payload.get("attempted")
+    refreshed = receipt_payload.get("refreshed")
+    failed = receipt_payload.get("failed")
+    failed_items = [entry for entry in (receipt_payload.get("failed_items") or []) if isinstance(entry, dict)]
+    reasons = [str(entry.get("reason") or "").strip() for entry in failed_items if str(entry.get("reason") or "").strip()]
+    reason_text = " ".join(reasons).lower()
+    if "cooling down" in reason_text or "pacing budget" in reason_text or "rate_limit" in reason_text:
+        first_reason = reasons[0] if reasons else "Etsy browser pacing guard stopped the refresh."
+        return (
+            f"Customer inbox refresh attempted {attempted or 0} thread(s), refreshed {refreshed or 0}, "
+            f"and failed {failed or 0} because the Etsy browser pacing guard was cooling down. {first_reason}"
+        )
+    if failed_items:
+        first_reason = reasons[0] if reasons else "No detailed failure reason was captured."
+        return (
+            f"Customer inbox refresh attempted {attempted or 0} thread(s), refreshed {refreshed or 0}, "
+            f"and failed {failed or len(failed_items)}. First failure: {first_reason}"
+        )
+    if str(item.get("state_reason") or "").strip() == "refresh_failed":
+        return "Customer inbox refresh failed, but the latest receipt did not include item-level failure details."
+    return None
+
+
 def _newduck_root_cause(item: dict[str, Any]) -> str | None:
     if str(item.get("state_reason") or "").strip() != "seo_writeback_verification_failed":
         return None
@@ -368,6 +397,13 @@ def _fix_hint(item: dict[str, Any], root_cause: str | None) -> str | None:
             )
     if lane == "quality_gate" and root_cause:
         return "Review the urgent gate items below, then archive or rerun the stale one so the quality gate queue matches the real operator queue."
+    if lane == "customer_inbox_refresh" and root_cause:
+        if "cooling down" in root_cause.lower() or "pacing guard" in root_cause.lower():
+            return (
+                "Do not retry this from the overnight loop. Hold it for the next supervised Etsy browser window, "
+                "then run a small customer inbox refresh batch after the cooldown has cleared."
+            )
+        return "Run one small supervised customer inbox refresh batch and inspect the first failed thread before widening the batch."
     return None
 
 
@@ -420,7 +456,11 @@ def _command_text(item: dict[str, Any]) -> str | None:
     if lane == "jeepfact" and reason == "execution_failed":
         return f"cd {duckagent} && python src/main_agent.py --only jeepfact_publish --flow jeepfact --type jeepfact --force"
     if lane == "quality_gate" and reason in {"alerts_pending", "execution_failed"}:
+        if reason == "alerts_pending":
+            return None
         return f"cd {duckops} && python runtime/quality_gate_pilot.py"
+    if lane == "customer_inbox_refresh" and reason == "refresh_failed":
+        return None
     if lane == "trend_ranker" and reason in {"pending_review", "execution_failed"}:
         return f"cd {duckops} && python runtime/trend_ranker.py"
     if lane == "notifier" and reason in {"alerts_pending", "review_needed"}:
@@ -452,6 +492,8 @@ def _root_cause(item: dict[str, Any], *, quality_gate_state_path: Path | None = 
         return _newduck_root_cause(item)
     if lane == "review_execution":
         return _review_execution_root_cause(item)
+    if lane == "customer_inbox_refresh":
+        return _customer_inbox_root_cause(item)
     if lane == "quality_gate":
         urgent_items = _quality_gate_urgent_items(quality_gate_state_path)
         if urgent_items:
@@ -478,6 +520,16 @@ def _operator_next_action(item: dict[str, Any]) -> str:
             "No manual refresh is needed if you are waiting for the next weekly sale or campaign. "
             "That flow refreshes the sale monitor automatically before it builds the playbook."
         )
+    if lane == "quality_gate" and reason == "alerts_pending":
+        return (
+            "Review the urgent quality gate alert in the Business Desk or quality gate page, then archive stale alerts "
+            "or rerun only the affected candidate after its source has changed."
+        )
+    if lane == "customer_inbox_refresh" and reason == "refresh_failed":
+        return (
+            "No overnight browser action is needed. Retry during the next supervised Etsy browser window with a small batch "
+            "after the pacing/cooldown guard is clear."
+        )
     return next_action
 
 
@@ -492,6 +544,8 @@ def _is_info_only_followthrough(item: dict[str, Any], next_action: str) -> bool:
     if normalized_action.startswith("wait for the next"):
         return True
     if normalized_action.startswith("no manual refresh is needed"):
+        return True
+    if normalized_action.startswith("no overnight browser action is needed"):
         return True
     return False
 

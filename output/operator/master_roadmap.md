@@ -86,7 +86,8 @@ Detailed execution sequence:
   - weekly data-model governance review
   - weekly documentation-governance review
 - Governance digest email delivery is smoke-tested, so the observe/propose recommendation channel is live.
-- Business Desk promotion watch now covers the current approval-policy lanes and is being hardened into the explicit autonomy-readiness gate before any lane graduates toward auto-action.
+- Business Desk promotion watch now covers the current approval-policy lanes and uses an explicit autonomy-readiness contract across weekly sale, Meme Monday, Tuesday review carousel, Jeep Fact Wednesday, and Etsy review execution.
+- Promotion readiness email and Business Desk sections now repeat owner, current mode, target mode, side effect, allowed tier, approval boundary, and no-self-promotion constraints before any lane can be promoted.
 
 ### 9. Social Strategy Intelligence Layer
 - Own-post social performance collection is live from DuckAgent post receipts.
@@ -94,6 +95,7 @@ Detailed execution sequence:
 - Current learnings, competitor benchmarking, and weekly strategy packet outputs are live.
 - The business desk now surfaces a weekly social plan with lane-fit reasoning and ready-to-run slot guidance.
 - Weekly slots now track recommended lane, alternate lane, actual observed lane, and simple performance follow-through.
+- Current learnings now turns weekly slot execution into per-slot feedback so missed, fallback, different-lane, and clean-win outcomes show up as concrete planning guidance.
 - Material learning changes now feed a dedicated learnings-change digest and business-desk follow-through action.
 - Weekly strategy packet now carries a `What Changed` section so learning shifts are folded back into the weekly plan.
 
@@ -108,6 +110,7 @@ Detailed execution sequence:
 ### 2. Etsy Inbox Truth Sync
 - Launchd-installed daytime refresh is live.
 - Still needs a few cycles of observation to prove long-term stability with manual Etsy replies.
+- Customer inbox refresh cooldown/pacing failures now surface as supervised-window retries with no overnight command, so health does not accidentally tell us to reopen Etsy during a cooldown.
 
 ### 3. Review Carousel Publishing
 - Approval/publish loop is working.
@@ -120,10 +123,10 @@ Detailed execution sequence:
 
 ## Highest-Value Open Work
 
-### Priority 1: Agent OS Promotion Readiness Gate
-The highest-ROI Agent OS work is making Business Desk promotion readiness the explicit gate between supervised approval lanes and controlled auto-action.
+### Priority 1: Agent OS Promotion Readiness Operationalization
+The highest-ROI Agent OS work is now using the Business Desk promotion readiness gate as the explicit bridge between supervised approval lanes and controlled auto-action.
 
-The promotion surface should show:
+The promotion surface now shows:
 1. which lane is being considered
 2. who owns the executor
 3. what side effect the promoted mode would allow
@@ -135,6 +138,11 @@ Why this is high value:
 - Weekly sale, Meme Monday, Tuesday review carousel, and Jeep Fact Wednesday are all converging on the same approval-policy pattern.
 - We need one place to answer “is this safe to automate?” instead of per-lane folklore.
 - Clean gated runs should notify the operator, not silently become permission to mutate production systems.
+
+Next slices:
+1. use the readiness surface to decide whether weekly sale can move from manual email approval to auto-apply after operator approval
+2. add the same promotion contract automatically whenever a new approval-policy lane is created
+3. include promotion-readiness deltas in the morning Business Desk email when a lane changes from observing to ready, blocked, or active
 
 ### Priority 2: Outcome Learning Layer Expansion
 The social learning foundation is now live. The next high-value work is extending that same discipline into the remaining business outcomes:
@@ -151,7 +159,7 @@ Why this is high value:
 
 ### Priority 3: Social Strategy Hardening
 - Improve cross-channel post coverage so Instagram and Facebook outcomes stay comparable when both publish.
-- Feed weekly strategy execution truth into current learnings, governance digest, and change-notifier surfaces.
+- Continue feeding weekly strategy execution truth into current learnings, governance digest, and change-notifier surfaces, with the new per-slot feedback as the operator-facing primitive.
 - Turn manual experiments into first-class lanes only after repeated execution and outcome evidence justify it.
 
 ### Priority 4: Expand SEO Audit Intelligence
@@ -221,7 +229,7 @@ Why this matters:
 
 ### 3. Harden Promotion Watch Into The Autonomy Gate
 - Weekly sale, Meme Monday, Tuesday review carousel, and Jeep Fact Wednesday now share the policy/watch/promote pattern.
-- The next step is to ensure every promotion candidate names the owner, side effect, allowed tier, approval boundary, current mode, target mode, and source config before the operator is asked to promote anything.
+- Every promotion candidate now names the owner, side effect, allowed tier, approval boundary, current mode, target mode, and source config before the operator is asked to promote anything.
 - Keep the same model: supervised first, evidence in workflow control, promotion surfaced in the business desk, and default-off until the operator explicitly approves the mode change.
 
 ## Lower-Priority / Nice-to-Have
