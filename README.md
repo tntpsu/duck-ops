@@ -1,122 +1,147 @@
 # duck-ops
 
-This is the canonical home for the duck business-specific OpenClaw operator workspace.
+Duck Ops is the operator workspace for the myJeepDuck automation system. It owns review queues, policy checks, Business Desk surfaces, promotion readiness, customer/operator state, and the local control layer around DuckAgent and OpenClaw.
 
-What lives here:
+DuckAgent executes business workflows. Duck Ops decides what should be reviewed, surfaced, reconciled, promoted, or held.
 
-- `runtime/`
-- `config/`
-- `contracts/`
-- operator docs and roadmaps
-- stack/bootstrap docs
+## Start Here
 
-What does not belong in git:
+Read these first:
 
-- `output/`
-- `state/`
-- Python cache files
-- local browser auth/session state
-- local launchd/runtime helpers
+1. `AGENTS.md` - repo rules for AI assistants and human contributors.
+2. `BOOTSTRAP.md` - repo boundaries and local runtime layout.
+3. `OPENCLAW_PHASE2_ROADMAP.md` - Duck Ops/OpenClaw roadmap context.
+4. `OPENCLAW_PHASE2_IMPLEMENTATION_CHECKLIST.md` - current implementation status and acceptance checks.
+5. `/Users/philtullai/ai-agents/duck-ops/output/operator/master_roadmap.md` - cross-repo roadmap status, completed work, and highest-value next items.
+6. `/Users/philtullai/ai-agents/duckAgent/docs/current_system/AGENT_GOVERNANCE_POLICY.md` - shared automation authority and approval policy.
 
-Current goal:
+## What This Repo Owns
 
-- use `duck-ops` as the clean working home
-- keep `openclaw` focused on engine code only
+- `runtime/` - operator logic, review loop, Business Desk builders, health checks, queue handling, and policy helpers.
+- `contracts/` - compact data contracts for customer cases, trends, publish candidates, print queues, and operator payloads.
+- `config/` - brand guardrails, evaluator rules, customer reply policy, and source definitions.
+- `OPENCLAW_PHASE2_*` docs - Duck Ops implementation roadmap and checklist.
+- `WHATSAPP_OPERATOR.md` - short-message operator mode for review/trend approvals only.
+- `state/` and `output/` - generated local state and operator reports, normally ignored by git.
 
-Current status:
+Duck Ops does not own:
 
-- active local launchd jobs now run directly from `duck-ops`
-- `duck-ops` is the only active git home for duck operator work
-- `/Users/philtullai/ai-agents/openclaw/workspace` is now a legacy/historical area, not an active
-  workspace root
+- DuckAgent flow implementation.
+- OpenClaw engine/platform source.
+- live credentials, browser profiles, or local `launchd` plists.
+- generated caches, logs, or one-off runtime artifacts.
 
-See `BOOTSTRAP.md` for the current repo layout and runtime boundaries.
+## Quick Start
 
-Planning docs:
+Use DuckAgent's virtual environment when dependencies overlap:
 
-- `OPENCLAW_PHASE2_ROADMAP.md`
-- `OPENCLAW_PHASE2_IMPLEMENTATION_CHECKLIST.md`
-- `CUSTOMER_INTERACTION_AGENT_PLAN.md`
+```bash
+cd /Users/philtullai/ai-agents/duck-ops
+/Users/philtullai/ai-agents/duckAgent/.venv/bin/python -m pytest tests -q
+```
 
-Current staged customer/work outputs:
+Compile runtime files quickly:
 
-- `state/customer_interaction_queue.json`
-- `output/operator/customer_interaction_queue.md`
-- `state/customer_recovery_decisions.jsonl`
-- `state/customer_action_packets.json`
-- `output/operator/customer_action_packets.md`
-- `output/operator/current_customer_action.md`
-- `output/operator/customer_queue.md`
-- `state/nightly_action_summary.json`
-- `output/operator/nightly_action_summary.md`
-- `state/business_operator_desk.json`
-- `output/operator/business_operator_desk.md`
-- `state/custom_build_task_candidates.json`
-- `output/operator/custom_build_task_candidates.md`
-- `state/etsy_conversation_browser_sync.json`
-- `output/operator/etsy_conversation_browser_sync.md`
-- `state/normalized/etsy_open_orders_snapshot.json`
-- `state/normalized/shopify_open_orders_snapshot.json`
-- `state/normalized/packing_summary.json`
-- `state/normalized/print_queue_candidates.json`
-- `state/normalized/usps_tracking_snapshot.json`
-- `state/google_tasks_custom_design_tasks.json`
+```bash
+cd /Users/philtullai/ai-agents/duck-ops
+python3 - <<'PY'
+from pathlib import Path
+import py_compile
 
-Customer recovery decisions can now be staged with:
+for path in sorted(Path("runtime").glob("*.py")):
+    py_compile.compile(str(path), doraise=True)
+print("compiled runtime files")
+PY
+```
 
-- `runtime/customer_recovery_decisions.py record --receipt-id ... --resolution replacement|refund|wait|reply_only --note "..."`
-- `runtime/customer_operator.py status`
-- `runtime/customer_operator.py handle --text 'replacement C301 because ...'`
+## Common Commands
 
-Unified desk commands now run through the main operator loop too:
+Business Desk commands run through the main review loop:
 
-- `python3 runtime/review_loop.py handle --text 'desk status'`
-- `python3 runtime/review_loop.py handle --text 'desk next'`
-- `python3 runtime/review_loop.py handle --text 'desk show customer'`
-- `python3 runtime/review_loop.py handle --text 'desk show builds'`
-- `python3 runtime/review_loop.py handle --text 'desk show packing'`
-- `python3 runtime/review_loop.py handle --text 'desk show stock'`
-- `python3 runtime/review_loop.py handle --text 'desk show reviews'`
-- `python3 runtime/review_loop.py handle --text 'desk show roi'`
-- `python3 runtime/review_loop.py handle --text 'desk show freshness'`
-- `python3 runtime/review_loop.py handle --text 'status all'`
+```bash
+python3 runtime/review_loop.py handle --text 'desk status'
+python3 runtime/review_loop.py handle --text 'desk next'
+python3 runtime/review_loop.py handle --text 'desk show customer'
+python3 runtime/review_loop.py handle --text 'desk show builds'
+python3 runtime/review_loop.py handle --text 'desk show packing'
+python3 runtime/review_loop.py handle --text 'desk show stock'
+python3 runtime/review_loop.py handle --text 'desk show reviews'
+python3 runtime/review_loop.py handle --text 'desk show roi'
+python3 runtime/review_loop.py handle --text 'desk show freshness'
+python3 runtime/review_loop.py handle --text 'status all'
+```
 
-Shared operator interface contracts now live in:
+Customer recovery decisions can be staged with:
+
+```bash
+python3 runtime/customer_recovery_decisions.py record --receipt-id ... --resolution replacement|refund|wait|reply_only --note "..."
+python3 runtime/customer_operator.py status
+python3 runtime/customer_operator.py handle --text 'replacement C301 because ...'
+```
+
+## Operating Model
+
+Duck Ops reads DuckAgent outputs, mailbox-derived signals, platform snapshots, and local state. It turns those into:
+
+- review items
+- policy decisions
+- promotion-readiness candidates
+- Business Desk summaries
+- health and freshness signals
+- deterministic execution queues where a lane has explicit approval
+
+The default posture is observe, recommend, and require approval. Auto-action requires a policy, evidence, a promotion gate, and operator-visible receipts.
+
+## Etsy Browser Policy
+
+Etsy Playwright/browser automation is constrained and should not run ad hoc.
+
+Current design:
+
+- exactly three Etsy Playwright windows per day
+- one morning, one afternoon, and one evening window with jitter
+- customer read: up to 2 threads per session
+- review reply: up to 2 approved replies per session
+- relist: up to 1 listing in one randomly chosen session per day
+- notifier and other sidecars should stay read-only and skip Etsy browser preflight
+
+Etsy API reads are a different lane from browser automation. Do not blur those two in docs, code, or health checks.
+
+## Shared Interface Contracts
+
+Shared compact operator interfaces live in:
 
 - `runtime/operator_interface_contracts.py`
 
-Use that module as the canonical compact surface for lightweight readers like the
-Business Desk, Even/Pulse widget API, and any future companion app payloads.
-Keep those readers as thin adapters instead of recomputing counts from
-normalized state in multiple places.
+The Business Desk, Even/Pulse widget API, and future companion readers should use that module instead of recomputing counts from normalized state in multiple places.
 
-ROI triage and maintenance freshness are now first-class Business Desk surfaces:
+## Documentation Map
 
-- `runtime/roi_triage.py` ranks open DuckAgent/Duck Ops work by impact, urgency, confidence, and effort, while filtering completed slices and suppressing stale governance-digest recommendations when fresher source reviews disagree.
-- `state/roi_triage.json` and `output/operator/roi_triage.md` are the canonical ROI triage outputs.
-- Business Desk surfaces `ROI Triage` and `Maintenance Freshness` so the morning email can show the highest-return next slice, recently completed work, stale signals that were ignored, and whether OS reports are fresh enough to trust.
+- `BOOTSTRAP.md` - repo layout, runtime boundaries, and local-only paths.
+- `OPENCLAW_PHASE2_ROADMAP.md` - operator-system roadmap.
+- `OPENCLAW_PHASE2_IMPLEMENTATION_CHECKLIST.md` - phase checklist and acceptance criteria.
+- `CUSTOMER_INTERACTION_AGENT_PLAN.md` - customer interaction design and roadmap.
+- `contracts/` - shape and meaning of operator payloads.
+- `config/` - policies and evaluator rules.
+- `/Users/philtullai/ai-agents/duckAgent/docs/current_system/README.md` - cross-repo current-system docs hub.
 
-Etsy inbox truth-sync is now available as a dedicated OpenClaw lane:
+## Generated Files
 
-- `python3 runtime/customer_inbox_refresh.py --limit 8 --skip-outside-hours --start-hour 7 --start-minute 30 --end-hour 23 --end-minute 59`
+These normally do not belong in git:
 
-Recommended local scheduling for that lane:
+- `output/`
+- `state/`
+- `.playwright-cli/`
+- `.pytest_cache/`
+- local browser auth/session state
+- local launchd/runtime helpers
+- logs and lock files
 
-- plan exactly 3 Etsy Playwright windows per day
-- use one morning, one afternoon, and one evening window with a jittered run time inside each window
-- cap each session instead of draining the full backlog:
-  - customer read: up to 2 threads
-  - review reply: up to 2 approved replies
-  - relist: up to 1 listing in one randomly chosen session per day
-- keep `notifier.py` read-only by skipping Etsy customer refresh preflight from the sidecar
+Only commit generated files when they are intentional fixtures, docs examples, or explicitly approved canonical outputs.
 
-This lane is intentionally read-only against Etsy:
+## Current Sharp Edges
 
-- it reuses the trusted Etsy seller session
-- verifies direct `/messages/<id>` links when safe
-- updates customer thread truth and operator outputs
-- never types or sends customer replies
-
-Publish review reconciliation is now fail-closed in Duck Ops:
-
-- if DuckAgent already shows a `newduck` listing as published to Shopify/Etsy, or a weekly sale as already published, OpenClaw reconciles the pending review state back to handled instead of resurfacing the old review item
+- Several useful operator reports live under ignored `output/`; they are operational truth locally but not stable repo source.
+- Browser automation safety depends on local wrappers and schedules outside git.
+- WhatsApp is intentionally narrow now: review/trend approvals only. Email is the primary channel for social posts, sales, and Business Desk summaries.
+- The master roadmap is generated under `output/operator/` but is treated as a canonical operator doc; keep that exception explicit.

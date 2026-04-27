@@ -65,7 +65,12 @@ Current customer-thread refresh pattern:
 - mailbox/file observation stays lightweight and frequent
 - Etsy inbox truth-sync runs as a separate `duck-ops` runtime lane
 - launchd should schedule the Etsy inbox sync locally; do not commit machine-specific plist files
-- recommended cadence is every 2 hours during the day/evening plus one guaranteed `6:30 PM` pass
+- Etsy browser sync should run through three jittered daily Playwright windows, not fixed frequent intervals:
+  - one morning window
+  - one afternoon window
+  - one evening window
+  - customer read and review reply run with per-session caps
+  - relist runs at most once per day in one randomly chosen window
 
 Current local morning observe/review pattern:
 

@@ -2,8 +2,27 @@
 
 Last updated: 2026-04-27
 
-Detailed execution sequence:
+## Document Ownership
+
+This is the canonical cross-repo roadmap for Duck Ops, DuckAgent, and related product work.
+
+This document owns:
+- completed major capabilities
+- active operational lanes
+- highest-value open work
+- near-term roadmap recommendations
+- legacy-plan archival notes
+
+This document does not own:
+- phase-by-phase rollout criteria
+- detailed implementation design for a lane
+- current code ownership boundaries
+- governance power-tier policy
+
+Companion docs:
 - [ROADMAP_EXECUTION_SEQUENCE.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/ROADMAP_EXECUTION_SEQUENCE.md)
+- [MASTER_IMPLEMENTATION_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/MASTER_IMPLEMENTATION_PLAN.md)
+- [AGENT_GOVERNANCE_POLICY.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/AGENT_GOVERNANCE_POLICY.md)
 - [SOCIAL_PERFORMANCE_EXECUTION_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/SOCIAL_PERFORMANCE_EXECUTION_PLAN.md)
 
 ## Completed Major Work
@@ -78,6 +97,7 @@ Detailed execution sequence:
 - `duck-change-planner`, `duck-reliability-review`, `duck-data-model-governance`, and `duck-automation-safety` are now created and validated.
 - `duck-tech-debt-triage`, `duck-social-insights`, and `duck-competitor-benchmark` are now created and validated.
 - `duck-documentation-governance` now exists so canonical roadmap, governance, and current-system docs can be reviewed for drift and cleanup.
+- DuckAgent and Duck Ops now have root README front doors plus canonical `AGENTS.md` files so human and AI contributors start from the same boundaries, commands, and safety rules.
 - Agent/skill governance policy now exists to define power tiers, recommendation flow, and review/push expectations.
 - Engineering governance digest lane now exists and is scheduled for the morning.
 - The observe-only engineering review loop is now complete:
