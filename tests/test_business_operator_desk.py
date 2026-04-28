@@ -102,6 +102,56 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Duck Ops Inventory Truth", inventory_section)
         self.assertIn("demand_only", inventory_section)
 
+    def test_operator_desk_surfaces_product_concept_queue(self) -> None:
+        product_surface = {
+            "available": True,
+            "path": "/tmp/product_concept_queue.md",
+            "status": "ready_for_brief_review",
+            "headline": "1 product concept candidate is ready.",
+            "recommended_action": "Run DuckAgent design_brief_queue with the generated input.",
+            "candidate_count": 2,
+            "ready_for_brief_review_count": 1,
+            "watch_count": 1,
+            "blocked_by_guardrail_count": 0,
+            "design_brief_signal_count": 1,
+            "source_paths": {"design_brief_input": "/tmp/product_concept_queue_design_brief_input.json"},
+            "items": [
+                {
+                    "theme": "Pizza Duck",
+                    "queue_state": "ready_for_brief_review",
+                    "source_type": "trend_candidate",
+                    "score": 0.91,
+                    "recommended_next_step": "Send this candidate to DuckAgent design_brief_queue for operator review.",
+                    "evidence": ["Catalog status: gap", "7d sold: 4"],
+                }
+            ],
+        }
+
+        with patch("business_operator_desk._load_product_concept_queue_surface", return_value=product_surface):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+            )
+
+        self.assertEqual(payload["counts"]["product_concept_candidates"], 2)
+        self.assertEqual(payload["counts"]["product_concept_ready"], 1)
+        action = next(item for item in payload.get("next_actions") or [] if item.get("lane") == "product_concept")
+        self.assertEqual(action["title"], "Pizza Duck")
+        self.assertIn("design_brief_queue", action["command"])
+
+        markdown = render_business_operator_desk_markdown(payload)
+        self.assertIn("Product Concept Queue", markdown)
+        self.assertIn("Pizza Duck", markdown)
+
+        section = render_business_section(payload, "concepts")
+        self.assertIn("Duck Ops Product Concept Queue", section)
+        self.assertIn("Pizza Duck", section)
+
     def test_operator_desk_markdown_shortens_visible_titles(self) -> None:
         markdown = render_business_operator_desk_markdown(
             {

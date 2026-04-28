@@ -18,6 +18,7 @@ from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
 from inventory_truth import INVENTORY_TRUTH_MD_PATH, build_inventory_truth
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
 from operator_interface_contracts import build_interface_contract_summary
+from product_concept_queue import PRODUCT_CONCEPT_QUEUE_MD_PATH, build_product_concept_queue
 from repo_ci_status import REPO_CI_MD_PATH, build_repo_ci_status
 from roi_triage import OUTPUT_MD_PATH as ROI_TRIAGE_MD_PATH
 from roi_triage import STATE_PATH as ROI_TRIAGE_PATH
@@ -2003,6 +2004,60 @@ def _load_inventory_truth_surface(
     }
 
 
+def _load_product_concept_queue_surface() -> dict[str, Any]:
+    try:
+        payload = build_product_concept_queue(write_outputs=False)
+    except Exception:
+        return {
+            "available": False,
+            "path": str(PRODUCT_CONCEPT_QUEUE_MD_PATH),
+            "headline": None,
+            "recommended_action": None,
+            "candidate_count": 0,
+            "ready_for_brief_review_count": 0,
+            "watch_count": 0,
+            "blocked_by_guardrail_count": 0,
+            "design_brief_signal_count": 0,
+            "items": [],
+            "design_brief_input": {},
+            "source_paths": {},
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "path": str(PRODUCT_CONCEPT_QUEUE_MD_PATH),
+            "headline": None,
+            "recommended_action": None,
+            "candidate_count": 0,
+            "ready_for_brief_review_count": 0,
+            "watch_count": 0,
+            "blocked_by_guardrail_count": 0,
+            "design_brief_signal_count": 0,
+            "items": [],
+            "design_brief_input": {},
+            "source_paths": {},
+        }
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return {
+        "available": True,
+        "path": str(PRODUCT_CONCEPT_QUEUE_MD_PATH),
+        "generated_at": payload.get("generated_at"),
+        "status": payload.get("status"),
+        "headline": payload.get("headline"),
+        "recommended_action": payload.get("recommended_action"),
+        "candidate_count": int(summary.get("candidate_count") or len(payload.get("items") or [])),
+        "ready_for_brief_review_count": int(summary.get("ready_for_brief_review_count") or 0),
+        "watch_count": int(summary.get("watch_count") or 0),
+        "blocked_by_guardrail_count": int(summary.get("blocked_by_guardrail_count") or 0),
+        "design_brief_signal_count": int(summary.get("design_brief_signal_count") or 0),
+        "items": [item for item in list(payload.get("items") or []) if isinstance(item, dict)][:12],
+        "design_brief_input": dict(payload.get("design_brief_input") or {}),
+        "source_paths": dict(payload.get("source_paths") or {}),
+    }
+
+
 def _stock_items_with_inventory_truth(
     stock_items: list[dict[str, Any]],
     inventory_truth_surface: dict[str, Any],
@@ -2397,6 +2452,37 @@ def _learning_change_action_item(learning_surface: dict[str, Any]) -> dict[str, 
     }
 
 
+def _product_concept_action_item(product_concept_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not product_concept_surface.get("available"):
+        return None
+    ready_count = int(product_concept_surface.get("ready_for_brief_review_count") or 0)
+    blocked_count = int(product_concept_surface.get("blocked_by_guardrail_count") or 0)
+    if ready_count <= 0 and blocked_count <= 0:
+        return None
+
+    items = [item for item in list(product_concept_surface.get("items") or []) if isinstance(item, dict)]
+    ready_items = [item for item in items if str(item.get("queue_state") or "") == "ready_for_brief_review"]
+    blocked_items = [item for item in items if str(item.get("queue_state") or "") == "blocked_by_guardrail"]
+    first = (ready_items or blocked_items or items or [{}])[0]
+    source_paths = product_concept_surface.get("source_paths") if isinstance(product_concept_surface.get("source_paths"), dict) else {}
+    design_input_path = str(source_paths.get("design_brief_input") or "").strip()
+    state = str(first.get("queue_state") or product_concept_surface.get("status") or "review").strip()
+    if ready_items:
+        command = product_concept_surface.get("recommended_action") or "Run DuckAgent design_brief_queue with the generated concept input."
+    else:
+        command = "Rewrite or abstract the blocked concept before sending it to DuckAgent."
+    return {
+        "lane": "product_concept",
+        "title": first.get("theme") or "Product concept queue",
+        "summary": (
+            f"{state} | ready {ready_count} | blocked {blocked_count} | "
+            f"{_trim_text(first.get('recommended_next_step') or product_concept_surface.get('headline'), 90)}"
+        ),
+        "command": command,
+        "secondary_command": f"Input: {design_input_path}" if design_input_path else str(product_concept_surface.get("path") or "").strip() or None,
+    }
+
+
 def _build_next_actions(
     *,
     customer_items: list[dict[str, Any]],
@@ -2409,6 +2495,7 @@ def _build_next_actions(
     workflow_items: list[dict[str, Any]],
     learning_surface: dict[str, Any],
     weekly_strategy_packet: dict[str, Any],
+    product_concept_surface: dict[str, Any],
     governance_surface: dict[str, Any],
     roi_triage_surface: dict[str, Any],
     repo_ci_surface: dict[str, Any],
@@ -2524,6 +2611,9 @@ def _build_next_actions(
     social_plan_action = _social_plan_action_item(weekly_strategy_packet)
     if social_plan_action:
         actions.append(social_plan_action)
+    product_concept_action = _product_concept_action_item(product_concept_surface)
+    if product_concept_action:
+        actions.append(product_concept_action)
     learning_action = _learning_change_action_item(learning_surface)
     if learning_action:
         actions.append(learning_action)
@@ -2558,7 +2648,7 @@ def _build_next_actions(
                 "secondary_command": (item.get("next_action") if item.get("command") else None),
             }
         )
-    return actions[:8]
+    return actions[:10]
 
 
 def build_business_operator_desk(
@@ -2584,6 +2674,7 @@ def build_business_operator_desk(
     workflow_items = list(workflow_followthrough or build_workflow_followthrough_items(limit=6))
     learning_surface = _load_learning_surface()
     weekly_strategy_packet = _load_weekly_strategy_packet()
+    product_concept_surface = _load_product_concept_queue_surface()
     seo_outcomes = _load_seo_outcome_surface()
     governance_surface = _load_governance_surface()
     roi_triage_surface = _load_roi_triage_surface()
@@ -2711,6 +2802,11 @@ def build_business_operator_desk(
             "strategy_watchouts": len(weekly_strategy_packet.get("watchouts") or []),
             "strategy_plan_items": len(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or [])),
             "strategy_ready_slots": social_ready_slots,
+            "product_concept_candidates": int(product_concept_surface.get("candidate_count") or 0),
+            "product_concept_ready": int(product_concept_surface.get("ready_for_brief_review_count") or 0),
+            "product_concept_watch": int(product_concept_surface.get("watch_count") or 0),
+            "product_concept_blocked": int(product_concept_surface.get("blocked_by_guardrail_count") or 0),
+            "product_concept_design_brief_signals": int(product_concept_surface.get("design_brief_signal_count") or 0),
             "seo_outcome_items": int(seo_outcomes.get("applied_item_count") or 0),
             "seo_outcome_attention_items": len(seo_outcomes.get("attention_items") or []),
             "seo_outcome_stable_items": int(seo_outcomes.get("stable_count") or 0),
@@ -2726,6 +2822,7 @@ def build_business_operator_desk(
             workflow_items=workflow_items,
             learning_surface=learning_surface,
             weekly_strategy_packet=weekly_strategy_packet,
+            product_concept_surface=product_concept_surface,
             governance_surface=governance_surface,
             roi_triage_surface=roi_triage_surface,
             repo_ci_surface=repo_ci_surface,
@@ -2740,6 +2837,7 @@ def build_business_operator_desk(
         "repo_ci_surface": repo_ci_surface,
         "scheduler_health_surface": scheduler_health_surface,
         "dependency_health_surface": dependency_health_surface,
+        "product_concept_surface": product_concept_surface,
         "inventory_truth_surface": inventory_truth_surface,
         "maintenance_freshness_surface": maintenance_freshness_surface,
         "interface_contract_surface": interface_contract_surface,
@@ -2777,6 +2875,7 @@ def build_business_operator_desk(
             "learning_surface": list(learning_surface.get("items") or [])[:4],
             "weekly_strategy_packet": list(weekly_strategy_packet.get("recommendations") or [])[:4],
             "weekly_social_plan": list(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or []))[:5],
+            "product_concept_queue": list(product_concept_surface.get("items") or [])[:6],
             "seo_outcomes": (list(seo_outcomes.get("attention_items") or []) or list(seo_outcomes.get("recent_wins") or []))[:4],
         },
     }
@@ -2801,6 +2900,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     jeepfact_policy_surface = payload.get("jeepfact_policy_surface") or {}
     learning_surface = payload.get("learning_surface") or {}
     weekly_strategy_packet = payload.get("weekly_strategy_packet") or {}
+    product_concept_surface = payload.get("product_concept_surface") or {}
     seo_outcomes = payload.get("seo_outcomes") or {}
     if not learning_surface.get("available"):
         learning_surface = _load_learning_surface()
@@ -2876,6 +2976,9 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Strategy recommendations surfaced: `{counts.get('strategy_recommendations') or len(strategy_items)}`",
         f"- Strategy watchouts surfaced: `{counts.get('strategy_watchouts') or len(weekly_strategy_packet.get('watchouts') or [])}`",
         f"- Social plan items surfaced: `{counts.get('strategy_plan_items') or len((weekly_strategy_packet.get('social_plan') or {}).get('slots') or []) or len((weekly_strategy_packet.get('social_plan') or {}).get('items') or [])}`",
+        f"- Product concept candidates: `{counts.get('product_concept_candidates', 0)}`",
+        f"- Product concepts ready for brief review: `{counts.get('product_concept_ready', 0)}`",
+        f"- Product concepts blocked by guardrail: `{counts.get('product_concept_blocked', 0)}`",
         f"- SEO fixes tracked: `{counts.get('seo_outcome_items') or seo_outcomes.get('applied_item_count') or 0}`",
         f"- SEO items needing follow-up: `{counts.get('seo_outcome_attention_items') or len(seo_outcomes.get('attention_items') or [])}`",
         f"- Stable SEO fixes: `{counts.get('seo_outcome_stable_items') or seo_outcomes.get('stable_count') or 0}`",
@@ -3507,6 +3610,35 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Performance: `{item.get('performance_label')}`")
     lines.extend([
         "",
+        "## Product Concept Queue",
+        "",
+    ])
+    if not product_concept_surface.get("available"):
+        lines.append("Product concept queue is not available yet.")
+    else:
+        source_paths = product_concept_surface.get("source_paths") if isinstance(product_concept_surface.get("source_paths"), dict) else {}
+        lines.append(f"- Page: `{product_concept_surface.get('path')}`")
+        lines.append(f"- Status: `{product_concept_surface.get('status') or 'unknown'}`")
+        lines.append(f"- Ready for brief review: `{product_concept_surface.get('ready_for_brief_review_count', 0)}`")
+        lines.append(f"- Watch: `{product_concept_surface.get('watch_count', 0)}`")
+        lines.append(f"- Blocked by guardrail: `{product_concept_surface.get('blocked_by_guardrail_count', 0)}`")
+        lines.append(f"- Design-brief input: `{source_paths.get('design_brief_input') or ''}`")
+        if product_concept_surface.get("headline"):
+            lines.append(f"- Headline: {_trim_text(product_concept_surface.get('headline'), 180)}")
+        if product_concept_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(product_concept_surface.get('recommended_action'), 180)}")
+        concept_items = sections.get("product_concept_queue") or list(product_concept_surface.get("items") or [])
+        if concept_items:
+            lines.append("- Top candidates:")
+            for item in concept_items[:6]:
+                lines.append(
+                    f"  - {_trim_text(item.get('theme'), 80)} | `{item.get('queue_state') or 'unknown'}` | "
+                    f"`{item.get('source_type') or 'unknown'}` | score `{item.get('score', 0)}`"
+                )
+                if item.get("recommended_next_step"):
+                    lines.append(f"    Next: {_trim_text(item.get('recommended_next_step'), 160)}")
+    lines.extend([
+        "",
         "## Do Next",
         "",
     ])
@@ -3921,6 +4053,12 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "recommendations": "weekly_strategy_packet",
         "social_plan": "social_plan",
         "plan": "social_plan",
+        "concept": "product_concept_queue",
+        "concepts": "product_concept_queue",
+        "product_concept": "product_concept_queue",
+        "product_concepts": "product_concept_queue",
+        "product_concept_queue": "product_concept_queue",
+        "idea_queue": "product_concept_queue",
     }
     normalized = aliases.get(section_key, section_key)
     if normalized == "next_actions":
@@ -4768,6 +4906,37 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Performance: {item.get('performance_label')}")
         return "\n".join(lines)
 
+    if normalized == "product_concept_queue":
+        lines = ["Duck Ops Product Concept Queue", ""]
+        surface = payload.get("product_concept_surface") or {}
+        if not surface.get("available"):
+            surface = _load_product_concept_queue_surface()
+        if not surface.get("available"):
+            lines.append("Product concept queue is not available yet.")
+            return "\n".join(lines)
+        source_paths = surface.get("source_paths") if isinstance(surface.get("source_paths"), dict) else {}
+        lines.append(f"Page: {surface.get('path')}")
+        lines.append(f"Status: {surface.get('status') or 'unknown'}")
+        lines.append(f"Ready for brief review: {surface.get('ready_for_brief_review_count', 0)}")
+        lines.append(f"Watch: {surface.get('watch_count', 0)}")
+        lines.append(f"Blocked by guardrail: {surface.get('blocked_by_guardrail_count', 0)}")
+        lines.append(f"Design-brief input: {source_paths.get('design_brief_input') or ''}")
+        if surface.get("recommended_action"):
+            lines.append(f"Recommended action: {_trim_text(surface.get('recommended_action'), 180)}")
+        items = (sections.get("product_concept_queue") or []) or list(surface.get("items") or [])
+        if items:
+            lines.append("")
+            for item in items[:8]:
+                lines.append(
+                    f"- {_trim_text(item.get('theme'), 90)} | {item.get('queue_state') or 'unknown'} | "
+                    f"{item.get('source_type') or 'unknown'} | score {item.get('score', 0)}"
+                )
+                if item.get("recommended_next_step"):
+                    lines.append(f"  Next: {_trim_text(item.get('recommended_next_step'), 180)}")
+                if item.get("evidence"):
+                    lines.append(f"  Evidence: {_trim_text('; '.join(str(value) for value in list(item.get('evidence') or [])[:3]), 220)}")
+        return "\n".join(lines)
+
     items = sections.get(normalized) or []
     title_map = {
         "customer_packets": "Customer Queue",
@@ -4778,6 +4947,7 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "inventory_truth": "Inventory Truth",
         "weekly_sale_monitor": "Weekly Sale Monitor",
         "review_queue": "Creative Review Queue",
+        "product_concept_queue": "Product Concept Queue",
         "workflow_followthrough": "Workflow Follow-Through",
         "approval_chains": "Approval Chains",
     }

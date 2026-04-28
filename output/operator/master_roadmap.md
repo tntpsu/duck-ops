@@ -122,6 +122,12 @@ Companion docs:
 - Material learning changes now feed a dedicated learnings-change digest and business-desk follow-through action.
 - Weekly strategy packet now carries a `What Changed` section so learning shifts are folded back into the weekly plan.
 
+### 10. Product Concept Queue
+- Duck Ops now has a Product Concept Queue contract for trend, competitor-learning, and strategy signals.
+- The queue writes a DuckAgent-compatible `DesignBriefQueueInput` handoff artifact while keeping image generation, model creation, listing work, and publishing out of Duck Ops.
+- Business Desk now surfaces product concepts as ready/watch/blocked and reserves room for blocked guardrail examples instead of hiding risky signals behind ready candidates.
+- IP/team/organization-adjacent themes are blocked for manual abstraction before any design brief generation.
+
 ## Active Operational Lanes
 
 ### 1. Shopify SEO Category Workflow
@@ -197,8 +203,8 @@ Why this is high value:
 - It gives the AI system a safer way to propose new products without silently copying IP-heavy competitor motifs.
 
 Next slices:
-1. define the product-concept queue contract and approval states
-2. connect Duck Ops concept review to DuckAgent image/model generation runs
+1. connect Duck Ops Product Concept Queue review to DuckAgent `design_brief_queue` email generation
+2. add approval receipts and promotion-readiness history for recurring product concept queue runs
 3. add model-quality checks for flat bottom, smoothness, color intent, and Bambu import readiness
 
 ### Priority 4: Social Strategy Hardening
