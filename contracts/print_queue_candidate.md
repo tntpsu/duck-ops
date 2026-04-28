@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Represent one operator-facing recommendation for what to print or restock next.
+Represent one operator-facing stock-watch recommendation for what may need a live inventory check before printing or restocking.
 
-This is an intelligence artifact, not a printer command.
+This is an intelligence artifact, not a printer command or proof that stock is low.
 
 ## Sources
 
@@ -35,5 +35,6 @@ This is an intelligence artifact, not a printer command.
 ## Safety rules
 
 - if we only have demand evidence and not real stock evidence, say that explicitly
+- demand-only candidates should be phrased as inventory verification, not as confirmed print work
 - do not convert a print recommendation into printer execution automatically in the first slice
 - preserve the source signal used to justify the queue candidate

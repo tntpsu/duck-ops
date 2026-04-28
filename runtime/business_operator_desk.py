@@ -175,6 +175,33 @@ def _jeepfact_policy_reason_text(value: Any) -> str:
     return JEEPFACT_POLICY_REASON_LABELS.get(key, key.replace("_", " "))
 
 
+def _is_clean_gated_policy_entry(
+    entry: dict[str, Any],
+    *,
+    publish_success_state_reasons: set[str],
+) -> bool:
+    # A clean gated run can be either waiting only on the approval gate or the
+    # same run after manual approval reached its expected publish/schedule state.
+    blockers = [str(value).strip() for value in list(entry.get("blockers") or []) if str(value).strip()]
+    if blockers:
+        return False
+
+    review_reasons = {
+        str(value).strip()
+        for value in list(entry.get("manual_review_reasons") or [])
+        if str(value).strip()
+    }
+    if not review_reasons <= {"approval_gated_mode"}:
+        return False
+
+    decision = str(entry.get("decision") or "").strip()
+    if decision == "manual_review_required":
+        return True
+
+    state_reason = str(entry.get("state_reason") or "").strip()
+    return decision == "manual_publish_allowed" and state_reason in publish_success_state_reasons
+
+
 def _with_promotion_controls(candidate: dict[str, Any], *, current_mode: str | None = None) -> dict[str, Any]:
     promotion_id = str(candidate.get("promotion_id") or "").strip()
     metadata = PROMOTION_CONTROL_METADATA.get(promotion_id, {})
@@ -226,13 +253,7 @@ def _load_weekly_sale_policy_surface() -> dict[str, Any]:
     recent_runs = [_recent_entry(item) for item in recent]
 
     def _is_clean_gated(entry: dict[str, Any]) -> bool:
-        blockers = list(entry.get("blockers") or [])
-        review_reasons = list(entry.get("manual_review_reasons") or [])
-        return (
-            str(entry.get("decision") or "") == "manual_review_required"
-            and not blockers
-            and set(review_reasons or []) <= {"approval_gated_mode"}
-        )
+        return _is_clean_gated_policy_entry(entry, publish_success_state_reasons={"sale_rotation_published"})
 
     clean_gated_streak = 0
     for entry in recent_runs:
@@ -388,13 +409,7 @@ def _load_meme_policy_surface() -> dict[str, Any]:
     recent_runs = [_recent_entry(item) for item in recent]
 
     def _is_clean_gated(entry: dict[str, Any]) -> bool:
-        blockers = list(entry.get("blockers") or [])
-        review_reasons = list(entry.get("manual_review_reasons") or [])
-        return (
-            str(entry.get("decision") or "") == "manual_review_required"
-            and not blockers
-            and set(review_reasons or []) <= {"approval_gated_mode"}
-        )
+        return _is_clean_gated_policy_entry(entry, publish_success_state_reasons={"scheduled"})
 
     clean_gated_streak = 0
     for entry in recent_runs:
@@ -544,13 +559,7 @@ def _load_review_carousel_policy_surface() -> dict[str, Any]:
     recent_runs = [_recent_entry(item) for item in recent]
 
     def _is_clean_gated(entry: dict[str, Any]) -> bool:
-        blockers = list(entry.get("blockers") or [])
-        review_reasons = list(entry.get("manual_review_reasons") or [])
-        return (
-            str(entry.get("decision") or "") == "manual_review_required"
-            and not blockers
-            and set(review_reasons or []) <= {"approval_gated_mode"}
-        )
+        return _is_clean_gated_policy_entry(entry, publish_success_state_reasons={"scheduled"})
 
     clean_gated_streak = 0
     for entry in recent_runs:
@@ -700,13 +709,7 @@ def _load_jeepfact_policy_surface() -> dict[str, Any]:
     recent_runs = [_recent_entry(item) for item in recent]
 
     def _is_clean_gated(entry: dict[str, Any]) -> bool:
-        blockers = list(entry.get("blockers") or [])
-        review_reasons = list(entry.get("manual_review_reasons") or [])
-        return (
-            str(entry.get("decision") or "") == "manual_review_required"
-            and not blockers
-            and set(review_reasons or []) <= {"approval_gated_mode"}
-        )
+        return _is_clean_gated_policy_entry(entry, publish_success_state_reasons={"scheduled"})
 
     clean_gated_streak = 0
     for entry in recent_runs:
@@ -1951,6 +1954,33 @@ def _print_queue_items(print_queue_candidates: dict[str, Any] | list[dict[str, A
     )
 
 
+def _stock_watch_signal_label(item: dict[str, Any]) -> str:
+    notes = item.get("notes") if isinstance(item.get("notes"), dict) else {}
+    inventory_signal = str(item.get("inventory_signal") or "").strip()
+    stock_evidence = str((notes or {}).get("stock_evidence") or "").strip()
+    if inventory_signal == "demand_alert_only" or stock_evidence == "not_yet_available":
+        return "demand-only"
+    if stock_evidence:
+        return stock_evidence.replace("_", "-")
+    if inventory_signal:
+        return inventory_signal.replace("_", "-")
+    return "stock evidence unknown"
+
+
+def _stock_watch_summary(item: dict[str, Any]) -> str:
+    return (
+        f"{item.get('priority', 'low')} priority | "
+        f"{_stock_watch_signal_label(item)} | "
+        f"recent demand {int(item.get('recent_demand') or 0)}"
+    )
+
+
+def _stock_watch_command(item: dict[str, Any]) -> str:
+    if _stock_watch_signal_label(item) == "demand-only":
+        return "Verify live stock before queuing any replenishment print."
+    return "Check live stock and queue a replenishment print if inventory is below threshold."
+
+
 def _weekly_sale_items(weekly_sale_monitor: dict[str, Any] | None) -> list[dict[str, Any]]:
     items = list((weekly_sale_monitor or {}).get("items") or [])
     return sorted(
@@ -2375,9 +2405,9 @@ def _build_next_actions(
             {
                 "lane": "stock_print",
                 "title": _display_duck_name(first.get("product_title")) or "Stock print candidate",
-                "summary": f"{first.get('priority', 'low')} priority | recent demand {int(first.get('recent_demand') or 0)}",
-                "command": "Check live stock and queue a replenishment print.",
-                "secondary_command": None,
+                "summary": _stock_watch_summary(first),
+                "command": _stock_watch_command(first),
+                "secondary_command": "Only queue prints after live inventory is confirmed low.",
             }
         )
     weak_sale_items = [item for item in weekly_sale_items if str(item.get("effectiveness") or "") in {"weak", "watch"}]
@@ -2699,7 +2729,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Custom build candidates: `{counts.get('custom_build_candidates', 0)}`",
         f"- Live Google Tasks for builds: `{counts.get('custom_build_tasks_live', 0)}`",
         f"- Non-custom units to pack: `{counts.get('orders_to_pack_units', 0)}`",
-        f"- Print-soon candidates: `{counts.get('stock_print_candidates', 0)}`",
+        f"- Stock-watch candidates: `{counts.get('stock_print_candidates', 0)}`",
         f"- Active weekly sale items: `{counts.get('active_weekly_sale_items', 0)}`",
         f"- Weak weekly sale items: `{counts.get('weak_weekly_sale_items', 0)}`",
         f"- Creative/operator review items: `{counts.get('review_queue_items', 0)}`",
@@ -3463,16 +3493,17 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             if item.get("option_summary"):
                 lines.append(f"  Choices: {_trim_text(item.get('option_summary'), 120)}")
 
-    lines.extend(["", "## Print Soon / Stock Watch", ""])
+    lines.extend(["", "## Stock Watch / Print Review", ""])
     stock_items = sections.get("stock_print_candidates") or []
     if not stock_items:
         lines.append("No stock-print candidates are staged right now.")
     else:
         for item in stock_items:
             lines.append(
-                f"- {_display_duck_name(item.get('product_title'), 44)} | {item.get('priority') or 'low'} priority | recent demand {int(item.get('recent_demand') or 0)}"
+                f"- {_display_duck_name(item.get('product_title'), 44)} | {_stock_watch_summary(item)}"
             )
             lines.append(f"  Why: {_trim_text(item.get('why_now'), 120)}")
+            lines.append(f"  Action: {_stock_watch_command(item)}")
 
     lines.extend(["", "## Weekly Sale Monitor", ""])
     weekly_sale_items = sections.get("weekly_sale_monitor") or []
@@ -4640,7 +4671,7 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "etsy_browser_threads": "Etsy Browser Review",
         "custom_build_candidates": "Custom Builds",
         "orders_to_pack": "Pack Tonight",
-        "stock_print_candidates": "Print Soon / Stock Watch",
+        "stock_print_candidates": "Stock Watch / Print Review",
         "weekly_sale_monitor": "Weekly Sale Monitor",
         "review_queue": "Creative Review Queue",
         "workflow_followthrough": "Workflow Follow-Through",
@@ -4686,9 +4717,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append(f"  Choices: {_trim_text(item.get('option_summary'), 120)}")
         elif normalized == "stock_print_candidates":
             lines.append(
-                f"- {_display_duck_name(item.get('product_title'), 44)} | {item.get('priority')} priority | recent demand {int(item.get('recent_demand') or 0)}"
+                f"- {_display_duck_name(item.get('product_title'), 44)} | {_stock_watch_summary(item)}"
             )
             lines.append(f"  Why: {_trim_text(item.get('why_now'), 120)}")
+            lines.append(f"  Action: {_stock_watch_command(item)}")
         elif normalized == "weekly_sale_monitor":
             lines.append(
                 f"- {_display_duck_name(item.get('product_title'), 44)} | {item.get('discount')} | {item.get('effectiveness')} | 7d {int(item.get('sales_7d') or 0)} | 30d {int(item.get('sales_30d') or 0)}"

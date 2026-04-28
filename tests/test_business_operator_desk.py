@@ -11,6 +11,7 @@ if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
 from business_operator_desk import (
+    _load_weekly_sale_policy_surface,
     build_business_operator_desk,
     render_business_operator_desk_markdown,
     render_business_section,
@@ -61,6 +62,38 @@ class BusinessOperatorDeskTests(unittest.TestCase):
 
         self.assertEqual(packing_action.get("title"), "Dachshund Duck")
         self.assertEqual(weekly_action.get("title"), "Dachshund Duck")
+
+    def test_operator_desk_labels_demand_only_stock_watch_without_printing_urgency(self) -> None:
+        payload = build_business_operator_desk(
+            customer_packets={"items": []},
+            nightly_summary={"counts": {}, "sections": {}},
+            etsy_browser_sync={"items": []},
+            custom_build_candidates={"items": []},
+            print_queue_candidates={
+                "items": [
+                    {
+                        "product_title": "Dachshund Duck \u2013 Long & Loyal Wiener Dog Collectible",
+                        "priority": "high",
+                        "recent_demand": 70,
+                        "why_now": "High demand - check inventory levels",
+                        "inventory_signal": "demand_alert_only",
+                        "notes": {"stock_evidence": "not_yet_available"},
+                    }
+                ]
+            },
+            weekly_sale_monitor={"items": []},
+            review_queue={"items": []},
+        )
+
+        action = next(item for item in payload.get("next_actions") or [] if item.get("lane") == "stock_print")
+        self.assertIn("demand-only", action["summary"])
+        self.assertEqual(action["command"], "Verify live stock before queuing any replenishment print.")
+        self.assertIn("Only queue prints after live inventory is confirmed low", action["secondary_command"])
+
+        markdown = render_business_operator_desk_markdown(payload)
+        self.assertIn("Stock Watch / Print Review", markdown)
+        self.assertIn("demand-only", markdown)
+        self.assertIn("Verify live stock before queuing", markdown)
 
     def test_operator_desk_markdown_shortens_visible_titles(self) -> None:
         markdown = render_business_operator_desk_markdown(
@@ -944,6 +977,85 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("ready_with_approval", social_action["summary"])
         self.assertEqual(social_action["command"], "python src/main_agent.py --flow meme --all")
         self.assertIn("Reply `publish`", social_action["secondary_command"])
+
+    def test_weekly_sale_policy_counts_successful_manual_publish_as_clean_gated(self) -> None:
+        states = [
+            {
+                "lane": "weekly",
+                "run_id": "2026-04-26",
+                "updated_at": "2026-04-27T17:37:15-04:00",
+                "state_reason": "sale_rotation_published",
+                "metadata": {
+                    "sale_theme_name": "Sports & Athletics",
+                    "weekly_sale_policy_decision": "manual_publish_allowed",
+                    "weekly_sale_policy_reason": "policy_checks_passed",
+                    "weekly_sale_policy_blockers": [],
+                    "weekly_sale_policy_manual_review_reasons": [],
+                },
+            },
+            {
+                "lane": "weekly",
+                "run_id": "2026-04-19",
+                "updated_at": "2026-04-19T09:00:00-04:00",
+                "state_reason": "awaiting_sale_review",
+                "metadata": {
+                    "sale_theme_name": "Spring Ducks",
+                    "weekly_sale_policy_decision": "manual_review_required",
+                    "weekly_sale_policy_blockers": [],
+                    "weekly_sale_policy_manual_review_reasons": ["approval_gated_mode"],
+                },
+            },
+        ]
+
+        with (
+            patch("business_operator_desk.load_json", return_value={"mode": "approval_gated"}),
+            patch("business_operator_desk.list_workflow_states", return_value=states),
+        ):
+            surface = _load_weekly_sale_policy_surface()
+
+        self.assertEqual(surface["latest_decision"], "manual_publish_allowed")
+        self.assertEqual(surface["clean_gated_streak"], 2)
+        self.assertEqual(surface["clean_gated_recent_count"], 2)
+        self.assertIn("1 more clean gated run", surface["readiness_headline"])
+
+    def test_weekly_sale_policy_does_not_count_failed_manual_publish_as_clean_gated(self) -> None:
+        states = [
+            {
+                "lane": "weekly",
+                "run_id": "2026-04-26",
+                "updated_at": "2026-04-27T17:37:15-04:00",
+                "state_reason": "execution_failed",
+                "metadata": {
+                    "sale_theme_name": "Sports & Athletics",
+                    "weekly_sale_policy_decision": "manual_publish_allowed",
+                    "weekly_sale_policy_reason": "policy_checks_passed",
+                    "weekly_sale_policy_blockers": [],
+                    "weekly_sale_policy_manual_review_reasons": [],
+                },
+            },
+            {
+                "lane": "weekly",
+                "run_id": "2026-04-19",
+                "updated_at": "2026-04-19T09:00:00-04:00",
+                "state_reason": "awaiting_sale_review",
+                "metadata": {
+                    "sale_theme_name": "Spring Ducks",
+                    "weekly_sale_policy_decision": "manual_review_required",
+                    "weekly_sale_policy_blockers": [],
+                    "weekly_sale_policy_manual_review_reasons": ["approval_gated_mode"],
+                },
+            },
+        ]
+
+        with (
+            patch("business_operator_desk.load_json", return_value={"mode": "approval_gated"}),
+            patch("business_operator_desk.list_workflow_states", return_value=states),
+        ):
+            surface = _load_weekly_sale_policy_surface()
+
+        self.assertEqual(surface["latest_decision"], "manual_publish_allowed")
+        self.assertEqual(surface["clean_gated_streak"], 0)
+        self.assertEqual(surface["clean_gated_recent_count"], 1)
 
     def test_operator_desk_surfaces_weekly_sale_policy_promotion_readiness(self) -> None:
         with (
