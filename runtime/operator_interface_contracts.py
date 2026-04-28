@@ -550,28 +550,16 @@ def _weekly_sales(etsy: dict[str, Any] | None, shopify: dict[str, Any] | None) -
     return out
 
 
-def _sales_trends(etsy: dict[str, Any] | None) -> dict[str, Any]:
-    empty = {
-        "today_units": 0,
-        "today_orders": 0,
-        "yesterday_units": 0,
-        "yesterday_orders": 0,
-        "wtd_units": 0,
-        "wtd_orders": 0,
-        "wtd_last_week_units": 0,
-        "wtd_last_week_orders": 0,
-        "mtd_units": 0,
-        "mtd_orders": 0,
-        "mtd_last_month_units": 0,
-        "mtd_last_month_orders": 0,
-        "source": "etsy",
-    }
-    if not etsy:
-        return empty
-    items = etsy.get("items") or []
-    if not items:
-        return empty
-
+def _sales_trends(
+    receipts: dict[str, Any] | None,
+    shopify: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    # Reads the Etsy *receipts* snapshot (~45-day rolling history, paid+open
+    # filtered to is_paid) instead of the open-orders-tied transactions
+    # snapshot — which only carries timestamps for currently-open orders
+    # and so collapses to ~4 days of history when fulfillment runs ahead.
+    # Shopify is now joined too; before this change the card showed 0 for
+    # any day where all sales went through Shopify.
     now = datetime.now().astimezone()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     yesterday_start = today_start - timedelta(days=1)
@@ -586,18 +574,40 @@ def _sales_trends(etsy: dict[str, Any] | None) -> dict[str, Any]:
         last_month_start = this_month_start.replace(month=this_month_start.month - 1)
     last_month_cutoff = last_month_start + (now - this_month_start)
 
+    # Build a unified [(timestamp, order_id, units)] stream from both
+    # marketplaces so the bucket math runs once and shopify-only days
+    # don't read as zero.
+    sales: list[tuple[float, str, int]] = []
+    if receipts:
+        for r in receipts.get("items") or []:
+            if not r.get("is_paid"):
+                continue
+            created = float(r.get("created_timestamp") or 0)
+            if created <= 0:
+                continue
+            order_id = f"etsy:{r.get('receipt_id')}"
+            qty = sum(int(t.get("quantity") or 0) for t in (r.get("transactions") or []))
+            sales.append((created, order_id, qty))
+    if shopify:
+        for o in shopify.get("items") or []:
+            created_dt = parse_iso(o.get("created_at"))
+            if not created_dt:
+                continue
+            order_id = f"shopify:{o.get('id') or o.get('order_number') or o.get('name')}"
+            qty = sum(int(li.get("quantity") or 0) for li in (o.get("line_items") or []))
+            sales.append((created_dt.timestamp(), order_id, qty))
+
     def collect(start_ts: float, end_ts: float | None = None) -> tuple[int, int]:
-        receipts: set[Any] = set()
+        order_ids: set[str] = set()
         units = 0
-        for tx in items:
-            created = float(tx.get("created_timestamp") or 0)
-            if created < start_ts:
+        for ts, oid, qty in sales:
+            if ts < start_ts:
                 continue
-            if end_ts is not None and created >= end_ts:
+            if end_ts is not None and ts >= end_ts:
                 continue
-            receipts.add(tx.get("receipt_id"))
-            units += int(tx.get("quantity") or 0)
-        return len(receipts), units
+            order_ids.add(oid)
+            units += qty
+        return len(order_ids), units
 
     today_orders, today_units = collect(today_start.timestamp())
     yesterday_orders, yesterday_units = collect(yesterday_start.timestamp(), today_start.timestamp())
@@ -606,6 +616,12 @@ def _sales_trends(etsy: dict[str, Any] | None) -> dict[str, Any]:
     mtd_orders, mtd_units = collect(this_month_start.timestamp())
     mtd_last_month_orders, mtd_last_month_units = collect(last_month_start.timestamp(), last_month_cutoff.timestamp())
 
+    if receipts and shopify:
+        source = "etsy+shopify"
+    elif shopify:
+        source = "shopify"
+    else:
+        source = "etsy"
     return {
         "today_units": today_units,
         "today_orders": today_orders,
@@ -619,7 +635,7 @@ def _sales_trends(etsy: dict[str, Any] | None) -> dict[str, Any]:
         "mtd_orders": mtd_orders,
         "mtd_last_month_units": mtd_last_month_units,
         "mtd_last_month_orders": mtd_last_month_orders,
-        "source": "etsy",
+        "source": source,
     }
 
 
@@ -693,7 +709,7 @@ def build_compact_operator_surface(source_bundle: dict[str, Any] | None = None) 
         "top_tasks": top_tasks,
         "weekly_insights": _weekly_insights(receipts, catalog),
         "weekly_sales": _weekly_sales(etsy, shopify),
-        "sales_trends": _sales_trends(etsy),
+        "sales_trends": _sales_trends(receipts, shopify),
         "pending_approvals": pending_approvals,
     }
 
