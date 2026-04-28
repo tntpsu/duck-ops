@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from dependency_health import DEPENDENCY_HEALTH_MD_PATH, build_dependency_health
 from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
 from operator_interface_contracts import build_interface_contract_summary
@@ -1558,6 +1559,73 @@ def _load_scheduler_health_surface() -> dict[str, Any]:
     }
 
 
+def _load_dependency_health_surface() -> dict[str, Any]:
+    try:
+        payload = build_dependency_health(write_outputs=False)
+    except Exception:
+        return {
+            "available": False,
+            "path": str(DEPENDENCY_HEALTH_MD_PATH),
+            "headline": None,
+            "recommended_action": None,
+            "item_count": 0,
+            "bad_count": 0,
+            "warn_count": 0,
+            "items": [],
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "path": str(DEPENDENCY_HEALTH_MD_PATH),
+            "headline": None,
+            "recommended_action": None,
+            "item_count": 0,
+            "bad_count": 0,
+            "warn_count": 0,
+            "items": [],
+        }
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    normalized_items: list[dict[str, Any]] = []
+    for item in list(payload.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        normalized_items.append(
+            {
+                "dependency": str(item.get("dependency") or "").strip() or "dependency",
+                "dependency_label": str(item.get("dependency_label") or item.get("dependency") or "").strip() or "Dependency",
+                "blocker": str(item.get("blocker") or "").strip() or None,
+                "blocker_label": str(item.get("blocker_label") or item.get("blocker") or "").strip() or None,
+                "status": str(item.get("status") or "warn").strip() or "warn",
+                "lane": str(item.get("lane") or "workflow").strip() or "workflow",
+                "run_id": item.get("run_id"),
+                "title": str(item.get("title") or "").strip() or None,
+                "summary": str(item.get("summary") or "").strip() or None,
+                "updated_at": item.get("updated_at"),
+                "recommended_action": str(item.get("recommended_action") or "").strip() or None,
+                "path": item.get("path"),
+                "source": item.get("source"),
+            }
+        )
+
+    return {
+        "available": True,
+        "path": str(DEPENDENCY_HEALTH_MD_PATH),
+        "source": payload.get("source"),
+        "generated_at": payload.get("generated_at"),
+        "status": payload.get("status"),
+        "headline": payload.get("headline"),
+        "recommended_action": payload.get("recommended_action"),
+        "item_count": int(summary.get("item_count") or len(normalized_items)),
+        "bad_count": int(summary.get("bad_count") or 0),
+        "warn_count": int(summary.get("warn_count") or 0),
+        "dependency_count": int(summary.get("dependency_count") or 0),
+        "dependencies": list(summary.get("dependencies") or []),
+        "items": normalized_items[:8],
+    }
+
+
 def _load_interface_contract_surface() -> dict[str, Any]:
     try:
         payload = build_interface_contract_summary()
@@ -1682,6 +1750,7 @@ def _load_maintenance_freshness_surface(
     roi_triage_surface: dict[str, Any],
     repo_ci_surface: dict[str, Any],
     scheduler_health_surface: dict[str, Any],
+    dependency_health_surface: dict[str, Any],
     interface_contract_surface: dict[str, Any],
 ) -> dict[str, Any]:
     items = [
@@ -1689,6 +1758,13 @@ def _load_maintenance_freshness_surface(
             surface_id="scheduler_health",
             label="Scheduler health",
             surface=scheduler_health_surface,
+            designed_cadence_hours=3,
+            max_age_hours=8,
+        ),
+        _freshness_item(
+            surface_id="dependency_health",
+            label="Dependency health",
+            surface=dependency_health_surface,
             designed_cadence_hours=3,
             max_age_hours=8,
         ),
@@ -2056,6 +2132,38 @@ def _scheduler_health_action_item(scheduler_health_surface: dict[str, Any]) -> d
     }
 
 
+def _dependency_health_action_item(dependency_health_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not dependency_health_surface.get("available"):
+        return None
+
+    items = [item for item in list(dependency_health_surface.get("items") or []) if isinstance(item, dict)]
+    attention_items = [item for item in items if str(item.get("status") or "") in {"bad", "warn"}]
+    if not attention_items:
+        return None
+
+    status_rank = {"bad": 0, "warn": 1, "ok": 2}
+    attention_items.sort(
+        key=lambda item: (
+            status_rank.get(str(item.get("status") or "warn"), 9),
+            str(item.get("dependency") or ""),
+            str(item.get("lane") or ""),
+        )
+    )
+    top = attention_items[0]
+    summary_bits = [
+        str(top.get("dependency_label") or top.get("dependency") or "dependency"),
+        str(top.get("status") or "unknown"),
+        _trim_text(str(top.get("blocker_label") or top.get("blocker") or ""), 90),
+    ]
+    return {
+        "lane": "dependency_health",
+        "title": f"Dependency attention: {top.get('dependency_label') or top.get('dependency') or 'dependency'}",
+        "summary": " | ".join(bit for bit in summary_bits if bit),
+        "command": str(top.get("recommended_action") or dependency_health_surface.get("recommended_action") or "").strip() or None,
+        "secondary_command": str(top.get("path") or dependency_health_surface.get("path") or "").strip() or None,
+    }
+
+
 def _maintenance_freshness_action_item(maintenance_freshness_surface: dict[str, Any]) -> dict[str, Any] | None:
     if not maintenance_freshness_surface.get("available"):
         return None
@@ -2190,6 +2298,7 @@ def _build_next_actions(
     roi_triage_surface: dict[str, Any],
     repo_ci_surface: dict[str, Any],
     scheduler_health_surface: dict[str, Any],
+    dependency_health_surface: dict[str, Any],
     maintenance_freshness_surface: dict[str, Any],
     promotion_watch_surface: dict[str, Any],
     approval_chain_surface: dict[str, Any],
@@ -2315,6 +2424,9 @@ def _build_next_actions(
     scheduler_action = _scheduler_health_action_item(scheduler_health_surface)
     if scheduler_action:
         actions.append(scheduler_action)
+    dependency_action = _dependency_health_action_item(dependency_health_surface)
+    if dependency_action:
+        actions.append(dependency_action)
     maintenance_action = _maintenance_freshness_action_item(maintenance_freshness_surface)
     if maintenance_action:
         actions.append(maintenance_action)
@@ -2360,6 +2472,7 @@ def build_business_operator_desk(
     roi_triage_surface = _load_roi_triage_surface()
     repo_ci_surface = _load_repo_ci_surface()
     scheduler_health_surface = _load_scheduler_health_surface()
+    dependency_health_surface = _load_dependency_health_surface()
     interface_contract_surface = _load_interface_contract_surface()
     maintenance_freshness_surface = _load_maintenance_freshness_surface(
         learning_surface=learning_surface,
@@ -2369,6 +2482,7 @@ def build_business_operator_desk(
         roi_triage_surface=roi_triage_surface,
         repo_ci_surface=repo_ci_surface,
         scheduler_health_surface=scheduler_health_surface,
+        dependency_health_surface=dependency_health_surface,
         interface_contract_surface=interface_contract_surface,
     )
     weekly_sale_policy_surface = _load_weekly_sale_policy_surface()
@@ -2456,6 +2570,9 @@ def build_business_operator_desk(
             "scheduler_orphaned_jobs": int(scheduler_health_surface.get("orphaned_count") or 0),
             "scheduler_failed_jobs": int(scheduler_health_surface.get("failed_count") or 0),
             "scheduler_timeout_jobs": int(scheduler_health_surface.get("timeout_count") or 0),
+            "dependency_health_items": int(dependency_health_surface.get("item_count") or 0),
+            "dependency_health_bad_items": int(dependency_health_surface.get("bad_count") or 0),
+            "dependency_health_warn_items": int(dependency_health_surface.get("warn_count") or 0),
             "maintenance_freshness_items": int(maintenance_freshness_surface.get("item_count") or 0),
             "maintenance_freshness_attention_items": int(maintenance_freshness_surface.get("attention_count") or 0),
             "maintenance_freshness_stale_items": int(maintenance_freshness_surface.get("stale_count") or 0),
@@ -2492,6 +2609,7 @@ def build_business_operator_desk(
             roi_triage_surface=roi_triage_surface,
             repo_ci_surface=repo_ci_surface,
             scheduler_health_surface=scheduler_health_surface,
+            dependency_health_surface=dependency_health_surface,
             maintenance_freshness_surface=maintenance_freshness_surface,
             promotion_watch_surface=promotion_watch_surface,
             approval_chain_surface=approval_chain_surface,
@@ -2500,6 +2618,7 @@ def build_business_operator_desk(
         "roi_triage_surface": roi_triage_surface,
         "repo_ci_surface": repo_ci_surface,
         "scheduler_health_surface": scheduler_health_surface,
+        "dependency_health_surface": dependency_health_surface,
         "maintenance_freshness_surface": maintenance_freshness_surface,
         "interface_contract_surface": interface_contract_surface,
         "weekly_sale_policy_surface": weekly_sale_policy_surface,
@@ -2527,6 +2646,7 @@ def build_business_operator_desk(
             "roi_triage": list(roi_triage_surface.get("recommendations") or [])[:5],
             "repo_ci_status": list(repo_ci_surface.get("items") or [])[:4],
             "scheduler_health": list(scheduler_health_surface.get("items") or [])[:6],
+            "dependency_health": list(dependency_health_surface.get("items") or [])[:6],
             "maintenance_freshness": list(maintenance_freshness_surface.get("items") or [])[:8],
             "interface_contract_pending_approvals": list(interface_contract_surface.get("pending_approvals") or [])[:4],
             "interface_contract_top_tasks": list(interface_contract_surface.get("top_tasks") or [])[:3],
@@ -2547,6 +2667,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     roi_triage_surface = payload.get("roi_triage_surface") or {}
     repo_ci_surface = payload.get("repo_ci_surface") or {}
     scheduler_health_surface = payload.get("scheduler_health_surface") or {}
+    dependency_health_surface = payload.get("dependency_health_surface") or {}
     maintenance_freshness_surface = payload.get("maintenance_freshness_surface") or {}
     interface_contract_surface = payload.get("interface_contract_surface") or {}
     promotion_watch_surface = payload.get("promotion_watch_surface") or {}
@@ -2613,6 +2734,9 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Scheduler jobs needing attention: `{counts.get('scheduler_attention_jobs', 0)}`",
         f"- Scheduler bad jobs: `{counts.get('scheduler_bad_jobs', 0)}`",
         f"- Scheduler warn jobs: `{counts.get('scheduler_warn_jobs', 0)}`",
+        f"- Dependency blockers surfaced: `{counts.get('dependency_health_items', 0)}`",
+        f"- Dependency bad items: `{counts.get('dependency_health_bad_items', 0)}`",
+        f"- Dependency warnings: `{counts.get('dependency_health_warn_items', 0)}`",
         f"- Maintenance freshness surfaces: `{counts.get('maintenance_freshness_items', 0)}`",
         f"- Maintenance freshness attention items: `{counts.get('maintenance_freshness_attention_items', 0)}`",
         f"- Stale maintenance surfaces: `{counts.get('maintenance_freshness_stale_items', 0)}`",
@@ -2886,6 +3010,37 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 if item.get("expected_at"):
                     lines.append(f"    Expected: `{item.get('expected_at')}`")
                 if item.get("recommended_action") and item.get("attention_needed"):
+                    lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
+    lines.extend([
+        "",
+        "## Dependency Health",
+        "",
+    ])
+    if not dependency_health_surface.get("available"):
+        dependency_health_surface = _load_dependency_health_surface()
+    dependency_items = (sections.get("dependency_health") or []) or list(dependency_health_surface.get("items") or [])
+    if not dependency_health_surface.get("available"):
+        lines.append("Dependency health is not available yet.")
+    else:
+        lines.append(f"- Page: `{dependency_health_surface.get('path')}`")
+        lines.append(f"- Source: `{dependency_health_surface.get('source') or 'workflow_control_and_recent_duckagent_state'}`")
+        lines.append(f"- Status: `{dependency_health_surface.get('status') or 'unknown'}`")
+        lines.append(f"- Active blockers/warnings: `{dependency_health_surface.get('item_count', len(dependency_items))}`")
+        lines.append(f"- Bad: `{dependency_health_surface.get('bad_count', 0)}`")
+        lines.append(f"- Warn: `{dependency_health_surface.get('warn_count', 0)}`")
+        if dependency_health_surface.get("headline"):
+            lines.append(f"- Headline: {_trim_text(dependency_health_surface.get('headline'), 180)}")
+        if dependency_health_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(dependency_health_surface.get('recommended_action'), 180)}")
+        if dependency_items:
+            lines.append("- Dependency items:")
+            for item in dependency_items[:6]:
+                lines.append(
+                    f"  - {item.get('dependency_label') or item.get('dependency')} | `{item.get('status') or 'unknown'}` | {item.get('lane') or 'workflow'} | {_trim_text(item.get('title'), 100)}"
+                )
+                if item.get("blocker_label"):
+                    lines.append(f"    Blocker: {_trim_text(item.get('blocker_label'), 160)}")
+                if item.get("recommended_action"):
                     lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
     lines.extend([
         "",
@@ -3607,6 +3762,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "scheduler_health": "scheduler_health",
         "processes": "scheduler_health",
         "process_health": "scheduler_health",
+        "dependencies": "dependency_health",
+        "dependency": "dependency_health",
+        "dependency_health": "dependency_health",
+        "upstream": "dependency_health",
         "freshness": "maintenance_freshness",
         "maintenance": "maintenance_freshness",
         "maintenance_freshness": "maintenance_freshness",
@@ -3877,6 +4036,37 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                     if item.get("expected_at"):
                         lines.append(f"  Expected: {item.get('expected_at')}")
                     if item.get("recommended_action") and item.get("attention_needed"):
+                        lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
+        return "\n".join(lines)
+    if normalized == "dependency_health":
+        lines = ["Duck Ops Dependency Health", ""]
+        surface = payload.get("dependency_health_surface") or {}
+        if not surface.get("available"):
+            surface = _load_dependency_health_surface()
+        items = (sections.get("dependency_health") or []) or list(surface.get("items") or [])
+        if not surface.get("available"):
+            lines.append("Dependency health is not available yet.")
+        else:
+            lines.append(f"Page: {surface.get('path')}")
+            lines.append(f"Source: {surface.get('source') or 'workflow_control_and_recent_duckagent_state'}")
+            lines.append(f"Status: {surface.get('status') or 'unknown'}")
+            lines.append(f"Active blockers/warnings: {surface.get('item_count', len(items))}")
+            lines.append(f"Bad: {surface.get('bad_count', 0)}")
+            lines.append(f"Warn: {surface.get('warn_count', 0)}")
+            if surface.get("headline"):
+                lines.append(f"Headline: {_trim_text(surface.get('headline'), 180)}")
+            if surface.get("recommended_action"):
+                lines.append(f"Recommended action: {_trim_text(surface.get('recommended_action'), 180)}")
+            if items:
+                lines.append("")
+                lines.append("Dependency items:")
+                for item in items[:8]:
+                    lines.append(
+                        f"- {item.get('dependency_label') or item.get('dependency')} | {item.get('status') or 'unknown'} | {item.get('lane') or 'workflow'} | {_trim_text(item.get('title'), 120)}"
+                    )
+                    if item.get("blocker_label"):
+                        lines.append(f"  Blocker: {_trim_text(item.get('blocker_label'), 180)}")
+                    if item.get("recommended_action"):
                         lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
         return "\n".join(lines)
     if normalized == "learning_surface":
