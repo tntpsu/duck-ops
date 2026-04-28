@@ -38,12 +38,22 @@ ATTENTION_STATUSES = {
     "unknown",
 }
 BAD_STATUSES = {"missed_run", "failed", "timeout", "hung", "orphaned"}
-WARN_STATUSES = {"slow", "skipped_lock_active", "skipped_lock_unavailable", "running", "no_history", "unknown"}
+WARN_STATUSES = {
+    "dependency_blocked_recent",
+    "slow",
+    "skipped_lock_active",
+    "skipped_lock_unavailable",
+    "running",
+    "no_history",
+    "unknown",
+}
+NON_ACTIONABLE_ATTENTION_STATUSES = {"dependency_blocked_recent"}
 LOG_EVENT_RE = re.compile(
     r"^\[(?P<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?: [A-Z]{2,4})?\]\s+"
     r"(?P<event>START|END|TIMEOUT|BUDGET|SKIP|INTERRUPTED)\s+"
     r"(?P<job>[^\s]+)\s*(?:::)?\s*(?P<detail>.*)$"
 )
+LOG_STAMP_RE = re.compile(r"^\[(?P<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?: [A-Z]{2,4})?\]")
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -185,6 +195,43 @@ def _parse_scheduler_log(log_path: Path = SCHEDULER_LOG_PATH, *, max_lines: int 
     return events
 
 
+def _failure_dependency_from_log(
+    *,
+    log_path: Path,
+    started_at: datetime | None,
+    finished_at: datetime | None,
+) -> dict[str, str] | None:
+    if started_at is None or not log_path.exists():
+        return None
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-2500:]
+    except OSError:
+        return None
+
+    window_lines: list[str] = []
+    for line in lines:
+        parsed_at = None
+        match = LOG_STAMP_RE.match(line.strip())
+        if match:
+            parsed_at = _parse_log_timestamp(match.group("stamp"))
+        if parsed_at and parsed_at < started_at:
+            continue
+        if parsed_at and finished_at and parsed_at > finished_at:
+            continue
+        window_lines.append(line)
+
+    text = "\n".join(window_lines).lower()
+    if "photoroom" in text and ("exhausted the number of images" in text or "[402]" in text or "quota" in text):
+        return {
+            "dependency": "photoroom",
+            "dependency_blocker": "photoroom_quota_exhausted",
+            "failure_class": "dependency_blocked_recent",
+            "summary": "Last run hit PhotoRoom image quota, not a scheduler failure.",
+            "recommended_action": "No scheduler fix needed. Rerun the flow after the PhotoRoom quota resets or the plan is refreshed.",
+        }
+    return None
+
+
 def _schedule_datetime(schedule: dict[str, Any], *, now: datetime, future: bool) -> datetime | None:
     if not schedule:
         return None
@@ -317,10 +364,21 @@ def _evaluate_job(
         summary = f"Run exceeded the {timeout_seconds}s scheduler budget."
         recommended_action = "Inspect the flow logs for the stalled external call before retrying."
     elif exit_code not in {None, 0}:
-        status = "failed"
-        severity = "bad"
-        summary = f"Last run exited with code {exit_code}."
-        recommended_action = "Open the scheduler log tail and fix the failing flow before the next scheduled window."
+        dependency_failure = _failure_dependency_from_log(
+            log_path=scheduler_log_path,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+        if dependency_failure:
+            status = "dependency_blocked_recent"
+            severity = "warn"
+            summary = dependency_failure["summary"]
+            recommended_action = dependency_failure["recommended_action"]
+        else:
+            status = "failed"
+            severity = "bad"
+            summary = f"Last run exited with code {exit_code}."
+            recommended_action = "Open the scheduler log tail and fix the failing flow before the next scheduled window."
     elif duration_seconds is not None and duration_seconds > timeout_seconds:
         status = "slow"
         severity = "warn"
@@ -342,7 +400,7 @@ def _evaluate_job(
         "label": job.get("label"),
         "status": status,
         "severity": severity,
-        "attention_needed": status in ATTENTION_STATUSES,
+        "attention_needed": status in ATTENTION_STATUSES and status not in NON_ACTIONABLE_ATTENTION_STATUSES,
         "summary": summary,
         "recommended_action": recommended_action,
         "last_start_at": started_at.isoformat() if started_at else None,
@@ -359,6 +417,7 @@ def _evaluate_job(
         "receipt_path": (receipt or {}).get("receipt_path"),
         "log_path": str(scheduler_log_path),
         "plist_path": job.get("plist_path"),
+        **(dependency_failure if "dependency_failure" in locals() and dependency_failure else {}),
     }
 
 

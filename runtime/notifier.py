@@ -536,6 +536,7 @@ def _render_promotion_readiness_html(subject: str, payload: dict[str, Any]) -> s
     stats = "".join(
         [
             _notifier_stat("Ready now", payload.get("ready_item_count") or len(items)),
+            _notifier_stat("State changes", payload.get("state_change_count") or 0),
             _notifier_stat("Candidates", payload.get("item_count") or len(items)),
             _notifier_stat("Source", payload.get("source") or "business_desk"),
         ]
@@ -576,7 +577,7 @@ def _render_promotion_readiness_html(subject: str, payload: dict[str, Any]) -> s
             )
         )
     if not sections:
-        sections.append(_notifier_card("No promotion candidates", "<div style=\"color:#4b5563;\">No promotion candidates are ready right now.</div>"))
+        sections.append(_notifier_card("No promotion candidates", "<div style=\"color:#4b5563;\">No promotion candidates are ready or newly changed right now.</div>"))
     subtitle = f"Generated {payload.get('generated_at')} | business desk promotion watch"
     return _notifier_shell("Duck Ops Promotion Ready", subject, subtitle, stats, "".join(sections))
 
@@ -951,7 +952,26 @@ def promotion_readiness_signature(payload: dict[str, Any]) -> str:
             }
         )
     items.sort(key=lambda item: item.get("promotion_id") or "")
-    return canonical_hash({"ready_item_count": payload.get("ready_item_count", 0), "items": items})
+    state_changes = []
+    for item in payload.get("state_changes", []):
+        state_changes.append(
+            {
+                "promotion_id": item.get("promotion_id"),
+                "previous_state": item.get("previous_state"),
+                "promotion_state": item.get("promotion_state"),
+                "previous_progress_label": item.get("previous_progress_label"),
+                "progress_label": item.get("progress_label"),
+            }
+        )
+    state_changes.sort(key=lambda item: item.get("promotion_id") or "")
+    return canonical_hash(
+        {
+            "ready_item_count": payload.get("ready_item_count", 0),
+            "state_change_count": payload.get("state_change_count", 0),
+            "items": items,
+            "state_changes": state_changes,
+        }
+    )
 
 
 def learning_change_signature(payload: dict[str, Any]) -> str:
@@ -984,15 +1004,29 @@ def render_promotion_readiness_markdown(payload: dict[str, Any]) -> str:
         f"- Source: `{payload.get('source') or 'business_desk'}`",
         f"- Promotion candidates: `{payload.get('item_count', 0)}`",
         f"- Ready now: `{payload.get('ready_item_count', 0)}`",
+        f"- State changes: `{payload.get('state_change_count', 0)}`",
     ]
     if payload.get("headline"):
         lines.append(f"- Status: `{payload.get('headline')}`")
     if payload.get("recommended_action"):
         lines.append(f"- Recommended action: `{payload.get('recommended_action')}`")
-    lines.extend(["", "## Ready Candidates", ""])
+    state_changes = list(payload.get("state_changes") or [])
+    if state_changes:
+        lines.extend(["", "## State Changes", ""])
+        for item in state_changes[:6]:
+            lines.append(
+                f"- {item.get('title') or item.get('promotion_id') or 'Promotion candidate'} | "
+                f"`{item.get('previous_state') or 'unknown'}` -> `{item.get('promotion_state') or 'unknown'}` | "
+                f"`{item.get('progress_label') or ''}`"
+            )
+            if item.get("summary"):
+                lines.append(f"  Why: {item.get('summary')}")
+            if item.get("recommended_action"):
+                lines.append(f"  Next: {item.get('recommended_action')}")
+    lines.extend(["", "## Ready / Actionable Candidates", ""])
     items = list(payload.get("items") or [])
     if not items:
-        lines.append("No promotion candidates are ready right now.")
+        lines.append("No promotion candidates are ready or newly changed right now.")
         return "\n".join(lines)
     for item in items:
         lines.append(
@@ -1042,6 +1076,12 @@ def refresh_promotion_readiness_artifact() -> None:
     payload = load_json(BUSINESS_OPERATOR_DESK_PATH, {})
     if not isinstance(payload, dict) or not payload:
         return
+    previous_payload = load_json(PROMOTION_READINESS_DIGEST_PATH, {})
+    previous_snapshot = {
+        str(item.get("promotion_id") or "").strip(): item
+        for item in list((previous_payload if isinstance(previous_payload, dict) else {}).get("snapshot_items") or [])
+        if isinstance(item, dict) and str(item.get("promotion_id") or "").strip()
+    }
     promotion_surface = payload.get("promotion_watch_surface") if isinstance(payload.get("promotion_watch_surface"), dict) else {}
     items = [item for item in list(promotion_surface.get("items") or []) if isinstance(item, dict)]
     ready_items = [
@@ -1049,6 +1089,44 @@ def refresh_promotion_readiness_artifact() -> None:
         for item in items
         if item.get("promotion_state") == "ready" and not bool(item.get("already_promoted"))
     ]
+    snapshot_items = [
+        {
+            "promotion_id": item.get("promotion_id"),
+            "title": item.get("title"),
+            "promotion_state": item.get("promotion_state"),
+            "progress_label": item.get("progress_label"),
+            "summary": item.get("summary"),
+            "recommended_action": item.get("recommended_action"),
+        }
+        for item in items
+    ]
+    state_changes: list[dict[str, Any]] = []
+    watched_states = {"ready", "blocked", "active"}
+    for item in items:
+        promotion_id = str(item.get("promotion_id") or "").strip()
+        previous = previous_snapshot.get(promotion_id)
+        if not previous:
+            continue
+        previous_state = str(previous.get("promotion_state") or "").strip()
+        current_state = str(item.get("promotion_state") or "").strip()
+        previous_progress = str(previous.get("progress_label") or "").strip()
+        current_progress = str(item.get("progress_label") or "").strip()
+        if previous_state == current_state and previous_progress == current_progress:
+            continue
+        if current_state not in watched_states and previous_state not in watched_states:
+            continue
+        state_changes.append(
+            {
+                **item,
+                "previous_state": previous_state or None,
+                "previous_progress_label": previous_progress or None,
+            }
+        )
+    digest_items_by_id: dict[str, dict[str, Any]] = {}
+    for item in ready_items + state_changes:
+        promotion_id = str(item.get("promotion_id") or item.get("title") or "").strip()
+        if promotion_id:
+            digest_items_by_id[promotion_id] = item
     digest_payload = {
         "generated_at": datetime.now().astimezone().isoformat(),
         "source": "business_desk",
@@ -1057,7 +1135,10 @@ def refresh_promotion_readiness_artifact() -> None:
         "recommended_action": promotion_surface.get("recommended_action"),
         "item_count": len(items),
         "ready_item_count": len(ready_items),
-        "items": ready_items[:6],
+        "state_change_count": len(state_changes),
+        "state_changes": state_changes[:6],
+        "items": list(digest_items_by_id.values())[:6],
+        "snapshot_items": snapshot_items,
     }
     markdown = render_promotion_readiness_markdown(digest_payload)
     PROMOTION_READINESS_DIGEST_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1286,11 +1367,15 @@ def should_send_trend_digest(state: dict[str, Any], payload: dict[str, Any]) -> 
 
 def should_send_promotion_readiness(state: dict[str, Any], payload: dict[str, Any]) -> tuple[bool, str, str]:
     signature = promotion_readiness_signature(payload)
-    if int(payload.get("ready_item_count") or 0) <= 0:
-        return False, "no_ready_candidates", signature
+    ready_count = int(payload.get("ready_item_count") or 0)
+    state_change_count = int(payload.get("state_change_count") or 0)
+    if ready_count <= 0 and state_change_count <= 0:
+        return False, "no_ready_or_changed_candidates", signature
 
     previous_signature = state.get("last_promotion_readiness_signature")
     if signature != previous_signature:
+        if state_change_count > 0:
+            return True, "promotion_state_changed", signature
         return True, "promotion_ready", signature
 
     return False, "no_material_change", signature

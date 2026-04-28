@@ -139,6 +139,62 @@ class SchedulerHealthTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["hung_count"], 1)
             self.assertEqual(payload["items"][0]["status"], "hung")
 
+    def test_photoroom_quota_failure_is_dependency_warning_not_scheduler_failure(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            receipt_dir = root / "receipts"
+            launch_agents.mkdir()
+            receipt_dir.mkdir()
+            _write_plist(
+                launch_agents / "com.philtullai.duckagent.meme.monday.plist",
+                label="com.philtullai.duckagent.meme.monday",
+                job_name="meme_monday",
+                schedule={"Weekday": 1, "Hour": 9, "Minute": 0},
+            )
+            (receipt_dir / "meme_monday.json").write_text(
+                json.dumps(
+                    {
+                        "job_name": "meme_monday",
+                        "run_id": "meme_monday_20260427_090001_65509",
+                        "status": "failed",
+                        "exit_code": 1,
+                        "started_at": "2026-04-27T09:00:01-0400",
+                        "finished_at": "2026-04-27T09:00:19-0400",
+                        "timeout_seconds": 1800,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            log_path = root / "duckagent_scheduler.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "[2026-04-27 09:00:01 EDT] START meme_monday :: python src/main_agent.py --flow meme --all",
+                        "[photoroom] v2/edit templateId=d626efa0-5b2e-47b0-a0c9-376f88150463",
+                        'RuntimeError: Photoroom v2/edit failed [402]: {"error":{"message":"You have exhausted the number of images in your plan."}}',
+                        "[2026-04-27 09:00:19 EDT] END   meme_monday :: exit=1",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            payload = scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat("2026-04-27T10:00:00-04:00"),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=log_path,
+                receipt_dir=receipt_dir,
+                write_outputs=False,
+            )
+
+            self.assertEqual(payload["status"], "warn")
+            self.assertEqual(payload["summary"]["failed_count"], 0)
+            self.assertEqual(payload["summary"]["warn_count"], 1)
+            self.assertEqual(payload["summary"]["attention_count"], 0)
+            item = payload["items"][0]
+            self.assertEqual(item["status"], "dependency_blocked_recent")
+            self.assertEqual(item["dependency_blocker"], "photoroom_quota_exhausted")
+
 
 if __name__ == "__main__":
     unittest.main()

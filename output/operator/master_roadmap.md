@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-04-27
+Last updated: 2026-04-28
 
 ## Document Ownership
 
@@ -81,8 +81,10 @@ Companion docs:
 - Weekly/workflow health is more root-cause-aware than before.
 - Blog and ops health now treat healthy idle/backlog states as operator truth instead of fake warnings.
 - Etsy review auto-execution cooldown now degrades into a paused lane instead of crashing the sidecar.
+- Scheduler health now classifies upstream PhotoRoom quota failures as dependency-blocked warnings instead of scheduler failures.
 - Quality-gate control now prunes stale alerts and treats archived/overridden review items as resolved instead of counting them as still pending.
 - Business desk creative-review counts now separate currently surfaced items from older backlog so the queue reads more honestly.
+- Inventory truth now separates demand-only stock-watch leads from confirmed low-stock evidence so demand cannot silently become a print command.
 
 ### 7. Shopify Draft Activation Controls
 - Newduck is now a two-step Shopify flow:
@@ -108,6 +110,7 @@ Companion docs:
 - Governance digest email delivery is smoke-tested, so the observe/propose recommendation channel is live.
 - Business Desk promotion watch now covers the current approval-policy lanes and uses an explicit autonomy-readiness contract across weekly sale, Meme Monday, Tuesday review carousel, Jeep Fact Wednesday, and Etsy review execution.
 - Promotion readiness email and Business Desk sections now repeat owner, current mode, target mode, side effect, allowed tier, approval boundary, and no-self-promotion constraints before any lane can be promoted.
+- Promotion readiness notifications now include state-change deltas when a lane moves between observing, blocked, ready, or active.
 
 ### 9. Social Strategy Intelligence Layer
 - Own-post social performance collection is live from DuckAgent post receipts.
@@ -162,7 +165,7 @@ Why this is high value:
 Next slices:
 1. use the readiness surface to decide whether weekly sale can move from manual email approval to auto-apply after operator approval
 2. add the same promotion contract automatically whenever a new approval-policy lane is created
-3. include promotion-readiness deltas in the morning Business Desk email when a lane changes from observing to ready, blocked, or active
+3. keep promotion deltas tied to evidence and explicit operator approval before any mode change
 
 ### Priority 2: Outcome Learning Layer Expansion
 The social learning foundation is now live. The next high-value work is extending that same discipline into the remaining business outcomes:
@@ -177,12 +180,33 @@ Why this is high value:
 - That makes it finally worth learning from outcomes instead of just automating actions.
 - It also gives us a disciplined way to borrow strong ideas from competitors instead of guessing when to shift content strategy.
 
-### Priority 3: Social Strategy Hardening
+### Priority 3: Duck Product Studio / Concept-To-Print Pipeline
+The product creation path is becoming a real strategic lane, not just one-off experiments.
+
+Target workflow:
+1. Trends, competitor signals, and manual ideas feed a product-concept queue.
+2. The operator reviews concept framing before image generation.
+3. Approved concept images move through semantic/IP policy and product-listing policy.
+4. Strong concepts can be handed to 3D AI Studio or the local `paint-to-print-3d` toolchain.
+5. Repaired colored model outputs are opened in Bambu Studio for final human print review.
+6. Proven winners feed back into Shopify/Etsy listing creation, social launch planning, and outcome learning.
+
+Why this is high value:
+- It connects trend discovery to actual sellable inventory instead of stopping at content ideas.
+- It creates a reusable path from "interesting signal" to "printable duck" with human approval checkpoints.
+- It gives the AI system a safer way to propose new products without silently copying IP-heavy competitor motifs.
+
+Next slices:
+1. define the product-concept queue contract and approval states
+2. connect Duck Ops concept review to DuckAgent image/model generation runs
+3. add model-quality checks for flat bottom, smoothness, color intent, and Bambu import readiness
+
+### Priority 4: Social Strategy Hardening
 - Improve cross-channel post coverage so Instagram and Facebook outcomes stay comparable when both publish.
 - Continue feeding weekly strategy execution truth into current learnings, governance digest, and change-notifier surfaces, with the new per-slot feedback as the operator-facing primitive.
 - Turn manual experiments into first-class lanes only after repeated execution and outcome evidence justify it.
 
-### Priority 4: Expand SEO Audit Intelligence
+### Priority 5: Expand SEO Audit Intelligence
 Current audit checks:
 - missing SEO title
 - missing SEO description
@@ -198,18 +222,18 @@ Best next SEO heuristics to add:
 - SEO titles too close to raw product titles
 - low-value page/article SEO copy
 
-### Priority 5: Etsy Conversation Closure Truth
+### Priority 6: Etsy Conversation Closure Truth
 - We are much better at discovery and direct links now.
 - But manual Etsy replies still depend on the next inbox refresh to be fully recognized as waiting-on-customer or resolved.
 - Best next step here is a lightweight recapture/closure reconciliation pass for active customer threads.
 
-### Priority 6: Expired Etsy Relist Lane
+### Priority 7: Expired Etsy Relist Lane
 - Logic exists for safe relisting rules:
   - max 3 renewals per day
   - only listings with at least one prior sale
 - This still needs careful rollout around Etsy bot-sensitivity and browser pacing.
 
-### Priority 7: Operationalize Product Engineering Skills
+### Priority 8: Operationalize Product Engineering Skills
 The reusable skill layer now exists. The next job is to use it consistently instead of letting it sit as documentation.
 
 Key uses next:

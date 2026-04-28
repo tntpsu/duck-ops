@@ -36,5 +36,6 @@ This is an intelligence artifact, not a printer command or proof that stock is l
 
 - if we only have demand evidence and not real stock evidence, say that explicitly
 - demand-only candidates should be phrased as inventory verification, not as confirmed print work
+- consumers that need stock truth should read the derived `inventory_truth` surface instead of inferring stock from demand
 - do not convert a print recommendation into printer execution automatically in the first slice
 - preserve the source signal used to justify the queue candidate

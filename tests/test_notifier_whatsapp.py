@@ -292,6 +292,43 @@ class NotifierWhatsAppTests(unittest.TestCase):
                 )
         self.assertFalse(any(item["kind"] == "promotion_readiness" for item in artifacts_again))
 
+    def test_promotion_readiness_sends_state_change_without_ready_candidate(self) -> None:
+        payload = {
+            "generated_at": "2026-04-19T08:00:00-04:00",
+            "source": "business_desk",
+            "item_count": 1,
+            "ready_item_count": 0,
+            "state_change_count": 1,
+            "state_changes": [
+                {
+                    "promotion_id": "meme_auto_schedule",
+                    "title": "Meme Monday auto-schedule",
+                    "previous_state": "observing",
+                    "promotion_state": "blocked",
+                    "progress_label": "0/3 clean gated run(s)",
+                    "summary": "Meme Monday is blocked by an upstream render dependency.",
+                    "recommended_action": "Wait for the upstream quota reset, then rerun the flow.",
+                }
+            ],
+            "items": [
+                {
+                    "promotion_id": "meme_auto_schedule",
+                    "title": "Meme Monday auto-schedule",
+                    "previous_state": "observing",
+                    "promotion_state": "blocked",
+                    "progress_label": "0/3 clean gated run(s)",
+                    "summary": "Meme Monday is blocked by an upstream render dependency.",
+                    "recommended_action": "Wait for the upstream quota reset, then rerun the flow.",
+                }
+            ],
+        }
+
+        should_send, reason, signature = notifier.should_send_promotion_readiness({}, payload)
+
+        self.assertTrue(should_send)
+        self.assertEqual(reason, "promotion_state_changed")
+        self.assertTrue(signature)
+
     def test_build_operator_whatsapp_summary_skips_business_desk_when_disabled(self) -> None:
         settings = {
             "whatsapp": {

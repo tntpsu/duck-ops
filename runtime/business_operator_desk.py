@@ -15,6 +15,7 @@ from typing import Any
 
 from dependency_health import DEPENDENCY_HEALTH_MD_PATH, build_dependency_health
 from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
+from inventory_truth import INVENTORY_TRUTH_MD_PATH, build_inventory_truth
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
 from operator_interface_contracts import build_interface_contract_summary
 from repo_ci_status import REPO_CI_MD_PATH, build_repo_ci_status
@@ -1954,10 +1955,94 @@ def _print_queue_items(print_queue_candidates: dict[str, Any] | list[dict[str, A
     )
 
 
+def _load_inventory_truth_surface(
+    print_queue_candidates: dict[str, Any] | list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    try:
+        payload = build_inventory_truth(print_queue_candidates=print_queue_candidates, write_outputs=False)
+    except Exception:
+        return {
+            "available": False,
+            "path": str(INVENTORY_TRUTH_MD_PATH),
+            "headline": None,
+            "recommended_action": None,
+            "candidate_count": 0,
+            "demand_only_count": 0,
+            "confirmed_low_stock_count": 0,
+            "live_inventory_available_count": 0,
+            "items": [],
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "path": str(INVENTORY_TRUTH_MD_PATH),
+            "headline": None,
+            "recommended_action": None,
+            "candidate_count": 0,
+            "demand_only_count": 0,
+            "confirmed_low_stock_count": 0,
+            "live_inventory_available_count": 0,
+            "items": [],
+        }
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return {
+        "available": True,
+        "path": str(INVENTORY_TRUTH_MD_PATH),
+        "generated_at": payload.get("generated_at"),
+        "status": payload.get("status"),
+        "headline": payload.get("headline"),
+        "recommended_action": payload.get("recommended_action"),
+        "candidate_count": int(summary.get("candidate_count") or len(payload.get("items") or [])),
+        "demand_only_count": int(summary.get("demand_only_count") or 0),
+        "cached_inventory_count": int(summary.get("cached_inventory_count") or 0),
+        "confirmed_low_stock_count": int(summary.get("confirmed_low_stock_count") or 0),
+        "live_inventory_available_count": int(summary.get("live_inventory_available_count") or 0),
+        "items": [item for item in list(payload.get("items") or []) if isinstance(item, dict)][:10],
+    }
+
+
+def _stock_items_with_inventory_truth(
+    stock_items: list[dict[str, Any]],
+    inventory_truth_surface: dict[str, Any],
+) -> list[dict[str, Any]]:
+    truth_by_product_id = {
+        str(item.get("product_id") or "").strip(): item
+        for item in list(inventory_truth_surface.get("items") or [])
+        if isinstance(item, dict) and str(item.get("product_id") or "").strip()
+    }
+    enriched: list[dict[str, Any]] = []
+    for item in stock_items:
+        product_id = str(item.get("product_id") or "").strip()
+        truth = truth_by_product_id.get(product_id)
+        if not truth:
+            enriched.append(item)
+            continue
+        enriched.append(
+            {
+                **item,
+                "inventory_truth": truth,
+                "inventory_evidence_level": truth.get("inventory_evidence_level"),
+                "stock_evidence": truth.get("stock_evidence"),
+                "cached_inventory_total": truth.get("cached_inventory_total"),
+                "live_inventory_available": truth.get("live_inventory_available"),
+            }
+        )
+    return enriched
+
+
 def _stock_watch_signal_label(item: dict[str, Any]) -> str:
     notes = item.get("notes") if isinstance(item.get("notes"), dict) else {}
+    evidence_level = str(item.get("inventory_evidence_level") or "").strip()
+    if evidence_level == "confirmed_low_stock":
+        return "confirmed-low-stock"
+    if evidence_level == "cached_inventory":
+        return "cached-inventory"
+    if evidence_level == "demand_only":
+        return "demand-only"
     inventory_signal = str(item.get("inventory_signal") or "").strip()
-    stock_evidence = str((notes or {}).get("stock_evidence") or "").strip()
+    stock_evidence = str(item.get("stock_evidence") or (notes or {}).get("stock_evidence") or "").strip()
     if inventory_signal == "demand_alert_only" or stock_evidence == "not_yet_available":
         return "demand-only"
     if stock_evidence:
@@ -1976,7 +2061,7 @@ def _stock_watch_summary(item: dict[str, Any]) -> str:
 
 
 def _stock_watch_command(item: dict[str, Any]) -> str:
-    if _stock_watch_signal_label(item) == "demand-only":
+    if _stock_watch_signal_label(item) in {"demand-only", "cached-inventory"}:
         return "Verify live stock before queuing any replenishment print."
     return "Check live stock and queue a replenishment print if inventory is below threshold."
 
@@ -2493,6 +2578,8 @@ def build_business_operator_desk(
     browser_items = _browser_review_items(etsy_browser_sync)
     build_items = _custom_build_items(custom_build_candidates)
     stock_items = _print_queue_items(print_queue_candidates)
+    inventory_truth_surface = _load_inventory_truth_surface(print_queue_candidates)
+    stock_items = _stock_items_with_inventory_truth(stock_items, inventory_truth_surface)
     weekly_sale_items = _weekly_sale_items(weekly_sale_monitor)
     workflow_items = list(workflow_followthrough or build_workflow_followthrough_items(limit=6))
     learning_surface = _load_learning_surface()
@@ -2554,6 +2641,10 @@ def build_business_operator_desk(
             "custom_build_tasks_live": sum(1 for item in build_items if str(item.get("google_task_status") or "") == "created"),
             "orders_to_pack_units": int(counts.get("orders_to_pack_units") or 0),
             "stock_print_candidates": len(stock_items),
+            "inventory_truth_items": int(inventory_truth_surface.get("candidate_count") or 0),
+            "inventory_truth_demand_only": int(inventory_truth_surface.get("demand_only_count") or 0),
+            "inventory_truth_confirmed_low_stock": int(inventory_truth_surface.get("confirmed_low_stock_count") or 0),
+            "inventory_truth_live_available": int(inventory_truth_surface.get("live_inventory_available_count") or 0),
             "active_weekly_sale_items": len(weekly_sale_items),
             "weak_weekly_sale_items": sum(1 for item in weekly_sale_items if str(item.get("effectiveness") or "") == "weak"),
             "review_queue_items": len(review_items),
@@ -2649,6 +2740,7 @@ def build_business_operator_desk(
         "repo_ci_surface": repo_ci_surface,
         "scheduler_health_surface": scheduler_health_surface,
         "dependency_health_surface": dependency_health_surface,
+        "inventory_truth_surface": inventory_truth_surface,
         "maintenance_freshness_surface": maintenance_freshness_surface,
         "interface_contract_surface": interface_contract_surface,
         "weekly_sale_policy_surface": weekly_sale_policy_surface,
@@ -2663,6 +2755,7 @@ def build_business_operator_desk(
             "custom_build_candidates": build_items[:6],
             "orders_to_pack": pack_items[:8],
             "stock_print_candidates": stock_items[:6],
+            "inventory_truth": list(inventory_truth_surface.get("items") or [])[:6],
             "weekly_sale_monitor": weekly_sale_items[:6],
             "review_queue": review_items[:6],
             "workflow_followthrough": workflow_items[:6],
@@ -2698,6 +2791,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     repo_ci_surface = payload.get("repo_ci_surface") or {}
     scheduler_health_surface = payload.get("scheduler_health_surface") or {}
     dependency_health_surface = payload.get("dependency_health_surface") or {}
+    inventory_truth_surface = payload.get("inventory_truth_surface") or {}
     maintenance_freshness_surface = payload.get("maintenance_freshness_surface") or {}
     interface_contract_surface = payload.get("interface_contract_surface") or {}
     promotion_watch_surface = payload.get("promotion_watch_surface") or {}
@@ -2730,6 +2824,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- Live Google Tasks for builds: `{counts.get('custom_build_tasks_live', 0)}`",
         f"- Non-custom units to pack: `{counts.get('orders_to_pack_units', 0)}`",
         f"- Stock-watch candidates: `{counts.get('stock_print_candidates', 0)}`",
+        f"- Demand-only stock-watch candidates: `{counts.get('inventory_truth_demand_only', 0)}`",
+        f"- Confirmed low-stock candidates: `{counts.get('inventory_truth_confirmed_low_stock', 0)}`",
         f"- Active weekly sale items: `{counts.get('active_weekly_sale_items', 0)}`",
         f"- Weak weekly sale items: `{counts.get('weak_weekly_sale_items', 0)}`",
         f"- Creative/operator review items: `{counts.get('review_queue_items', 0)}`",
@@ -3494,6 +3590,11 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 lines.append(f"  Choices: {_trim_text(item.get('option_summary'), 120)}")
 
     lines.extend(["", "## Stock Watch / Print Review", ""])
+    if inventory_truth_surface.get("available"):
+        lines.append(f"- Inventory truth: {_trim_text(inventory_truth_surface.get('headline'), 180)}")
+        lines.append(f"- Inventory action: {_trim_text(inventory_truth_surface.get('recommended_action'), 180)}")
+        lines.append(f"- Demand-only: `{inventory_truth_surface.get('demand_only_count', 0)}`")
+        lines.append(f"- Confirmed low-stock: `{inventory_truth_surface.get('confirmed_low_stock_count', 0)}`")
     stock_items = sections.get("stock_print_candidates") or []
     if not stock_items:
         lines.append("No stock-print candidates are staged right now.")
@@ -3769,6 +3870,8 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "wednesday_policy": "jeepfact_policy",
         "stock": "stock_print_candidates",
         "print": "stock_print_candidates",
+        "inventory": "inventory_truth",
+        "inventory_truth": "inventory_truth",
         "reviews": "review_queue",
         "creative": "review_queue",
         "next": "next_actions",
@@ -4672,6 +4775,7 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "custom_build_candidates": "Custom Builds",
         "orders_to_pack": "Pack Tonight",
         "stock_print_candidates": "Stock Watch / Print Review",
+        "inventory_truth": "Inventory Truth",
         "weekly_sale_monitor": "Weekly Sale Monitor",
         "review_queue": "Creative Review Queue",
         "workflow_followthrough": "Workflow Follow-Through",
@@ -4721,6 +4825,14 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
             )
             lines.append(f"  Why: {_trim_text(item.get('why_now'), 120)}")
             lines.append(f"  Action: {_stock_watch_command(item)}")
+        elif normalized == "inventory_truth":
+            lines.append(
+                f"- {_display_duck_name(item.get('product_title'), 44)} | {item.get('inventory_evidence_level') or 'unknown'} | demand {int(item.get('recent_demand') or 0)}"
+            )
+            if item.get("evidence_summary"):
+                lines.append(f"  Evidence: {_trim_text(item.get('evidence_summary'), 160)}")
+            if item.get("recommended_action"):
+                lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 160)}")
         elif normalized == "weekly_sale_monitor":
             lines.append(
                 f"- {_display_duck_name(item.get('product_title'), 44)} | {item.get('discount')} | {item.get('effectiveness')} | 7d {int(item.get('sales_7d') or 0)} | 30d {int(item.get('sales_30d') or 0)}"

@@ -89,11 +89,18 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("demand-only", action["summary"])
         self.assertEqual(action["command"], "Verify live stock before queuing any replenishment print.")
         self.assertIn("Only queue prints after live inventory is confirmed low", action["secondary_command"])
+        self.assertEqual(payload["counts"]["inventory_truth_demand_only"], 1)
+        self.assertEqual(payload["counts"]["inventory_truth_confirmed_low_stock"], 0)
 
         markdown = render_business_operator_desk_markdown(payload)
         self.assertIn("Stock Watch / Print Review", markdown)
+        self.assertIn("Inventory truth", markdown)
         self.assertIn("demand-only", markdown)
         self.assertIn("Verify live stock before queuing", markdown)
+
+        inventory_section = render_business_section(payload, "inventory")
+        self.assertIn("Duck Ops Inventory Truth", inventory_section)
+        self.assertIn("demand_only", inventory_section)
 
     def test_operator_desk_markdown_shortens_visible_titles(self) -> None:
         markdown = render_business_operator_desk_markdown(
