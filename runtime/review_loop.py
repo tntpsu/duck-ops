@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from business_operator_desk import render_business_section
+from concept_name_quality import concept_name_quality
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, write_decision
 from ops_control import sync_ops_control
 from trend_ranker import build_trend_concepts
@@ -118,6 +119,19 @@ RECOMMENDED_ACTION_BY_DECISION = {
     "needs_revision": "needs_changes",
     "discard": "discard",
 }
+NEWDUCK_LISTING_NOISE_PHRASES = (
+    "3d printed",
+    "collectible",
+    "desk and dashboard",
+    "dashboard",
+    "desk",
+    "decor",
+    "display",
+    "gift",
+    "for",
+    "figurine",
+    "rubber",
+)
 
 
 def now_iso() -> str:
@@ -194,6 +208,46 @@ def normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
 
+def newduck_product_key_from_artifact_id(artifact_id: str | None) -> str:
+    parts = [part for part in str(artifact_id or "").split("::") if part]
+    if len(parts) >= 4 and parts[0] == "publish" and parts[1] == "newduck":
+        return normalize_text(parts[-1].replace("-", " "))
+    return ""
+
+
+def newduck_product_key_from_title(value: Any) -> str:
+    text = normalize_text(value)
+    for phrase in NEWDUCK_LISTING_NOISE_PHRASES:
+        text = re.sub(rf"\b{re.escape(phrase)}\b", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def newduck_product_key_from_decision(decision: dict[str, Any]) -> str:
+    artifact_key = newduck_product_key_from_artifact_id(str(decision.get("artifact_id") or ""))
+    if artifact_key:
+        return artifact_key
+    title_key = newduck_product_key_from_title(decision.get("title"))
+    if title_key:
+        return title_key
+    return newduck_run_family(str(decision.get("run_id") or ""))
+
+
+def newduck_product_key_from_workflow(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    for value in (
+        metadata.get("duck_name"),
+        metadata.get("listing_name"),
+        item.get("display_label"),
+        item.get("run_id"),
+        item.get("entity_id"),
+    ):
+        key = newduck_product_key_from_title(value)
+        if key:
+            return key
+    return ""
+
+
 def newduck_run_family(run_id: str | None) -> str:
     value = str(run_id or "").strip()
     if not value:
@@ -215,6 +269,32 @@ def newduck_run_sort_key(run_id: str | None) -> tuple[int, str, str]:
         1,
         str(match.group("date") or ""),
         str(match.group("time") or "").zfill(6),
+    )
+
+
+def newduck_decision_version_key(decision: dict[str, Any]) -> tuple[float, tuple[int, str, str], str]:
+    parsed = parse_iso_datetime(str(decision.get("created_at") or ""))
+    timestamp = parsed.timestamp() if parsed else 0.0
+    return (timestamp, newduck_run_sort_key(str(decision.get("run_id") or "")), str(decision.get("artifact_id") or ""))
+
+
+def newduck_workflow_version_key(item: dict[str, Any]) -> tuple[float, tuple[int, str, str], str]:
+    parsed = parse_iso_datetime(str(item.get("updated_at") or ""))
+    timestamp = parsed.timestamp() if parsed else 0.0
+    run_id = str(item.get("run_id") or item.get("entity_id") or "")
+    return (timestamp, newduck_run_sort_key(run_id), run_id)
+
+
+def newduck_workflow_is_strong_replacement(item: dict[str, Any]) -> bool:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    state = str(item.get("state") or "").strip()
+    state_reason = str(item.get("state_reason") or "").strip()
+    return bool(
+        state == "verified"
+        or state_reason in {"published", "shopify_activated", "listing_ids_present"}
+        or metadata.get("shopify_activated")
+        or metadata.get("shopify_product_id")
+        or metadata.get("etsy_listing_id")
     )
 
 
@@ -313,26 +393,33 @@ def newer_newduck_run_reconciliation(decision: dict[str, Any]) -> dict[str, Any]
         return None
 
     current_family = newduck_run_family(run_id)
+    current_product_key = newduck_product_key_from_decision(decision)
     current_sort_key = newduck_run_sort_key(run_id)
+    current_version_key = newduck_decision_version_key(decision)
     if not current_family:
         return None
 
     replacement: dict[str, Any] | None = None
-    replacement_sort_key = current_sort_key
+    replacement_version_key = current_version_key
     for item in list_workflow_states():
         if str(item.get("lane") or "").strip() != "newduck":
             continue
         candidate_run_id = str(item.get("run_id") or item.get("entity_id") or "").strip()
         if not candidate_run_id or candidate_run_id == run_id:
             continue
-        if newduck_run_family(candidate_run_id) != current_family:
+        candidate_product_key = newduck_product_key_from_workflow(item)
+        same_product = bool(current_product_key and candidate_product_key == current_product_key)
+        same_run_family = newduck_run_family(candidate_run_id) == current_family
+        if not same_product and not same_run_family:
             continue
         candidate_sort_key = newduck_run_sort_key(candidate_run_id)
-        if candidate_sort_key <= current_sort_key:
+        candidate_version_key = newduck_workflow_version_key(item)
+        is_newer = candidate_sort_key > current_sort_key or candidate_version_key > current_version_key
+        if not is_newer and not (same_product and newduck_workflow_is_strong_replacement(item)):
             continue
-        if replacement is None or candidate_sort_key > replacement_sort_key:
+        if replacement is None or candidate_version_key > replacement_version_key:
             replacement = item
-            replacement_sort_key = candidate_sort_key
+            replacement_version_key = candidate_version_key
 
     if replacement is None:
         return None
@@ -353,6 +440,62 @@ def newer_newduck_run_reconciliation(decision: dict[str, Any]) -> dict[str, Any]
             f"already exists for this duck (`{state_label}`)."
         ),
         "source": replacement_path,
+    }
+
+
+def newer_newduck_review_artifact_reconciliation(
+    decision: dict[str, Any],
+    artifacts: dict[str, Any],
+) -> dict[str, Any] | None:
+    flow = str(decision.get("flow") or "").strip()
+    artifact_type = str(decision.get("artifact_type") or "").strip()
+    if flow != "newduck" and artifact_type != "listing":
+        return None
+
+    current_key = newduck_product_key_from_decision(decision)
+    current_artifact_id = str(decision.get("artifact_id") or "").strip()
+    current_version_key = newduck_decision_version_key(decision)
+    if not current_key or not current_artifact_id:
+        return None
+
+    replacement_decision: dict[str, Any] | None = None
+    replacement_version_key = current_version_key
+    for artifact_id, record in artifacts.items():
+        candidate = record.get("decision") if isinstance(record, dict) else {}
+        if not isinstance(candidate, dict):
+            continue
+        if str(candidate.get("artifact_id") or artifact_id or "").strip() == current_artifact_id:
+            continue
+        candidate_flow = str(candidate.get("flow") or "").strip()
+        candidate_type = str(candidate.get("artifact_type") or "").strip()
+        if candidate_flow != "newduck" and candidate_type != "listing":
+            continue
+        if str(candidate.get("review_status") or "").strip() == "rejected":
+            continue
+        if newduck_product_key_from_decision(candidate) != current_key:
+            continue
+        candidate_version_key = newduck_decision_version_key(candidate)
+        if candidate_version_key <= current_version_key:
+            continue
+        if replacement_decision is None or candidate_version_key > replacement_version_key:
+            replacement_decision = candidate
+            replacement_version_key = candidate_version_key
+
+    if replacement_decision is None:
+        return None
+
+    replacement_artifact_id = str(replacement_decision.get("artifact_id") or "").strip()
+    replacement_run_id = str(replacement_decision.get("run_id") or "").strip()
+    return {
+        "recorded_at": str(replacement_decision.get("created_at") or now_iso()),
+        "resolution": "superseded",
+        "replacement_run_id": replacement_run_id,
+        "replacement_artifact_id": replacement_artifact_id,
+        "note": (
+            f"Superseded automatically because a newer newduck review artifact "
+            f"`{replacement_artifact_id or replacement_run_id}` exists for this same product."
+        ),
+        "source": "quality_gate_state",
     }
 
 
@@ -438,6 +581,28 @@ def reconcile_quality_gate_state(state: dict[str, Any]) -> bool:
                 note=str(published_state.get("note") or "Reconciled from DuckAgent publish state."),
                 source=str(published_state.get("source") or "duckagent_state"),
             )
+            changed = True
+            continue
+
+        superseded_review_artifact = newer_newduck_review_artifact_reconciliation(decision, artifacts)
+        if superseded_review_artifact:
+            apply_reconciled_review_status(
+                record,
+                decision,
+                review_status="archived",
+                action="reconcile",
+                resolution=str(superseded_review_artifact.get("resolution") or "superseded"),
+                recorded_at=str(superseded_review_artifact.get("recorded_at") or now_iso()),
+                note=str(superseded_review_artifact.get("note") or "Reconciled from newer newduck review artifact."),
+                source=str(superseded_review_artifact.get("source") or "quality_gate_state"),
+            )
+            decision["archive_reason"] = "superseded by newer newduck review artifact"
+            decision["superseded_at"] = str(superseded_review_artifact.get("recorded_at") or now_iso())
+            decision["superseded_by_run_id"] = str(superseded_review_artifact.get("replacement_run_id") or "")
+            decision["superseded_by_artifact_id"] = str(superseded_review_artifact.get("replacement_artifact_id") or "")
+            record["decision"] = decision
+            record["superseded_by_run_id"] = decision["superseded_by_run_id"]
+            record["superseded_by_artifact_id"] = decision["superseded_by_artifact_id"]
             changed = True
             continue
 
@@ -1195,6 +1360,7 @@ def collect_trend_items(state: dict[str, Any]) -> list[dict[str, Any]]:
             "carried_review": concept.get("carried_review"),
             "carried_forward_from_artifact_id": concept.get("carried_forward_from_artifact_id"),
         }
+        item["name_quality"] = concept_name_quality(item.get("theme") or item.get("title"))
         if not should_surface_trend_item(item):
             continue
         items.append(item)
@@ -1238,6 +1404,13 @@ def should_surface_trend_item(item: dict[str, Any]) -> bool:
     if theme_value in GENERIC_TREND_TITLES:
         return False
     action = str(item.get("action_frame") or "wait")
+    name_quality = item.get("name_quality") if isinstance(item.get("name_quality"), dict) else concept_name_quality(theme_value)
+    if (
+        action in {"build", "promote"}
+        and name_quality.get("status") != "product_ready"
+        and not item.get("manual_review_requested")
+    ):
+        return False
     if action in {"build", "promote"}:
         return True
     if action != "wait":

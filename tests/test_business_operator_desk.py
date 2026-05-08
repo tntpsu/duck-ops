@@ -11,6 +11,7 @@ if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
 from business_operator_desk import (
+    _load_jeepfact_policy_surface,
     _load_weekly_sale_policy_surface,
     build_business_operator_desk,
     render_business_operator_desk_markdown,
@@ -1113,6 +1114,40 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertEqual(surface["latest_decision"], "manual_publish_allowed")
         self.assertEqual(surface["clean_gated_streak"], 0)
         self.assertEqual(surface["clean_gated_recent_count"], 1)
+
+    def test_jeepfact_policy_respects_configured_promotion_threshold(self) -> None:
+        states = [
+            {
+                "lane": "jeepfact",
+                "run_id": f"jeepfact-2026-04-{day}",
+                "updated_at": f"2026-04-{day}T19:00:00-04:00",
+                "state_reason": "awaiting_review",
+                "metadata": {
+                    "cover_hook": f"Jeep Fact {day}",
+                    "jeepfact_policy_decision": "manual_review_required",
+                    "jeepfact_policy_blockers": [],
+                    "jeepfact_policy_manual_review_reasons": ["approval_gated_mode"],
+                },
+            }
+            for day in (29, 22, 15)
+        ]
+
+        with (
+            patch(
+                "business_operator_desk.load_json",
+                return_value={
+                    "mode": "approval_gated",
+                    "promotion_watch": {"promote_after_clean_streak": 5},
+                },
+            ),
+            patch("business_operator_desk.list_workflow_states", return_value=states),
+        ):
+            surface = _load_jeepfact_policy_surface()
+
+        self.assertEqual(surface["promotion_threshold"], 5)
+        self.assertEqual(surface["clean_gated_streak"], 3)
+        self.assertFalse(surface["promote_ready"])
+        self.assertIn("2 more clean gated run", surface["readiness_headline"])
 
     def test_operator_desk_surfaces_weekly_sale_policy_promotion_readiness(self) -> None:
         with (

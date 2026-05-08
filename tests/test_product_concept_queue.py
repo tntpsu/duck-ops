@@ -76,6 +76,30 @@ class ProductConceptQueueTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["queue_state"], "blocked_by_guardrail")
         self.assertEqual(payload["design_brief_input"]["candidate_signals"], [])
 
+    def test_raw_relationship_theme_is_blocked_until_reframed(self) -> None:
+        payload = product_concept_queue.build_product_concept_queue(
+            trend_candidates={
+                "items": [
+                    {
+                        "artifact_id": "trend::child-maternal-love-duck",
+                        "theme": "child maternal love duck",
+                        "source_refs": [{"path": "state/normalized/trend_candidates.json"}],
+                        "signal_summary": {"trending_score": 900, "sold_last_7d": 5},
+                        "catalog_match": {"status": "gap"},
+                    }
+                ]
+            },
+            current_learnings={},
+            competitor_social_benchmark={},
+            write_outputs=False,
+        )
+
+        self.assertEqual(payload["status"], "blocked_by_guardrail")
+        self.assertEqual(payload["summary"]["ready_for_brief_review_count"], 0)
+        self.assertEqual(payload["items"][0]["queue_state"], "blocked_by_guardrail")
+        self.assertEqual(payload["items"][0]["name_quality"]["status"], "needs_reframe")
+        self.assertEqual(payload["design_brief_input"]["candidate_signals"], [])
+
     def test_school_and_sport_themes_need_manual_abstraction(self) -> None:
         payload = product_concept_queue.build_product_concept_queue(
             trend_candidates={

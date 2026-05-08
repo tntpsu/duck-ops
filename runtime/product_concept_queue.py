@@ -21,6 +21,7 @@ from governance_review_common import (
     write_json,
     write_markdown,
 )
+from concept_name_quality import concept_name_quality
 
 
 TREND_CANDIDATES_PATH = STATE_DIR / "normalized" / "trend_candidates.json"
@@ -150,6 +151,7 @@ def _ip_guardrails(theme: str) -> list[str]:
 def _trend_candidate_to_queue_item(item: dict[str, Any]) -> dict[str, Any]:
     raw_theme = str(item.get("theme") or "fresh duck concept").strip()
     theme = _clean_theme(raw_theme)
+    name_quality = concept_name_quality(raw_theme)
     signal_summary = item.get("signal_summary") if isinstance(item.get("signal_summary"), dict) else {}
     trending_score = _as_float(signal_summary.get("trending_score"))
     sold_7d = _as_int(signal_summary.get("sold_last_7d"))
@@ -163,6 +165,7 @@ def _trend_candidate_to_queue_item(item: dict[str, Any]) -> dict[str, Any]:
         "Avoid readable logos, team marks, brand names, copyrighted characters, and customer-specific text.",
     ]
     guardrails.extend(_ip_guardrails(raw_theme))
+    guardrails.extend(str(issue) for issue in name_quality.get("issues") or [])
 
     confidence_cap = _as_float(item.get("input_confidence_cap"), 0.65) or 0.65
     evidence_bonus = min(0.2, source_ref_count * 0.04)
@@ -170,7 +173,10 @@ def _trend_candidate_to_queue_item(item: dict[str, Any]) -> dict[str, Any]:
     confidence = min(confidence_cap, 0.45 + evidence_bonus + commercial_bonus)
     score = min(1.0, 0.15 + (trending_score / 1000.0) + (sold_7d * 0.04) + (revenue_7d / 500.0))
 
-    if len(guardrails) > 4:
+    if name_quality.get("status") != "product_ready":
+        queue_state = "blocked_by_guardrail"
+        recommended_next_step = "Reframe this raw trend into a concrete product-ready duck concept before design briefs."
+    elif len(guardrails) > 4:
         queue_state = "blocked_by_guardrail"
         recommended_next_step = "Review abstraction manually before sending this to DuckAgent for design briefs."
     elif catalog_status == "gap" and confidence >= 0.52:
@@ -199,6 +205,7 @@ def _trend_candidate_to_queue_item(item: dict[str, Any]) -> dict[str, Any]:
         "queue_state": queue_state,
         "score": round(score, 3),
         "confidence": round(confidence, 3),
+        "name_quality": name_quality,
         "evidence": evidence,
         "guardrails": guardrails,
         "recommended_next_step": recommended_next_step,

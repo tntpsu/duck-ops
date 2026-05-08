@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-05-01
+Last updated: 2026-05-08
 
 ## Document Ownership
 
@@ -129,6 +129,7 @@ Companion docs:
 - The queue writes a DuckAgent-compatible `DesignBriefQueueInput` handoff artifact while keeping image generation, model creation, listing work, and publishing out of Duck Ops.
 - Business Desk now surfaces product concepts as ready/watch/blocked and reserves room for blocked guardrail examples instead of hiding risky signals behind ready candidates.
 - IP/team/organization-adjacent themes are blocked for manual abstraction before any design brief generation.
+- Product concept and OpenClaw review queues now apply a naming-quality gate so raw search-language themes must be reframed before they can become build/design-brief candidates.
 - DuckAgent concept runs now support a local-only concept-to-print pilot proof, so one selected run can show its current gate and next cost boundary before external AI calls, Bambu review, or marketplace work.
 
 ### 11. Creative Console Productization
@@ -220,6 +221,7 @@ Next slices:
 2. run one local-only concept-to-print pilot proof against a real approved concept run
 3. add approval receipts and promotion-readiness history for recurring product concept queue runs
 4. add model-quality checks for flat bottom, smoothness, color intent, and Bambu import readiness
+5. when ready, run the DuckAgent [Local Image-To-3D Provider Evaluation Plan](/Users/philtullai/ai-agents/duckAgent/docs/current_system/LOCAL_IMAGE_TO_3D_PROVIDER_PLAN.md) to benchmark self-hosted providers before reducing 3D AI Studio dependency
 
 ### Priority 4: Social Strategy Hardening
 - Improve cross-channel post coverage so Instagram and Facebook outcomes stay comparable when both publish.

@@ -48,6 +48,19 @@ MEME_POLICY_PROMOTION_THRESHOLD = 3
 REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD = 3
 JEEPFACT_POLICY_PROMOTION_THRESHOLD = 3
 
+
+def _promotion_threshold_from_config(config: dict[str, Any], default_threshold: int) -> int:
+    """Allow individual lanes to ask for a longer observation window."""
+    promotion_watch = config.get("promotion_watch") if isinstance(config.get("promotion_watch"), dict) else {}
+    raw_threshold = promotion_watch.get("promote_after_clean_streak", config.get("promote_after_clean_streak"))
+    try:
+        threshold = int(raw_threshold)
+    except (TypeError, ValueError):
+        return default_threshold
+    if threshold < 1:
+        return default_threshold
+    return threshold
+
 PROMOTION_CONTROL_METADATA = {
     "weekly_sale_auto_apply": {
         "owner": "duckAgent",
@@ -687,6 +700,7 @@ def _load_jeepfact_policy_surface() -> dict[str, Any]:
     config_payload = load_json(JEEPFACT_EXECUTION_CONFIG_PATH, {})
     config = config_payload if isinstance(config_payload, dict) else {}
     mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
+    promotion_threshold = _promotion_threshold_from_config(config, JEEPFACT_POLICY_PROMOTION_THRESHOLD)
     workflow_items = [
         item
         for item in list_workflow_states()
@@ -725,7 +739,7 @@ def _load_jeepfact_policy_surface() -> dict[str, Any]:
     blocked_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "blocked")
     auto_schedule_eligible_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "auto_schedule_allowed")
     latest = recent_runs[0] if recent_runs else {}
-    promote_ready = bool(mode == "approval_gated" and clean_gated_streak >= JEEPFACT_POLICY_PROMOTION_THRESHOLD)
+    promote_ready = bool(mode == "approval_gated" and clean_gated_streak >= promotion_threshold)
 
     if mode == "auto_schedule_meta":
         readiness_headline = "Jeep Fact Wednesday auto-schedule is already enabled."
@@ -737,7 +751,7 @@ def _load_jeepfact_policy_surface() -> dict[str, Any]:
             "then supervise the next Wednesday run."
         )
     elif recent_runs:
-        remaining = max(0, JEEPFACT_POLICY_PROMOTION_THRESHOLD - clean_gated_streak)
+        remaining = max(0, promotion_threshold - clean_gated_streak)
         readiness_headline = f"Jeep Fact Wednesday policy is not ready for promotion yet; {remaining} more clean gated run(s) are recommended."
         recommended_action = "Keep replying `publish` on Wednesday while the policy streak builds and watch for any blocked decisions."
     else:
@@ -748,7 +762,7 @@ def _load_jeepfact_policy_surface() -> dict[str, Any]:
         "available": True,
         "path": str(JEEPFACT_EXECUTION_CONFIG_PATH),
         "mode": mode,
-        "promotion_threshold": JEEPFACT_POLICY_PROMOTION_THRESHOLD,
+        "promotion_threshold": promotion_threshold,
         "clean_gated_streak": clean_gated_streak,
         "blocked_recent_count": blocked_recent_count,
         "auto_schedule_eligible_recent_count": auto_schedule_eligible_recent_count,
