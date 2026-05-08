@@ -832,6 +832,14 @@ def build_widget_status_payload(surface: dict[str, Any] | None = None) -> dict[s
                 "targets": list(item.get("targets") or []),
                 "publishToken": item.get("publish_token"),
                 "bodyPreview": item.get("body_preview"),
+                # Optional thumbnail URL for the Pulse glasses-app's
+                # Approvals card. When present, the card dithers and
+                # renders the image in detail mode (128x128, 4-bit
+                # greyscale). Falls through to text-only when None.
+                # Upstream producers (etsy_browser_batch / publish-flow
+                # code) should populate `preview_image_url` when artwork
+                # is available.
+                "previewImageUrl": item.get("preview_image_url"),
             }
             for item in list(payload.get("pending_approvals") or [])
         ],
