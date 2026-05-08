@@ -29,6 +29,7 @@ class ReviewRewriteContractTests(unittest.TestCase):
         self.assertIn("gift for your friend", rewrite.lower())
         self.assertIn("arrived quickly", rewrite.lower())
         self.assertNotIn("small business", rewrite.lower())
+        self.assertLessEqual(rewrite.lower().count("i'm so glad"), 1)
 
 
 if __name__ == "__main__":

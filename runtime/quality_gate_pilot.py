@@ -40,6 +40,15 @@ EVALUATOR_VERSION = 4
 QUALITY_GATE_PENDING_REVIEW_STATUSES = {"pending"}
 QUALITY_GATE_REVISION_REVIEW_STATUSES = {"needs_revision"}
 QUALITY_GATE_RESOLVED_REVIEW_STATUSES = {"approved", "rejected", "archived", "overridden"}
+PUBLIC_REVIEW_REPLY_WARMTH_TERMS = (
+    "thank",
+    "appreciate",
+    "thrilled",
+    "wonderful to hear",
+    "glad",
+    "love hearing",
+    "happy to hear",
+)
 
 
 def now_iso() -> str:
@@ -311,6 +320,11 @@ def lexical_overlap(a: str, b: str) -> float:
     return len(left.intersection(right)) / len(left)
 
 
+def has_public_review_reply_warmth(response: str) -> bool:
+    lowered = response.lower()
+    return any(term in lowered for term in PUBLIC_REVIEW_REPLY_WARMTH_TERMS)
+
+
 def evaluate_review_story(candidate: dict[str, Any], age_days: int | None) -> dict[str, Any]:
     summary = candidate.get("candidate_summary") or {}
     supporting = candidate.get("supporting_context") or {}
@@ -449,7 +463,7 @@ def evaluate_review_reply(candidate: dict[str, Any], age_days: int | None, priva
     if private_mode:
         brand_fit = 17 if has_apology and has_remedy else 12
     else:
-        brand_fit = 18 if any(term in response.lower() for term in ("thank", "thrilled", "appreciate")) else 13
+        brand_fit = 18 if has_public_review_reply_warmth(response) else 13
     reasoning.append(
         f"Brand-fit score {brand_fit}/20 based on tone, empathy, and whether the reply matches the review type."
     )
@@ -477,7 +491,10 @@ def evaluate_review_reply(candidate: dict[str, Any], age_days: int | None, priva
     )
 
     conversion = 5
-    if not private_mode and any(term in response.lower() for term in ("thank", "love", "support", "kind words")):
+    if not private_mode and (
+        has_public_review_reply_warmth(response)
+        or any(term in response.lower() for term in ("love", "support", "kind words"))
+    ):
         conversion += 4
     if private_mode and has_apology:
         conversion += 3
