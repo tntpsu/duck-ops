@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-04-28
+Last updated: 2026-05-01
 
 ## Document Ownership
 
@@ -111,6 +111,8 @@ Companion docs:
 - Business Desk promotion watch now covers the current approval-policy lanes and uses an explicit autonomy-readiness contract across weekly sale, Meme Monday, Tuesday review carousel, Jeep Fact Wednesday, and Etsy review execution.
 - Promotion readiness email and Business Desk sections now repeat owner, current mode, target mode, side effect, allowed tier, approval boundary, and no-self-promotion constraints before any lane can be promoted.
 - Promotion readiness notifications now include state-change deltas when a lane moves between observing, blocked, ready, or active.
+- Review Inbox now provides a browser fallback for the same review-reply approval loop used by WhatsApp/email, including recent decision receipts and a clearer separation between approving reply quality and supervised Etsy browser posting.
+- Business Desk promotion watch now includes an explicit autonomy gate summary that identifies the next candidate, whether the operator must promote it, and confirms that clean streaks cannot self-promote a lane.
 
 ### 9. Social Strategy Intelligence Layer
 - Own-post social performance collection is live from DuckAgent post receipts.
@@ -127,6 +129,15 @@ Companion docs:
 - The queue writes a DuckAgent-compatible `DesignBriefQueueInput` handoff artifact while keeping image generation, model creation, listing work, and publishing out of Duck Ops.
 - Business Desk now surfaces product concepts as ready/watch/blocked and reserves room for blocked guardrail examples instead of hiding risky signals behind ready candidates.
 - IP/team/organization-adjacent themes are blocked for manual abstraction before any design brief generation.
+- DuckAgent concept runs now support a local-only concept-to-print pilot proof, so one selected run can show its current gate and next cost boundary before external AI calls, Bambu review, or marketplace work.
+
+### 11. Creative Console Productization
+- Creative Agent and Decision Inbox now have a canonical UI flow audit that separates operator use cases from internal workflow plumbing.
+- Creative Agent starts from outcome cards, with provider/model, dry-run, input-file, and command-preview controls hidden under advanced sections.
+- Decision Inbox is now the selected-run front door for finished creative work instead of a raw run viewer.
+- A derived `decision_detail` contract now lets the browser show the artifact, decision question, recommendation, blocked reasons, receipts, and safe action before raw logs or pipeline controls.
+- Decision Inbox groups pending work into Needs My Decision, Ready To Continue, Blocked, and Recently Completed lanes.
+- HMI smoke coverage now checks the local console pages, action registry, decision inbox wiring, upload handling, and latest-run deep links before manual operator testing.
 
 ## Active Operational Lanes
 
@@ -171,7 +182,7 @@ Why this is high value:
 Next slices:
 1. use the readiness surface to decide whether weekly sale can move from manual email approval to auto-apply after operator approval
 2. add the same promotion contract automatically whenever a new approval-policy lane is created
-3. keep promotion deltas tied to evidence and explicit operator approval before any mode change
+3. keep Email, WhatsApp, Review Inbox, and Business Desk aligned to one canonical approval contract so operator decisions do not fork
 
 ### Priority 2: Outcome Learning Layer Expansion
 The social learning foundation is now live. The next high-value work is extending that same discipline into the remaining business outcomes:
@@ -180,11 +191,13 @@ The social learning foundation is now live. The next high-value work is extendin
 3. Relist/renew outcome monitoring so we learn what renewal actually pays off.
 4. Customer-reply conversion insights so we learn what reply styles lead to orders.
 5. Stronger competitor-strategy separation between stable patterns, experiments, and do-not-copy motifs over time.
+6. Concept-to-print pilot outcomes so printable, rejected, and needs-revision product ideas become learning evidence instead of isolated experiments.
 
 Why this is high value:
 - We now have better workflow truth and safer execution.
 - That makes it finally worth learning from outcomes instead of just automating actions.
 - It also gives us a disciplined way to borrow strong ideas from competitors instead of guessing when to shift content strategy.
+- Business Desk now has an outcome-learning expansion surface that points at the highest-value missing evidence, including SEO traffic proof, own-post outcome coverage, concept-to-print pilots, relist lift, and material learning changes.
 
 ### Priority 3: Duck Product Studio / Concept-To-Print Pipeline
 The product creation path is becoming a real strategic lane, not just one-off experiments.
@@ -204,8 +217,9 @@ Why this is high value:
 
 Next slices:
 1. connect Duck Ops Product Concept Queue review to DuckAgent `design_brief_queue` email generation
-2. add approval receipts and promotion-readiness history for recurring product concept queue runs
-3. add model-quality checks for flat bottom, smoothness, color intent, and Bambu import readiness
+2. run one local-only concept-to-print pilot proof against a real approved concept run
+3. add approval receipts and promotion-readiness history for recurring product concept queue runs
+4. add model-quality checks for flat bottom, smoothness, color intent, and Bambu import readiness
 
 ### Priority 4: Social Strategy Hardening
 - Improve cross-channel post coverage so Instagram and Facebook outcomes stay comparable when both publish.
@@ -270,7 +284,7 @@ Why this matters:
 ## Recommended Next 3 Steps
 
 ### 1. Resume Review / Reliability Hardening In Safe Windows
-- When Etsy access is safe again, return to `Review Execution` stabilization and stronger failure breadcrumbs.
+- When Etsy access is safe again, continue `Review Inbox` and supervised posting stabilization with stronger failure breadcrumbs.
 - Keep this in observe-first mode so the operator surface stays trustworthy.
 
 ### 2. Turn Learnings Into Stronger Weekly Execution Guidance

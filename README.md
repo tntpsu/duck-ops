@@ -66,6 +66,8 @@ python3 runtime/review_loop.py handle --text 'desk show builds'
 python3 runtime/review_loop.py handle --text 'desk show packing'
 python3 runtime/review_loop.py handle --text 'desk show stock'
 python3 runtime/review_loop.py handle --text 'desk show reviews'
+python3 runtime/review_loop.py handle --text 'desk show promotion'
+python3 runtime/review_loop.py handle --text 'desk show outcome'
 python3 runtime/review_loop.py handle --text 'desk show roi'
 python3 runtime/review_loop.py handle --text 'desk show freshness'
 python3 runtime/review_loop.py handle --text 'status all'
@@ -143,5 +145,5 @@ Only commit generated files when they are intentional fixtures, docs examples, o
 
 - Several useful operator reports live under ignored `output/`; they are operational truth locally but not stable repo source.
 - Browser automation safety depends on local wrappers and schedules outside git.
-- WhatsApp is intentionally narrow now: review/trend approvals only. Email is the primary channel for social posts, sales, and Business Desk summaries.
+- WhatsApp is intentionally narrow now: review/trend approvals only. Email is the primary channel for social posts, sales, and Business Desk summaries. Review Inbox is the browser fallback for the same public review-reply decisions, not a separate approval system.
 - The master roadmap is generated under `output/operator/` but is treated as a canonical operator doc; keep that exception explicit.

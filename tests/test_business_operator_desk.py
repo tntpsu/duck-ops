@@ -1191,16 +1191,25 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertTrue(candidate["promotion_requires_operator_approval"])
         self.assertFalse(candidate["promotion_can_self_promote"])
         self.assertIn("Duck Ops may recommend promotion", candidate["approval_boundary"])
+        autonomy_gate = payload["promotion_watch_surface"]["autonomy_gate"]
+        self.assertEqual(autonomy_gate["next_candidate_id"], "weekly_sale_auto_apply")
+        self.assertEqual(autonomy_gate["next_candidate_state"], "ready")
+        self.assertTrue(autonomy_gate["operator_must_promote"])
+        self.assertFalse(autonomy_gate["self_promotion_allowed"])
         action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "weekly_sale_policy")
         self.assertEqual(action["title"], "Promote weekly sale auto-apply")
         self.assertIn("3 clean gated run", action["summary"])
         self.assertIn("## Promotion Watch", markdown)
         self.assertIn("1 promotion candidate(s) are ready to promote.", markdown)
+        self.assertIn("Autonomy gate next step", markdown)
+        self.assertIn("Self-promotion allowed: `False`", markdown)
         self.assertIn("## Weekly Sale Policy", markdown)
         self.assertIn("ready for promotion after 3 clean gated run", markdown)
         promotion_section = render_business_section(payload, "promotion")
         self.assertIn("Duck Ops Promotion Watch", promotion_section)
         self.assertIn("Ready to promote: 1", promotion_section)
+        self.assertIn("Autonomy gate next step", promotion_section)
+        self.assertIn("Self-promotion allowed: False", promotion_section)
         self.assertIn("Control: Tier 3 after explicit operator promotion", promotion_section)
         self.assertIn("Boundary: Duck Ops may recommend promotion", promotion_section)
         self.assertIn("Duck Ops Weekly Sale Policy", policy_section)
@@ -1502,6 +1511,81 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("no_post_observed", output)
         self.assertIn("Evening posts still outperform midday posts.", output)
         self.assertNotIn("Fallback belief should not be used.", output)
+
+    def test_operator_desk_surfaces_outcome_learning_expansion(self) -> None:
+        with (
+            patch("business_operator_desk._load_weekly_sale_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_meme_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_review_carousel_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_jeepfact_policy_surface", return_value={"available": False}),
+            patch("business_operator_desk._load_review_reply_execution_surface", return_value={"available": False}),
+            patch(
+                "business_operator_desk._load_learning_surface",
+                return_value={
+                    "available": True,
+                    "path": "/tmp/current_learnings.md",
+                    "change_count": 1,
+                    "idea_count": 1,
+                    "material_change_count": 1,
+                    "items": [{"headline": "Evening social slots improved."}],
+                    "change_notifier": {"available": True, "items": []},
+                },
+            ),
+            patch(
+                "business_operator_desk._load_weekly_strategy_packet",
+                return_value={
+                    "available": True,
+                    "path": "/tmp/weekly_strategy_recommendation_packet.md",
+                    "own_signal_confidence": "low",
+                    "recommendations": [],
+                    "watchouts": [],
+                    "social_plan": {},
+                },
+            ),
+            patch(
+                "business_operator_desk._load_product_concept_queue_surface",
+                return_value={
+                    "available": True,
+                    "path": "/tmp/product_concept_queue.md",
+                    "ready_for_brief_review_count": 1,
+                    "candidate_count": 1,
+                    "items": [],
+                },
+            ),
+            patch(
+                "business_operator_desk._load_seo_outcome_surface",
+                return_value={
+                    "available": True,
+                    "path": "/tmp/shopify_seo_outcomes.md",
+                    "applied_item_count": 4,
+                    "traffic_signal_available_count": 0,
+                    "attention_items": [],
+                    "recent_wins": [],
+                },
+            ),
+        ):
+            payload = build_business_operator_desk(
+                customer_packets={"items": []},
+                nightly_summary={"counts": {}, "sections": {}},
+                etsy_browser_sync={"items": []},
+                custom_build_candidates={"items": []},
+                print_queue_candidates=[],
+                weekly_sale_monitor={"items": []},
+                review_queue={"items": []},
+                workflow_followthrough=[],
+            )
+
+        markdown = render_business_operator_desk_markdown(payload)
+        outcome_section = render_business_section(payload, "outcome")
+        action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "shopify_seo_outcomes")
+
+        self.assertGreaterEqual(payload["counts"]["outcome_learning_items"], 4)
+        self.assertEqual(payload["counts"]["outcome_learning_active_items"], 3)
+        self.assertIn("traffic/search-click", action["command"])
+        self.assertIn("## Outcome Learning Expansion", markdown)
+        self.assertIn("Feed concept-to-print pilots back into product learning", markdown)
+        self.assertIn("Duck Ops Outcome Learning Expansion", outcome_section)
+        self.assertIn("Active follow-ups: 3", outcome_section)
 
     def test_render_business_section_strategy_packet_includes_recommendations_and_watchouts(self) -> None:
         output = render_business_section(

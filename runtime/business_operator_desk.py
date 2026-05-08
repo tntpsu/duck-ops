@@ -33,6 +33,8 @@ WEEKLY_STRATEGY_PACKET_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/w
 WEEKLY_STRATEGY_PACKET_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/weekly_strategy_recommendation_packet.md")
 SHOPIFY_SEO_OUTCOMES_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/shopify_seo_outcomes.json")
 SHOPIFY_SEO_OUTCOMES_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/shopify_seo_outcomes.md")
+ETSY_RELIST_OUTCOME_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/etsy_expired_relist.json")
+ETSY_RELIST_OUTCOME_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/etsy_expired_relist.md")
 ENGINEERING_GOVERNANCE_DIGEST_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/engineering_governance_digest.json")
 ENGINEERING_GOVERNANCE_DIGEST_MD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/engineering_governance_digest.md")
 INTERFACE_CONTRACT_MODULE_PATH = Path("/Users/philtullai/ai-agents/duck-ops/runtime/operator_interface_contracts.py")
@@ -85,7 +87,7 @@ PROMOTION_CONTROL_METADATA = {
         "allowed_tier": "Tier 3 manual only while Etsy browser risk remains elevated",
         "risk_class": "browser-heavy Etsy mutation",
         "side_effect": "Etsy review reply submission",
-        "approval_boundary": "Duck Ops may queue and review replies, but Etsy browser submission must stay manually supervised until cooldown and failure signals are clean.",
+        "approval_boundary": "Duck Ops may record Review Inbox, WhatsApp, or email approval decisions, but Etsy browser submission must stay manually supervised until cooldown and failure signals are clean.",
     },
 }
 
@@ -876,6 +878,27 @@ def _load_promotion_watch_surface(
         headline = "Promotion watch is not available yet."
         recommended_action = "Build at least one promotion candidate surface before relying on this watch."
 
+    def remaining_evidence(item: dict[str, Any]) -> int:
+        threshold = int(item.get("threshold") or 0)
+        progress = int(item.get("progress_value") or 0)
+        return max(0, threshold - progress) if threshold else 999
+
+    next_candidate = None
+    if ready_items:
+        next_candidate = ready_items[0]
+        autonomy_next_step = "Ask the operator for explicit promotion approval; do not self-promote."
+    elif blocked_items:
+        next_candidate = blocked_items[0]
+        autonomy_next_step = "Fix the blocker before collecting more clean-run evidence."
+    elif observing_items:
+        next_candidate = sorted(observing_items, key=remaining_evidence)[0]
+        autonomy_next_step = "Keep this lane in supervised mode until the clean-run threshold is met."
+    elif active_items:
+        next_candidate = active_items[0]
+        autonomy_next_step = "Watch the active canary and avoid widening automation without new evidence."
+    else:
+        autonomy_next_step = recommended_action
+
     return {
         "available": bool(items),
         "item_count": len(items),
@@ -885,6 +908,15 @@ def _load_promotion_watch_surface(
         "observing_count": len(observing_items),
         "headline": headline,
         "recommended_action": recommended_action,
+        "autonomy_gate": {
+            "next_step": autonomy_next_step,
+            "next_candidate_id": (next_candidate or {}).get("promotion_id"),
+            "next_candidate_title": (next_candidate or {}).get("title"),
+            "next_candidate_state": (next_candidate or {}).get("promotion_state"),
+            "next_candidate_progress": (next_candidate or {}).get("progress_label"),
+            "operator_must_promote": True,
+            "self_promotion_allowed": False,
+        },
         "items": items[:6],
     }
 
@@ -916,23 +948,23 @@ def _review_reply_execution_promotion_candidate(surface: dict[str, Any]) -> dict
 
     if auto_execution_enabled and not blocked:
         promotion_state = "active"
-        action_title = "Etsy review auto-execution active"
-        summary = "Etsy review auto-execution is enabled and the browser guard is currently clear."
-        recommended_action = "Keep monitoring the live lane and only widen automation after the browser guard stays quiet."
+        action_title = "Etsy review supervised posting active"
+        summary = "The Etsy review posting lane is enabled and the browser guard is currently clear."
+        recommended_action = "Keep monitoring receipts and only widen automation after the browser guard stays quiet."
     elif blocked:
         promotion_state = "blocked"
-        action_title = "Etsy review auto-execution cooling down"
+        action_title = "Etsy review browser posting cooling down"
         summary = (
             f"Etsy browser automation is cooling down until {blocked_until}."
             if blocked_until
             else "Etsy browser automation is cooling down and should stay paused."
         )
-        recommended_action = "Keep the Etsy review lane in manual mode until the browser cooldown clears and the sidecar stays healthy again."
+        recommended_action = "Use Review Inbox, WhatsApp, or email for approval decisions only; keep Etsy browser posting manual until the cooldown clears and the sidecar stays healthy again."
     else:
         promotion_state = "observing"
-        action_title = "Etsy review auto-execution still gated"
-        summary = "Review auto-execution is still intentionally gated while we supervise the Etsy lane manually."
-        recommended_action = "Keep manual review replies as the control path until the cooldown and failure signals stay quiet long enough to revisit promotion."
+        action_title = "Etsy review posting still supervised"
+        summary = "Review approvals are intentionally separated from Etsy browser posting while the lane remains supervised."
+        recommended_action = "Use Review Inbox, WhatsApp, or email to approve reply quality; do not promote browser submission until cooldown and failure signals stay quiet long enough to revisit promotion."
 
     evidence = [
         f"Auto execution enabled: {auto_execution_enabled}.",
@@ -948,7 +980,7 @@ def _review_reply_execution_promotion_candidate(surface: dict[str, Any]) -> dict
     return _with_promotion_controls({
         "promotion_id": "review_reply_auto_execution",
         "lane": "review_reply_execution",
-        "title": "Etsy review auto-execution",
+        "title": "Etsy review supervised posting",
         "action_title": action_title,
         "promotion_state": promotion_state,
         "ready": False,
@@ -1282,6 +1314,99 @@ def _load_seo_outcome_surface() -> dict[str, Any]:
         "category_guidance": list(payload.get("category_guidance") or [])[:4],
         "attention_items": list(payload.get("attention_items") or [])[:4],
         "recent_wins": list(payload.get("recent_wins") or [])[:4],
+    }
+
+
+def _load_outcome_learning_expansion_surface(
+    *,
+    learning_surface: dict[str, Any],
+    weekly_strategy_packet: dict[str, Any],
+    product_concept_surface: dict[str, Any],
+    seo_outcomes: dict[str, Any],
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+
+    traffic_signal_count = int(seo_outcomes.get("traffic_signal_available_count") or 0)
+    if seo_outcomes.get("available") and traffic_signal_count <= 0:
+        items.append(
+            {
+                "lane": "shopify_seo_outcomes",
+                "status": "gap",
+                "title": "Wire SEO fixes to traffic or search-click lift",
+                "summary": "SEO cleanup has durable writeback verification, but no traffic/search-click signal is wired yet.",
+                "next_action": "Add a traffic/search-click collector before treating SEO cleanup as organic-growth proof.",
+                "source_path": seo_outcomes.get("path"),
+            }
+        )
+
+    own_confidence = str(weekly_strategy_packet.get("own_signal_confidence") or "").strip()
+    if weekly_strategy_packet.get("available") and own_confidence in {"low", "low_medium", "unknown", ""}:
+        items.append(
+            {
+                "lane": "social_outcomes",
+                "status": "observing",
+                "title": "Expand own-post outcome coverage",
+                "summary": f"Weekly strategy still marks own-post signal confidence as `{own_confidence or 'unknown'}`.",
+                "next_action": "Keep adding post-level outcomes so weekly recommendations lean more on our results and less on competitor proxy data.",
+                "source_path": weekly_strategy_packet.get("path"),
+            }
+        )
+
+    ready_concepts = int(product_concept_surface.get("ready_for_brief_review_count") or 0)
+    if ready_concepts > 0:
+        items.append(
+            {
+                "lane": "concept_to_print",
+                "status": "ready_to_test",
+                "title": "Feed concept-to-print pilots back into product learning",
+                "summary": f"{ready_concepts} concept candidate(s) are ready for brief review, but print-pilot outcomes are not yet closed-loop learning evidence.",
+                "next_action": "Run one dry concept-to-print pilot proof, then record whether it becomes printable, rejected, or needs concept revision.",
+                "source_path": product_concept_surface.get("path"),
+            }
+        )
+
+    relist_payload = load_json(ETSY_RELIST_OUTCOME_PATH, {})
+    if isinstance(relist_payload, dict) and relist_payload:
+        renewed_today = int(relist_payload.get("renewed_today") or 0)
+        eligible_count = int(relist_payload.get("eligible_count") or 0)
+        items.append(
+            {
+                "lane": "etsy_relist_outcomes",
+                "status": "monitoring" if renewed_today or eligible_count else "quiet",
+                "title": "Track post-relist lift after renewals",
+                "summary": f"Relist queue shows {renewed_today} renewed today and {eligible_count} eligible listing(s).",
+                "next_action": "Compare renewed listings against follow-on views, favorites, and sales before increasing relist volume.",
+                "source_path": str(ETSY_RELIST_OUTCOME_MD_PATH),
+            }
+        )
+
+    material_changes = int(learning_surface.get("material_change_count") or 0)
+    if material_changes > 0:
+        items.append(
+            {
+                "lane": "learning_change_notifier",
+                "status": "changed",
+                "title": "Promote material learning changes into experiments",
+                "summary": f"{material_changes} material learning change(s) are waiting to become explicit tests or guardrails.",
+                "next_action": "Convert each material change into a weekly experiment, a do-not-copy guardrail, or a roadmap item.",
+                "source_path": learning_surface.get("path"),
+            }
+        )
+
+    headline = "Outcome-learning backlog is clear enough to keep monitoring."
+    recommended_action = "Keep current learning surfaces fresh."
+    if items:
+        active_count = sum(1 for item in items if item.get("status") in {"gap", "ready_to_test", "changed"})
+        headline = f"{len(items)} outcome-learning expansion item(s) are available; {active_count} need active follow-through."
+        recommended_action = str(items[0].get("next_action") or "Review the outcome-learning expansion list.").strip()
+
+    return {
+        "available": True,
+        "headline": headline,
+        "recommended_action": recommended_action,
+        "item_count": len(items),
+        "active_count": sum(1 for item in items if item.get("status") in {"gap", "ready_to_test", "changed"}),
+        "items": items[:6],
     }
 
 
@@ -2402,6 +2527,26 @@ def _promotion_watch_action_item(promotion_surface: dict[str, Any]) -> dict[str,
     return None
 
 
+def _outcome_learning_action_item(outcome_learning_surface: dict[str, Any]) -> dict[str, Any] | None:
+    if not outcome_learning_surface.get("available"):
+        return None
+    items = [
+        item
+        for item in list(outcome_learning_surface.get("items") or [])
+        if str(item.get("status") or "") in {"gap", "ready_to_test", "changed"}
+    ]
+    if not items:
+        return None
+    first = items[0]
+    return {
+        "lane": first.get("lane") or "outcome_learning",
+        "title": first.get("title") or "Outcome learning expansion",
+        "summary": _trim_text(first.get("summary"), 120),
+        "command": first.get("next_action") or outcome_learning_surface.get("recommended_action"),
+        "secondary_command": first.get("source_path"),
+    }
+
+
 def _approval_chain_action_item(approval_chain_surface: dict[str, Any]) -> dict[str, Any] | None:
     if not approval_chain_surface.get("available"):
         return None
@@ -2504,6 +2649,7 @@ def _build_next_actions(
     maintenance_freshness_surface: dict[str, Any],
     promotion_watch_surface: dict[str, Any],
     approval_chain_surface: dict[str, Any],
+    outcome_learning_surface: dict[str, Any],
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     if customer_items:
@@ -2617,6 +2763,9 @@ def _build_next_actions(
     learning_action = _learning_change_action_item(learning_surface)
     if learning_action:
         actions.append(learning_action)
+    outcome_learning_action = _outcome_learning_action_item(outcome_learning_surface)
+    if outcome_learning_action:
+        actions.append(outcome_learning_action)
     governance_action = _governance_action_item(governance_surface)
     if governance_action:
         actions.append(governance_action)
@@ -2676,6 +2825,12 @@ def build_business_operator_desk(
     weekly_strategy_packet = _load_weekly_strategy_packet()
     product_concept_surface = _load_product_concept_queue_surface()
     seo_outcomes = _load_seo_outcome_surface()
+    outcome_learning_surface = _load_outcome_learning_expansion_surface(
+        learning_surface=learning_surface,
+        weekly_strategy_packet=weekly_strategy_packet,
+        product_concept_surface=product_concept_surface,
+        seo_outcomes=seo_outcomes,
+    )
     governance_surface = _load_governance_surface()
     roi_triage_surface = _load_roi_triage_surface()
     repo_ci_surface = _load_repo_ci_surface()
@@ -2721,6 +2876,7 @@ def build_business_operator_desk(
         "learning_surface": learning_surface,
         "weekly_strategy_packet": weekly_strategy_packet,
         "seo_outcomes": seo_outcomes,
+        "outcome_learning_surface": outcome_learning_surface,
         "counts": {
             "customer_packets": len(customer_items),
             "customer_attention_items": int(counts.get("customer_attention_items") or 0),
@@ -2810,6 +2966,8 @@ def build_business_operator_desk(
             "seo_outcome_items": int(seo_outcomes.get("applied_item_count") or 0),
             "seo_outcome_attention_items": len(seo_outcomes.get("attention_items") or []),
             "seo_outcome_stable_items": int(seo_outcomes.get("stable_count") or 0),
+            "outcome_learning_items": int(outcome_learning_surface.get("item_count") or 0),
+            "outcome_learning_active_items": int(outcome_learning_surface.get("active_count") or 0),
         },
         "next_actions": _build_next_actions(
             customer_items=customer_items,
@@ -2831,6 +2989,7 @@ def build_business_operator_desk(
             maintenance_freshness_surface=maintenance_freshness_surface,
             promotion_watch_surface=promotion_watch_surface,
             approval_chain_surface=approval_chain_surface,
+            outcome_learning_surface=outcome_learning_surface,
         ),
         "governance_surface": governance_surface,
         "roi_triage_surface": roi_triage_surface,
@@ -2847,6 +3006,7 @@ def build_business_operator_desk(
         "jeepfact_policy_surface": jeepfact_policy_surface,
         "promotion_watch_surface": promotion_watch_surface,
         "approval_chain_surface": approval_chain_surface,
+        "outcome_learning_surface": outcome_learning_surface,
         "sections": {
             "customer_packets": customer_items[:6],
             "etsy_browser_threads": browser_items[:6],
@@ -2877,6 +3037,7 @@ def build_business_operator_desk(
             "weekly_social_plan": list(((weekly_strategy_packet.get("social_plan") or {}).get("slots") or []) or ((weekly_strategy_packet.get("social_plan") or {}).get("items") or []))[:5],
             "product_concept_queue": list(product_concept_surface.get("items") or [])[:6],
             "seo_outcomes": (list(seo_outcomes.get("attention_items") or []) or list(seo_outcomes.get("recent_wins") or []))[:4],
+            "outcome_learning": list(outcome_learning_surface.get("items") or [])[:6],
         },
     }
 
@@ -2902,6 +3063,7 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     weekly_strategy_packet = payload.get("weekly_strategy_packet") or {}
     product_concept_surface = payload.get("product_concept_surface") or {}
     seo_outcomes = payload.get("seo_outcomes") or {}
+    outcome_learning_surface = payload.get("outcome_learning_surface") or {}
     if not learning_surface.get("available"):
         learning_surface = _load_learning_surface()
     learning_items = (sections.get("learning_surface") or []) or list(learning_surface.get("items") or [])
@@ -2911,6 +3073,14 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
     if not seo_outcomes.get("available"):
         seo_outcomes = _load_seo_outcome_surface()
     seo_items = (sections.get("seo_outcomes") or []) or list(seo_outcomes.get("attention_items") or []) or list(seo_outcomes.get("recent_wins") or [])
+    if not outcome_learning_surface.get("available"):
+        outcome_learning_surface = _load_outcome_learning_expansion_surface(
+            learning_surface=learning_surface,
+            weekly_strategy_packet=weekly_strategy_packet,
+            product_concept_surface=product_concept_surface,
+            seo_outcomes=seo_outcomes,
+        )
+    outcome_learning_items = (sections.get("outcome_learning") or []) or list(outcome_learning_surface.get("items") or [])
     lines = [
         "# Duck Ops Business Desk",
         "",
@@ -2982,6 +3152,8 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
         f"- SEO fixes tracked: `{counts.get('seo_outcome_items') or seo_outcomes.get('applied_item_count') or 0}`",
         f"- SEO items needing follow-up: `{counts.get('seo_outcome_attention_items') or len(seo_outcomes.get('attention_items') or [])}`",
         f"- Stable SEO fixes: `{counts.get('seo_outcome_stable_items') or seo_outcomes.get('stable_count') or 0}`",
+        f"- Outcome-learning expansion items: `{counts.get('outcome_learning_items') or outcome_learning_surface.get('item_count') or 0}`",
+        f"- Active outcome-learning follow-ups: `{counts.get('outcome_learning_active_items') or outcome_learning_surface.get('active_count') or 0}`",
         "",
         "## Strategic Focus",
         "",
@@ -3085,6 +3257,14 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- Status: {_trim_text(promotion_watch_surface.get('headline'), 180)}")
         if promotion_watch_surface.get("recommended_action"):
             lines.append(f"- Recommended action: {_trim_text(promotion_watch_surface.get('recommended_action'), 180)}")
+        autonomy_gate = promotion_watch_surface.get("autonomy_gate") if isinstance(promotion_watch_surface.get("autonomy_gate"), dict) else {}
+        if autonomy_gate:
+            lines.append(f"- Autonomy gate next step: {_trim_text(autonomy_gate.get('next_step'), 180)}")
+            if autonomy_gate.get("next_candidate_title"):
+                lines.append(
+                    f"- Next candidate: {_trim_text(autonomy_gate.get('next_candidate_title'), 90)} | `{autonomy_gate.get('next_candidate_state') or 'unknown'}` | `{autonomy_gate.get('next_candidate_progress') or 'n/a'}`"
+                )
+            lines.append(f"- Self-promotion allowed: `{bool(autonomy_gate.get('self_promotion_allowed'))}`")
         if promotion_items:
             lines.append("- Promotion candidates:")
             for item in promotion_items[:4]:
@@ -3404,6 +3584,28 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 )
                 if item.get("verification_note"):
                     lines.append(f"    Note: {_trim_text(item.get('verification_note'), 170)}")
+    lines.extend([
+        "",
+        "## Outcome Learning Expansion",
+        "",
+    ])
+    if not outcome_learning_surface.get("available"):
+        lines.append("Outcome-learning expansion surface is not available yet.")
+    else:
+        lines.append(f"- Status: {_trim_text(outcome_learning_surface.get('headline'), 180)}")
+        lines.append(f"- Active follow-ups: `{outcome_learning_surface.get('active_count', 0)}`")
+        if outcome_learning_surface.get("recommended_action"):
+            lines.append(f"- Recommended action: {_trim_text(outcome_learning_surface.get('recommended_action'), 180)}")
+        if outcome_learning_items:
+            lines.append("- Learning expansion items:")
+            for item in outcome_learning_items[:6]:
+                lines.append(
+                    f"  - `{item.get('lane') or 'learning'}` | `{item.get('status') or 'unknown'}` | {_trim_text(item.get('title'), 120)}"
+                )
+                if item.get("summary"):
+                    lines.append(f"    Why: {_trim_text(item.get('summary'), 170)}")
+                if item.get("next_action"):
+                    lines.append(f"    Next: {_trim_text(item.get('next_action'), 170)}")
     lines.extend([
         "",
         "## Weekly Strategy Packet",
@@ -4044,6 +4246,10 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "even": "interface_contracts",
         "learning": "learning_surface",
         "learnings": "learning_surface",
+        "outcome": "outcome_learning",
+        "outcomes": "outcome_learning",
+        "outcome_learning": "outcome_learning",
+        "learning_backlog": "outcome_learning",
         "seo": "seo_outcomes",
         "seo_outcome": "seo_outcomes",
         "seo_outcomes": "seo_outcomes",
@@ -4388,6 +4594,14 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append(f"Status: {_trim_text(promotion_watch_surface.get('headline'), 180)}")
             if promotion_watch_surface.get("recommended_action"):
                 lines.append(f"Recommended action: {_trim_text(promotion_watch_surface.get('recommended_action'), 180)}")
+            autonomy_gate = promotion_watch_surface.get("autonomy_gate") if isinstance(promotion_watch_surface.get("autonomy_gate"), dict) else {}
+            if autonomy_gate:
+                lines.append(f"Autonomy gate next step: {_trim_text(autonomy_gate.get('next_step'), 180)}")
+                if autonomy_gate.get("next_candidate_title"):
+                    lines.append(
+                        f"Next candidate: {_trim_text(autonomy_gate.get('next_candidate_title'), 90)} | {autonomy_gate.get('next_candidate_state') or 'unknown'} | {autonomy_gate.get('next_candidate_progress') or 'n/a'}"
+                    )
+                lines.append(f"Self-promotion allowed: {bool(autonomy_gate.get('self_promotion_allowed'))}")
             if promotion_items:
                 lines.append("")
                 lines.append("Candidates:")
@@ -4432,6 +4646,40 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                         lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
                     if item.get("recommended_action"):
                         lines.append(f"  Next: {_trim_text(item.get('recommended_action'), 180)}")
+        return "\n".join(lines)
+
+    if normalized == "outcome_learning":
+        lines = ["Duck Ops Outcome Learning Expansion", ""]
+        surface = payload.get("outcome_learning_surface") or {}
+        if not surface.get("available"):
+            learning_surface = payload.get("learning_surface") or _load_learning_surface()
+            weekly_strategy_packet = payload.get("weekly_strategy_packet") or _load_weekly_strategy_packet()
+            product_concept_surface = payload.get("product_concept_surface") or _load_product_concept_queue_surface()
+            seo_outcomes = payload.get("seo_outcomes") or _load_seo_outcome_surface()
+            surface = _load_outcome_learning_expansion_surface(
+                learning_surface=learning_surface,
+                weekly_strategy_packet=weekly_strategy_packet,
+                product_concept_surface=product_concept_surface,
+                seo_outcomes=seo_outcomes,
+            )
+        items = (sections.get("outcome_learning") or []) or list(surface.get("items") or [])
+        lines.append(f"Status: {_trim_text(surface.get('headline'), 180)}")
+        lines.append(f"Active follow-ups: {surface.get('active_count', 0)}")
+        if surface.get("recommended_action"):
+            lines.append(f"Recommended action: {_trim_text(surface.get('recommended_action'), 180)}")
+        if items:
+            lines.append("")
+            lines.append("Expansion items:")
+            for item in items[:6]:
+                lines.append(
+                    f"- {item.get('lane') or 'learning'} | {item.get('status') or 'unknown'} | {_trim_text(item.get('title'), 140)}"
+                )
+                if item.get("summary"):
+                    lines.append(f"  Why: {_trim_text(item.get('summary'), 180)}")
+                if item.get("next_action"):
+                    lines.append(f"  Next: {_trim_text(item.get('next_action'), 180)}")
+                if item.get("source_path"):
+                    lines.append(f"  Source: {item.get('source_path')}")
         return "\n".join(lines)
 
     if normalized == "weekly_sale_policy":

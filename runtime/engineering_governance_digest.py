@@ -232,6 +232,8 @@ def _business_desk_highlights() -> dict[str, Any]:
         ("review_queue_items", "Creative reviews"),
         ("governance_top_priority_items", "Governance P1"),
         ("strategy_ready_slots", "Social slots ready"),
+        ("promotion_ready_candidates", "Promotion-ready lanes"),
+        ("outcome_learning_active_items", "Outcome-learning follow-ups"),
     ]
     count_rows = [
         {"key": key, "label": label, "count": int(counts.get(key) or 0)}
