@@ -195,6 +195,68 @@ class SchedulerHealthTests(unittest.TestCase):
             self.assertEqual(item["status"], "dependency_blocked_recent")
             self.assertEqual(item["dependency_blocker"], "photoroom_quota_exhausted")
 
+    def test_failed_job_with_matching_resolution_is_fixed_pending_warning(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            receipt_dir = root / "receipts"
+            resolution_dir = root / "resolutions"
+            launch_agents.mkdir()
+            receipt_dir.mkdir()
+            resolution_dir.mkdir()
+            _write_plist(
+                launch_agents / "com.philtullai.duckagent.weekly.sunday.plist",
+                label="com.philtullai.duckagent.weekly.sunday",
+                job_name="weekly_sunday",
+                schedule={"Weekday": 0, "Hour": 7, "Minute": 0},
+            )
+            (receipt_dir / "weekly_sunday.json").write_text(
+                json.dumps(
+                    {
+                        "job_name": "weekly_sunday",
+                        "run_id": "weekly_sunday_20260510_070002_19333",
+                        "status": "failed",
+                        "exit_code": 1,
+                        "started_at": "2026-05-10T07:00:02-0400",
+                        "finished_at": "2026-05-10T07:03:27-0400",
+                        "timeout_seconds": 5400,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (resolution_dir / "weekly_sunday.json").write_text(
+                json.dumps(
+                    {
+                        "job_name": "weekly_sunday",
+                        "run_id": "weekly_sunday_20260510_070002_19333",
+                        "exit_code": 1,
+                        "resolution_status": "fixed_pending_next_run",
+                        "root_cause_class": "workflow_validation",
+                        "fix_summary": "SEO meta description repair handles short generated copy.",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat("2026-05-10T08:00:00-04:00"),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=root / "duckagent_scheduler.log",
+                receipt_dir=receipt_dir,
+                resolution_dir=resolution_dir,
+                write_outputs=False,
+            )
+
+            self.assertEqual(payload["status"], "warn")
+            self.assertEqual(payload["summary"]["bad_count"], 0)
+            self.assertEqual(payload["summary"]["warn_count"], 1)
+            self.assertEqual(payload["summary"]["fixed_pending_count"], 1)
+            self.assertEqual(payload["summary"]["attention_count"], 0)
+            item = payload["items"][0]
+            self.assertEqual(item["status"], "fixed_pending_next_run")
+            self.assertEqual(item["severity"], "warn")
+            self.assertIsNotNone(item["resolution"])
+
 
 if __name__ == "__main__":
     unittest.main()

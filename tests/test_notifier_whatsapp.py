@@ -76,6 +76,10 @@ class NotifierWhatsAppTests(unittest.TestCase):
         )
         self.assertEqual(result, ["https://example.com/a.png", "https://example.com/b.png"])
 
+    def test_unique_media_urls_filters_placeholder_media(self) -> None:
+        result = notifier.unique_media_urls(["🎯", "not a media url", "https://example.com/a.png"])
+        self.assertEqual(result, ["https://example.com/a.png"])
+
     @mock.patch.object(notifier, "build_whatsapp_collage")
     def test_prepare_whatsapp_media_urls_prefers_collage(self, build_collage: mock.Mock) -> None:
         build_collage.return_value = Path("/tmp/collage.png")
@@ -451,6 +455,39 @@ class NotifierWhatsAppTests(unittest.TestCase):
         self.assertIn("Trend approval needed", result["message"])
         self.assertEqual(result["media_urls"], ["https://example.com/trend.png"])
 
+    def test_build_reviews_whatsapp_operator_push_skips_placeholder_media(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            operator_current_path = Path(tmpdir) / "current_review.json"
+            quality_gate_path = Path(tmpdir) / "quality_gate_state.json"
+            operator_current_path.write_text(
+                """
+                {
+                  "message": "Review approval needed",
+                  "current": {
+                    "artifact_id": "review-story-1",
+                    "flow": "reviews_story",
+                    "title": "Review story",
+                    "review_status": "pending",
+                    "preview": {
+                      "asset_url": "🎯"
+                    }
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            quality_gate_path.write_text("{\"artifacts\": {}}", encoding="utf-8")
+
+            with (
+                mock.patch.object(notifier, "OPERATOR_CURRENT_PATH", operator_current_path),
+                mock.patch.object(notifier, "QUALITY_GATE_STATE_PATH", quality_gate_path),
+            ):
+                result = notifier.build_reviews_whatsapp_operator_push({})
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["media_urls"], [])
+
     def test_build_reviews_whatsapp_operator_push_skips_non_review_current_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             operator_current_path = Path(tmpdir) / "current_review.json"
@@ -517,6 +554,81 @@ class NotifierWhatsAppTests(unittest.TestCase):
             skip_order_refresh=True,
             skip_customer_refresh_preflight=True,
         )
+
+    @mock.patch.object(notifier, "send_whatsapp_message", side_effect=RuntimeError("gateway unavailable"))
+    @mock.patch.object(notifier, "send_message")
+    @mock.patch.object(notifier, "maybe_auto_approve_weekly_sales", return_value={"changed": False, "results": []})
+    @mock.patch.object(notifier, "refresh_learning_change_artifact")
+    @mock.patch.object(notifier, "refresh_promotion_readiness_artifact")
+    @mock.patch.object(notifier, "refresh_phase_readiness_artifact")
+    @mock.patch.object(notifier, "refresh_nightly_action_summary_sources")
+    @mock.patch.object(notifier, "notifier_settings")
+    def test_main_persists_email_state_before_whatsapp_failure(
+        self,
+        notifier_settings_mock: mock.Mock,
+        refresh_summary_mock: mock.Mock,
+        refresh_phase_mock: mock.Mock,
+        refresh_promotion_mock: mock.Mock,
+        refresh_learning_mock: mock.Mock,
+        auto_approve_mock: mock.Mock,
+        send_message_mock: mock.Mock,
+        send_whatsapp_mock: mock.Mock,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state_path = root / "notifier_state.json"
+            digest_path = root / "digest.json"
+            digest_md_path = root / "digest.md"
+            state_path.write_text('{"sent": {}}', encoding="utf-8")
+            digest_path.write_text("{}", encoding="utf-8")
+            digest_md_path.write_text("# Digest\n", encoding="utf-8")
+            artifact = {
+                "kind": "digest",
+                "key": str(digest_path),
+                "json_path": digest_path,
+                "md_path": digest_md_path,
+                "payload": {"items": [{"artifact_id": "review-1"}]},
+                "send_reason": "new_decision",
+                "digest_signature": "digest-sig",
+            }
+            notifier_settings_mock.return_value = {
+                "subjects": {"digest": "[OpenClaw Digest] <date>"},
+                "host": "smtp.example.com",
+                "user": "sender@example.com",
+                "password": "secret",
+                "to": "ops@example.com",
+                "whatsapp": {"enabled": True},
+            }
+
+            with (
+                mock.patch.object(notifier, "STATE_PATH", state_path),
+                mock.patch.object(notifier, "hydrate_digest_signature", return_value=False),
+                mock.patch.object(notifier, "hydrate_trend_digest_signature", return_value=False),
+                mock.patch.object(notifier, "hydrate_promotion_readiness_signature", return_value=False),
+                mock.patch.object(notifier, "hydrate_learning_change_signature", return_value=False),
+                mock.patch.object(notifier, "load_sendable_artifacts", side_effect=[[artifact], []]),
+                mock.patch.object(
+                    notifier,
+                    "build_operator_whatsapp_summary",
+                    return_value={
+                        "run_id": "run-1",
+                        "signature": "whatsapp-sig",
+                        "message": "hello",
+                        "media_urls": [],
+                    },
+                ),
+                mock.patch.object(sys, "argv", ["notifier.py"]),
+            ):
+                result = notifier.main()
+
+            state = notifier.load_json(state_path, {})
+
+        self.assertEqual(result, 0)
+        send_message_mock.assert_called_once()
+        send_whatsapp_mock.assert_called_once()
+        self.assertIn(str(digest_path), state["sent"])
+        self.assertEqual(state["last_digest_signature"], "digest-sig")
+        self.assertEqual(state["last_operator_whatsapp_error"]["signature"], "whatsapp-sig")
 
 
 if __name__ == "__main__":

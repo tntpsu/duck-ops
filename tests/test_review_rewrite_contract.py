@@ -10,6 +10,7 @@ if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
 import review_loop
+import review_reply_contract
 
 
 class ReviewRewriteContractTests(unittest.TestCase):
@@ -30,6 +31,50 @@ class ReviewRewriteContractTests(unittest.TestCase):
         self.assertIn("arrived quickly", rewrite.lower())
         self.assertNotIn("small business", rewrite.lower())
         self.assertLessEqual(rewrite.lower().count("i'm so glad"), 1)
+
+    def test_public_rewrite_handles_material_expectation_mismatch(self) -> None:
+        rewrite = review_loop.build_rewrite_suggestion_text(
+            {
+                "artifact_type": "review_reply",
+                "flow": "reviews_reply_positive",
+                "preview": {
+                    "context_text": "I thought they were plastic which would have been better.",
+                    "proposed_text": "Thank you for your feedback! Our 3D printed ducks have a unique feel, and we hope you still enjoy their charm.",
+                },
+            }
+        )
+
+        self.assertIsNotNone(rewrite)
+        lowered = rewrite.lower()
+        self.assertIn("honest feedback", lowered)
+        self.assertIn("material", lowered)
+        self.assertIn("not what you expected", lowered)
+        self.assertNotIn("kind review", lowered)
+        self.assertNotIn("loved", lowered)
+
+    def test_contract_flags_generic_positive_language_against_mixed_review(self) -> None:
+        contract = review_reply_contract.build_review_reply_contract(
+            "I thought they were plastic which would have been better.",
+            "Thanks so much for the kind review! Thanks again for the kind review.",
+            private_mode=False,
+        )
+
+        self.assertEqual(contract["classification"]["sentiment"], "complaint_adjacent")
+        self.assertEqual(contract["classification"]["issue_type"], "material_expectation")
+        self.assertTrue(contract["classification"]["needs_rewrite"])
+        failed_ids = {check["id"] for check in contract["failed_checks"]}
+        self.assertIn("no_generic_positive_reply_for_mixed_review", failed_ids)
+
+    def test_contract_does_not_treat_positive_3d_printed_review_as_issue(self) -> None:
+        contract = review_reply_contract.build_review_reply_contract(
+            "Great 3D printed duck and fast shipping.",
+            "Thanks so much for the kind review! I'm happy it arrived quickly.",
+            private_mode=False,
+        )
+
+        self.assertEqual(contract["classification"]["sentiment"], "positive")
+        self.assertEqual(contract["classification"]["issue_type"], "none")
+        self.assertFalse(contract["classification"]["needs_rewrite"])
 
 
 if __name__ == "__main__":

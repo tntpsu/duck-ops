@@ -48,6 +48,11 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def clear_stale_config_diagnostics(state: dict[str, Any], *keys: str) -> None:
+    for key in keys:
+        state.pop(key, None)
+
+
 def load_env_file(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
@@ -403,6 +408,7 @@ def sync_custom_work_items(
             build_rows.append(enriched)
         state["generated_at"] = summary["generated_at"]
         state["config_status"] = "credentials_missing"
+        clear_stale_config_diagnostics(state, "token_result", "tasklist_result")
         write_json(TASKS_STATE_PATH, state)
         return design_rows, build_rows, summary
 
@@ -421,6 +427,7 @@ def sync_custom_work_items(
         state["generated_at"] = summary["generated_at"]
         state["config_status"] = "token_failed"
         state["token_result"] = token_result
+        clear_stale_config_diagnostics(state, "tasklist_result")
         write_json(TASKS_STATE_PATH, state)
         return design_rows, build_rows, summary
 
@@ -439,12 +446,14 @@ def sync_custom_work_items(
         state["generated_at"] = summary["generated_at"]
         state["config_status"] = "tasklist_unavailable"
         state["tasklist_result"] = tasklist_result
+        clear_stale_config_diagnostics(state, "token_result")
         write_json(TASKS_STATE_PATH, state)
         return design_rows, build_rows, summary
 
     state.setdefault("items", {})
     state["tasklist_id"] = tasklist_id
     state["config_status"] = "ready"
+    clear_stale_config_diagnostics(state, "token_result", "tasklist_result")
     summary["config_status"] = "ready"
     summary["tasklist_id"] = tasklist_id
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from business_operator_desk import render_business_section
 from concept_name_quality import concept_name_quality
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, write_decision
 from ops_control import sync_ops_control
+from review_reply_contract import build_review_reply_contract, contract_failure_messages, public_issue_reply_lines
 from trend_ranker import build_trend_concepts
 from workflow_control import list_workflow_states
 
@@ -64,6 +66,62 @@ DUCK_AGENT_HANDOFF_FLOWS = {
         "approve": {"flow": "reviews", "action": "publish"},
     },
 }
+PUBLISH_SUCCESS_STATUSES = {"success", "partial", "scheduled", "published_now", "published"}
+PUBLISH_FAILURE_STATUSES = {"failed", "blocked", "error", "cancelled", "canceled"}
+DUCKAGENT_PUBLISH_RECONCILIATION_SPECS = {
+    "newduck": {
+        "state_file": "state_newduck.json",
+        "truthy_keys": ["newduck_published", "shopify_product_id", "etsy_listing_id"],
+        "recorded_at_keys": ["newduck_published_at", "published_at"],
+        "note": "Reconciled automatically because DuckAgent already shows this listing as published.",
+    },
+    "weekly_sale": {
+        "state_file": "state_weekly.json",
+        "truthy_keys": ["weekly_sale_published"],
+        "recorded_at_keys": ["weekly_sale_published_at"],
+        "note": "Reconciled automatically because DuckAgent already shows this weekly sale as published.",
+    },
+    "meme": {
+        "state_file": "state_meme.json",
+        "status_key": "meme_publish_status",
+        "recorded_at_keys": ["meme_scheduled_at", "meme_published_at"],
+        "note": "Reconciled automatically because DuckAgent already shows this meme as scheduled or published.",
+    },
+    "jeepfact": {
+        "state_file": "state_jeepfact.json",
+        "status_key": "jeepfact_publish_status",
+        "recorded_at_keys": ["jeepfact_scheduled_at", "jeepfact_published_at"],
+        "note": "Reconciled automatically because DuckAgent already shows this Jeep Fact post as scheduled or published.",
+    },
+    "thursday": {
+        "state_file": "state_thursday.json",
+        "truthy_keys": ["thursday_published"],
+        "recorded_at_keys": ["thursday_publish_time"],
+        "note": "Reconciled automatically because DuckAgent already shows this Thursday post as published.",
+    },
+    "gtdf": {
+        "state_file": "state_gtdf.json",
+        "recorded_at_keys": ["gtdf_scheduled_at"],
+        "note": "Reconciled automatically because DuckAgent already shows this GTDF post as scheduled.",
+    },
+    "reviews_story": {
+        "state_file": "state_reviews.json",
+        "status_key": "reviews_story_publish_status",
+        "truthy_keys": ["reviews_story_published"],
+        "recorded_at_keys": ["reviews_story_published_at"],
+        "note": "Reconciled automatically because DuckAgent already shows this review story as sent.",
+    },
+}
+DUCKAGENT_ARTIFACT_FLOW_ALIASES = {
+    "listing": "newduck",
+    "promotion": "weekly_sale",
+}
+DUCKAGENT_GATEWAY_FLOW_ALIASES = {
+    "reviews": "reviews_story",
+}
+DUCKAGENT_GATEWAY_APPROVE_ACTIONS = {"approve", "approved", "publish", "apply"}
+DUCKAGENT_GATEWAY_REVISE_ACTIONS = {"revise", "needs_changes", "needs_revision"}
+DUCKAGENT_GATEWAY_REJECT_ACTIONS = {"discard", "reject"}
 
 SHORT_ID_START = 101
 MAX_TREND_OPERATOR_ITEMS = 8
@@ -90,8 +148,10 @@ ACTION_ALIASES = {
     "discard": "discard",
     "drop": "discard",
     "reject": "discard",
+    "archive": "skip",
+    "pass": "skip",
     "ignore": "ignore",
-    "skip": "ignore",
+    "skip": "skip",
     "bad": "ignore",
     "why": "why",
     "more": "why",
@@ -345,42 +405,63 @@ def latest_override_index() -> dict[str, dict[str, Any]]:
     return latest
 
 
+def duckagent_reconciliation_flow(decision: dict[str, Any]) -> str:
+    flow = str(decision.get("flow") or "").strip()
+    if flow in DUCKAGENT_PUBLISH_RECONCILIATION_SPECS:
+        return flow
+    artifact_type = str(decision.get("artifact_type") or "").strip()
+    return DUCKAGENT_ARTIFACT_FLOW_ALIASES.get(artifact_type, flow)
+
+
+def first_payload_value(payload: dict[str, Any], keys: list[str] | tuple[str, ...]) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value:
+            return value
+    return None
+
+
+def duckagent_publish_reconciliation_from_state(
+    *,
+    run_id: str,
+    flow: str,
+    spec: dict[str, Any],
+) -> dict[str, Any] | None:
+    state_path = DUCK_AGENT_RUNS_DIR / run_id / str(spec.get("state_file") or "")
+    if not state_path.name:
+        return None
+    payload = load_json(state_path, {})
+    if not isinstance(payload, dict):
+        return None
+
+    status_key = str(spec.get("status_key") or "").strip()
+    status = str(payload.get(status_key) or "").strip().lower() if status_key else ""
+    if status in PUBLISH_FAILURE_STATUSES:
+        return None
+    has_success_status = bool(status and status in PUBLISH_SUCCESS_STATUSES)
+    has_truthy_key = bool(first_payload_value(payload, list(spec.get("truthy_keys") or [])))
+    recorded_at = first_payload_value(payload, list(spec.get("recorded_at_keys") or []))
+    if not (has_success_status or has_truthy_key or recorded_at):
+        return None
+
+    return {
+        "recorded_at": str(recorded_at or now_iso()),
+        "resolution": "approve",
+        "note": str(spec.get("note") or f"Reconciled automatically because DuckAgent already shows {flow} as complete."),
+        "source": str(state_path),
+    }
+
+
 def duckagent_publish_reconciliation(decision: dict[str, Any]) -> dict[str, Any] | None:
     run_id = str(decision.get("run_id") or "").strip()
-    flow = str(decision.get("flow") or "")
-    artifact_type = str(decision.get("artifact_type") or "")
     if not run_id:
         return None
 
-    if flow == "newduck" or artifact_type == "listing":
-        state_path = DUCK_AGENT_RUNS_DIR / run_id / "state_newduck.json"
-        payload = load_json(state_path, {})
-        if not isinstance(payload, dict):
-            return None
-        if payload.get("newduck_published") or payload.get("shopify_product_id") or payload.get("etsy_listing_id"):
-            return {
-                "recorded_at": now_iso(),
-                "resolution": "approve",
-                "note": "Reconciled automatically because DuckAgent already shows this listing as published.",
-                "source": str(state_path),
-            }
+    flow = duckagent_reconciliation_flow(decision)
+    spec = DUCKAGENT_PUBLISH_RECONCILIATION_SPECS.get(flow)
+    if not spec:
         return None
-
-    if flow == "weekly_sale" or artifact_type == "promotion":
-        state_path = DUCK_AGENT_RUNS_DIR / run_id / "state_weekly.json"
-        payload = load_json(state_path, {})
-        if not isinstance(payload, dict):
-            return None
-        if payload.get("weekly_sale_published") or payload.get("weekly_sale_published_at"):
-            return {
-                "recorded_at": str(payload.get("weekly_sale_published_at") or now_iso()),
-                "resolution": "approve",
-                "note": "Reconciled automatically because DuckAgent already shows this weekly sale as published.",
-                "source": str(state_path),
-            }
-        return None
-
-    return None
+    return duckagent_publish_reconciliation_from_state(run_id=run_id, flow=flow, spec=spec)
 
 
 def newer_newduck_run_reconciliation(decision: dict[str, Any]) -> dict[str, Any] | None:
@@ -873,6 +954,7 @@ def resolution_label(resolution: str) -> str:
         "build": "build",
         "promote": "promote",
         "wait": "wait",
+        "skip": "skip this occurrence",
     }.get(resolution or "", resolution or "pending")
 
 
@@ -1782,6 +1864,16 @@ def public_reply_detail_lines(review_text: str, draft_text: str = "") -> list[st
 
 def private_reply_issue_line(review_text: str) -> str:
     lowered = review_text.lower()
+    contract = build_review_reply_contract(review_text, "", private_mode=True)
+    issue_type = str((contract.get("classification") or {}).get("issue_type") or "none")
+    if issue_type == "material_expectation":
+        return "I understand why the material or feel was not what you expected."
+    if issue_type == "size_expectation":
+        return "I understand why the size was not what you expected."
+    if issue_type == "quality_concern":
+        return "I understand why this felt disappointing."
+    if issue_type == "damage_or_shipping":
+        return "I understand why that delivery experience was frustrating."
     if "3d print" in lowered or "3d printed" in lowered or "micro plastic" in lowered:
         return "I understand why the material and listing wording felt misleading."
     if "misleading" in lowered or "not disclosed" in lowered:
@@ -1823,8 +1915,11 @@ def build_rewrite_suggestion_text(item: dict[str, Any], hint: str = "") -> str |
     hint_text = normalize_operator_note(hint).lower()
     shorter = "short" in hint_text
     warmer = "warm" in hint_text
+    private_mode = item.get("flow") == "reviews_reply_private"
+    reply_contract = build_review_reply_contract(review_text, draft_text, private_mode=private_mode)
+    classification = reply_contract.get("classification") or {}
 
-    if item.get("flow") == "reviews_reply_private":
+    if private_mode:
         opening = "Thank you for reaching out, and I'm sorry this missed the mark."
         if shorter:
             opening = "I'm sorry this missed the mark."
@@ -1836,6 +1931,9 @@ def build_rewrite_suggestion_text(item: dict[str, Any], hint: str = "") -> str |
             private_reply_remedy_line(draft_text),
         ]
         return " ".join(dedupe_phrases(parts))
+
+    if classification.get("issue_type") != "none":
+        return " ".join(dedupe_phrases(public_issue_reply_lines(review_text, shorter=shorter, warmer=warmer)))
 
     opening = "Thanks so much for the kind review!"
     if shorter:
@@ -1859,6 +1957,34 @@ def build_rewrite_suggestion_text(item: dict[str, Any], hint: str = "") -> str |
     if len(parts) < 3:
         parts.append(closing)
     return " ".join(dedupe_phrases(parts))
+
+
+def review_reply_contract_summary_lines(item: dict[str, Any]) -> list[str]:
+    if item.get("artifact_type") != "review_reply":
+        return []
+    preview = item.get("preview") or {}
+    contract = build_review_reply_contract(
+        normalize_operator_text(preview.get("context_text")),
+        normalize_operator_text(preview.get("proposed_text")),
+        private_mode=item.get("flow") == "reviews_reply_private",
+    )
+    classification = contract.get("classification") or {}
+    lines = [
+        "Rewrite analysis:",
+        f"- Classification: {str(classification.get('sentiment') or 'unknown').replace('_', ' ')}",
+    ]
+    issue_type = str(classification.get("issue_type") or "none")
+    if issue_type != "none":
+        issue_description = str(classification.get("issue_description") or "").strip()
+        lines.append(f"- Issue detected: {issue_description or issue_type.replace('_', ' ')}")
+    failures = contract_failure_messages(contract)
+    if failures:
+        lines.extend(f"- Policy issue: {message}" for message in failures[:3])
+    elif classification.get("needs_rewrite"):
+        lines.append("- OpenClaw thinks this should be rewritten before approval.")
+    else:
+        lines.append("- No rewrite-blocking issue detected in the current draft.")
+    return lines
 
 
 def render_rewrite_suggestion(item: dict[str, Any], hint: str = "") -> str:
@@ -1907,6 +2033,8 @@ def render_rewrite_suggestion(item: dict[str, Any], hint: str = "") -> str:
         [
             f"OpenClaw Rewrite {item['short_id']}{hint_suffix}",
             f"{item.get('title') or item.get('artifact_id')}",
+            "",
+            *review_reply_contract_summary_lines(item),
             "",
             "Suggested reply:",
             f"\"{rewrite_text}\"",
@@ -2431,6 +2559,7 @@ def record_action(
     review_status_map = {
         "approve": "approved",
         "reject": "rejected",
+        "archive": "archived",
         "override": "overridden",
     }
     if action == "override" and not (note or "").strip():
@@ -2456,6 +2585,7 @@ def record_action(
     decision["human_review"] = human_review
     operator_action = resolution or {
         "approve": "approve",
+        "archive": "skip",
         "reject": "discard",
         "override": "needs_changes",
     }.get(action, action)
@@ -2478,6 +2608,12 @@ def record_action(
             decision["execution_mode"] = "operator_approved"
     decision.pop("manual_review_requested", None)
     decision["review_status"] = review_status_map[action]
+    if action == "archive":
+        archived_at = human_review["recorded_at"]
+        decision["archived_at"] = archived_at
+        decision["archive_reason"] = note.strip() if note else "Operator skipped this occurrence without rejecting the creative."
+        record["archived_at"] = archived_at
+        record["archive_reason"] = decision["archive_reason"]
     record["decision"] = decision
     record["reviewed_at"] = human_review["recorded_at"]
     record["output_paths"] = write_decision(decision)
@@ -2546,12 +2682,15 @@ def invoke_duckagent_mail_event(flow: str, run_id: str | None, title: str, actio
             json.dump(payload, handle)
             temp_path = handle.name
         command = [str(python_bin), "src/main_agent.py", "--mail-file", temp_path]
+        env = dict(os.environ)
+        env["DUCK_OPS_DECISION_GATEWAY_BYPASS"] = "1"
         proc = subprocess.run(
             command,
             cwd=str(DUCK_AGENT_ROOT),
             capture_output=True,
             text=True,
             check=False,
+            env=env,
         )
     finally:
         if temp_path:
@@ -2630,6 +2769,229 @@ def maybe_handoff_duckagent_publish_after_operator_action(decision: dict[str, An
         "message": message,
         "updated_decision": decision,
     }
+
+
+def normalize_decision_gateway_flow(flow: str | None) -> str:
+    value = str(flow or "").strip()
+    return DUCKAGENT_GATEWAY_FLOW_ALIASES.get(value, value)
+
+
+def decision_gateway_resolution(action: str | None) -> str | None:
+    value = str(action or "").strip().lower()
+    if value in DUCKAGENT_GATEWAY_APPROVE_ACTIONS:
+        return "approve"
+    if value in DUCKAGENT_GATEWAY_REVISE_ACTIONS:
+        return "needs_changes"
+    if value in DUCKAGENT_GATEWAY_REJECT_ACTIONS:
+        return "discard"
+    return None
+
+
+def find_decision_gateway_matches(
+    state_bundle: dict[str, dict[str, Any]],
+    *,
+    flow: str,
+    run_id: str,
+    pending_only: bool = True,
+) -> list[tuple[str, str, dict[str, Any], dict[str, Any]]]:
+    matches: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+    for source_name, state in state_bundle.items():
+        artifacts = state.get("artifacts") if isinstance(state, dict) else {}
+        for artifact_id, record in (artifacts or {}).items():
+            if not isinstance(record, dict):
+                continue
+            decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+            if str(decision.get("flow") or "").strip() != flow:
+                continue
+            if str(decision.get("run_id") or "").strip() != run_id:
+                continue
+            if pending_only and str(decision.get("review_status") or "").strip() != "pending":
+                continue
+            matches.append((str(artifact_id), source_name, record, decision))
+    return matches
+
+
+def _decision_gateway_result(
+    *,
+    handled: bool,
+    ok: bool,
+    status: str,
+    flow: str,
+    run_id: str | None,
+    message: str,
+    artifact_id: str | None = None,
+    review_status: str | None = None,
+    dispatch: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "handled": handled,
+        "ok": ok,
+        "status": status,
+        "flow": flow,
+        "run_id": run_id,
+        "artifact_id": artifact_id,
+        "review_status": review_status,
+        "message": message,
+        "dispatch": dispatch,
+        "recorded_at": now_iso(),
+    }
+
+
+def record_decision_and_dispatch(
+    *,
+    flow: str,
+    run_id: str | None,
+    action: str,
+    note: str | None = None,
+    channel: str = "unknown",
+    dispatch: bool = True,
+) -> dict[str, Any]:
+    gateway_flow = normalize_decision_gateway_flow(flow)
+    clean_run_id = str(run_id or "").strip()
+    resolution = decision_gateway_resolution(action)
+    if gateway_flow not in DUCK_AGENT_HANDOFF_FLOWS:
+        return _decision_gateway_result(
+            handled=False,
+            ok=True,
+            status="unsupported_flow",
+            flow=gateway_flow,
+            run_id=clean_run_id,
+            message=f"Flow `{flow}` is not owned by the shared Duck Ops decision gateway yet.",
+        )
+    if not clean_run_id:
+        return _decision_gateway_result(
+            handled=False,
+            ok=False,
+            status="missing_run_id",
+            flow=gateway_flow,
+            run_id=clean_run_id,
+            message="The shared decision gateway requires a run id.",
+        )
+    if not resolution:
+        return _decision_gateway_result(
+            handled=False,
+            ok=True,
+            status="unsupported_action",
+            flow=gateway_flow,
+            run_id=clean_run_id,
+            message=f"Action `{action}` is not a shared decision-gateway action.",
+        )
+
+    state_bundle = load_state_bundle()
+    operator_state = load_operator_state()
+    reconcile_state_bundle(state_bundle)
+
+    pending_matches = find_decision_gateway_matches(state_bundle, flow=gateway_flow, run_id=clean_run_id)
+    if len(pending_matches) > 1:
+        return _decision_gateway_result(
+            handled=True,
+            ok=False,
+            status="ambiguous_decision",
+            flow=gateway_flow,
+            run_id=clean_run_id,
+            message=(
+                f"Found {len(pending_matches)} pending `{gateway_flow}` decisions for run `{clean_run_id}`. "
+                "No execution was dispatched."
+            ),
+        )
+    if not pending_matches:
+        existing_matches = find_decision_gateway_matches(
+            state_bundle,
+            flow=gateway_flow,
+            run_id=clean_run_id,
+            pending_only=False,
+        )
+        if existing_matches:
+            artifact_id, _source_name, _record, decision = existing_matches[0]
+            review_status = str(decision.get("review_status") or "").strip()
+            return _decision_gateway_result(
+                handled=True,
+                ok=True,
+                status="already_resolved",
+                flow=gateway_flow,
+                run_id=clean_run_id,
+                artifact_id=artifact_id,
+                review_status=review_status,
+                message=f"Decision `{artifact_id}` is already `{review_status}`; no duplicate execution was dispatched.",
+            )
+        return _decision_gateway_result(
+            handled=False,
+            ok=True,
+            status="no_pending_decision",
+            flow=gateway_flow,
+            run_id=clean_run_id,
+            message=f"No pending Duck Ops decision was found for `{gateway_flow}` run `{clean_run_id}`.",
+        )
+
+    artifact_id, source_name, _record, _decision = pending_matches[0]
+    record_action_name = "approve" if resolution == "approve" else "reject" if resolution == "discard" else "override"
+    record_note = note
+    if resolution == "needs_changes" and not str(record_note or "").strip():
+        record_note = f"Operator requested revision from {channel}."
+
+    _, source_name = record_action(
+        state_bundle,
+        artifact_id,
+        record_action_name,
+        record_note,
+        resolution=resolution,
+    )
+    recorded_decision = (
+        ((state_bundle.get(source_name) or {}).get("artifacts") or {}).get(artifact_id, {}).get("decision") or {}
+    )
+    recorded_decision["decision_gateway"] = {
+        "channel": channel,
+        "flow": gateway_flow,
+        "source_flow": flow,
+        "run_id": clean_run_id,
+        "operator_action": resolution,
+        "requested_action": action,
+        "recorded_at": now_iso(),
+    }
+    artifact_record = ((state_bundle.get(source_name) or {}).get("artifacts") or {}).get(artifact_id, {})
+    artifact_record["decision"] = recorded_decision
+    artifact_record["output_paths"] = write_decision(recorded_decision)
+    write_state_source(source_name, state_bundle[source_name])
+
+    dispatch_result = None
+    if dispatch:
+        dispatch_result = maybe_handoff_duckagent_publish_after_operator_action(recorded_decision)
+        if dispatch_result:
+            artifact_record["decision"] = recorded_decision
+            artifact_record["output_paths"] = write_decision(recorded_decision)
+            write_state_source(source_name, state_bundle[source_name])
+
+    write_review_queue(state_bundle, operator_state)
+    write_operator_state(operator_state)
+
+    if dispatch_result and not dispatch_result.get("ok"):
+        return _decision_gateway_result(
+            handled=True,
+            ok=False,
+            status=str(dispatch_result.get("status") or "dispatch_failed"),
+            flow=gateway_flow,
+            run_id=clean_run_id,
+            artifact_id=artifact_id,
+            review_status=str(recorded_decision.get("review_status") or ""),
+            message=str(dispatch_result.get("message") or "Decision was recorded, but DuckAgent dispatch failed."),
+            dispatch=dispatch_result,
+        )
+
+    return _decision_gateway_result(
+        handled=True,
+        ok=True,
+        status="recorded_and_dispatched" if dispatch_result else "recorded",
+        flow=gateway_flow,
+        run_id=clean_run_id,
+        artifact_id=artifact_id,
+        review_status=str(recorded_decision.get("review_status") or ""),
+        message=(
+            "Decision was recorded in Duck Ops and dispatched to DuckAgent."
+            if dispatch_result
+            else "Decision was recorded in Duck Ops."
+        ),
+        dispatch=dispatch_result,
+    )
 
 
 def operator_help(current_item: dict[str, Any] | None = None) -> str:
@@ -2809,6 +3171,14 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
 
     if command == "rewrite":
         rewrite_text = build_rewrite_suggestion_text(target_item, hint=note)
+        preview = target_item.get("preview") or {}
+        rewrite_contract = None
+        if target_item.get("artifact_type") == "review_reply":
+            rewrite_contract = build_review_reply_contract(
+                normalize_operator_text(preview.get("context_text")),
+                normalize_operator_text(preview.get("proposed_text")),
+                private_mode=target_item.get("flow") == "reviews_reply_private",
+            )
         rewrite_cache = operator_state.setdefault("rewrite_suggestions", {})
         if rewrite_text and (
             target_item.get("artifact_type") == "review_reply"
@@ -2818,6 +3188,8 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
                 "text": rewrite_text,
                 "generated_at": now_iso(),
             }
+            if rewrite_contract:
+                rewrite_cache[target_item["artifact_id"]]["contract"] = rewrite_contract
         write_review_queue(state_bundle, operator_state)
         return render_rewrite_suggestion(target_item, hint=note)
 
@@ -2858,7 +3230,7 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
             "Reply `agree` if that looks right, or `next` to move on."
         )
 
-    valid_commands = {"agree", "discard"}
+    valid_commands = {"agree", "discard", "skip"}
     if target_item.get("artifact_type") == "trend":
         valid_commands.update({"build", "promote", "wait", "ignore"})
     else:
@@ -2870,6 +3242,8 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
 
     recommended = recommended_action(target_item)
     desired_resolution = recommended if command == "agree" else command
+    if desired_resolution == "skip" and not note:
+        note = "Skipped this occurrence so the next scheduled run can generate a fresh candidate."
     if desired_resolution != recommended and not note:
         write_review_queue(state_bundle, operator_state)
         return (
@@ -2891,7 +3265,7 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
         if cached_rewrite:
             note_override = cached_rewrite
 
-    internal_action = "approve" if desired_resolution == recommended else "override"
+    internal_action = "archive" if desired_resolution == "skip" else "approve" if desired_resolution == recommended else "override"
     _, source_name = record_action(
         state_bundle,
         target_item["artifact_id"],
@@ -2972,6 +3346,14 @@ def main() -> int:
     handle_parser = sub.add_parser("handle", help="Handle a plain-language operator reply.")
     handle_parser.add_argument("--text", required=True)
 
+    gateway_parser = sub.add_parser("decision-gateway", help="Record a shared decision event and dispatch the owning executor.")
+    gateway_parser.add_argument("--flow", required=True)
+    gateway_parser.add_argument("--run-id", required=True)
+    gateway_parser.add_argument("--action", required=True)
+    gateway_parser.add_argument("--note")
+    gateway_parser.add_argument("--channel", default="cli")
+    gateway_parser.add_argument("--no-dispatch", action="store_true")
+
     args = parser.parse_args()
     state_bundle = load_state_bundle()
     operator_state = load_operator_state()
@@ -3016,6 +3398,18 @@ def main() -> int:
         write_operator_state(operator_state)
         print(response)
         return 0
+
+    if args.command == "decision-gateway":
+        result = record_decision_and_dispatch(
+            flow=args.flow,
+            run_id=args.run_id,
+            action=args.action,
+            note=args.note,
+            channel=args.channel,
+            dispatch=not args.no_dispatch,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get("ok") else 2
 
     raise SystemExit(f"Unknown command: {args.command}")
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 
@@ -13,7 +15,255 @@ if str(RUNTIME_DIR) not in sys.path:
 import review_loop
 
 
+def write_duckagent_state(root: Path, run_id: str, filename: str, payload: dict) -> Path:
+    state_path = root / run_id / filename
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return state_path
+
+
 class ReviewLoopReconciliationTests(unittest.TestCase):
+    def test_duckagent_publish_reconciliation_detects_recurring_social_proofs(self) -> None:
+        cases = [
+            (
+                {"flow": "meme", "artifact_type": "social_post", "run_id": "meme_20260518"},
+                "state_meme.json",
+                {"meme_publish_status": "scheduled", "meme_scheduled_at": "2026-05-18T19:00:00-04:00"},
+                "meme as scheduled",
+            ),
+            (
+                {"flow": "jeepfact", "artifact_type": "social_post", "run_id": "jeepfact_20260520"},
+                "state_jeepfact.json",
+                {"jeepfact_publish_status": "partial", "jeepfact_scheduled_at": "2026-05-20T19:00:00-04:00"},
+                "Jeep Fact post as scheduled",
+            ),
+            (
+                {"flow": "thursday", "artifact_type": "social_post", "run_id": "thursday_20260521"},
+                "state_thursday.json",
+                {"thursday_published": True, "thursday_publish_time": "2026-05-21T19:00:00-04:00"},
+                "Thursday post as published",
+            ),
+            (
+                {"flow": "gtdf", "artifact_type": "social_post", "run_id": "gtdf_20260523"},
+                "state_gtdf.json",
+                {"gtdf_scheduled_at": "2026-05-23T11:00:00-04:00"},
+                "GTDF post as scheduled",
+            ),
+            (
+                {"flow": "reviews_story", "artifact_type": "social_post", "run_id": "reviews_20260517"},
+                "state_reviews.json",
+                {"reviews_story_published": True, "reviews_story_published_at": "2026-05-17T09:15:00-04:00"},
+                "review story as sent",
+            ),
+        ]
+
+        with TemporaryDirectory() as temp_dir:
+            runs_root = Path(temp_dir)
+            for decision, filename, payload, expected_note in cases:
+                write_duckagent_state(runs_root, decision["run_id"], filename, payload)
+
+            with patch.object(review_loop, "DUCK_AGENT_RUNS_DIR", runs_root):
+                for decision, _filename, _payload, expected_note in cases:
+                    with self.subTest(flow=decision["flow"]):
+                        result = review_loop.duckagent_publish_reconciliation(decision)
+
+                    self.assertIsNotNone(result)
+                    self.assertEqual(result["resolution"], "approve")
+                    self.assertIn(expected_note, result["note"])
+                    self.assertIn(str(runs_root / decision["run_id"]), result["source"])
+
+    def test_duckagent_publish_reconciliation_ignores_failed_or_unproven_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            runs_root = Path(temp_dir)
+            write_duckagent_state(
+                runs_root,
+                "meme_20260518",
+                "state_meme.json",
+                {"meme_publish_status": "failed", "meme_scheduled_at": "2026-05-18T19:00:00-04:00"},
+            )
+            write_duckagent_state(
+                runs_root,
+                "jeepfact_20260520",
+                "state_jeepfact.json",
+                {"jeepfact_publish_status": "blocked"},
+            )
+
+            with patch.object(review_loop, "DUCK_AGENT_RUNS_DIR", runs_root):
+                self.assertIsNone(
+                    review_loop.duckagent_publish_reconciliation(
+                        {"flow": "meme", "artifact_type": "social_post", "run_id": "meme_20260518"}
+                    )
+                )
+                self.assertIsNone(
+                    review_loop.duckagent_publish_reconciliation(
+                        {"flow": "jeepfact", "artifact_type": "social_post", "run_id": "jeepfact_20260520"}
+                    )
+                )
+
+    def test_reconcile_quality_gate_approves_email_published_social_decision(self) -> None:
+        state = {
+            "artifacts": {
+                "publish::jeepfact::2026-05-20::jeep-fact-wednesday": {
+                    "artifact_id": "publish::jeepfact::2026-05-20::jeep-fact-wednesday",
+                    "decision": {
+                        "artifact_id": "publish::jeepfact::2026-05-20::jeep-fact-wednesday",
+                        "artifact_type": "social_post",
+                        "flow": "jeepfact",
+                        "run_id": "2026-05-20",
+                        "review_status": "pending",
+                        "created_at": "2026-05-20T09:00:00-04:00",
+                        "title": "Jeep Fact Wednesday",
+                    },
+                }
+            }
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            runs_root = Path(temp_dir)
+            state_path = write_duckagent_state(
+                runs_root,
+                "2026-05-20",
+                "state_jeepfact.json",
+                {"jeepfact_publish_status": "scheduled", "jeepfact_scheduled_at": "2026-05-20T19:00:00-04:00"},
+            )
+
+            with (
+                patch.object(review_loop, "DUCK_AGENT_RUNS_DIR", runs_root),
+                patch.object(review_loop, "latest_override_index", return_value={}),
+                patch.object(review_loop, "now_iso", return_value="2026-05-20T19:05:00-04:00"),
+            ):
+                changed = review_loop.reconcile_quality_gate_state(state)
+
+        self.assertTrue(changed)
+        decision = state["artifacts"]["publish::jeepfact::2026-05-20::jeep-fact-wednesday"]["decision"]
+        self.assertEqual(decision["review_status"], "approved")
+        self.assertEqual(decision["human_review"]["resolution"], "approve")
+        self.assertEqual(decision["reconciled_resolution"]["source"], str(state_path))
+
+    def test_record_decision_and_dispatch_records_email_decision_before_duckagent_handoff(self) -> None:
+        state_bundle = {
+            "quality_gate": {
+                "artifacts": {
+                    "publish::jeepfact::2026-05-20::jeep-fact-wednesday": {
+                        "artifact_id": "publish::jeepfact::2026-05-20::jeep-fact-wednesday",
+                        "decision": {
+                            "artifact_id": "publish::jeepfact::2026-05-20::jeep-fact-wednesday",
+                            "artifact_type": "social_post",
+                            "flow": "jeepfact",
+                            "run_id": "2026-05-20",
+                            "review_status": "pending",
+                            "decision": "publish_ready",
+                            "created_at": "2026-05-20T09:00:00-04:00",
+                            "title": "Jeep Fact Wednesday",
+                        },
+                    }
+                }
+            },
+            "trend_ranker": {"artifacts": {}},
+        }
+        dispatch_calls: list[dict] = []
+
+        def fake_invoke(**kwargs):
+            dispatch_calls.append(kwargs)
+            return {"ok": True, "returncode": 0, "stdout": "scheduled", "stderr": "", "command": ["duckagent"]}
+
+        with (
+            patch.object(review_loop, "load_state_bundle", return_value=state_bundle),
+            patch.object(review_loop, "load_operator_state", return_value={}),
+            patch.object(review_loop, "reconcile_state_bundle", return_value=False),
+            patch.object(review_loop, "write_state_source", return_value=None),
+            patch.object(review_loop, "write_review_queue", return_value=None),
+            patch.object(review_loop, "write_operator_state", return_value=None),
+            patch.object(review_loop, "write_decision", return_value={}),
+            patch.object(review_loop, "invoke_duckagent_mail_event", side_effect=fake_invoke),
+            patch.object(review_loop, "now_iso", return_value="2026-05-20T19:05:00-04:00"),
+        ):
+            result = review_loop.record_decision_and_dispatch(
+                flow="jeepfact",
+                run_id="2026-05-20",
+                action="publish",
+                note="publish",
+                channel="email",
+            )
+
+        decision = state_bundle["quality_gate"]["artifacts"]["publish::jeepfact::2026-05-20::jeep-fact-wednesday"]["decision"]
+        self.assertTrue(result["handled"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "recorded_and_dispatched")
+        self.assertEqual(decision["review_status"], "approved")
+        self.assertEqual(decision["decision_gateway"]["channel"], "email")
+        self.assertEqual(decision["decision_gateway"]["operator_action"], "approve")
+        self.assertEqual(decision["execution_state"], "publish_requested")
+        self.assertEqual(dispatch_calls[0]["flow"], "jeepfact")
+        self.assertEqual(dispatch_calls[0]["action"], "publish")
+
+    def test_record_decision_and_dispatch_does_not_duplicate_resolved_decision(self) -> None:
+        state_bundle = {
+            "quality_gate": {
+                "artifacts": {
+                    "publish::meme::2026-05-18::meme-monday": {
+                        "artifact_id": "publish::meme::2026-05-18::meme-monday",
+                        "decision": {
+                            "artifact_id": "publish::meme::2026-05-18::meme-monday",
+                            "artifact_type": "social_post",
+                            "flow": "meme",
+                            "run_id": "2026-05-18",
+                            "review_status": "approved",
+                            "decision": "publish_ready",
+                            "title": "Meme Monday",
+                        },
+                    }
+                }
+            },
+            "trend_ranker": {"artifacts": {}},
+        }
+
+        with (
+            patch.object(review_loop, "load_state_bundle", return_value=state_bundle),
+            patch.object(review_loop, "load_operator_state", return_value={}),
+            patch.object(review_loop, "reconcile_state_bundle", return_value=False),
+            patch.object(review_loop, "invoke_duckagent_mail_event") as invoke,
+            patch.object(review_loop, "now_iso", return_value="2026-05-18T19:05:00-04:00"),
+        ):
+            result = review_loop.record_decision_and_dispatch(
+                flow="meme",
+                run_id="2026-05-18",
+                action="publish",
+                note="publish",
+                channel="email",
+            )
+
+        self.assertTrue(result["handled"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "already_resolved")
+        invoke.assert_not_called()
+
+    def test_invoke_duckagent_mail_event_sets_gateway_bypass_env(self) -> None:
+        captured: dict = {}
+
+        class FakeCompleted:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["env"] = kwargs.get("env") or {}
+            return FakeCompleted()
+
+        with patch.object(review_loop.subprocess, "run", side_effect=fake_run):
+            result = review_loop.invoke_duckagent_mail_event(
+                flow="jeepfact",
+                run_id="2026-05-20",
+                title="Jeep Fact Wednesday",
+                action="publish",
+                note="publish",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(captured["env"].get("DUCK_OPS_DECISION_GATEWAY_BYPASS"), "1")
+        self.assertIn("src/main_agent.py", " ".join(captured["command"]))
+
     def test_reconcile_quality_gate_archives_superseded_newduck_runs(self) -> None:
         state = {
             "artifacts": {
@@ -248,6 +498,48 @@ class ReviewLoopReconciliationTests(unittest.TestCase):
 
         self.assertIn("Greyhound Duck", titles)
         self.assertNotIn("Child Maternal Love Duck", titles)
+
+    def test_handle_operator_text_skips_recurring_social_without_rejecting(self) -> None:
+        state_bundle = {
+            "quality_gate": {
+                "artifacts": {
+                    "publish::jeepfact::2026-05-13::jeep-fact-wednesday": {
+                        "artifact_id": "publish::jeepfact::2026-05-13::jeep-fact-wednesday",
+                        "decision": {
+                            "artifact_id": "publish::jeepfact::2026-05-13::jeep-fact-wednesday",
+                            "artifact_type": "social_post",
+                            "flow": "jeepfact",
+                            "run_id": "2026-05-13",
+                            "review_status": "pending",
+                            "decision": "publish_ready",
+                            "score": 85,
+                            "confidence": 0.6,
+                            "priority": "medium",
+                            "created_at": "2026-05-13T09:00:00-04:00",
+                            "title": "Jeep Fact Wednesday",
+                        },
+                    },
+                },
+            },
+            "trend_ranker": {"artifacts": {}},
+        }
+        operator_state: dict = {}
+
+        with (
+            patch.object(review_loop, "write_review_queue", return_value=None),
+            patch.object(review_loop, "write_state_source", return_value=None),
+            patch.object(review_loop, "write_decision", return_value={}),
+            patch.object(review_loop, "now_iso", return_value="2026-05-15T19:00:00-04:00"),
+        ):
+            response = review_loop.handle_operator_text(state_bundle, operator_state, "skip")
+
+        decision = state_bundle["quality_gate"]["artifacts"]["publish::jeepfact::2026-05-13::jeep-fact-wednesday"]["decision"]
+        self.assertIn("-> skip this occurrence.", response)
+        self.assertEqual(decision["review_status"], "archived")
+        self.assertEqual(decision["human_review"]["action"], "archive")
+        self.assertEqual(decision["human_review"]["resolution"], "skip")
+        self.assertEqual(decision["operator_resolution"]["action"], "skip")
+        self.assertEqual(decision["archive_reason"], "Skipped this occurrence so the next scheduled run can generate a fresh candidate.")
 
 
 if __name__ == "__main__":

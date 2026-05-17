@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, slugify, write_decision
+from review_reply_contract import build_review_reply_contract, contract_failure_messages, contract_improvement_suggestions
 from workflow_control import record_workflow_transition
 
 
@@ -241,6 +243,28 @@ def preview_text(value: str | None, limit: int = 400) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def media_reference_is_renderable(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered in {"none", "null", "n/a", "na", "asset", "image", "preview", "placeholder"}:
+        return False
+    if text in {"🎯", "✅", "❌", "⚠️", "⭐"}:
+        return False
+    if re.match(r"^(https?|data):", text, flags=re.I):
+        return True
+    if re.search(r"\.(png|jpe?g|webp|gif)(\?.*)?$", text, flags=re.I):
+        return True
+    return False
+
+
+def renderable_media_references(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        values = [values]
+    return [str(value).strip() for value in values if media_reference_is_renderable(value)]
+
+
 def confidence_cap(candidate: dict[str, Any]) -> float:
     caps = [1.0]
     source_refs = candidate.get("source_refs") or []
@@ -334,7 +358,8 @@ def evaluate_review_story(candidate: dict[str, Any], age_days: int | None) -> di
     stats = supporting.get("review_stats") or {}
     positive_reviews = int(stats.get("five_star_reviews") or 0)
     low_reviews = int(stats.get("low_rating_reviews") or 0)
-    has_image = bool(summary.get("images"))
+    story_images = renderable_media_references(summary.get("images") or [])
+    has_image = bool(story_images)
 
     reasoning: list[str] = []
     suggestions: list[str] = []
@@ -385,7 +410,7 @@ def evaluate_review_story(candidate: dict[str, Any], age_days: int | None) -> di
     risk_penalty = 0
     if not has_image:
         risk_penalty += 2
-        suggestions.append("Attach the final story image URL or asset before asking for publish approval.")
+        suggestions.append("Attach the final story image URL or local asset path before asking for publish approval.")
     if story_score is not None and int(story_score) < 7:
         risk_penalty += 2
     if low_reviews > 0:
@@ -447,6 +472,9 @@ def evaluate_review_reply(candidate: dict[str, Any], age_days: int | None, priva
     has_placeholder = "[" in response and "]" in response
     has_apology = any(term in response.lower() for term in ("sorry", "apolog"))
     has_remedy = any(term in response.lower() for term in ("refund", "replacement", "make this right", "make things right"))
+    reply_contract = build_review_reply_contract(customer_review, response, private_mode=private_mode)
+    contract_failures = contract_failure_messages(reply_contract)
+    contract_suggestions = contract_improvement_suggestions(reply_contract)
 
     reasoning: list[str] = []
     suggestions: list[str] = []
@@ -522,6 +550,9 @@ def evaluate_review_reply(candidate: dict[str, Any], age_days: int | None, priva
         risk_penalty += 2
     if not private_mode and "refund" in response.lower():
         risk_penalty += 2
+    if contract_failures:
+        risk_penalty += 2
+        suggestions.extend(contract_suggestions)
     risk_penalty = int(clamp(risk_penalty, 0, 5))
     reasoning.append(
         f"Risk penalty {risk_penalty}/5 from placeholder text, length issues, and remedy mismatch risk."
@@ -537,6 +568,7 @@ def evaluate_review_reply(candidate: dict[str, Any], age_days: int | None, priva
         fail_closed.append("Low-rating private reply is missing an explicit apology.")
     if private_mode and not has_remedy:
         fail_closed.append("Low-rating private reply does not clearly offer a remedy or next step.")
+    fail_closed.extend(f"Review reply contract failed: {message}" for message in contract_failures)
 
     if fail_closed:
         decision = "discard" if score < 60 else "needs_revision"
@@ -570,6 +602,7 @@ def evaluate_review_reply(candidate: dict[str, Any], age_days: int | None, priva
             "risk_penalty": risk_penalty,
         },
         "fail_closed": fail_closed,
+        "reply_contract": reply_contract,
     }
 
 
@@ -594,6 +627,7 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
     if flow == "reviews_story":
         outcome = evaluate_review_story(candidate, age_days)
         evidence_refs = [ref.get("path", "") for ref in source_refs[:5] if ref.get("path")]
+        story_images = renderable_media_references(summary.get("images") or [])
         return {
             "artifact_id": candidate["artifact_id"],
             "artifact_type": candidate.get("artifact_type", "social_post"),
@@ -613,7 +647,7 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
             "preview": {
                 "proposed_label": "Selected review",
                 "proposed_text": preview_text(summary.get("selected_review") or summary.get("body")),
-                "asset_url": ((summary.get("images") or [None])[0]),
+                "asset_url": story_images[0] if story_images else None,
             },
             "quality_gate_metadata": {
                 "age_days": age_days,
@@ -674,6 +708,7 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
                 "confidence_cap": confidence_cap(candidate),
                 "component_scores": outcome["component_scores"],
                 "fail_closed": outcome["fail_closed"],
+                "reply_contract": outcome["reply_contract"],
                 "review_target_match_quality": review_target.get("match_quality"),
             },
         }

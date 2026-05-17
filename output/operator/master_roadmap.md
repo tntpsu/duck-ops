@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-05-08
+Last updated: 2026-05-16
 
 ## Document Ownership
 
@@ -24,6 +24,8 @@ Companion docs:
 - [MASTER_IMPLEMENTATION_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/MASTER_IMPLEMENTATION_PLAN.md)
 - [AGENT_GOVERNANCE_POLICY.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/AGENT_GOVERNANCE_POLICY.md)
 - [SOCIAL_PERFORMANCE_EXECUTION_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/SOCIAL_PERFORMANCE_EXECUTION_PLAN.md)
+- [CREATIVE_QUALITY_LOOP_V2_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/CREATIVE_QUALITY_LOOP_V2_PLAN.md)
+- [PROMPT_CONTRACT_AUDIT_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/PROMPT_CONTRACT_AUDIT_PLAN.md)
 
 ## Completed Major Work
 
@@ -227,8 +229,29 @@ Next slices:
 - Improve cross-channel post coverage so Instagram and Facebook outcomes stay comparable when both publish.
 - Continue feeding weekly strategy execution truth into current learnings, governance digest, and change-notifier surfaces, with the new per-slot feedback as the operator-facing primitive.
 - Turn manual experiments into first-class lanes only after repeated execution and outcome evidence justify it.
+- Build Creative Quality Loop v2 as the next creative hardening layer: start with This-or-That Thursday retry-on-warn, comparative ranking, hidden weak-option receipts, and Phil feedback memory, then reuse the loop across character-to-duck, new duck concepts, Meme Monday, Jeep Fact, GTDF, and review-story assets.
 
-### Priority 5: Expand SEO Audit Intelligence
+### Priority 5: Prompt Contract Audit And Policy Alignment
+The next cross-cutting quality improvement is to treat prompts like testable contracts instead of isolated prose instructions.
+
+Target model:
+1. each important AI-assisted lane has a master instruction, lane-specific objective, grounded inputs, structured output schema, deterministic policy checks, operator receipt, and regression tests
+2. weak or unstructured prompts are inventoried and upgraded by business risk
+3. policy failures explain the exact evidence instead of silently producing vague "needs revision" states
+4. structured output becomes the bridge between AI reasoning and deterministic workflow control
+
+Why this is high value:
+- Review rewrites, listing copy, tag generation, creative concepts, and Business Desk recommendations all depend on AI output quality.
+- We now have enough policy and HMI infrastructure to validate outputs instead of relying on one-shot prompt quality.
+- The current OpenClaw rewrite failure shows the risk: a mixed five-star review with expectation-mismatch language was treated like a generic positive review.
+
+Next slices:
+1. run the [Prompt Contract Audit And Improvement Plan](/Users/philtullai/ai-agents/duckAgent/docs/current_system/PROMPT_CONTRACT_AUDIT_PLAN.md) Phase 0 inventory across DuckAgent and Duck Ops prompts
+2. implement Phase 1 for OpenClaw review rewrite with mixed-positive / expectation-mismatch classification and structured rewrite output
+3. add regression tests for the known "plastic would have been better" review case
+4. move New Duck listing and commerce tag generation to the same structured prompt-and-policy pattern next
+
+### Priority 6: Expand SEO Audit Intelligence
 Current audit checks:
 - missing SEO title
 - missing SEO description
@@ -244,18 +267,18 @@ Best next SEO heuristics to add:
 - SEO titles too close to raw product titles
 - low-value page/article SEO copy
 
-### Priority 6: Etsy Conversation Closure Truth
+### Priority 7: Etsy Conversation Closure Truth
 - We are much better at discovery and direct links now.
 - But manual Etsy replies still depend on the next inbox refresh to be fully recognized as waiting-on-customer or resolved.
 - Best next step here is a lightweight recapture/closure reconciliation pass for active customer threads.
 
-### Priority 7: Expired Etsy Relist Lane
+### Priority 8: Expired Etsy Relist Lane
 - Logic exists for safe relisting rules:
   - max 3 renewals per day
   - only listings with at least one prior sale
 - This still needs careful rollout around Etsy bot-sensitivity and browser pacing.
 
-### Priority 8: Operationalize Product Engineering Skills
+### Priority 9: Operationalize Product Engineering Skills
 The reusable skill layer now exists. The next job is to use it consistently instead of letting it sit as documentation.
 
 Key uses next:

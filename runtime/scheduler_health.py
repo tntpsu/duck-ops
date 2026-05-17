@@ -16,6 +16,7 @@ DUCKAGENT_RUNTIME_ROOT = Path(os.getenv("DUCKAGENT_RUNTIME_ROOT", "/Users/philtu
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 SCHEDULER_LOG_PATH = DUCKAGENT_RUNTIME_ROOT / "logs" / "duckagent_scheduler.log"
 RECEIPT_DIR = DUCKAGENT_RUNTIME_ROOT / "state" / "scheduler_receipts"
+SCHEDULER_RESOLUTION_DIR = STATE_DIR / "scheduler_resolutions"
 SCHEDULER_HEALTH_STATE_PATH = STATE_DIR / "scheduler_health.json"
 SCHEDULER_HEALTH_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "scheduler_health.json"
 SCHEDULER_HEALTH_MD_PATH = OUTPUT_OPERATOR_DIR / "scheduler_health.md"
@@ -40,6 +41,7 @@ ATTENTION_STATUSES = {
 BAD_STATUSES = {"missed_run", "failed", "timeout", "hung", "orphaned"}
 WARN_STATUSES = {
     "dependency_blocked_recent",
+    "fixed_pending_next_run",
     "slow",
     "skipped_lock_active",
     "skipped_lock_unavailable",
@@ -122,6 +124,37 @@ def _load_receipts(receipt_dir: Path = RECEIPT_DIR) -> dict[str, dict[str, Any]]
             continue
         receipts[job_name] = {**payload, "receipt_path": str(path)}
     return receipts
+
+
+def _load_resolutions(resolution_dir: Path = SCHEDULER_RESOLUTION_DIR) -> dict[str, dict[str, Any]]:
+    resolutions: dict[str, dict[str, Any]] = {}
+    if not resolution_dir.exists():
+        return resolutions
+    for path in sorted(resolution_dir.glob("*.json")):
+        payload = _load_json(path, {})
+        if not isinstance(payload, dict):
+            continue
+        job_name = str(payload.get("job_name") or path.stem).strip()
+        if not job_name:
+            continue
+        resolutions[job_name] = {**payload, "resolution_path": str(path)}
+    return resolutions
+
+
+def _matching_resolution(receipt: dict[str, Any] | None, resolution: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(receipt, dict) or not isinstance(resolution, dict):
+        return None
+    if str(resolution.get("resolution_status") or "").strip() != "fixed_pending_next_run":
+        return None
+    receipt_run_id = str(receipt.get("run_id") or "").strip()
+    resolution_run_id = str(resolution.get("run_id") or "").strip()
+    if resolution_run_id and resolution_run_id != receipt_run_id:
+        return None
+    resolution_exit = resolution.get("exit_code")
+    receipt_exit = receipt.get("exit_code")
+    if resolution_exit is not None and receipt_exit is not None and _safe_int(resolution_exit, -999) != _safe_int(receipt_exit, -998):
+        return None
+    return resolution
 
 
 def _load_scheduled_jobs(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> dict[str, dict[str, Any]]:
@@ -288,6 +321,7 @@ def _evaluate_job(
     job: dict[str, Any],
     *,
     receipt: dict[str, Any] | None,
+    resolution: dict[str, Any] | None,
     events: list[dict[str, Any]],
     now: datetime,
     scheduler_log_path: Path,
@@ -327,6 +361,8 @@ def _evaluate_job(
     severity = "ok"
     summary = "Last scheduled run finished successfully."
     recommended_action = "No action needed."
+    dependency_failure: dict[str, str] | None = None
+    failure_resolution: dict[str, Any] | None = None
 
     latest_start_after_expected = bool(started_at and expected_at and started_at >= expected_at - timedelta(seconds=grace_seconds))
     expected_due = bool(expected_at and now >= expected_at + timedelta(seconds=grace_seconds))
@@ -369,7 +405,13 @@ def _evaluate_job(
             started_at=started_at,
             finished_at=finished_at,
         )
-        if dependency_failure:
+        failure_resolution = _matching_resolution(receipt, resolution)
+        if failure_resolution:
+            status = "fixed_pending_next_run"
+            severity = "warn"
+            summary = "Last failed run has a matching local fix recorded; waiting for the next scheduled run to prove recovery."
+            recommended_action = "No immediate operator action. Watch the next scheduled run, or rerun manually only if the weekly output is needed before then."
+        elif dependency_failure:
             status = "dependency_blocked_recent"
             severity = "warn"
             summary = dependency_failure["summary"]
@@ -417,7 +459,9 @@ def _evaluate_job(
         "receipt_path": (receipt or {}).get("receipt_path"),
         "log_path": str(scheduler_log_path),
         "plist_path": job.get("plist_path"),
-        **(dependency_failure if "dependency_failure" in locals() and dependency_failure else {}),
+        "resolution_path": (failure_resolution or {}).get("resolution_path"),
+        "resolution": failure_resolution,
+        **(dependency_failure if dependency_failure else {}),
     }
 
 
@@ -447,11 +491,13 @@ def build_scheduler_health(
     launch_agents_dir: Path = LAUNCH_AGENTS_DIR,
     scheduler_log_path: Path = SCHEDULER_LOG_PATH,
     receipt_dir: Path = RECEIPT_DIR,
+    resolution_dir: Path = SCHEDULER_RESOLUTION_DIR,
     write_outputs: bool = True,
 ) -> dict[str, Any]:
     current = now or datetime.now().astimezone()
     jobs = _load_scheduled_jobs(launch_agents_dir)
     receipts = _load_receipts(receipt_dir)
+    resolutions = _load_resolutions(resolution_dir)
     events = _parse_scheduler_log(scheduler_log_path)
     for job_name in sorted({*receipts.keys(), *(event.get("job_name") for event in events if event.get("job_name"))}):
         jobs.setdefault(
@@ -466,7 +512,14 @@ def build_scheduler_health(
         )
 
     items = [
-        _evaluate_job(job, receipt=receipts.get(job_name), events=events, now=current, scheduler_log_path=scheduler_log_path)
+        _evaluate_job(
+            job,
+            receipt=receipts.get(job_name),
+            resolution=resolutions.get(job_name),
+            events=events,
+            now=current,
+            scheduler_log_path=scheduler_log_path,
+        )
         for job_name, job in sorted(jobs.items())
     ]
     items.sort(
@@ -489,6 +542,7 @@ def build_scheduler_health(
         "orphaned_count": sum(1 for item in items if item.get("status") == "orphaned"),
         "slow_count": sum(1 for item in items if item.get("status") == "slow"),
         "running_count": sum(1 for item in items if item.get("status") == "running"),
+        "fixed_pending_count": sum(1 for item in items if item.get("status") == "fixed_pending_next_run"),
     }
     payload = {
         "generated_at": current.isoformat(),
@@ -501,6 +555,7 @@ def build_scheduler_health(
         "paths": {
             "scheduler_log": str(scheduler_log_path),
             "receipt_dir": str(receipt_dir),
+            "resolution_dir": str(resolution_dir),
             "launch_agents_dir": str(launch_agents_dir),
             "markdown": str(SCHEDULER_HEALTH_MD_PATH),
         },

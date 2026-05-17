@@ -1224,6 +1224,46 @@ def parse_review_story_from_summary(body_text: str) -> dict[str, Any] | None:
     }
 
 
+def review_story_media_reference_is_renderable(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered in {"none", "null", "n/a", "na", "asset", "image", "preview", "placeholder"}:
+        return False
+    if text in {"🎯", "✅", "❌", "⚠️", "⭐"}:
+        return False
+    if re.match(r"^(https?|data):", text, flags=re.I):
+        return True
+    if re.search(r"\.(png|jpe?g|webp|gif)(\?.*)?$", text, flags=re.I):
+        return True
+    return False
+
+
+def review_story_asset_references(run_id: str, story: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+
+    def add_ref(value: Any, *, require_file: bool = False) -> None:
+        candidate = str(value or "").strip()
+        if not review_story_media_reference_is_renderable(candidate):
+            return
+        if require_file and not Path(candidate).is_file():
+            return
+        if candidate not in refs:
+            refs.append(candidate)
+
+    add_ref(story.get("image_url"))
+
+    state = load_reviews_state(run_id)
+    story_image = state.get("story_image") if isinstance(state, dict) else {}
+    if isinstance(story_image, dict):
+        add_ref(story_image.get("image_url"))
+        add_ref(story_image.get("local_path"), require_file=True)
+        add_ref(story_image.get("preview_image_path"), require_file=True)
+
+    return refs
+
+
 def parse_positive_review_replies(body_text: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for match in THANK_YOU_MESSAGE_PATTERN.finditer(body_text or ""):
@@ -1380,6 +1420,7 @@ def build_reviews_story_candidate_from_email(email_item: dict[str, Any]) -> dict
     if not story:
         return None
     stats = parse_review_summary_stats(body_text)
+    story_assets = review_story_asset_references(review_meta["run_id"], story)
     return {
         "artifact_id": f"publish::reviews_story::{review_meta['run_id']}::review-story",
         "artifact_type": "social_post",
@@ -1398,7 +1439,7 @@ def build_reviews_story_candidate_from_email(email_item: dict[str, Any]) -> dict
         "candidate_summary": {
             "title": f"Etsy Review Story {review_meta['run_id']}",
             "body": trim_text(story["selected_review"], 1500),
-            "images": [story["image_url"]] if story.get("image_url") else [],
+            "images": story_assets,
             "platform_targets": ["instagram_story", "facebook_story"],
             "email_subject": email_item.get("subject"),
             "selected_review": story["selected_review"],
@@ -1415,7 +1456,7 @@ def build_reviews_story_candidate_from_email(email_item: dict[str, Any]) -> dict
         },
         "normalization_notes": {
             "source_mode": "review_summary_email",
-            "completeness": "medium",
+            "completeness": "high" if story_assets else "medium",
             "input_confidence_cap": 0.75,
         },
     }

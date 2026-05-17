@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from customer_action_packets import build_customer_action_packets
 from customer_interaction_cases import build_customer_interaction_queue
@@ -675,12 +676,26 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def is_sendable_media_reference(value: Any) -> bool:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return False
+    if candidate.startswith(("http://", "https://")):
+        parsed = urlparse(candidate)
+        return bool(parsed.scheme and parsed.netloc)
+    if candidate.startswith("file://"):
+        return Path(candidate[7:]).is_file()
+    if any(char.isspace() for char in candidate):
+        return False
+    return Path(candidate).is_file()
+
+
 def unique_media_urls(urls: list[str] | None) -> list[str]:
     unique: list[str] = []
     seen: set[str] = set()
     for value in urls or []:
         candidate = str(value).strip()
-        if not candidate or candidate in seen:
+        if not is_sendable_media_reference(candidate) or candidate in seen:
             continue
         unique.append(candidate)
         seen.add(candidate)
@@ -1717,11 +1732,13 @@ def build_reviews_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any
         and current_message
     ):
         preview = current.get("preview") or {}
-        media_urls = [
-            str(url).strip()
-            for url in ([preview.get("asset_url")] + list(preview.get("asset_urls") or []))
-            if str(url or "").strip()
-        ]
+        media_urls = unique_media_urls(
+            [
+                str(url).strip()
+                for url in ([preview.get("asset_url")] + list(preview.get("asset_urls") or []))
+                if str(url or "").strip()
+            ]
+        )
         signature_payload = {
             "artifact_id": current.get("artifact_id"),
             "input_hash": current.get("input_hash"),
@@ -1737,7 +1754,7 @@ def build_reviews_whatsapp_operator_push(state: dict[str, Any]) -> dict[str, Any
             "run_id": current.get("run_id"),
             "signature": signature,
             "message": f"{WHATSAPP_PUSH_SENTINEL}\n{current_message}",
-            "media_urls": list(dict.fromkeys(media_urls)),
+            "media_urls": media_urls,
             "media_title": current.get("title") or current.get("artifact_id") or "OpenClaw Review",
         }
 
@@ -2137,6 +2154,45 @@ def send_whatsapp_message(
         subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
+def record_sent_artifact(state: dict[str, Any], artifact: dict[str, Any], subject: str) -> None:
+    state.setdefault("sent", {})[artifact["key"]] = {
+        "kind": artifact["kind"],
+        "sent_at": datetime.now().astimezone().isoformat(),
+        "subject": subject,
+        "send_reason": artifact.get("send_reason"),
+    }
+    sent_at = state["sent"][artifact["key"]]["sent_at"]
+    if artifact["kind"] == "digest":
+        state["last_digest_signature"] = artifact["digest_signature"]
+        state["last_digest_signature_version"] = DIGEST_SIGNATURE_VERSION
+        state["last_digest_sent_at"] = sent_at
+        state["last_digest_reason"] = artifact.get("send_reason")
+    if artifact["kind"] == "trend_digest":
+        state["last_trend_digest_signature"] = artifact["trend_digest_signature"]
+        state["last_trend_digest_signature_version"] = TREND_DIGEST_SIGNATURE_VERSION
+        state["last_trend_digest_sent_at"] = sent_at
+        state["last_trend_digest_reason"] = artifact.get("send_reason")
+    if artifact["kind"] == "promotion_readiness":
+        state["last_promotion_readiness_signature"] = artifact["promotion_readiness_signature"]
+        state["last_promotion_readiness_signature_version"] = PROMOTION_READINESS_SIGNATURE_VERSION
+        state["last_promotion_readiness_sent_at"] = sent_at
+        state["last_promotion_readiness_reason"] = artifact.get("send_reason")
+    if artifact["kind"] == "learning_change_digest":
+        state["last_learning_change_signature"] = artifact["learning_change_signature"]
+        state["last_learning_change_signature_version"] = LEARNING_CHANGE_SIGNATURE_VERSION
+        state["last_learning_change_sent_at"] = sent_at
+        state["last_learning_change_reason"] = artifact.get("send_reason")
+
+
+def record_whatsapp_failure(state: dict[str, Any], whatsapp_summary: dict[str, Any], exc: Exception) -> None:
+    state["last_operator_whatsapp_error"] = {
+        "failed_at": datetime.now().astimezone().isoformat(),
+        "run_id": whatsapp_summary.get("run_id"),
+        "signature": whatsapp_summary.get("signature"),
+        "message": str(exc),
+    }
+
+
 def preview_message_text(msg: EmailMessage, artifact: dict[str, Any]) -> str:
     preview_part = msg.get_body(preferencelist=("plain", "html"))
     if preview_part is not None:
@@ -2225,32 +2281,9 @@ def main() -> int:
         if not all((settings.get("host"), settings.get("user"), settings.get("password"), settings.get("to"))):
             raise SystemExit("Notifier SMTP settings are incomplete.")
         send_message(settings, msg)
-        state.setdefault("sent", {})[artifact["key"]] = {
-            "kind": artifact["kind"],
-            "sent_at": datetime.now().astimezone().isoformat(),
-            "subject": str(msg["Subject"]),
-        }
-        if artifact["kind"] == "digest":
-            state["last_digest_signature"] = artifact["digest_signature"]
-            state["last_digest_signature_version"] = DIGEST_SIGNATURE_VERSION
-            state["last_digest_sent_at"] = state["sent"][artifact["key"]]["sent_at"]
-            state["last_digest_reason"] = artifact.get("send_reason")
-        if artifact["kind"] == "trend_digest":
-            state["last_trend_digest_signature"] = artifact["trend_digest_signature"]
-            state["last_trend_digest_signature_version"] = TREND_DIGEST_SIGNATURE_VERSION
-            state["last_trend_digest_sent_at"] = state["sent"][artifact["key"]]["sent_at"]
-            state["last_trend_digest_reason"] = artifact.get("send_reason")
-        if artifact["kind"] == "promotion_readiness":
-            state["last_promotion_readiness_signature"] = artifact["promotion_readiness_signature"]
-            state["last_promotion_readiness_signature_version"] = PROMOTION_READINESS_SIGNATURE_VERSION
-            state["last_promotion_readiness_sent_at"] = state["sent"][artifact["key"]]["sent_at"]
-            state["last_promotion_readiness_reason"] = artifact.get("send_reason")
-        if artifact["kind"] == "learning_change_digest":
-            state["last_learning_change_signature"] = artifact["learning_change_signature"]
-            state["last_learning_change_signature_version"] = LEARNING_CHANGE_SIGNATURE_VERSION
-            state["last_learning_change_sent_at"] = state["sent"][artifact["key"]]["sent_at"]
-            state["last_learning_change_reason"] = artifact.get("send_reason")
+        record_sent_artifact(state, artifact, str(msg["Subject"]))
         state_changed = True
+        write_json(STATE_PATH, state)
 
     if whatsapp_summary:
         if args.dry_run:
@@ -2261,17 +2294,24 @@ def main() -> int:
         else:
             whatsapp_cfg = settings.get("whatsapp") or {}
             if whatsapp_cfg.get("enabled"):
-                send_whatsapp_message(
-                    settings,
-                    whatsapp_summary["message"],
-                    media_urls=whatsapp_summary.get("media_urls"),
-                    media_title=whatsapp_summary.get("media_title"),
-                )
-                state["last_operator_whatsapp_signature"] = whatsapp_summary["signature"]
-                state["last_reviews_whatsapp_signature"] = whatsapp_summary["signature"]
-                state["last_reviews_whatsapp_run_id"] = whatsapp_summary["run_id"]
-                state["last_reviews_whatsapp_sent_at"] = datetime.now().astimezone().isoformat()
-                state_changed = True
+                try:
+                    send_whatsapp_message(
+                        settings,
+                        whatsapp_summary["message"],
+                        media_urls=whatsapp_summary.get("media_urls"),
+                        media_title=whatsapp_summary.get("media_title"),
+                    )
+                except Exception as exc:
+                    record_whatsapp_failure(state, whatsapp_summary, exc)
+                    state_changed = True
+                    print(f"[notifier] Warning: WhatsApp operator push failed: {exc}", file=sys.stderr)
+                else:
+                    state["last_operator_whatsapp_signature"] = whatsapp_summary["signature"]
+                    state["last_reviews_whatsapp_signature"] = whatsapp_summary["signature"]
+                    state["last_reviews_whatsapp_run_id"] = whatsapp_summary["run_id"]
+                    state["last_reviews_whatsapp_sent_at"] = datetime.now().astimezone().isoformat()
+                    state.pop("last_operator_whatsapp_error", None)
+                    state_changed = True
 
     if not args.dry_run:
         state = sync_notifier_control(state, pending_artifacts=load_sendable_artifacts(state), whatsapp_summary=whatsapp_summary)
