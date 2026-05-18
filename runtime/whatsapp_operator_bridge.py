@@ -228,7 +228,7 @@ def process_operator_text(text: str, dry_run: bool = False) -> str:
     state_bundle = load_state_bundle()
     operator_state = load_operator_state()
     if not dry_run:
-        response = handle_operator_text(state_bundle, operator_state, text)
+        response = handle_operator_text(state_bundle, operator_state, text, channel="whatsapp")
         write_operator_state(operator_state)
         write_review_queue(state_bundle, operator_state)
         return response
@@ -246,7 +246,7 @@ def process_operator_text(text: str, dry_run: bool = False) -> str:
     for path in snapshot_paths:
         snapshots[path] = path.read_bytes() if path.exists() else None
     try:
-        return handle_operator_text(state_bundle, operator_state, text)
+        return handle_operator_text(state_bundle, operator_state, text, channel="whatsapp")
     finally:
         for path, content in snapshots.items():
             if content is None:

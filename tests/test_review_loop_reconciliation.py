@@ -541,6 +541,45 @@ class ReviewLoopReconciliationTests(unittest.TestCase):
         self.assertEqual(decision["operator_resolution"]["action"], "skip")
         self.assertEqual(decision["archive_reason"], "Skipped this occurrence so the next scheduled run can generate a fresh candidate.")
 
+    def test_handle_operator_text_records_channel_receipt_metadata(self) -> None:
+        state_bundle = {
+            "quality_gate": {
+                "artifacts": {
+                    "publish::jeepfact::2026-05-13::jeep-fact-wednesday": {
+                        "artifact_id": "publish::jeepfact::2026-05-13::jeep-fact-wednesday",
+                        "decision": {
+                            "artifact_id": "publish::jeepfact::2026-05-13::jeep-fact-wednesday",
+                            "artifact_type": "social_post",
+                            "flow": "jeepfact",
+                            "run_id": "2026-05-13",
+                            "review_status": "pending",
+                            "decision": "publish_ready",
+                            "score": 85,
+                            "confidence": 0.6,
+                            "priority": "medium",
+                            "created_at": "2026-05-13T09:00:00-04:00",
+                            "title": "Jeep Fact Wednesday",
+                        },
+                    },
+                },
+            },
+            "trend_ranker": {"artifacts": {}},
+        }
+        operator_state: dict = {}
+
+        with (
+            patch.object(review_loop, "write_review_queue", return_value=None),
+            patch.object(review_loop, "write_state_source", return_value=None),
+            patch.object(review_loop, "write_decision", return_value={}),
+            patch.object(review_loop, "now_iso", return_value="2026-05-17T11:00:00-04:00"),
+        ):
+            response = review_loop.handle_operator_text(state_bundle, operator_state, "skip", channel="portal")
+
+        decision = state_bundle["quality_gate"]["artifacts"]["publish::jeepfact::2026-05-13::jeep-fact-wednesday"]["decision"]
+        self.assertIn("Recorded:", response)
+        self.assertEqual(decision["human_review"]["channel"], "portal")
+        self.assertEqual(decision["operator_resolution"]["channel"], "portal")
+
 
 if __name__ == "__main__":
     unittest.main()

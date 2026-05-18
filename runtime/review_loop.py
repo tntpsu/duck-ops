@@ -1395,6 +1395,10 @@ def build_quality_gate_items(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "review_status": decision.get("review_status"),
                 "artifact_type": decision.get("artifact_type") or "publish",
                 "action_frame": decision.get("action_frame"),
+                "human_review": decision.get("human_review") or {},
+                "operator_resolution": decision.get("operator_resolution") or {},
+                "decision_gateway": decision.get("decision_gateway") or {},
+                "reconciled_resolution": decision.get("reconciled_resolution") or {},
                 "state_source": "quality_gate",
                 "first_reason": (decision.get("reasoning") or ["No reasoning captured."])[0],
                 "output_paths": record.get("output_paths", {}),
@@ -2544,6 +2548,7 @@ def record_action(
     note: str | None,
     resolution: str | None = None,
     approved_reply_text: str | None = None,
+    channel: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     source_name = ""
     record: dict[str, Any] | None = None
@@ -2570,6 +2575,9 @@ def record_action(
         "action": action,
         "recorded_at": now_iso(),
     }
+    clean_channel = str(channel or "").strip()
+    if clean_channel:
+        human_review["channel"] = clean_channel
     if resolution:
         human_review["resolution"] = resolution
     if note:
@@ -2594,6 +2602,8 @@ def record_action(
         "note": note.strip() if note else None,
         "recorded_at": human_review["recorded_at"],
     }
+    if clean_channel:
+        decision["operator_resolution"]["channel"] = clean_channel
     if decision.get("artifact_type") == "review_reply" or decision.get("review_target"):
         decision.setdefault("execution_mode", "manual_only")
         decision.setdefault("execution_state", "not_queued")
@@ -2935,6 +2945,7 @@ def record_decision_and_dispatch(
         record_action_name,
         record_note,
         resolution=resolution,
+        channel=channel,
     )
     recorded_decision = (
         ((state_bundle.get(source_name) or {}).get("artifacts") or {}).get(artifact_id, {}).get("decision") or {}
@@ -3101,7 +3112,13 @@ def render_queue_status(
     return "\n".join(lines)
 
 
-def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state: dict[str, Any], text: str) -> str:
+def handle_operator_text(
+    state_bundle: dict[str, dict[str, Any]],
+    operator_state: dict[str, Any],
+    text: str,
+    *,
+    channel: str | None = None,
+) -> str:
     reconcile_state_bundle(state_bundle)
     if should_delegate_to_business_desk(text):
         return handle_business_desk_text(text)
@@ -3273,6 +3290,7 @@ def handle_operator_text(state_bundle: dict[str, dict[str, Any]], operator_state
         note=note_override or note or None,
         resolution=desired_resolution,
         approved_reply_text=approved_reply_override,
+        channel=channel,
     )
     write_state_source(source_name, state_bundle[source_name])
     recorded_decision = (
@@ -3365,7 +3383,7 @@ def main() -> int:
 
     if args.command == "record":
         reconcile_state_bundle(state_bundle)
-        _, source_name = record_action(state_bundle, args.artifact_id, args.action, args.note, resolution=args.resolution)
+        _, source_name = record_action(state_bundle, args.artifact_id, args.action, args.note, resolution=args.resolution, channel="cli")
         write_state_source(source_name, state_bundle[source_name])
         write_review_queue(state_bundle, operator_state)
         return 0
@@ -3394,7 +3412,7 @@ def main() -> int:
         return 0
 
     if args.command == "handle":
-        response = handle_operator_text(state_bundle, operator_state, args.text)
+        response = handle_operator_text(state_bundle, operator_state, args.text, channel="cli")
         write_operator_state(operator_state)
         print(response)
         return 0
