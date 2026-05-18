@@ -48,6 +48,7 @@ class ProductConceptQueueTests(unittest.TestCase):
         design_signal = payload["design_brief_input"]["candidate_signals"][0]
         self.assertEqual(design_signal["theme"], "Pizza")
         self.assertEqual(design_signal["source"], "duck-ops.product_concept_queue")
+        self.assertEqual(payload["design_brief_input"]["source_contract"], "duck-ops.product_concept_queue")
         self.assertEqual(design_signal["concept_design_brief"]["concept_title"], "Pizza Duck")
         self.assertEqual(design_signal["trend_quality_gate"]["status"], "needs_reframe")
 
@@ -77,6 +78,53 @@ class ProductConceptQueueTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["blocked_by_guardrail_count"], 1)
         self.assertEqual(payload["items"][0]["queue_state"], "blocked_by_guardrail")
         self.assertEqual(payload["items"][0]["trend_quality_gate"]["status"], "blocked_by_policy")
+        self.assertEqual(payload["design_brief_input"]["candidate_signals"], [])
+
+    def test_operator_feedback_suppresses_rejected_concept_from_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feedback_path = Path(tmpdir) / "product_concept_feedback.json"
+            feedback_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "duck.product_concept_feedback.v1",
+                        "concepts": {
+                            "pizza": {
+                                "latest_resolution": "discarded",
+                                "latest_reason": "not a product direction we want",
+                                "updated_at": "2026-05-18T08:00:00-04:00",
+                                "aliases": ["pizza", "pizza-fidget"],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(product_concept_queue, "PRODUCT_CONCEPT_FEEDBACK_PATH", feedback_path):
+                payload = product_concept_queue.build_product_concept_queue(
+                    trend_candidates={
+                        "items": [
+                            {
+                                "artifact_id": "trend::pizza-fidget-duck",
+                                "theme": "pizza fidget duck",
+                                "source_refs": [{"path": "state/normalized/trend_candidates.json"}],
+                                "signal_summary": {
+                                    "trending_score": 820,
+                                    "sold_last_7d": 4,
+                                    "revenue_last_7d": 72.0,
+                                },
+                                "catalog_match": {"status": "gap"},
+                                "input_confidence_cap": 0.75,
+                            }
+                        ]
+                    },
+                    current_learnings={},
+                    competitor_social_benchmark={},
+                    write_outputs=False,
+                )
+
+        self.assertEqual(payload["status"], "clear")
+        self.assertEqual(payload["summary"]["ready_for_brief_review_count"], 0)
+        self.assertEqual(payload["summary"]["suppressed_by_operator_count"], 1)
         self.assertEqual(payload["design_brief_input"]["candidate_signals"], [])
 
     def test_raw_relationship_theme_is_blocked_until_reframed(self) -> None:

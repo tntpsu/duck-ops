@@ -36,10 +36,29 @@ PRODUCT_CONCEPT_QUEUE_PATH = STATE_DIR / "product_concept_queue.json"
 PRODUCT_CONCEPT_QUEUE_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "product_concept_queue.json"
 PRODUCT_CONCEPT_QUEUE_MD_PATH = OUTPUT_OPERATOR_DIR / "product_concept_queue.md"
 PRODUCT_CONCEPT_DESIGN_BRIEF_INPUT_PATH = STATE_DIR / "product_concept_queue_design_brief_input.json"
+PRODUCT_CONCEPT_FEEDBACK_PATH = STATE_DIR / "product_concept_feedback.json"
 
 SURFACE_VERSION = 1
 DEFAULT_MAX_ITEMS = 12
 DEFAULT_DESIGN_BRIEF_LIMIT = 3
+SUPPRESSING_FEEDBACK_RESOLUTIONS = {
+    "abandoned",
+    "approved",
+    "approved_to_build",
+    "approved_to_generate_concept_image",
+    "discard",
+    "discarded",
+    "duplicate",
+    "needs_changes",
+    "needs_reframe",
+    "not_interested",
+    "rejected",
+    "revision_requested",
+    "skip",
+    "skip_this_cycle",
+    "skipped",
+    "skipped_this_cycle",
+}
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -63,6 +82,62 @@ def _as_int(value: Any, default: int = 0) -> int:
 def _slugify(value: Any) -> str:
     text = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
     return text or "concept"
+
+
+def _concept_feedback_key(value: Any) -> str:
+    text = re.sub(r"\bducks?\b", " ", str(value or "").lower())
+    text = text.replace("3dprinting", "3d printing")
+    return _slugify(text)
+
+
+def _concept_feedback_keys_for_item(item: dict[str, Any]) -> set[str]:
+    concept_brief = item.get("concept_design_brief") if isinstance(item.get("concept_design_brief"), dict) else {}
+    quality_gate = item.get("trend_quality_gate") if isinstance(item.get("trend_quality_gate"), dict) else {}
+    values: list[Any] = [
+        item.get("concept_id"),
+        item.get("source_artifact_id"),
+        item.get("theme"),
+        item.get("raw_theme"),
+        concept_brief.get("concept_title"),
+        concept_brief.get("raw_theme"),
+        concept_brief.get("semantic_identity"),
+        quality_gate.get("normalized_concept_title"),
+    ]
+    keys = {_concept_feedback_key(value) for value in values if str(value or "").strip()}
+    return {key for key in keys if key and key != "concept"}
+
+
+def _load_concept_feedback() -> dict[str, Any]:
+    payload = load_json(PRODUCT_CONCEPT_FEEDBACK_PATH, {"concepts": {}})
+    if not isinstance(payload, dict):
+        return {"concepts": {}}
+    if not isinstance(payload.get("concepts"), dict):
+        payload["concepts"] = {}
+    return payload
+
+
+def _feedback_for_item(item: dict[str, Any], feedback: dict[str, Any]) -> dict[str, Any]:
+    concepts = feedback.get("concepts") if isinstance(feedback.get("concepts"), dict) else {}
+    matches: list[dict[str, Any]] = []
+    item_keys = _concept_feedback_keys_for_item(item)
+    for key, record in concepts.items():
+        if not isinstance(record, dict):
+            continue
+        record_keys = {
+            _concept_feedback_key(key),
+            *[_concept_feedback_key(value) for value in (record.get("aliases") or []) if str(value or "").strip()],
+            *[_concept_feedback_key(value) for value in (record.get("concept_keys") or []) if str(value or "").strip()],
+        }
+        if item_keys.intersection(record_keys):
+            matches.append(record)
+    if not matches:
+        return {}
+    return sorted(matches, key=lambda record: str(record.get("updated_at") or record.get("recorded_at") or ""), reverse=True)[0]
+
+
+def _feedback_suppresses_concept(record: dict[str, Any]) -> bool:
+    resolution = str(record.get("latest_resolution") or record.get("resolution") or "").strip().lower()
+    return resolution in SUPPRESSING_FEEDBACK_RESOLUTIONS
 
 
 def _stable_id(prefix: str, theme: str, source: str) -> str:
@@ -284,7 +359,7 @@ def _merge_duplicate_themes(items: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def _queue_rank(item: dict[str, Any]) -> tuple[int, float, float, str]:
-    state_rank = {"ready_for_brief_review": 0, "watch": 1, "blocked_by_guardrail": 2}
+    state_rank = {"ready_for_brief_review": 0, "watch": 1, "blocked_by_guardrail": 2, "suppressed_by_operator": 3}
     return (
         state_rank.get(str(item.get("queue_state") or "watch"), 9),
         -float(item.get("score") or 0.0),
@@ -323,6 +398,8 @@ def _build_design_brief_input(items: list[dict[str, Any]], *, limit: int) -> dic
             "Duck Ops curated these from market, trend, and competitor-learning signals. "
             "Keep concepts duck-first, public-safe, printable, and distinct from competitor work."
         ),
+        "source_contract": "duck-ops.product_concept_queue",
+        "source_path": str(PRODUCT_CONCEPT_DESIGN_BRIEF_INPUT_PATH),
         "candidate_signals": [_design_brief_signal(item) for item in candidates],
     }
 
@@ -351,11 +428,26 @@ def build_product_concept_queue(
         items.extend(_strategy_idea_items(learning_payload, benchmark_payload))
 
     all_items = _merge_duplicate_themes(items)
+    feedback = _load_concept_feedback()
+    for item in all_items:
+        record = _feedback_for_item(item, feedback)
+        if not record:
+            continue
+        item["operator_feedback"] = {
+            "latest_resolution": record.get("latest_resolution") or record.get("resolution"),
+            "reason": record.get("reason") or record.get("latest_reason"),
+            "recorded_at": record.get("updated_at") or record.get("recorded_at"),
+            "source": record.get("source"),
+        }
+        if _feedback_suppresses_concept(record):
+            item["queue_state"] = "suppressed_by_operator"
+            item["recommended_next_step"] = "No action needed; operator feedback already resolved or suppressed this concept."
     all_items.sort(key=_queue_rank)
 
     ready_items = [item for item in all_items if item.get("queue_state") == "ready_for_brief_review"]
     watch_items = [item for item in all_items if item.get("queue_state") == "watch"]
     blocked_items = [item for item in all_items if item.get("queue_state") == "blocked_by_guardrail"]
+    suppressed_items = [item for item in all_items if item.get("queue_state") == "suppressed_by_operator"]
     blocked_slot_count = min(3, len(blocked_items))
     watch_slot_count = min(2, len(watch_items))
     ready_slot_count = max(0, max_items - blocked_slot_count - watch_slot_count)
@@ -364,6 +456,7 @@ def build_product_concept_queue(
     ready_count = len(ready_items)
     watch_count = len(watch_items)
     blocked_count = len(blocked_items)
+    suppressed_count = len(suppressed_items)
     design_brief_input = _build_design_brief_input(ready_items, limit=design_brief_limit)
 
     if ready_count:
@@ -394,6 +487,7 @@ def build_product_concept_queue(
             "trend_candidates": str(TREND_CANDIDATES_PATH),
             "current_learnings": str(CURRENT_LEARNINGS_PATH),
             "competitor_social_benchmark": str(COMPETITOR_SOCIAL_BENCHMARK_PATH),
+            "concept_feedback": str(PRODUCT_CONCEPT_FEEDBACK_PATH),
             "design_brief_input": str(PRODUCT_CONCEPT_DESIGN_BRIEF_INPUT_PATH),
         },
         "summary": {
@@ -401,6 +495,7 @@ def build_product_concept_queue(
             "ready_for_brief_review_count": ready_count,
             "watch_count": watch_count,
             "blocked_by_guardrail_count": blocked_count,
+            "suppressed_by_operator_count": suppressed_count,
             "design_brief_signal_count": len(design_brief_input.get("candidate_signals") or []),
         },
         "design_brief_input": design_brief_input,
@@ -428,6 +523,7 @@ def render_product_concept_queue_markdown(payload: dict[str, Any]) -> str:
         f"- Ready for brief review: `{summary.get('ready_for_brief_review_count', 0)}`",
         f"- Watch: `{summary.get('watch_count', 0)}`",
         f"- Blocked by guardrail: `{summary.get('blocked_by_guardrail_count', 0)}`",
+        f"- Suppressed by operator feedback: `{summary.get('suppressed_by_operator_count', 0)}`",
         f"- Design-brief signals: `{summary.get('design_brief_signal_count', 0)}`",
         f"- Design-brief input: `{source_paths.get('design_brief_input') or PRODUCT_CONCEPT_DESIGN_BRIEF_INPUT_PATH}`",
         f"- Headline: {payload.get('headline')}",

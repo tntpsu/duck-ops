@@ -44,6 +44,7 @@ Represent product concept candidates Duck Ops can safely surface before DuckAgen
 - `ready_for_brief_review`: public-safe catalog gap with enough evidence to send to DuckAgent `design_brief_queue`.
 - `watch`: useful signal, but too weak or too broad for concept approval.
 - `blocked_by_guardrail`: likely IP, logo, competitor-copy, or printability issue that needs manual abstraction first.
+- `suppressed_by_operator`: an operator already discarded, skipped, abandoned, approved, or requested reframe for the matching concept, so it should not be re-sent as a fresh design brief.
 
 ## DuckAgent Handoff
 
@@ -54,9 +55,37 @@ The queue writes `state/product_concept_queue_design_brief_input.json` in DuckAg
 - `time_window`
 - `max_candidates`
 - `operator_notes`
+- `source_contract`
+- `source_path`
 - `candidate_signals`
 
 Each `candidate_signals` entry must include `public_concept_allowed` in its guardrails so DuckAgent can distinguish public market signals from private customer-custom signals.
+
+The handoff must set `source_contract` to `duck-ops.product_concept_queue`. If no candidates are ready, the handoff should contain an empty `candidate_signals` list; DuckAgent treats that as a hold state and must not invent placeholder concepts.
+
+## Operator Feedback Ledger
+
+DuckAgent and the portal can write concept decisions back to `state/product_concept_feedback.json`.
+
+Purpose:
+
+- stop discarded concepts from resurfacing in later weekly emails
+- let abandoned Studio build ideas leave the active build queue
+- preserve why a concept was skipped, revised, or approved
+- keep future learning tied to the same concept aliases
+
+Minimum shape:
+
+- `schema_version`: `duck.product_concept_feedback.v1`
+- `updated_at`
+- `concepts`
+- `concepts.<key>.latest_resolution`
+- `concepts.<key>.latest_reason`
+- `concepts.<key>.updated_at`
+- `concepts.<key>.aliases`
+- `concepts.<key>.events`
+
+Duck Ops reads this ledger before ranking the queue. Suppressing resolutions include discarded, skipped, abandoned, rejected, duplicate, needs_reframe, revision_requested, and approved-to-build states.
 
 ## Concept Design Brief
 

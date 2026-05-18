@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-05-17
+Last updated: 2026-05-18
 
 ## Document Ownership
 
@@ -135,6 +135,7 @@ Companion docs:
 - Product concept and OpenClaw review queues now apply a naming-quality gate so raw search-language themes must be reframed before they can become build/design-brief candidates.
 - DuckAgent concept runs now support a local-only concept-to-print pilot proof, so one selected run can show its current gate and next cost boundary before external AI calls, Bambu review, or marketplace work.
 - Product concept handoff now has an implemented first-slice `trend_quality_gate` + `concept_design_brief` contract so approved trend ideas can carry semantic identity, visual cues, printability guardrails, IP risks, evidence, and style-reference policy before DuckAgent spends image or 3D credits.
+- Product concept feedback memory now prevents discarded, skipped, revised, abandoned, or already-approved concepts from resurfacing as fresh weekly design brief options; the weekly design brief job now reads the curated Duck Ops Product Concept Queue handoff by default instead of scraping broad strategy notes.
 
 ### 11. Creative Console Productization
 - Creative Agent and Decision Inbox now have a canonical UI flow audit that separates operator use cases from internal workflow plumbing.
