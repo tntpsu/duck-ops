@@ -223,7 +223,7 @@ Why this is high value:
 
 Next slices:
 1. connect Duck Ops Product Concept Queue review to DuckAgent `design_brief_queue` email generation
-2. continue Product Concept Brief Contract Phase 3: pre-generation HMI blocking for `generation_ready=false`, weak-brief repair prompts, and Agent OS health coverage for missing/blocked concept briefs
+2. continue Product Concept Brief Contract Phase 4: semantic QA after image generation so generated concept images are judged against `concept_design_brief`, starting with Greyhound-style literal/color-only failures
 3. run one local-only concept-to-print pilot proof against a real approved concept run
 4. add approval receipts and promotion-readiness history for recurring product concept queue runs
 5. add model-quality checks for flat bottom, smoothness, color intent, and Bambu import readiness
