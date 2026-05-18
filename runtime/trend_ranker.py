@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, write_decision
+from product_concept_brief import build_concept_design_brief, evaluate_trend_quality
 from workflow_control import record_workflow_transition
 
 
@@ -32,7 +33,7 @@ OUTPUT_DIR = ROOT / "output"
 TREND_CANDIDATES_PATH = NORMALIZED_DIR / "trend_candidates.json"
 TREND_RANKER_STATE_PATH = STATE_DIR / "trend_ranker_state.json"
 DECISION_HISTORY_PATH = STATE_DIR / "decision_history.jsonl"
-EVALUATOR_VERSION = 3
+EVALUATOR_VERSION = 4
 GENERIC_THEMES = {"duck", "ducks", "rubber duck", "rubber ducks"}
 GENERIC_OPERATOR_THEMES = GENERIC_THEMES | {"jeep duck", "jeep ducks"}
 THEME_NOISE_TOKENS = {"duck", "ducks", "rubber", "jeep", "collectible"}
@@ -866,6 +867,42 @@ def evaluate_trend(aggregate: dict[str, Any]) -> dict[str, Any]:
         if listing_id:
             evidence_refs.append(f"competitor_listing:{listing_id}")
     evidence_refs = evidence_refs[:10]
+    signal_summary = {
+        "sold_last_7d": sold_7d,
+        "sold_last_30d": sold_30d,
+        "quantity_drop": qty_drop,
+        "engagement_delta_7d": engagement_delta,
+        "views_delta_7d": views_delta,
+        "favorites_delta_7d": favorites_delta,
+        "trending_score": trending_score,
+    }
+    trend_quality_gate = evaluate_trend_quality(
+        raw_theme=theme,
+        signal_summary=signal_summary,
+        source_refs=list(aggregate.get("source_refs") or []),
+        catalog_status=catalog_status,
+        latest_observed_at=aggregate.get("latest_observed_at"),
+    )
+    if action_frame == "build" and trend_quality_gate.get("status") == "blocked_by_policy":
+        action_frame = "wait"
+        decision = "watch"
+        priority = "medium" if priority == "high" else priority
+        suggestions.insert(0, "Do not send this to Studio until the concept is reframed into a public-safe, product-ready duck idea.")
+    elif action_frame == "build" and trend_quality_gate.get("status") == "needs_refresh":
+        action_frame = "wait"
+        decision = "watch"
+        suggestions.insert(0, "Refresh the market evidence before spending image or 3D credits on this concept.")
+    concept_design_brief = build_concept_design_brief(
+        raw_theme=theme,
+        signal_summary=signal_summary,
+        source_refs=list(aggregate.get("source_refs") or [])[:10],
+        catalog_status=catalog_status,
+        latest_observed_at=aggregate.get("latest_observed_at"),
+        review_status="pending",
+        confidence=confidence,
+        trend_quality_gate=trend_quality_gate,
+        brief_source="duck_ops_trend_ranker",
+    )
 
     return {
         "artifact_id": aggregate["artifact_id"],
@@ -882,7 +919,10 @@ def evaluate_trend(aggregate: dict[str, Any]) -> dict[str, Any]:
         "review_status": "pending",
         "created_at": now_iso(),
         "action_frame": action_frame,
-        "title": theme.title(),
+        "title": str(concept_design_brief.get("concept_title") or theme.title()),
+        "raw_title": theme.title(),
+        "trend_quality_gate": trend_quality_gate,
+        "concept_design_brief": concept_design_brief,
         "trend_metadata": {
             "first_seen_at": aggregate.get("first_seen_at"),
             "latest_observed_at": aggregate.get("latest_observed_at"),
@@ -908,15 +948,7 @@ def evaluate_trend(aggregate: dict[str, Any]) -> dict[str, Any]:
                 "execution_feasibility": execution,
                 "historical_hit_rate": historical,
             },
-            "signal_summary": {
-                "sold_last_7d": sold_7d,
-                "sold_last_30d": sold_30d,
-                "quantity_drop": qty_drop,
-                "engagement_delta_7d": engagement_delta,
-                "views_delta_7d": views_delta,
-                "favorites_delta_7d": favorites_delta,
-                "trending_score": trending_score,
-            },
+            "signal_summary": signal_summary,
             "confidence_cap": confidence_cap(aggregate),
             "fail_closed": fail_closed,
         },

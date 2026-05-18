@@ -22,6 +22,11 @@ from governance_review_common import (
     write_markdown,
 )
 from concept_name_quality import concept_name_quality
+from product_concept_brief import (
+    build_concept_design_brief,
+    clean_product_theme,
+    evaluate_trend_quality,
+)
 
 
 TREND_CANDIDATES_PATH = STATE_DIR / "normalized" / "trend_candidates.json"
@@ -35,45 +40,6 @@ PRODUCT_CONCEPT_DESIGN_BRIEF_INPUT_PATH = STATE_DIR / "product_concept_queue_des
 SURFACE_VERSION = 1
 DEFAULT_MAX_ITEMS = 12
 DEFAULT_DESIGN_BRIEF_LIMIT = 3
-
-NOISE_PHRASES = (
-    "rubber duck figurine",
-    "rubber ducky",
-    "rubber duck",
-    "jeep duck",
-    "desk decor",
-    "car decor",
-    "dashboard",
-    "collectible",
-    "figurine",
-    "fidget toy",
-    "fidget",
-    "gift",
-    "toy",
-    "duck",
-)
-
-IP_SENSITIVE_TOKENS = {
-    "delta gamma": "Greek-letter organization themes need manual abstraction before concepting.",
-    "gamma delta": "Greek-letter organization themes need manual abstraction before concepting.",
-    "sorority": "Sorority/fraternity references need manual abstraction before concepting.",
-    "fraternity": "Sorority/fraternity references need manual abstraction before concepting.",
-    "gcu": "School/team references need manual abstraction before concepting.",
-    "lopes": "School/team nickname should not become a logo or trademark concept.",
-    "wildcats": "Mascot/team references need manual abstraction before concepting.",
-    "vols": "College/team nickname should not become a logo or trademark concept.",
-    "tennessee vols": "College/team nickname should not become a logo or trademark concept.",
-    "chicago football": "City-plus-sport themes are likely team-adjacent and need manual abstraction.",
-    "football": "Sport themes need a generic public-safe direction before concepting.",
-    "hockey": "Sport themes need a generic public-safe direction before concepting.",
-    "logo": "Avoid logo-driven concepts unless a public-safe abstraction is defined.",
-    "nfl": "Professional sports league references need explicit abstraction before concepting.",
-    "nba": "Professional sports league references need explicit abstraction before concepting.",
-    "mlb": "Professional sports league references need explicit abstraction before concepting.",
-    "disney": "Named entertainment IP needs explicit abstraction before concepting.",
-    "marvel": "Named entertainment IP needs explicit abstraction before concepting.",
-    "pokemon": "Named entertainment IP needs explicit abstraction before concepting.",
-}
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -105,16 +71,7 @@ def _stable_id(prefix: str, theme: str, source: str) -> str:
 
 
 def _clean_theme(value: Any) -> str:
-    text = re.sub(r"\s+", " ", str(value or "").strip().lower())
-    for phrase in NOISE_PHRASES:
-        text = re.sub(rf"\b{re.escape(phrase)}\b", " ", text)
-    text = re.sub(r"\s+", " ", text).strip(" -")
-    if not text:
-        text = str(value or "fresh duck concept").strip()
-    words = [part for part in text.split() if part]
-    if not words:
-        return "Fresh Duck Concept"
-    return " ".join(word.capitalize() for word in words)
+    return clean_product_theme(value)
 
 
 def _candidate_items(payload: Any) -> list[dict[str, Any]]:
@@ -139,18 +96,8 @@ def _source_ref_count(item: dict[str, Any]) -> int:
     return len(refs) if isinstance(refs, list) else 0
 
 
-def _ip_guardrails(theme: str) -> list[str]:
-    text = f" {theme.lower()} "
-    guardrails: list[str] = []
-    for token, message in IP_SENSITIVE_TOKENS.items():
-        if f" {token} " in text:
-            guardrails.append(message)
-    return guardrails
-
-
 def _trend_candidate_to_queue_item(item: dict[str, Any]) -> dict[str, Any]:
     raw_theme = str(item.get("theme") or "fresh duck concept").strip()
-    theme = _clean_theme(raw_theme)
     name_quality = concept_name_quality(raw_theme)
     signal_summary = item.get("signal_summary") if isinstance(item.get("signal_summary"), dict) else {}
     trending_score = _as_float(signal_summary.get("trending_score"))
@@ -158,14 +105,35 @@ def _trend_candidate_to_queue_item(item: dict[str, Any]) -> dict[str, Any]:
     revenue_7d = _as_float(signal_summary.get("revenue_last_7d"))
     catalog_status = _catalog_status(item)
     source_ref_count = _source_ref_count(item)
+    source_refs = list(item.get("source_refs") or [])[:10]
+    trend_quality_gate = evaluate_trend_quality(
+        raw_theme=raw_theme,
+        signal_summary=signal_summary,
+        source_refs=source_refs,
+        catalog_status=catalog_status,
+        latest_observed_at=item.get("observed_at"),
+    )
+    concept_design_brief = build_concept_design_brief(
+        raw_theme=raw_theme,
+        signal_summary=signal_summary,
+        source_refs=source_refs,
+        catalog_status=catalog_status,
+        latest_observed_at=item.get("observed_at"),
+        review_status=str(item.get("review_status") or ""),
+        confidence=None,
+        trend_quality_gate=trend_quality_gate,
+        brief_source="duck_ops_product_concept_queue",
+    )
+    theme = _clean_theme(concept_design_brief.get("concept_title") or raw_theme)
     guardrails = [
         "public_concept_allowed",
         "Do not copy competitor artwork, exact wording, photos, tags, or listing structure.",
         "Keep this as a duck-first design, not a loose prop or non-duck object.",
         "Avoid readable logos, team marks, brand names, copyrighted characters, and customer-specific text.",
     ]
-    guardrails.extend(_ip_guardrails(raw_theme))
     guardrails.extend(str(issue) for issue in name_quality.get("issues") or [])
+    guardrails.extend(str(issue) for issue in trend_quality_gate.get("issues") or [])
+    guardrails.extend(str(warning) for warning in trend_quality_gate.get("warnings") or [])
 
     confidence_cap = _as_float(item.get("input_confidence_cap"), 0.65) or 0.65
     evidence_bonus = min(0.2, source_ref_count * 0.04)
@@ -173,15 +141,18 @@ def _trend_candidate_to_queue_item(item: dict[str, Any]) -> dict[str, Any]:
     confidence = min(confidence_cap, 0.45 + evidence_bonus + commercial_bonus)
     score = min(1.0, 0.15 + (trending_score / 1000.0) + (sold_7d * 0.04) + (revenue_7d / 500.0))
 
-    if name_quality.get("status") != "product_ready":
+    if trend_quality_gate.get("status") == "blocked_by_policy" or name_quality.get("status") != "product_ready":
         queue_state = "blocked_by_guardrail"
         recommended_next_step = "Reframe this raw trend into a concrete product-ready duck concept before design briefs."
-    elif len(guardrails) > 4:
-        queue_state = "blocked_by_guardrail"
-        recommended_next_step = "Review abstraction manually before sending this to DuckAgent for design briefs."
+    elif trend_quality_gate.get("status") == "needs_refresh" or int(trend_quality_gate.get("staleness_days") or 0) > 21:
+        queue_state = "watch"
+        recommended_next_step = "Refresh the market evidence before sending this concept to DuckAgent for design briefs."
     elif catalog_status == "gap" and confidence >= 0.52:
         queue_state = "ready_for_brief_review"
-        recommended_next_step = "Send this candidate to DuckAgent design_brief_queue for operator review."
+        if trend_quality_gate.get("status") == "needs_reframe":
+            recommended_next_step = "Use the cleaned concept brief before image generation; do not use the raw marketplace title."
+        else:
+            recommended_next_step = "Send this candidate to DuckAgent design_brief_queue for operator review."
     else:
         queue_state = "watch"
         recommended_next_step = "Keep watching until the signal has stronger commercial evidence or a clearer catalog gap."
@@ -206,11 +177,13 @@ def _trend_candidate_to_queue_item(item: dict[str, Any]) -> dict[str, Any]:
         "score": round(score, 3),
         "confidence": round(confidence, 3),
         "name_quality": name_quality,
+        "trend_quality_gate": trend_quality_gate,
+        "concept_design_brief": concept_design_brief,
         "evidence": evidence,
         "guardrails": guardrails,
         "recommended_next_step": recommended_next_step,
         "duckagent_task": "design_brief_queue",
-        "source_refs": list(item.get("source_refs") or [])[:3],
+        "source_refs": source_refs[:3],
     }
 
 
@@ -330,6 +303,8 @@ def _design_brief_signal(item: dict[str, Any]) -> dict[str, Any]:
         "confidence": float(item.get("confidence") or 0.0),
         "score": float(item.get("score") or 0.0),
         "guardrails": [str(value) for value in list(item.get("guardrails") or []) if str(value).strip()][:8],
+        "trend_quality_gate": item.get("trend_quality_gate") or {},
+        "concept_design_brief": item.get("concept_design_brief") or {},
     }
 
 
@@ -469,6 +444,18 @@ def render_product_concept_queue_markdown(payload: dict[str, Any]) -> str:
             f"`{item.get('source_type') or 'unknown'}` | score `{item.get('score', 0)}` | confidence `{item.get('confidence', 0)}`"
         )
         lines.append(f"  Next: {item.get('recommended_next_step')}")
+        concept_brief = item.get("concept_design_brief") if isinstance(item.get("concept_design_brief"), dict) else {}
+        if concept_brief:
+            lines.append(f"  Brief: {concept_brief.get('concept_title')} — {concept_brief.get('operator_summary')}")
+        trend_quality = item.get("trend_quality_gate") if isinstance(item.get("trend_quality_gate"), dict) else {}
+        if trend_quality:
+            issue_text = "; ".join([str(value) for value in (trend_quality.get("issues") or [])[:2]])
+            warning_text = "; ".join([str(value) for value in (trend_quality.get("warnings") or [])[:2]])
+            lines.append(
+                f"  Quality: `{trend_quality.get('status') or 'unknown'}`"
+                f"{' | Issues: ' + issue_text if issue_text else ''}"
+                f"{' | Warnings: ' + warning_text if warning_text else ''}"
+            )
         evidence = [str(value) for value in list(item.get("evidence") or []) if str(value).strip()]
         if evidence:
             lines.append(f"  Evidence: {'; '.join(evidence[:3])}")

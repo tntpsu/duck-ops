@@ -48,6 +48,8 @@ class ProductConceptQueueTests(unittest.TestCase):
         design_signal = payload["design_brief_input"]["candidate_signals"][0]
         self.assertEqual(design_signal["theme"], "Pizza")
         self.assertEqual(design_signal["source"], "duck-ops.product_concept_queue")
+        self.assertEqual(design_signal["concept_design_brief"]["concept_title"], "Pizza Duck")
+        self.assertEqual(design_signal["trend_quality_gate"]["status"], "needs_reframe")
 
     def test_ip_sensitive_trend_is_blocked_from_design_brief_input(self) -> None:
         payload = product_concept_queue.build_product_concept_queue(
@@ -74,6 +76,7 @@ class ProductConceptQueueTests(unittest.TestCase):
         self.assertEqual(payload["status"], "blocked_by_guardrail")
         self.assertEqual(payload["summary"]["blocked_by_guardrail_count"], 1)
         self.assertEqual(payload["items"][0]["queue_state"], "blocked_by_guardrail")
+        self.assertEqual(payload["items"][0]["trend_quality_gate"]["status"], "blocked_by_policy")
         self.assertEqual(payload["design_brief_input"]["candidate_signals"], [])
 
     def test_raw_relationship_theme_is_blocked_until_reframed(self) -> None:
@@ -165,6 +168,7 @@ class ProductConceptQueueTests(unittest.TestCase):
             self.assertTrue(design_input_path.exists())
             design_input = json.loads(design_input_path.read_text(encoding="utf-8"))
             self.assertEqual(design_input["channel"], "product_concept")
+            self.assertEqual(design_input["candidate_signals"][0]["concept_design_brief"]["concept_title"], "Orange Cat Duck")
 
 
 if __name__ == "__main__":

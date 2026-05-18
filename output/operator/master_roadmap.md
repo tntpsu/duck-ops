@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-05-16
+Last updated: 2026-05-17
 
 ## Document Ownership
 
@@ -26,6 +26,7 @@ Companion docs:
 - [SOCIAL_PERFORMANCE_EXECUTION_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/SOCIAL_PERFORMANCE_EXECUTION_PLAN.md)
 - [CREATIVE_QUALITY_LOOP_V2_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/CREATIVE_QUALITY_LOOP_V2_PLAN.md)
 - [PROMPT_CONTRACT_AUDIT_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/PROMPT_CONTRACT_AUDIT_PLAN.md)
+- [PRODUCT_CONCEPT_BRIEF_CONTRACT_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/PRODUCT_CONCEPT_BRIEF_CONTRACT_PLAN.md)
 
 ## Completed Major Work
 
@@ -133,6 +134,7 @@ Companion docs:
 - IP/team/organization-adjacent themes are blocked for manual abstraction before any design brief generation.
 - Product concept and OpenClaw review queues now apply a naming-quality gate so raw search-language themes must be reframed before they can become build/design-brief candidates.
 - DuckAgent concept runs now support a local-only concept-to-print pilot proof, so one selected run can show its current gate and next cost boundary before external AI calls, Bambu review, or marketplace work.
+- Product concept handoff now has an implemented first-slice `trend_quality_gate` + `concept_design_brief` contract so approved trend ideas can carry semantic identity, visual cues, printability guardrails, IP risks, evidence, and style-reference policy before DuckAgent spends image or 3D credits.
 
 ### 11. Creative Console Productization
 - Creative Agent and Decision Inbox now have a canonical UI flow audit that separates operator use cases from internal workflow plumbing.
@@ -207,11 +209,12 @@ The product creation path is becoming a real strategic lane, not just one-off ex
 
 Target workflow:
 1. Trends, competitor signals, and manual ideas feed a product-concept queue.
-2. The operator reviews concept framing before image generation.
-3. Approved concept images move through semantic/IP policy and product-listing policy.
-4. Strong concepts can be handed to 3D AI Studio or the local `paint-to-print-3d` toolchain.
-5. Repaired colored model outputs are opened in Bambu Studio for final human print review.
-6. Proven winners feed back into Shopify/Etsy listing creation, social launch planning, and outcome learning.
+2. Duck Ops writes a structured concept design brief with semantic meaning, visual cues, risks, and source evidence.
+3. The operator reviews concept framing before image generation.
+4. Approved concept images move through semantic/IP policy and product-listing policy.
+5. Strong concepts can be handed to 3D AI Studio or the local `paint-to-print-3d` toolchain.
+6. Repaired colored model outputs are opened in Bambu Studio for final human print review.
+7. Proven winners feed back into Shopify/Etsy listing creation, social launch planning, and outcome learning.
 
 Why this is high value:
 - It connects trend discovery to actual sellable inventory instead of stopping at content ideas.
@@ -220,10 +223,11 @@ Why this is high value:
 
 Next slices:
 1. connect Duck Ops Product Concept Queue review to DuckAgent `design_brief_queue` email generation
-2. run one local-only concept-to-print pilot proof against a real approved concept run
-3. add approval receipts and promotion-readiness history for recurring product concept queue runs
-4. add model-quality checks for flat bottom, smoothness, color intent, and Bambu import readiness
-5. when ready, run the DuckAgent [Local Image-To-3D Provider Evaluation Plan](/Users/philtullai/ai-agents/duckAgent/docs/current_system/LOCAL_IMAGE_TO_3D_PROVIDER_PLAN.md) to benchmark self-hosted providers before reducing 3D AI Studio dependency
+2. continue Product Concept Brief Contract Phase 3: pre-generation HMI blocking for `generation_ready=false`, weak-brief repair prompts, and Agent OS health coverage for missing/blocked concept briefs
+3. run one local-only concept-to-print pilot proof against a real approved concept run
+4. add approval receipts and promotion-readiness history for recurring product concept queue runs
+5. add model-quality checks for flat bottom, smoothness, color intent, and Bambu import readiness
+6. when ready, run the DuckAgent [Local Image-To-3D Provider Evaluation Plan](/Users/philtullai/ai-agents/duckAgent/docs/current_system/LOCAL_IMAGE_TO_3D_PROVIDER_PLAN.md) to benchmark self-hosted providers before reducing 3D AI Studio dependency
 
 ### Priority 4: Social Strategy Hardening
 - Improve cross-channel post coverage so Instagram and Facebook outcomes stay comparable when both publish.
