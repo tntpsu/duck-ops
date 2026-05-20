@@ -9,11 +9,12 @@ DuckAgent executes business workflows. Duck Ops decides what should be reviewed,
 Read these first:
 
 1. `AGENTS.md` - repo rules for AI assistants and human contributors.
-2. `BOOTSTRAP.md` - repo boundaries and local runtime layout.
-3. `OPENCLAW_PHASE2_ROADMAP.md` - Duck Ops/OpenClaw roadmap context.
-4. `OPENCLAW_PHASE2_IMPLEMENTATION_CHECKLIST.md` - current implementation status and acceptance checks.
-5. `/Users/philtullai/ai-agents/duck-ops/output/operator/master_roadmap.md` - cross-repo roadmap status, completed work, and highest-value next items.
-6. `/Users/philtullai/ai-agents/duckAgent/docs/current_system/AGENT_GOVERNANCE_POLICY.md` - shared automation authority and approval policy.
+2. `/Users/philtullai/ai-agents/duckAgent/docs/current_system/CODEX_REMOTE_HANDOFF.md` - compact cross-repo bootstrap for remote Codex sessions when prior chat context is too large.
+3. `BOOTSTRAP.md` - repo boundaries and local runtime layout.
+4. `OPENCLAW_PHASE2_ROADMAP.md` - Duck Ops/OpenClaw roadmap context.
+5. `OPENCLAW_PHASE2_IMPLEMENTATION_CHECKLIST.md` - current implementation status and acceptance checks.
+6. `/Users/philtullai/ai-agents/duck-ops/output/operator/master_roadmap.md` - cross-repo roadmap status, completed work, and highest-value next items.
+7. `/Users/philtullai/ai-agents/duckAgent/docs/current_system/AGENT_GOVERNANCE_POLICY.md` - shared automation authority and approval policy.
 
 ## What This Repo Owns
 
@@ -126,6 +127,7 @@ The Business Desk, Even/Pulse widget API, and future companion readers should us
 - `contracts/` - shape and meaning of operator payloads.
 - `config/` - policies and evaluator rules.
 - `/Users/philtullai/ai-agents/duckAgent/docs/current_system/README.md` - cross-repo current-system docs hub.
+- `/Users/philtullai/ai-agents/duckAgent/docs/current_system/CODEX_REMOTE_HANDOFF.md` - remote-session context recovery and canonical-link shortcut.
 
 ## Generated Files
 
