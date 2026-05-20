@@ -37,6 +37,32 @@ class ProductConceptBriefTests(unittest.TestCase):
         self.assertTrue(any("hound" in cue for cue in brief["visual_cues"]))
         self.assertTrue(any("plain gray" in rule for rule in brief["must_avoid"]))
 
+    def test_german_shorthaired_pointer_gets_breed_specific_brief(self) -> None:
+        gate = evaluate_trend_quality(
+            raw_theme="german shorthaired pointer duck",
+            signal_summary={"sold_last_7d": 4, "sold_last_30d": 9, "trending_score": 900},
+            source_refs=[{"path": "/tmp/state_competitor.json", "source_type": "state_competitor"}],
+            catalog_status="gap",
+            latest_observed_at="2026-05-17T00:00:00-04:00",
+            now=datetime.fromisoformat("2026-05-17T12:00:00-04:00"),
+        )
+        brief = build_concept_design_brief(
+            raw_theme="german shorthaired pointer duck",
+            signal_summary={"sold_last_7d": 4, "sold_last_30d": 9, "trending_score": 900},
+            source_refs=[{"path": "/tmp/state_competitor.json", "source_type": "state_competitor"}],
+            catalog_status="gap",
+            trend_quality_gate=gate,
+        )
+
+        self.assertEqual(gate["status"], "ready")
+        self.assertEqual(brief["concept_title"], "German Shorthaired Pointer Duck")
+        self.assertIn("German Shorthaired Pointer", brief["semantic_identity"])
+        self.assertTrue(any("liver-brown" in cue for cue in brief["visual_cues"]))
+        self.assertTrue(any("roan/ticking" in cue for cue in brief["visual_cues"]))
+        self.assertTrue(any("plain brown" in rule for rule in brief["must_avoid"]))
+        self.assertTrue(any("mostly large cow-print" in rule for rule in brief["must_avoid"]))
+        self.assertTrue(any("paw-print" in rule for rule in brief["must_avoid"]))
+
     def test_ip_team_theme_is_blocked_before_build(self) -> None:
         gate = evaluate_trend_quality(
             raw_theme="tennessee vols duck",

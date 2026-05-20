@@ -63,6 +63,8 @@ Each `candidate_signals` entry must include `public_concept_allowed` in its guar
 
 The handoff must set `source_contract` to `duck-ops.product_concept_queue`. If no candidates are ready, the handoff should contain an empty `candidate_signals` list; DuckAgent treats that as a hold state and must not invent placeholder concepts.
 
+DuckAgent's curated staging script refreshes this queue before reading the handoff by default. That keeps design-brief emails and concept-builder inputs tied to the latest trend evidence and operator feedback instead of a stale copied input file. Test/debug runs may opt out with `--no-refresh-product-concept-queue`.
+
 ## Operator Feedback Ledger
 
 DuckAgent and the portal can write concept decisions back to `state/product_concept_feedback.json`.
@@ -136,7 +138,9 @@ Minimum shape:
 - `confidence`
 - `review_status`
 
-DuckAgent may generate deterministic fallback briefs for older approved artifacts, but Duck Ops is the long-term writer so review, approval, Studio generation, and QA use the same meaning.
+DuckAgent may generate deterministic fallback briefs for older approved artifacts, but Duck Ops is the long-term writer so review, approval, Studio generation, and QA use the same meaning. DuckAgent must preserve both objects from `candidate_signals` through `design_brief_queue` output, design-brief approval, concept-builder input, build handoff, and visual QA.
+
+`style_reference_policy.reference_examples` may be empty in Duck Ops output. In that case, DuckAgent is responsible for selecting relevant style-memory examples from its canonical style library and writing the selected keys plus visual-reference evidence into the downstream concept-builder run artifact. Duck Ops owns the intent (`use_style_memory`); DuckAgent owns runtime style-memory selection and provider attachment.
 
 Implementation plan:
 - [PRODUCT_CONCEPT_BRIEF_CONTRACT_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/PRODUCT_CONCEPT_BRIEF_CONTRACT_PLAN.md)

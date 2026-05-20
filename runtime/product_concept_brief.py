@@ -157,6 +157,23 @@ THEME_CUE_LIBRARY = {
             "separate paws, leash, thin tail, or fragile detached props",
         ],
     },
+    "german shorthaired pointer": {
+        "semantic_identity": "a German Shorthaired Pointer dog-breed themed duck collectible",
+        "theme_category": "animal",
+        "visual_cues": [
+            "solid liver-brown head with floppy attached ear shapes",
+            "white duck body with liver roan/ticking speckles plus a few broad liver patches",
+            "simple attached collar detail",
+            "athletic pointer-dog markings translated into chunky duck body panels without changing the duck silhouette",
+        ],
+        "must_avoid": [
+            "plain brown or spotted duck with no dog-breed cues",
+            "mostly large cow-print blotches with little or no German Shorthaired Pointer roan/ticking",
+            "realistic dog body replacing the duck body",
+            "separate paws, thin tail, hunting weapon, or fragile detached field props",
+            "generic paw-print decorations that read like clipart instead of breed-specific markings",
+        ],
+    },
     "tuxedo cat": {
         "semantic_identity": "a tuxedo-cat themed duck collectible",
         "theme_category": "animal",
