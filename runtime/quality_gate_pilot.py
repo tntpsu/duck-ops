@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, slugify, write_decision
+from flow_review_contract import build_flow_review_contract, flow_review_check
 from review_reply_contract import build_review_reply_contract, contract_failure_messages, contract_improvement_suggestions
 from workflow_control import record_workflow_transition
 
@@ -38,7 +39,7 @@ OUTPUT_DIR = ROOT / "output"
 PUBLISH_CANDIDATES_PATH = NORMALIZED_DIR / "publish_candidates.json"
 DECISION_HISTORY_PATH = STATE_DIR / "decision_history.jsonl"
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
-EVALUATOR_VERSION = 4
+EVALUATOR_VERSION = 8
 QUALITY_GATE_PENDING_REVIEW_STATUSES = {"pending"}
 QUALITY_GATE_REVISION_REVIEW_STATUSES = {"needs_revision"}
 QUALITY_GATE_RESOLVED_REVIEW_STATUSES = {"approved", "rejected", "archived", "overridden"}
@@ -320,10 +321,509 @@ def default_suggestions(flow: str) -> list[str]:
             "Keep the final Jeep Fact caption and cover image together so the operator can review the actual post package instead of a partial summary.",
             "Preserve the carousel image set and posting notes so the operator can approve or revise the scheduled post without reopening DuckAgent.",
         ]
+    if flow == "thursday":
+        return [
+            "Keep each This-or-That option image, caption, option id, and vote labels together so approval can publish the exact option the operator chose.",
+            "Preserve the option-review warnings and failures so weak pairings or source-title leakage are visible before approval.",
+        ]
     return [
         "Preserve the sale playbook as a structured state artifact so the gate can inspect the actual recommended actions instead of email formatting.",
         "Keep the final campaign summary concise enough that the publish recommendation is readable without parsing email scaffolding.",
     ]
+
+
+def evaluate_meme_publish_package(candidate: dict[str, Any], age_days: int | None) -> dict[str, Any]:
+    """Evaluate Meme Monday as a publish package instead of a generic scored artifact."""
+    summary = candidate.get("candidate_summary") or {}
+    supporting = candidate.get("supporting_context") or {}
+    notes = candidate.get("normalization_notes") or {}
+    body = " ".join(str(summary.get("body") or "").split())
+    images = renderable_media_references(summary.get("images") or [])
+    platform_targets = [str(item).strip() for item in (summary.get("platform_targets") or []) if str(item).strip()]
+    platform_variants = summary.get("platform_variants") if isinstance(summary.get("platform_variants"), dict) else {}
+    source_refs = candidate.get("source_refs") or []
+    trend_refs = supporting.get("trend_refs") or []
+
+    hard_blockers: list[str] = []
+    warnings: list[str] = []
+    suggestions: list[str] = []
+    checks: list[dict[str, str]] = []
+
+    if images:
+        checks.append(flow_review_check("pass", "Final meme image is attached", images[0]))
+    else:
+        hard_blockers.append("Final meme image is missing or is not a renderable image URL/path.")
+        checks.append(flow_review_check("fail", "Final meme image is attached", "No renderable image was found."))
+
+    if len(body) >= 80:
+        checks.append(flow_review_check("pass", "Caption is present", f"{len(body)} characters"))
+    else:
+        hard_blockers.append("Meme caption is too short or missing for approval.")
+        checks.append(flow_review_check("fail", "Caption is present", f"{len(body)} characters"))
+
+    meme_markers = ("meme monday", "expectation:", "reality:", "pov:", "#mememonday")
+    if any(marker in body.lower() for marker in meme_markers):
+        checks.append(flow_review_check("pass", "Meme framing is recognizable", "Caption includes Meme Monday or meme-format cues."))
+    else:
+        warnings.append("Meme framing is not obvious from the caption; consider adding a clearer hook before posting.")
+        checks.append(flow_review_check("warn", "Meme framing is recognizable", "No standard meme cue found in caption."))
+
+    if platform_targets or platform_variants:
+        platform_evidence = ", ".join(platform_targets) or ", ".join(sorted(platform_variants.keys()))
+        checks.append(flow_review_check("pass", "Platform payload is present", platform_evidence))
+    else:
+        hard_blockers.append("Platform target/caption payload is missing, so approval cannot map to a publishable post.")
+        checks.append(flow_review_check("fail", "Platform payload is present", "No platform targets or variants found."))
+
+    if body_has_css_noise(body):
+        hard_blockers.append("Caption appears to include email/CSS wrapper noise instead of clean social copy.")
+        checks.append(flow_review_check("fail", "Caption is clean social copy", "CSS/email wrapper markers found."))
+    else:
+        checks.append(flow_review_check("pass", "Caption is clean social copy"))
+
+    if age_days is None:
+        warnings.append("Run date is unknown, so timing should be checked before posting.")
+        timing_status = "warn"
+        timing_evidence = "Unknown run date"
+    elif age_days <= 3:
+        timing_status = "pass"
+        timing_evidence = f"{age_days} day(s) old"
+    elif age_days <= 7:
+        warnings.append("Meme package is several days old; verify the Monday slot still makes sense.")
+        timing_status = "warn"
+        timing_evidence = f"{age_days} day(s) old"
+    else:
+        hard_blockers.append("Meme package is stale for a Meme Monday approval; regenerate or intentionally reschedule it.")
+        timing_status = "fail"
+        timing_evidence = f"{age_days} day(s) old"
+    checks.append(flow_review_check(timing_status, "Posting window is current", timing_evidence))
+
+    if len(source_refs) <= 1 and not trend_refs:
+        warnings.append("Trend/support evidence is thin, but the final meme package itself is complete.")
+    if not platform_variants:
+        warnings.append("Platform-specific captions were not preserved; approval will rely on the shared caption.")
+    if len(platform_targets) == 1:
+        warnings.append("Only one platform target is attached to this Meme Monday package.")
+
+    score = 96 - (len(warnings) * 4) - (len(hard_blockers) * 35)
+    score = int(clamp(score, 0, 100))
+    if hard_blockers:
+        decision = "needs_revision" if score >= 40 else "discard"
+        priority = "high"
+    else:
+        decision = "publish_ready"
+        priority = "medium"
+
+    confidence = round(clamp(0.64 + min(0.08, 0.02 * len(images)) + min(0.08, 0.02 * len(platform_targets)), 0.25, confidence_cap(candidate)), 2)
+    if hard_blockers:
+        confidence = round(min(confidence + 0.05, confidence_cap(candidate)), 2)
+
+    if hard_blockers:
+        operator_summary = "OpenClaw found a blocking Meme Monday package issue."
+        recommended_action = "request_revision"
+        suggestions.extend(hard_blockers)
+    elif warnings:
+        operator_summary = "Meme Monday package is ready to approve with non-blocking warnings."
+        recommended_action = "approve"
+        suggestions.extend(warnings[:2])
+    else:
+        operator_summary = "Meme Monday package is ready to approve."
+        recommended_action = "approve"
+
+    reasoning = [
+        operator_summary,
+        f"Hard blockers: {len(hard_blockers)}.",
+        f"Warnings: {len(warnings)}.",
+    ]
+    reasoning.extend(f"Blocker: {item}" for item in hard_blockers)
+    reasoning.extend(f"Warning: {item}" for item in warnings[:3])
+
+    component_scores = {
+        "publish_package": 0 if hard_blockers else 40,
+        "caption": 20 if len(body) >= 80 else 5,
+        "platform_payload": 20 if platform_targets or platform_variants else 0,
+        "timing_fit": 10 if age_days is not None and age_days <= 3 else 6 if age_days is None or age_days <= 7 else 0,
+        "support_warning_penalty": min(10, len(warnings) * 2),
+    }
+
+    review_contract = build_flow_review_contract(
+        reviewer="meme_publish_package",
+        hard_blockers=hard_blockers,
+        warnings=warnings,
+        checks=checks,
+        operator_summary=operator_summary,
+        approval_summary="Approve this Meme Monday post package for the configured social publish lane.",
+        recommended_action=recommended_action,
+        operator_actions=["approve", "request_revision", "skip", "discard"],
+    )
+
+    return {
+        "decision": decision,
+        "score": score,
+        "confidence": confidence,
+        "priority": priority,
+        "reasoning": reasoning,
+        "improvement_suggestions": suggestions,
+        "component_scores": component_scores,
+        "fail_closed": hard_blockers,
+        "review_contract": review_contract,
+    }
+
+
+def evaluate_jeepfact_publish_package(candidate: dict[str, Any], age_days: int | None) -> dict[str, Any]:
+    """Evaluate Jeep Fact Wednesday as a reviewable carousel package."""
+    summary = candidate.get("candidate_summary") or {}
+    supporting = candidate.get("supporting_context") or {}
+    body = " ".join(str(summary.get("body") or "").split())
+    body_lower = body.lower()
+    images = renderable_media_references(summary.get("images") or [])
+    platform_targets = [str(item).strip() for item in (summary.get("platform_targets") or []) if str(item).strip()]
+    platform_variants = summary.get("platform_variants") if isinstance(summary.get("platform_variants"), dict) else {}
+    source_refs = candidate.get("source_refs") or []
+    trend_refs = supporting.get("trend_refs") or []
+    fact_cues = re.findall(r"\bfact\s*#?\s*\d+", body_lower)
+
+    hard_blockers: list[str] = []
+    warnings: list[str] = []
+    suggestions: list[str] = []
+    checks: list[dict[str, str]] = []
+
+    if len(images) >= 2:
+        checks.append(flow_review_check("pass", "Carousel slides are attached", f"{len(images)} renderable slide(s)"))
+    elif images:
+        hard_blockers.append("Only one Jeep Fact slide is attached; approval needs the carousel set, not just the cover.")
+        checks.append(flow_review_check("fail", "Carousel slides are attached", "Only one renderable slide was found."))
+    else:
+        hard_blockers.append("Jeep Fact carousel images are missing or not renderable.")
+        checks.append(flow_review_check("fail", "Carousel slides are attached", "No renderable slides were found."))
+
+    if len(images) >= 5:
+        checks.append(flow_review_check("pass", "Full carousel is reviewable", "Cover/facts/CTA slide set is attached."))
+    elif len(images) >= 2:
+        warnings.append("Jeep Fact has fewer than five slides attached; verify the cover, fact slides, and CTA are all present.")
+        checks.append(flow_review_check("warn", "Full carousel is reviewable", f"{len(images)} slide(s) attached."))
+
+    if len(body) >= 120:
+        checks.append(flow_review_check("pass", "Caption is present", f"{len(body)} characters"))
+    else:
+        hard_blockers.append("Jeep Fact caption is too short or missing for approval.")
+        checks.append(flow_review_check("fail", "Caption is present", f"{len(body)} characters"))
+
+    if "jeep fact" in body_lower and len(fact_cues) >= 4:
+        checks.append(flow_review_check("pass", "Jeep Fact framing is recognizable", f"{len(fact_cues)} fact cues found."))
+    elif "jeep fact" in body_lower or fact_cues:
+        warnings.append("Jeep Fact framing is partial; confirm the post clearly reads as Wednesday educational carousel content.")
+        checks.append(flow_review_check("warn", "Jeep Fact framing is recognizable", f"{len(fact_cues)} fact cue(s) found."))
+    else:
+        hard_blockers.append("Jeep Fact framing is missing, so the operator cannot tell this is the Wednesday fact carousel.")
+        checks.append(flow_review_check("fail", "Jeep Fact framing is recognizable", "No Jeep Fact/fact cues found."))
+
+    if "myjeepduck.com" in body_lower or "#jeepfactwednesday" in body_lower:
+        checks.append(flow_review_check("pass", "Brand CTA is present", "Caption includes MyJeepDuck or Jeep Fact hashtag."))
+    else:
+        warnings.append("Brand CTA or Jeep Fact hashtag is missing from the caption.")
+        checks.append(flow_review_check("warn", "Brand CTA is present", "No MyJeepDuck URL or Jeep Fact hashtag found."))
+
+    if platform_targets or platform_variants:
+        platform_evidence = ", ".join(platform_targets) or ", ".join(sorted(platform_variants.keys()))
+        checks.append(flow_review_check("pass", "Platform payload is present", platform_evidence))
+    else:
+        hard_blockers.append("Platform target/caption payload is missing, so approval cannot map to a publishable Jeep Fact post.")
+        checks.append(flow_review_check("fail", "Platform payload is present", "No platform targets or variants found."))
+
+    if body_has_css_noise(body):
+        hard_blockers.append("Caption appears to include email/CSS wrapper noise instead of clean social copy.")
+        checks.append(flow_review_check("fail", "Caption is clean social copy", "CSS/email wrapper markers found."))
+    else:
+        checks.append(flow_review_check("pass", "Caption is clean social copy"))
+
+    if age_days is None:
+        warnings.append("Run date is unknown, so timing should be checked before posting.")
+        timing_status = "warn"
+        timing_evidence = "Unknown run date"
+    elif age_days <= 3:
+        timing_status = "pass"
+        timing_evidence = f"{age_days} day(s) old"
+    elif age_days <= 7:
+        warnings.append("Jeep Fact package is several days old; approve only if it still fits the next Wednesday slot.")
+        timing_status = "warn"
+        timing_evidence = f"{age_days} day(s) old"
+    else:
+        hard_blockers.append("Jeep Fact package is stale for Wednesday approval; regenerate or intentionally reschedule it.")
+        timing_status = "fail"
+        timing_evidence = f"{age_days} day(s) old"
+    checks.append(flow_review_check(timing_status, "Posting window is current", timing_evidence))
+
+    if len(source_refs) <= 1 and not trend_refs:
+        warnings.append("Trend/support evidence is thin, but the final Jeep Fact package itself is complete.")
+    if not platform_variants:
+        warnings.append("Platform-specific captions were not preserved; approval will rely on the shared caption.")
+    if len(platform_targets) == 1:
+        warnings.append("Only one platform target is attached to this Jeep Fact package.")
+
+    score = 97 - (len(warnings) * 4) - (len(hard_blockers) * 35)
+    score = int(clamp(score, 0, 100))
+    if hard_blockers:
+        decision = "needs_revision" if score >= 40 else "discard"
+        priority = "high"
+    else:
+        decision = "publish_ready"
+        priority = "medium"
+
+    confidence = round(clamp(0.64 + min(0.1, 0.015 * len(images)) + min(0.08, 0.02 * len(platform_targets)), 0.25, confidence_cap(candidate)), 2)
+    if hard_blockers:
+        confidence = round(min(confidence + 0.05, confidence_cap(candidate)), 2)
+
+    if hard_blockers:
+        operator_summary = "OpenClaw found a blocking Jeep Fact package issue."
+        recommended_action = "request_revision"
+        suggestions.extend(hard_blockers)
+    elif warnings:
+        operator_summary = "Jeep Fact Wednesday package is ready to approve with non-blocking warnings."
+        recommended_action = "approve"
+        suggestions.extend(warnings[:2])
+    else:
+        operator_summary = "Jeep Fact Wednesday package is ready to approve."
+        recommended_action = "approve"
+
+    reasoning = [
+        operator_summary,
+        f"Hard blockers: {len(hard_blockers)}.",
+        f"Warnings: {len(warnings)}.",
+    ]
+    reasoning.extend(f"Blocker: {item}" for item in hard_blockers)
+    reasoning.extend(f"Warning: {item}" for item in warnings[:3])
+
+    component_scores = {
+        "carousel_package": 0 if hard_blockers else 40,
+        "caption": 20 if len(body) >= 120 else 5,
+        "platform_payload": 20 if platform_targets or platform_variants else 0,
+        "timing_fit": 10 if age_days is not None and age_days <= 3 else 6 if age_days is None or age_days <= 7 else 0,
+        "support_warning_penalty": min(10, len(warnings) * 2),
+    }
+
+    review_contract = build_flow_review_contract(
+        reviewer="jeepfact_carousel_package",
+        hard_blockers=hard_blockers,
+        warnings=warnings,
+        checks=checks,
+        operator_summary=operator_summary,
+        approval_summary="Approve this Jeep Fact Wednesday carousel for the configured social publish lane.",
+        recommended_action=recommended_action,
+        operator_actions=["approve", "request_revision", "skip", "discard"],
+    )
+
+    return {
+        "decision": decision,
+        "score": score,
+        "confidence": confidence,
+        "priority": priority,
+        "reasoning": reasoning,
+        "improvement_suggestions": suggestions,
+        "component_scores": component_scores,
+        "fail_closed": hard_blockers,
+        "review_contract": review_contract,
+    }
+
+
+THURSDAY_SOURCE_NOISE_PATTERNS = (
+    re.compile(r"\b\d+\s*min\b", re.I),
+    re.compile(r"\btonie\b", re.I),
+    re.compile(r"\badd your own content\b", re.I),
+    re.compile(r"\b3d\s*-?\s*printed\b", re.I),
+    re.compile(r"\bcar dashboard\b", re.I),
+    re.compile(r"\bcollectible figurine\b", re.I),
+    re.compile(r"\bmultiple colors?\b", re.I),
+)
+
+
+def thursday_source_name_issues(names: list[str]) -> list[str]:
+    issues: list[str] = []
+    for name in names:
+        clean_name = " ".join(str(name or "").split())
+        if not clean_name:
+            continue
+        matched = [pattern.pattern for pattern in THURSDAY_SOURCE_NOISE_PATTERNS if pattern.search(clean_name)]
+        if matched:
+            issues.append(f"`{clean_name}` looks like it still contains source-listing wording; simplify the vote label before publishing.")
+    return issues
+
+
+def thursday_long_vote_label_warnings(names: list[str]) -> list[str]:
+    warnings: list[str] = []
+    for name in names:
+        clean_name = " ".join(str(name or "").split())
+        if not clean_name:
+            continue
+        words = [word for word in re.split(r"\s+", clean_name) if word]
+        if len(words) > 6:
+            warnings.append(f"`{clean_name}` is long for a vote card; prefer a short product-style duck name if the visual still reads clearly.")
+    return warnings
+
+
+def evaluate_thursday_publish_package(candidate: dict[str, Any], age_days: int | None) -> dict[str, Any]:
+    """Evaluate This-or-That Thursday as an option-specific vote package."""
+    summary = candidate.get("candidate_summary") or {}
+    supporting = candidate.get("supporting_context") or {}
+    body = " ".join(str(summary.get("body") or "").split())
+    body_lower = body.lower()
+    images = renderable_media_references(summary.get("images") or [])
+    platform_targets = [str(item).strip() for item in (summary.get("platform_targets") or []) if str(item).strip()]
+    platform_variants = summary.get("platform_variants") if isinstance(summary.get("platform_variants"), dict) else {}
+    option_a = str(summary.get("option_a") or "").strip()
+    option_b = str(summary.get("option_b") or "").strip()
+    option_review = supporting.get("thursday_option_review") if isinstance(supporting.get("thursday_option_review"), dict) else {}
+    source_refs = candidate.get("source_refs") or []
+    trend_refs = supporting.get("trend_refs") or []
+
+    hard_blockers: list[str] = []
+    warnings: list[str] = []
+    suggestions: list[str] = []
+    checks: list[dict[str, str]] = []
+
+    if images:
+        checks.append(flow_review_check("pass", "Vote image is attached", images[0]))
+    else:
+        hard_blockers.append("This-or-That vote image is missing or is not a renderable image URL/path.")
+        checks.append(flow_review_check("fail", "Vote image is attached", "No renderable vote image was found."))
+
+    if len(body) >= 80:
+        checks.append(flow_review_check("pass", "Caption is present", f"{len(body)} characters"))
+    else:
+        hard_blockers.append("This-or-That caption is too short or missing for approval.")
+        checks.append(flow_review_check("fail", "Caption is present", f"{len(body)} characters"))
+
+    if option_a and option_b and option_a.lower() != option_b.lower():
+        checks.append(flow_review_check("pass", "Two clear vote choices are present", f"{option_a} vs {option_b}"))
+    else:
+        hard_blockers.append("This-or-That package must include two distinct vote choices.")
+        checks.append(flow_review_check("fail", "Two clear vote choices are present", f"{option_a or 'missing'} vs {option_b or 'missing'}"))
+
+    name_issues = thursday_source_name_issues([option_a, option_b])
+    long_name_warnings = thursday_long_vote_label_warnings([option_a, option_b])
+    if name_issues:
+        hard_blockers.extend(name_issues)
+        checks.append(flow_review_check("fail", "Vote labels are clean", "; ".join(name_issues[:2])))
+    else:
+        checks.append(flow_review_check("pass", "Vote labels are clean", "No source-listing residue found in the vote labels."))
+    warnings.extend(long_name_warnings)
+
+    vote_markers = ("this or that", "vote", "option a", "option b", "#thisorthatthursday")
+    if any(marker in body_lower for marker in vote_markers) and option_a.lower() in body_lower and option_b.lower() in body_lower:
+        checks.append(flow_review_check("pass", "Vote framing is recognizable", "Caption names both options and asks for a vote."))
+    elif any(marker in body_lower for marker in vote_markers):
+        warnings.append("Vote framing is partial; confirm the caption clearly names both options and asks for a vote.")
+        checks.append(flow_review_check("warn", "Vote framing is recognizable", "Vote cue found, but one or both option names are not clear in the caption."))
+    else:
+        hard_blockers.append("This-or-That vote framing is missing from the caption.")
+        checks.append(flow_review_check("fail", "Vote framing is recognizable", "No vote cue found."))
+
+    option_failures = [str(item).strip() for item in (option_review.get("failures") or []) if str(item).strip()]
+    option_warnings = [str(item).strip() for item in (option_review.get("warnings") or []) if str(item).strip()]
+    if option_failures:
+        hard_blockers.extend(f"Option review failure: {item}" for item in option_failures)
+        checks.append(flow_review_check("fail", "Option review passed", "; ".join(option_failures[:2])))
+    else:
+        checks.append(flow_review_check("pass", "Option review passed", str(option_review.get("summary") or "No option-review failures.")))
+    warnings.extend(f"Option review warning: {item}" for item in option_warnings)
+
+    if platform_targets or platform_variants:
+        platform_evidence = ", ".join(platform_targets) or ", ".join(sorted(platform_variants.keys()))
+        checks.append(flow_review_check("pass", "Platform payload is present", platform_evidence))
+    else:
+        hard_blockers.append("Platform target/caption payload is missing, so approval cannot map to a publishable Thursday post.")
+        checks.append(flow_review_check("fail", "Platform payload is present", "No platform targets or variants found."))
+
+    if body_has_css_noise(body):
+        hard_blockers.append("Caption appears to include email/CSS wrapper noise instead of clean social copy.")
+        checks.append(flow_review_check("fail", "Caption is clean social copy", "CSS/email wrapper markers found."))
+    else:
+        checks.append(flow_review_check("pass", "Caption is clean social copy"))
+
+    if age_days is None:
+        warnings.append("Run date is unknown, so timing should be checked before posting.")
+        timing_status = "warn"
+        timing_evidence = "Unknown run date"
+    elif age_days <= 3:
+        timing_status = "pass"
+        timing_evidence = f"{age_days} day(s) old"
+    elif age_days <= 7:
+        warnings.append("This-or-That package is several days old; approve only if it still fits the next Thursday slot.")
+        timing_status = "warn"
+        timing_evidence = f"{age_days} day(s) old"
+    else:
+        hard_blockers.append("This-or-That package is stale for Thursday approval; regenerate or intentionally reschedule it.")
+        timing_status = "fail"
+        timing_evidence = f"{age_days} day(s) old"
+    checks.append(flow_review_check(timing_status, "Posting window is current", timing_evidence))
+
+    if len(source_refs) <= 1 and not trend_refs:
+        warnings.append("Trend/support evidence is thin, but the final This-or-That package itself is complete.")
+
+    score = 97 - (len(warnings) * 4) - (len(hard_blockers) * 35)
+    score = int(clamp(score, 0, 100))
+    if hard_blockers:
+        decision = "needs_revision" if score >= 40 else "discard"
+        priority = "high"
+    else:
+        decision = "publish_ready"
+        priority = "medium"
+
+    confidence = round(clamp(0.64 + min(0.08, 0.03 * len(images)) + min(0.06, 0.02 * len(platform_targets)), 0.25, confidence_cap(candidate)), 2)
+    if hard_blockers:
+        confidence = round(min(confidence + 0.05, confidence_cap(candidate)), 2)
+
+    if hard_blockers:
+        operator_summary = "OpenClaw found a blocking This-or-That Thursday package issue."
+        recommended_action = "request_revision"
+        suggestions.extend(hard_blockers)
+    elif warnings:
+        operator_summary = "This-or-That Thursday package is ready to approve with non-blocking warnings."
+        recommended_action = "approve"
+        suggestions.extend(warnings[:2])
+    else:
+        operator_summary = "This-or-That Thursday package is ready to approve."
+        recommended_action = "approve"
+
+    reasoning = [
+        operator_summary,
+        f"Hard blockers: {len(hard_blockers)}.",
+        f"Warnings: {len(warnings)}.",
+    ]
+    reasoning.extend(f"Blocker: {item}" for item in hard_blockers)
+    reasoning.extend(f"Warning: {item}" for item in warnings[:3])
+
+    component_scores = {
+        "vote_package": 0 if hard_blockers else 40,
+        "caption": 20 if len(body) >= 80 else 5,
+        "platform_payload": 15 if platform_targets or platform_variants else 0,
+        "label_quality": 15 if not name_issues else 0,
+        "timing_fit": 10 if age_days is not None and age_days <= 3 else 6 if age_days is None or age_days <= 7 else 0,
+        "warning_penalty": min(10, len(warnings) * 2),
+    }
+
+    review_contract = build_flow_review_contract(
+        reviewer="thursday_vote_package",
+        hard_blockers=hard_blockers,
+        warnings=warnings,
+        checks=checks,
+        operator_summary=operator_summary,
+        approval_summary="Approve this This-or-That Thursday vote package for the configured social publish lane.",
+        recommended_action=recommended_action,
+        operator_actions=["approve", "request_revision", "skip", "discard"],
+    )
+
+    return {
+        "decision": decision,
+        "score": score,
+        "confidence": confidence,
+        "priority": priority,
+        "reasoning": reasoning,
+        "improvement_suggestions": suggestions,
+        "component_scores": component_scores,
+        "fail_closed": hard_blockers,
+        "review_contract": review_contract,
+    }
 
 
 def text_tokens(value: str) -> set[str]:
@@ -710,6 +1210,120 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
                 "fail_closed": outcome["fail_closed"],
                 "reply_contract": outcome["reply_contract"],
                 "review_target_match_quality": review_target.get("match_quality"),
+            },
+        }
+
+    if flow == "meme":
+        outcome = evaluate_meme_publish_package(candidate, age_days)
+        evidence_refs = [ref.get("path", "") for ref in source_refs[:5] if ref.get("path")]
+        meme_images = renderable_media_references(summary.get("images") or [])
+        suggestions = list(dict.fromkeys(outcome["improvement_suggestions"] + default_suggestions(flow)))
+        return {
+            "artifact_id": candidate["artifact_id"],
+            "artifact_type": candidate.get("artifact_type", "social_post"),
+            "flow": flow,
+            "run_id": candidate.get("run_id"),
+            "artifact_slug": slugify(f"{flow}-{candidate.get('run_id', 'unknown')}"),
+            "decision": outcome["decision"],
+            "score": outcome["score"],
+            "confidence": outcome["confidence"],
+            "priority": outcome["priority"],
+            "reasoning": outcome["reasoning"],
+            "improvement_suggestions": suggestions if outcome["decision"] != "publish_ready" else suggestions[:2],
+            "evidence_refs": evidence_refs,
+            "review_status": "pending",
+            "created_at": now_iso(),
+            "title": title,
+            "preview": {
+                "proposed_label": "Draft caption",
+                "proposed_text": preview_text(body),
+                "asset_url": meme_images[0] if meme_images else None,
+                "asset_urls": meme_images,
+            },
+            "quality_gate_metadata": {
+                "age_days": age_days,
+                "source_mode": notes.get("source_mode"),
+                "confidence_cap": confidence_cap(candidate),
+                "component_scores": outcome["component_scores"],
+                "fail_closed": outcome["fail_closed"],
+                "flow_review_contract": outcome["review_contract"],
+            },
+        }
+
+    if flow == "jeepfact":
+        outcome = evaluate_jeepfact_publish_package(candidate, age_days)
+        evidence_refs = [ref.get("path", "") for ref in source_refs[:5] if ref.get("path")]
+        jeepfact_images = renderable_media_references(summary.get("images") or [])
+        suggestions = list(dict.fromkeys(outcome["improvement_suggestions"] + default_suggestions(flow)))
+        return {
+            "artifact_id": candidate["artifact_id"],
+            "artifact_type": candidate.get("artifact_type", "social_post"),
+            "flow": flow,
+            "run_id": candidate.get("run_id"),
+            "artifact_slug": slugify(f"{flow}-{candidate.get('run_id', 'unknown')}"),
+            "decision": outcome["decision"],
+            "score": outcome["score"],
+            "confidence": outcome["confidence"],
+            "priority": outcome["priority"],
+            "reasoning": outcome["reasoning"],
+            "improvement_suggestions": suggestions if outcome["decision"] != "publish_ready" else suggestions[:2],
+            "evidence_refs": evidence_refs,
+            "review_status": "pending",
+            "created_at": now_iso(),
+            "title": title,
+            "preview": {
+                "proposed_label": "Draft caption",
+                "proposed_text": preview_text(body),
+                "asset_url": jeepfact_images[0] if jeepfact_images else None,
+                "asset_urls": jeepfact_images,
+            },
+            "quality_gate_metadata": {
+                "age_days": age_days,
+                "source_mode": notes.get("source_mode"),
+                "confidence_cap": confidence_cap(candidate),
+                "component_scores": outcome["component_scores"],
+                "fail_closed": outcome["fail_closed"],
+                "flow_review_contract": outcome["review_contract"],
+            },
+        }
+
+    if flow == "thursday":
+        outcome = evaluate_thursday_publish_package(candidate, age_days)
+        evidence_refs = [ref.get("path", "") for ref in source_refs[:5] if ref.get("path")]
+        thursday_images = renderable_media_references(summary.get("images") or [])
+        suggestions = list(dict.fromkeys(outcome["improvement_suggestions"] + default_suggestions(flow)))
+        return {
+            "artifact_id": candidate["artifact_id"],
+            "artifact_type": candidate.get("artifact_type", "social_post"),
+            "flow": flow,
+            "run_id": candidate.get("run_id"),
+            "artifact_slug": slugify(f"{flow}-{candidate.get('run_id', 'unknown')}-option-{summary.get('option_id') or 'unknown'}"),
+            "decision": outcome["decision"],
+            "score": outcome["score"],
+            "confidence": outcome["confidence"],
+            "priority": outcome["priority"],
+            "reasoning": outcome["reasoning"],
+            "improvement_suggestions": suggestions if outcome["decision"] != "publish_ready" else suggestions[:2],
+            "evidence_refs": evidence_refs,
+            "review_status": "pending",
+            "created_at": now_iso(),
+            "title": title,
+            "preview": {
+                "proposed_label": "Draft caption",
+                "proposed_text": preview_text(body),
+                "asset_url": thursday_images[0] if thursday_images else None,
+                "asset_urls": thursday_images[:1],
+            },
+            "quality_gate_metadata": {
+                "age_days": age_days,
+                "source_mode": notes.get("source_mode"),
+                "confidence_cap": confidence_cap(candidate),
+                "component_scores": outcome["component_scores"],
+                "fail_closed": outcome["fail_closed"],
+                "flow_review_contract": outcome["review_contract"],
+                "thursday_option_id": summary.get("option_id") or notes.get("thursday_option_id"),
+                "thursday_option_a": summary.get("option_a"),
+                "thursday_option_b": summary.get("option_b"),
             },
         }
 

@@ -107,7 +107,7 @@ SCHEDULER_HEALTH_PATH = STATE_DIR / "scheduler_health.json"
 SCHEDULER_HEALTH_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "scheduler_health.json"
 SCHEDULER_HEALTH_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "scheduler_health.md"
 
-PILOT_PUBLISH_FLOWS = {"newduck", "weekly_sale", "meme", "jeepfact"}
+PILOT_PUBLISH_FLOWS = {"newduck", "weekly_sale", "meme", "jeepfact", "thursday"}
 INITIAL_MAILBOX_BOOTSTRAP_LIMIT = 75
 SECONDARY_FOLDER_BOOTSTRAP_LIMIT = 25
 
@@ -1609,12 +1609,139 @@ def extract_publish_execution_state(flow: str, payload: dict[str, Any], run_dir:
             "published_at": str(scheduled_at) if scheduled_at else None,
             "state_source": str(run_dir / "state_jeepfact.json"),
         }
+    if flow == "thursday":
+        publish_status = str(payload.get("thursday_publish_mode") or "").strip().lower()
+        published_at = payload.get("thursday_publish_time")
+        already_published = bool(payload.get("thursday_published") or published_at)
+        published_channels = ["instagram"] if already_published and publish_status != "placeholder" else []
+        return {
+            "already_published": already_published,
+            "state": "published" if already_published else "draft",
+            "published_channels": published_channels,
+            "published_at": str(published_at) if published_at else None,
+            "state_source": str(run_dir / "state_thursday.json"),
+        }
     return {
         "already_published": False,
         "state": "draft",
         "published_channels": [],
         "state_source": str(run_dir),
     }
+
+
+def _thursday_option_name(option: dict[str, Any], key: str) -> str:
+    prefix = "duck_a" if key == "a" else "duck_b"
+    duck = option.get(prefix) if isinstance(option.get(prefix), dict) else {}
+    return str(option.get(f"{prefix}_display") or duck.get("display_name") or duck.get("title") or "").strip()
+
+
+def _thursday_option_image_refs(option: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    preview_url = str(option.get("preview_url") or "").strip()
+    if preview_url:
+        refs.append(preview_url)
+    layout_path = str(option.get("layout_path") or "").strip()
+    if layout_path:
+        layout = Path(layout_path)
+        if not layout.is_absolute():
+            layout = DUCKAGENT_RUNS_DIR.parent / layout_path
+        refs.append(str(layout.resolve()))
+    return list(dict.fromkeys(refs))
+
+
+def build_thursday_publish_candidates_from_state(
+    path: Path,
+    payload: dict[str, Any],
+    products: dict[str, dict[str, Any]],
+    publications: dict[str, dict[str, Any]],
+    trend_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    options = list(payload.get("thursday_publishable_batch_options") or payload.get("thursday_batch_options") or [])
+    if not options:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        option_id = option.get("id")
+        try:
+            option_id_int = int(option_id)
+        except (TypeError, ValueError):
+            continue
+        duck_a = _thursday_option_name(option, "a")
+        duck_b = _thursday_option_name(option, "b")
+        if not duck_a or not duck_b:
+            continue
+        title = f"This-or-That Thursday: {duck_a} vs {duck_b}"
+        theme = f"{duck_a} {duck_b}"
+        catalog_a = match_catalog(extract_theme(duck_a), products, publications)
+        catalog_b = match_catalog(extract_theme(duck_b), products, publications)
+        combined_products: list[dict[str, Any]] = []
+        seen_products: set[str] = set()
+        for product in [*catalog_a.matching_products, *catalog_b.matching_products]:
+            product_id = str(product.get("product_id") or product.get("id") or "")
+            if product_id and product_id in seen_products:
+                continue
+            if product_id:
+                seen_products.add(product_id)
+            combined_products.append(product)
+        combined_coverage: list[dict[str, Any]] = []
+        seen_coverage: set[str] = set()
+        for coverage in [*catalog_a.publication_coverage, *catalog_b.publication_coverage]:
+            product_id = str(coverage.get("product_id") or "")
+            if product_id and product_id in seen_coverage:
+                continue
+            if product_id:
+                seen_coverage.add(product_id)
+            combined_coverage.append(coverage)
+
+        review = option.get("review") if isinstance(option.get("review"), dict) else {}
+        candidates.append(
+            {
+                "artifact_id": f"publish::thursday::{path.parent.name}::option-{option_id_int}-{slugify(duck_a)}-vs-{slugify(duck_b)}",
+                "artifact_type": "social_post",
+                "flow": "thursday",
+                "run_id": path.parent.name,
+                "source_refs": [{"path": str(path), "source_type": "state_thursday"}],
+                "candidate_summary": {
+                    "title": title,
+                    "body": str(option.get("caption") or "").strip(),
+                    "images": _thursday_option_image_refs(option),
+                    "platform_targets": ["instagram"],
+                    "publish_token": f"{path.parent.name}::option-{option_id_int}",
+                    "platform_variants": {
+                        "instagram": {"caption": str(option.get("caption") or "").strip()},
+                    },
+                    "option_id": option_id_int,
+                    "option_a": duck_a,
+                    "option_b": duck_b,
+                },
+                "supporting_context": {
+                    "brand_family": "social_post",
+                    "catalog_overlap": combined_products,
+                    "publication_coverage": combined_coverage,
+                    "trend_refs": match_related_trends(theme, trend_candidates),
+                    "thursday_option_review": review,
+                    "thursday_option_visibility": option.get("approval_visibility") or "reviewable",
+                    "thursday_option_source_types": [
+                        str(((option.get("duck_a") or {}).get("source_type")) or "").strip(),
+                        str(((option.get("duck_b") or {}).get("source_type")) or "").strip(),
+                    ],
+                },
+                "normalization_notes": {
+                    "source_mode": "state_file",
+                    "completeness": "high",
+                    "input_confidence_cap": 0.85,
+                    "thursday_option_id": option_id_int,
+                },
+                "execution_state": {
+                    **extract_publish_execution_state("thursday", payload, path.parent),
+                    "option_id": option_id_int,
+                },
+            }
+        )
+    return candidates
 
 
 def normalize_publish_candidates(
@@ -1818,6 +1945,11 @@ def normalize_publish_candidates(
                 "execution_state": extract_publish_execution_state("jeepfact", payload, path.parent),
             },
         )
+
+    for path in sorted(DUCKAGENT_RUNS_DIR.glob("*/state_thursday.json")):
+        payload = load_json(path)
+        for candidate in build_thursday_publish_candidates_from_state(path, payload, products, publications, trend_candidates):
+            merge_publish_candidate(candidates, candidate)
 
     for email_item in mailbox_items:
         subject_data = email_item.get("subject_metadata", {})

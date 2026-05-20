@@ -58,6 +58,10 @@ DUCK_AGENT_HANDOFF_FLOWS = {
         "approve": {"flow": "jeepfact", "action": "publish"},
         "needs_changes": {"flow": "jeepfact", "action": "revise"},
     },
+    "thursday": {
+        "approve": {"flow": "thursday", "action": "publish"},
+        "needs_changes": {"flow": "thursday", "action": "revise"},
+    },
     "weekly_sale": {
         "approve": {"flow": "weekly_sale", "action": "publish"},
         "needs_changes": {"flow": "weekly_sale", "action": "revise"},
@@ -257,8 +261,9 @@ def item_age_days(value: str | None) -> float | None:
 
 def decision_age_days(decision: dict[str, Any]) -> float | None:
     run_id = str(decision.get("run_id") or "").strip()
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", run_id):
-        parsed = parse_iso_datetime(f"{run_id}T00:00:00+00:00")
+    run_date_match = re.search(r"\d{4}-\d{2}-\d{2}", run_id)
+    if run_date_match:
+        parsed = parse_iso_datetime(f"{run_date_match.group(0)}T00:00:00+00:00")
         if parsed:
             return max(0.0, (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds() / 86400.0)
     return item_age_days(decision.get("created_at"))
@@ -733,7 +738,16 @@ def archive_stale_quality_gate_items(state: dict[str, Any]) -> bool:
 
         threshold_days: float | None = None
         archive_reason: str | None = None
-        if flow.startswith("reviews_") or artifact_type in {"review_reply", "social_post"}:
+        if flow == "thursday":
+            threshold_days = 5.0
+            archive_reason = "stale This-or-That Thursday package"
+        elif flow == "meme":
+            threshold_days = 5.0
+            archive_reason = "stale Meme Monday package"
+        elif flow == "jeepfact":
+            threshold_days = 5.0
+            archive_reason = "stale Jeep Fact Wednesday package"
+        elif flow.startswith("reviews_") or artifact_type in {"review_reply", "social_post"}:
             threshold_days = 5.0
             archive_reason = "stale daily review item"
         elif flow == "weekly_sale" or artifact_type == "promotion":
@@ -962,11 +976,6 @@ def approval_intent_lines(item: dict[str, Any]) -> list[str]:
     flow = str(item.get("flow") or "")
     artifact_type = str(item.get("artifact_type") or "")
 
-    if flow == "reviews_story" or artifact_type == "social_post":
-        return [
-            "You are approving: DuckAgent using this customer review as a social / review-story post.",
-            "If approved, this is marketing content, not a reply back to the customer.",
-        ]
     if flow == "reviews_reply_positive":
         return [
             "You are approving: DuckAgent posting this draft as a public Etsy reply to the customer.",
@@ -998,6 +1007,16 @@ def approval_intent_lines(item: dict[str, Any]) -> list[str]:
             "You are approving: a Jeep Fact Wednesday social post package.",
             "If approved, DuckAgent can schedule this post directly for social publishing. If you reply needs changes, DuckAgent can regenerate the draft.",
             "If you want to steer the rewrite, reply `rewrite <id> <hint>` first, then `needs changes <id> use rewrite` to send a structured revise packet back into DuckAgent.",
+        ]
+    if flow == "thursday":
+        return [
+            "You are approving: a This-or-That Thursday vote package.",
+            "If approved, DuckAgent can schedule the exact option shown here for social publishing. If you reply needs changes, DuckAgent records feedback for that option.",
+        ]
+    if flow == "reviews_story" or artifact_type == "social_post":
+        return [
+            "You are approving: DuckAgent using this customer review as a social / review-story post.",
+            "If approved, this is marketing content, not a reply back to the customer.",
         ]
     if artifact_type == "trend":
         return [
@@ -1399,6 +1418,7 @@ def build_quality_gate_items(state: dict[str, Any]) -> list[dict[str, Any]]:
                 "operator_resolution": decision.get("operator_resolution") or {},
                 "decision_gateway": decision.get("decision_gateway") or {},
                 "reconciled_resolution": decision.get("reconciled_resolution") or {},
+                "quality_gate_metadata": decision.get("quality_gate_metadata") or {},
                 "state_source": "quality_gate",
                 "first_reason": (decision.get("reasoning") or ["No reasoning captured."])[0],
                 "output_paths": record.get("output_paths", {}),
@@ -2679,6 +2699,25 @@ def duckagent_mail_subject(flow: str, run_id: str | None, title: str, action: st
     return f"MJD: [{flow}] {title} | FLOW:{flow} | RUN:{run_id or datetime.now().strftime('%Y-%m-%d')} | ACTION:{action}"
 
 
+def thursday_option_id_from_decision(decision: dict[str, Any]) -> int | None:
+    metadata = decision.get("quality_gate_metadata") if isinstance(decision.get("quality_gate_metadata"), dict) else {}
+    for raw_value in (
+        metadata.get("thursday_option_id"),
+        ((decision.get("candidate_summary") or {}).get("option_id") if isinstance(decision.get("candidate_summary"), dict) else None),
+    ):
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    artifact_id = str(decision.get("artifact_id") or "")
+    match = re.search(r"::option-(\d+)(?:-|$)", artifact_id)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def invoke_duckagent_mail_event(flow: str, run_id: str | None, title: str, action: str, note: str | None) -> dict[str, Any]:
     payload = {
         "subject": duckagent_mail_subject(flow, run_id, title, action),
@@ -2734,12 +2773,21 @@ def maybe_handoff_duckagent_publish_after_operator_action(decision: dict[str, An
             "message": "DuckAgent already shows this post as scheduled or published.",
         }
 
+    handoff_note = str(operator_resolution.get("note") or "").strip() or None
+    if flow == "thursday":
+        option_id = thursday_option_id_from_decision(decision)
+        if option_id and operator_action == "approve":
+            handoff_note = f"publish {option_id}"
+        elif option_id and operator_action == "needs_changes":
+            extra_note = str(operator_resolution.get("note") or "").strip()
+            handoff_note = f"needs changes {option_id} {extra_note}".strip()
+
     result = invoke_duckagent_mail_event(
         flow=str(callback.get("flow") or flow),
         run_id=str(decision.get("run_id") or "").strip() or None,
         title=str(decision.get("title") or flow).strip() or flow,
         action=str(callback.get("action") or "").strip() or operator_action,
-        note=str(operator_resolution.get("note") or "").strip() or None,
+        note=handoff_note,
     )
     attempts = list(decision.get("execution_attempts") or [])
     attempts.append(

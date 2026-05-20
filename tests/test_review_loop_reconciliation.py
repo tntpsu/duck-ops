@@ -23,6 +23,66 @@ def write_duckagent_state(root: Path, run_id: str, filename: str, payload: dict)
 
 
 class ReviewLoopReconciliationTests(unittest.TestCase):
+    def test_quality_gate_items_preserve_flow_review_contract(self) -> None:
+        state = {
+            "artifacts": {
+                "publish::meme::2026-05-18::meme-monday": {
+                    "decision": {
+                        "artifact_id": "publish::meme::2026-05-18::meme-monday",
+                        "artifact_type": "social_post",
+                        "flow": "meme",
+                        "run_id": "2026-05-18",
+                        "review_status": "pending",
+                        "decision": "publish_ready",
+                        "score": 92,
+                        "confidence": 0.6,
+                        "priority": "medium",
+                        "title": "Meme Monday",
+                        "reasoning": ["Meme Monday package is ready to approve."],
+                        "quality_gate_metadata": {
+                            "flow_review_contract": {
+                                "schema_version": "duck.openclaw.flow_review.v1",
+                                "reviewer": "meme_publish_package",
+                                "hard_blockers": [],
+                                "warnings": ["Trend/support evidence is thin."],
+                                "checks": [{"status": "pass", "label": "Final meme image is attached"}],
+                            }
+                        },
+                    },
+                    "output_paths": {},
+                }
+            }
+        }
+
+        items = review_loop.build_quality_gate_items(state)
+
+        self.assertEqual(items[0]["quality_gate_metadata"]["flow_review_contract"]["reviewer"], "meme_publish_package")
+        self.assertEqual(items[0]["quality_gate_metadata"]["flow_review_contract"]["checks"][0]["status"], "pass")
+
+    def test_stale_archive_uses_date_prefix_in_run_ids(self) -> None:
+        state = {
+            "artifacts": {
+                "publish::thursday::2000-01-01-style-generator-email::option-1": {
+                    "decision": {
+                        "artifact_id": "publish::thursday::2000-01-01-style-generator-email::option-1",
+                        "artifact_type": "social_post",
+                        "flow": "thursday",
+                        "run_id": "2000-01-01-style-generator-email",
+                        "review_status": "pending",
+                        "decision": "needs_revision",
+                        "created_at": "2099-01-01T00:00:00+00:00",
+                    }
+                }
+            }
+        }
+
+        changed = review_loop.archive_stale_quality_gate_items(state)
+
+        decision = state["artifacts"]["publish::thursday::2000-01-01-style-generator-email::option-1"]["decision"]
+        self.assertTrue(changed)
+        self.assertEqual(decision["review_status"], "archived")
+        self.assertEqual(decision["archive_reason"], "stale This-or-That Thursday package")
+
     def test_duckagent_publish_reconciliation_detects_recurring_social_proofs(self) -> None:
         cases = [
             (
@@ -196,6 +256,59 @@ class ReviewLoopReconciliationTests(unittest.TestCase):
         self.assertEqual(decision["execution_state"], "publish_requested")
         self.assertEqual(dispatch_calls[0]["flow"], "jeepfact")
         self.assertEqual(dispatch_calls[0]["action"], "publish")
+
+    def test_thursday_dispatch_preserves_selected_option_id(self) -> None:
+        state_bundle = {
+            "quality_gate": {
+                "artifacts": {
+                    "publish::thursday::2026-05-21::option-3-pirate-duck-vs-cowgirl-duck": {
+                        "artifact_id": "publish::thursday::2026-05-21::option-3-pirate-duck-vs-cowgirl-duck",
+                        "decision": {
+                            "artifact_id": "publish::thursday::2026-05-21::option-3-pirate-duck-vs-cowgirl-duck",
+                            "artifact_type": "social_post",
+                            "flow": "thursday",
+                            "run_id": "2026-05-21",
+                            "review_status": "pending",
+                            "decision": "publish_ready",
+                            "created_at": "2026-05-21T09:00:00-04:00",
+                            "title": "This-or-That Thursday: Pirate Duck vs Cowgirl Duck",
+                            "quality_gate_metadata": {"thursday_option_id": 3},
+                        },
+                    }
+                }
+            },
+            "trend_ranker": {"artifacts": {}},
+        }
+        dispatch_calls: list[dict] = []
+
+        def fake_invoke(**kwargs):
+            dispatch_calls.append(kwargs)
+            return {"ok": True, "returncode": 0, "stdout": "scheduled", "stderr": "", "command": ["duckagent"]}
+
+        with (
+            patch.object(review_loop, "load_state_bundle", return_value=state_bundle),
+            patch.object(review_loop, "load_operator_state", return_value={}),
+            patch.object(review_loop, "reconcile_state_bundle", return_value=False),
+            patch.object(review_loop, "write_state_source", return_value=None),
+            patch.object(review_loop, "write_review_queue", return_value=None),
+            patch.object(review_loop, "write_operator_state", return_value=None),
+            patch.object(review_loop, "write_decision", return_value={}),
+            patch.object(review_loop, "invoke_duckagent_mail_event", side_effect=fake_invoke),
+            patch.object(review_loop, "now_iso", return_value="2026-05-21T10:05:00-04:00"),
+        ):
+            result = review_loop.record_decision_and_dispatch(
+                flow="thursday",
+                run_id="2026-05-21",
+                action="publish",
+                note="publish",
+                channel="portal",
+            )
+
+        self.assertTrue(result["handled"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(dispatch_calls[0]["flow"], "thursday")
+        self.assertEqual(dispatch_calls[0]["action"], "publish")
+        self.assertEqual(dispatch_calls[0]["note"], "publish 3")
 
     def test_record_decision_and_dispatch_does_not_duplicate_resolved_decision(self) -> None:
         state_bundle = {
