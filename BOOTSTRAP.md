@@ -86,6 +86,12 @@ Current local morning observe/review pattern:
   - weekly `data_model_governance_review.py`
   - weekly `documentation_governance_review.py`
 - `shopify_seo_kickoff.py` is now installed locally in launchd for a `7:35 AM` pass
+- operator maintenance surfaces can be refreshed manually with
+  `/Users/philtullai/ai-agents/duck-ops/runtime/refresh_operator_surfaces.py`
+  before changing LaunchAgent wiring; this refreshes engineering governance,
+  ROI triage, and Business Desk artifacts in dependency order and writes
+  `state/operator_surface_refresh.json` plus
+  `output/operator/operator_surface_refresh.md`
 - Etsy Playwright scheduling now belongs to the dedicated Etsy batch planner/checker wrappers in
   `/Users/philtullai/ai-agents/openclaw_runtime`, not ad hoc launchd intervals
 - lightweight reader payloads such as the Even/Pulse widget should read

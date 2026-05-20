@@ -80,6 +80,23 @@ def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+def _reply_action_blocks(*, subject: str, flow: str, run_id: str, intro: str = "Shortcut button:") -> tuple[str, str]:
+    try:
+        sys.path.insert(0, str(DUCK_AGENT_ROOT))
+        from helpers.email_reply_action_helper import (  # type: ignore
+            default_reply_actions,
+            render_default_reply_action_buttons,
+            text_reply_action_block,
+        )
+    except Exception:
+        return "", ""
+    actions = default_reply_actions(flow)
+    return (
+        render_default_reply_action_buttons(subject=subject, flow=flow, run_id=run_id, intro=intro),
+        text_reply_action_block(actions),
+    )
+
+
 def _blank_html(value: Any) -> bool:
     text = str(value or "")
     text = text.replace("<br>", " ").replace("<br/>", " ").replace("<br />", " ")
@@ -419,6 +436,12 @@ def render_shopify_draft_activation_email(payload: dict[str, Any], *, render_rep
                 eyebrow="Needs Work",
             )
         )
+    subject = f"MJD: [shopify_draft_activation] Weekly Shopify draft review | FLOW:shopify_draft_activation | RUN:{payload.get('run_id')} | ACTION:review"
+    reply_buttons_html, reply_buttons_text = _reply_action_blocks(
+        subject=subject,
+        flow="shopify_draft_activation",
+        run_id=str(payload.get("run_id") or ""),
+    )
     body_html = "".join(
         [
             report_card(
@@ -429,6 +452,7 @@ def render_shopify_draft_activation_email(payload: dict[str, Any], *, render_rep
                     "<div style=\"color:#374151;margin-bottom:8px;\">Before activation, DuckAgent will safely backfill missing Shopify image alt text and ensure <strong>New Duck Arrivals</strong> membership/rotation when needed.</div>"
                     "<div style=\"color:#6b7280;\">Quality suggestions are advisory only. They help us tighten the listing, but they do not block activation.</div>"
                     "<div style=\"color:#6b7280;margin-top:6px;\">Shopify tag advice is about distinct browse phrases and overlap cleanup, not simply maximizing the raw tag count.</div>"
+                    f"{reply_buttons_html}"
                 ),
                 eyebrow="Summary",
             ),
@@ -458,6 +482,7 @@ def render_shopify_draft_activation_email(payload: dict[str, Any], *, render_rep
         f"Ready with suggestions: {payload.get('suggestion_count', 0)}",
         "",
         'Reply "publish" or "apply" to activate all ready Shopify drafts. Blocked drafts will be left alone.',
+        reply_buttons_text,
         "Before activation, DuckAgent will safely backfill missing Shopify image alt text and ensure New Duck Arrivals membership/rotation when needed.",
         "Quality suggestions are advisory only and do not block activation.",
         "Shopify tag suggestions are about better phrase coverage and less overlap, not just using the maximum number of tags.",
@@ -478,7 +503,6 @@ def render_shopify_draft_activation_email(payload: dict[str, Any], *, render_rep
             issues = item.get("blocking_issues") or []
             summary = issues[0] if issues else "See email for checklist."
             text_lines.append(f"- {item.get('title')}: {summary}")
-    subject = f"MJD: [shopify_draft_activation] Weekly Shopify draft review | FLOW:shopify_draft_activation | RUN:{payload.get('run_id')} | ACTION:review"
     return subject, "\n".join(text_lines).strip(), html
 
 

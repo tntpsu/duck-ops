@@ -97,37 +97,38 @@ class ShopifyDraftActivationReviewTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
 
     def test_email_render_uses_publish_apply_language(self) -> None:
-        subject, text_body, html_body = shopify_draft_activation_review.render_shopify_draft_activation_email(
-            {
-                "run_id": "shopify_draft_activation_20260414_193000",
-                "item_count": 2,
-                "ready_count": 1,
-                "blocked_count": 1,
-                "items": [
-                    {
-                        "legacy_product_id": 101,
-                        "title": "Ready Duck",
-                        "status": "draft",
-                        "ready_for_activation": True,
-                        "admin_url": "https://admin.shopify.com/store/myjeepduck/products/101",
-                        "image_count": 3,
-                        "category_name": "Vehicles > Accessories",
-                    },
-                    {
-                        "legacy_product_id": 202,
-                        "title": "Blocked Duck",
-                        "status": "draft",
-                        "ready_for_activation": False,
-                        "admin_url": "https://admin.shopify.com/store/myjeepduck/products/202",
-                        "blocking_issues": ["SEO present: SEO title or description is missing."],
-                    },
-                ],
-            },
-            render_report_email=lambda **kwargs: kwargs.get("body_html", ""),
-            report_badge=lambda *args, **kwargs: "badge",
-            report_card=lambda _title, body, **kwargs: body,
-            report_link=lambda href, label: f"{label}:{href}",
-        )
+        with patch.dict("os.environ", {"APPROVAL_REPLY_TO": "ops@example.test"}):
+            subject, text_body, html_body = shopify_draft_activation_review.render_shopify_draft_activation_email(
+                {
+                    "run_id": "shopify_draft_activation_20260414_193000",
+                    "item_count": 2,
+                    "ready_count": 1,
+                    "blocked_count": 1,
+                    "items": [
+                        {
+                            "legacy_product_id": 101,
+                            "title": "Ready Duck",
+                            "status": "draft",
+                            "ready_for_activation": True,
+                            "admin_url": "https://admin.shopify.com/store/myjeepduck/products/101",
+                            "image_count": 3,
+                            "category_name": "Vehicles > Accessories",
+                        },
+                        {
+                            "legacy_product_id": 202,
+                            "title": "Blocked Duck",
+                            "status": "draft",
+                            "ready_for_activation": False,
+                            "admin_url": "https://admin.shopify.com/store/myjeepduck/products/202",
+                            "blocking_issues": ["SEO present: SEO title or description is missing."],
+                        },
+                    ],
+                },
+                render_report_email=lambda **kwargs: kwargs.get("body_html", ""),
+                report_badge=lambda *args, **kwargs: "badge",
+                report_card=lambda _title, body, **kwargs: body,
+                report_link=lambda href, label: f"{label}:{href}",
+            )
 
         self.assertIn("FLOW:shopify_draft_activation", subject)
         self.assertIn('Reply "publish" or "apply"', text_body)
@@ -138,6 +139,9 @@ class ShopifyDraftActivationReviewTests(unittest.TestCase):
         self.assertIn("backfill missing Shopify image alt text", html_body)
         self.assertIn("Quality suggestions are advisory only", html_body)
         self.assertIn("not simply maximizing the raw tag count", html_body)
+        self.assertIn("Reply Publish", html_body)
+        self.assertIn("Reply Apply", html_body)
+        self.assertIn("FLOW%3Ashopify_draft_activation", html_body)
 
 
 if __name__ == "__main__":

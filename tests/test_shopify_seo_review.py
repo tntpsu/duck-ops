@@ -64,30 +64,33 @@ class ShopifySeoReviewTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
 
     def test_email_render_uses_reply_apply_language(self) -> None:
-        subject, text_body, html_body = shopify_seo_review.render_shopify_seo_review_email(
-            {
-                "run_id": "shopify_seo_20260414_120000",
-                "generated_at": "2026-04-14T12:00:00-04:00",
-                "shopify_domain": "example.myshopify.com",
-                "items": [
-                    {
-                        "title": "About Us",
-                        "kind": "page",
-                        "resource_url": "/pages/about-us",
-                        "issues": [{"message": "Missing SEO title."}],
-                        "current_seo_title": "",
-                        "current_seo_description": "",
-                        "proposed_seo_title": "About MyJeepDuck - Collectible Duck Makers and Gift Ideas",
-                        "proposed_seo_description": "Learn how MyJeepDuck creates collectible dashboard ducks, custom gifts, and playful flock favorites for ducking fans and curious shoppers.",
-                        "rationale": "Adds missing SEO metadata to a key trust-building page.",
-                    }
-                ],
-            }
-        )
+        with patch.dict("os.environ", {"APPROVAL_REPLY_TO": "ops@example.test"}):
+            subject, text_body, html_body = shopify_seo_review.render_shopify_seo_review_email(
+                {
+                    "run_id": "shopify_seo_20260414_120000",
+                    "generated_at": "2026-04-14T12:00:00-04:00",
+                    "shopify_domain": "example.myshopify.com",
+                    "items": [
+                        {
+                            "title": "About Us",
+                            "kind": "page",
+                            "resource_url": "/pages/about-us",
+                            "issues": [{"message": "Missing SEO title."}],
+                            "current_seo_title": "",
+                            "current_seo_description": "",
+                            "proposed_seo_title": "About MyJeepDuck - Collectible Duck Makers and Gift Ideas",
+                            "proposed_seo_description": "Learn how MyJeepDuck creates collectible dashboard ducks, custom gifts, and playful flock favorites for ducking fans and curious shoppers.",
+                            "rationale": "Adds missing SEO metadata to a key trust-building page.",
+                        }
+                    ],
+                }
+            )
 
         self.assertIn("FLOW:shopify_seo", subject)
         self.assertIn("Reply apply", text_body)
         self.assertIn("Reply <code>apply</code>", html_body)
+        self.assertIn("Reply Apply", html_body)
+        self.assertIn("FLOW%3Ashopify_seo", html_body)
 
     def test_missing_only_bulk_review_keeps_existing_fields_unchanged(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -8,6 +8,7 @@ classified upstream blockers such as PhotoRoom quota, auth, or rate-limit issues
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,62 @@ def _dependency_for_blocker(blocker: str) -> str | None:
     return None
 
 
+def _parse_iso(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.astimezone()
+    return parsed.astimezone()
+
+
+def _state_dependency(state: dict[str, Any]) -> str | None:
+    metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+    blocker = str(metadata.get("render_blocker") or state.get("state_reason") or "").strip()
+    return _dependency_for_blocker(blocker)
+
+
+def _superseded_dependency_blocker(state: dict[str, Any], all_states: list[dict[str, Any]]) -> bool:
+    """Ignore old dependency blockers after the same lane has newer run proof.
+
+    Dependency health answers "what is blocking us now?", not "did a legacy run
+    ever hit a provider quota?" A newer same-lane workflow state without that
+    dependency means the old blocker is historical evidence, not an active OS
+    issue.
+    """
+
+    lane = str(state.get("lane") or "").strip()
+    dependency = _state_dependency(state)
+    updated_at = _parse_iso(state.get("updated_at"))
+    if not lane or not dependency or updated_at is None:
+        return False
+    for other in all_states:
+        if other is state or not isinstance(other, dict):
+            continue
+        if str(other.get("lane") or "").strip() != lane:
+            continue
+        other_updated_at = _parse_iso(other.get("updated_at"))
+        if other_updated_at is None or other_updated_at <= updated_at:
+            continue
+        if _state_dependency(other) == dependency:
+            continue
+        other_state = str(other.get("state") or "").strip()
+        other_reason = str(other.get("state_reason") or "").strip()
+        if other_state in {"proposed", "observed", "verified", "resolved", "running"} or other_reason in {
+            "awaiting_review",
+            "draft_ready",
+            "scheduled",
+            "published",
+            "shopify_activation_pending",
+        }:
+            return True
+    return False
+
+
 def _status_for_blocker(blocker: str) -> str:
     if blocker in {"photoroom_rate_limited", "photoroom_upstream_unavailable"}:
         return "warn"
@@ -90,13 +147,16 @@ def _recent_duckagent_state_files(limit: int = 80) -> list[Path]:
 
 def _workflow_dependency_items() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for state in list_workflow_states():
+    states = [state for state in list_workflow_states() if isinstance(state, dict)]
+    for state in states:
         if not isinstance(state, dict):
             continue
         metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
         blocker = str(metadata.get("render_blocker") or state.get("state_reason") or "").strip()
         dependency = _dependency_for_blocker(blocker)
         if not dependency:
+            continue
+        if _superseded_dependency_blocker(state, states):
             continue
         lane = str(state.get("lane") or "workflow").strip() or "workflow"
         title = str(state.get("display_label") or state.get("workflow_id") or lane).strip()

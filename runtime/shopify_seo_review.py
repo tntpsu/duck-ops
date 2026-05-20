@@ -126,6 +126,23 @@ def _ensure_duckagent_imports():
     return openai_json, send_email
 
 
+def _reply_action_blocks(*, subject: str, flow: str, run_id: str, intro: str = "Shortcut button:") -> tuple[str, str]:
+    try:
+        sys.path.insert(0, str(DUCK_AGENT_ROOT))
+        from helpers.email_reply_action_helper import (  # type: ignore
+            default_reply_actions,
+            render_default_reply_action_buttons,
+            text_reply_action_block,
+        )
+    except Exception:
+        return "", ""
+    actions = default_reply_actions(flow)
+    return (
+        render_default_reply_action_buttons(subject=subject, flow=flow, run_id=run_id, intro=intro),
+        text_reply_action_block(actions),
+    )
+
+
 def _review_run_path(run_id: str) -> Path:
     return REVIEW_RUN_DIR / f"{run_id}.json"
 
@@ -817,9 +834,14 @@ def render_shopify_seo_review_email(payload: dict[str, Any]) -> tuple[str, str, 
             auto_send_next_category=auto_send_next_category,
         )
     )
-    approval_action_html = approval_action.replace("Reply apply", "Reply <code>apply</code>")
     category_html = f"<strong>Category:</strong> {payload.get('category_label', '')}<br/>" if payload.get("category_label") else ""
     subject = f"MJD: [shopify_seo] {_review_subject_label(review_type, issue_category)} | FLOW:shopify_seo | RUN:{payload['run_id']} | ACTION:review"
+    approval_action_html = approval_action.replace("Reply apply", "Reply <code>apply</code>")
+    reply_buttons_html, reply_buttons_text = _reply_action_blocks(
+        subject=subject,
+        flow="shopify_seo",
+        run_id=str(payload.get("run_id") or ""),
+    )
     text_lines = [
         "Shopify SEO review ready",
         "",
@@ -830,6 +852,7 @@ def render_shopify_seo_review_email(payload: dict[str, Any]) -> tuple[str, str, 
         f"Items in run: {item_count}",
         "",
         f"Approval action: {approval_action}",
+        reply_buttons_text,
         "",
     ]
     html_parts = [
@@ -843,6 +866,7 @@ def render_shopify_seo_review_email(payload: dict[str, Any]) -> tuple[str, str, 
             f"<strong>Items in run:</strong> {item_count}</p>"
         ),
         f"<p><strong>Approval action:</strong> {approval_action_html}</p>",
+        reply_buttons_html,
     ]
     if kind_counts:
         scope_text = " | ".join(f"{kind.title()}s: {count}" for kind, count in sorted(kind_counts.items()))

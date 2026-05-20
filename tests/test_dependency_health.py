@@ -68,6 +68,42 @@ class DependencyHealthTests(unittest.TestCase):
         self.assertIn("rate-limiting", payload["items"][0]["blocker_label"])
         self.assertIn("Retry later", payload["items"][0]["recommended_action"])
 
+    def test_old_workflow_dependency_blocker_is_suppressed_after_newer_lane_run(self) -> None:
+        states = [
+            {
+                "workflow_id": "jeepfact::2026-04-29",
+                "lane": "jeepfact",
+                "display_label": "Jeep Fact 2026-04-29",
+                "run_id": "2026-04-29",
+                "state": "blocked",
+                "state_reason": "photoroom_quota_exhausted",
+                "next_action": "Wait for reset.",
+                "updated_at": "2026-04-29T09:03:00-04:00",
+                "metadata": {"render_blocker": "photoroom_quota_exhausted"},
+                "_path": "/tmp/jeepfact-old.json",
+            },
+            {
+                "workflow_id": "jeepfact::2026-05-20",
+                "lane": "jeepfact",
+                "display_label": "Jeep Fact 2026-05-20",
+                "run_id": "2026-05-20",
+                "state": "proposed",
+                "state_reason": "awaiting_review",
+                "next_action": "Review the Jeep Fact draft.",
+                "updated_at": "2026-05-20T09:08:00-04:00",
+                "metadata": {},
+                "_path": "/tmp/jeepfact-new.json",
+            },
+        ]
+        with (
+            patch("dependency_health.list_workflow_states", return_value=states),
+            patch("dependency_health._recent_duckagent_state_files", return_value=[]),
+        ):
+            payload = build_dependency_health(write_outputs=False)
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["summary"]["item_count"], 0)
+
     def test_markdown_renders_empty_state(self) -> None:
         payload = {
             "generated_at": "2026-04-27T09:00:00-04:00",

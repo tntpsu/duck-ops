@@ -74,6 +74,53 @@ python3 runtime/review_loop.py handle --text 'desk show freshness'
 python3 runtime/review_loop.py handle --text 'status all'
 ```
 
+### Operator Surface Refresh
+
+The canonical local refresh command for maintenance/operator surfaces is:
+
+```bash
+python3 runtime/refresh_operator_surfaces.py
+```
+
+The DuckAgent Agent OS portal also exposes a safe `Refresh Operator Surfaces` button for this same default command. That button intentionally does not expose `--send-email` or `--run-repo-ci`; it only rebuilds local summaries and writes the refresh receipt.
+
+It runs, in dependency order:
+
+1. `engineering_governance_digest.py` - rebuilds governance findings and recommendations from scheduled observe-only review outputs.
+2. `roi_triage.py` - writes the current highest-ROI work ranking after governance is current.
+3. `customer_inbox_refresh.rebuild_customer_outputs()` - rebuilds customer/operator summaries and the Business Desk from current normalized state without launching Etsy browser automation.
+
+Optional flags:
+
+```bash
+python3 runtime/refresh_operator_surfaces.py --run-repo-ci
+python3 runtime/refresh_operator_surfaces.py --send-email
+```
+
+Use `--send-email` only for the intended morning governance digest path. Use `--run-repo-ci` when the local CI mirror should be refreshed before governance. The wrapper writes:
+
+- `state/operator_surface_refresh.json`
+- `output/operator/operator_surface_refresh.md`
+- refreshed governance, ROI, and Business Desk artifacts under `state/` and `output/operator/`
+
+Launchd status:
+
+- Business Desk and scheduler health are also rebuilt by the Duck Ops sidecar every 3 hours.
+- Current learnings and the weekly strategy packet have their own daily LaunchAgents.
+- Governance has a morning LaunchAgent, but the wrapper above is the preferred target for any future LaunchAgent update because it prevents governance, ROI, and Business Desk drift.
+- ROI triage should not rely only on Business Desk's in-memory build; run the wrapper or `runtime/roi_triage.py` when the persisted ROI page must be current.
+
+Cadence expectations:
+
+- Business Desk / scheduler health: every 3 hours through sidecar, or on demand through the wrapper.
+- Engineering governance: daily after observe-only review jobs; stale after 72 hours.
+- ROI triage: daily or after roadmap/governance/current-learning changes; stale after 48 hours.
+- Repo CI mirror: after meaningful commits or daily; stale after 72 hours.
+- Current learnings: daily.
+- Weekly strategy and Shopify SEO outcomes: weekly; stale after 192 hours.
+
+Maintenance rule: changes to this refresh stack require `duck-reliability-review` for lock/timeout/log/schedule behavior and `duck-documentation-governance` for README, bootstrap, and handoff-doc alignment.
+
 Customer recovery decisions can be staged with:
 
 ```bash
