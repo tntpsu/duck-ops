@@ -177,6 +177,10 @@ class ReviewReplyQualityGateTests(unittest.TestCase):
         self.assertEqual(contract["hard_blockers"], [])
         self.assertTrue(any("Trend/support evidence is thin" in warning for warning in contract["warnings"]))
         self.assertTrue(any(check["label"] == "Final meme image is attached" and check["status"] == "pass" for check in contract["checks"]))
+        # Slice I: publish_ready meme items must not carry the flow-level
+        # boilerplate "Keep the meme text..." style guidance.
+        for suggestion in decision["improvement_suggestions"]:
+            self.assertNotIn("Keep the meme text", suggestion)
 
     def test_meme_package_missing_final_image_stays_blocked(self) -> None:
         run_date = quality_gate_pilot.now_iso()[:10]
