@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -14,6 +15,21 @@ import review_reply_contract
 
 
 class ReviewRewriteContractTests(unittest.TestCase):
+    """Tests against the deterministic rule-based rewriter. The LLM path is
+    explicitly disabled so these tests stay deterministic regardless of whether
+    OPENAI_API_KEY is set in the local environment. LLM-path tests live in
+    test_review_reply_rewriter_llm.py."""
+
+    def setUp(self) -> None:
+        self._prev_provider = os.environ.get("DUCK_REVIEW_REWRITE_PROVIDER")
+        os.environ["DUCK_REVIEW_REWRITE_PROVIDER"] = "disabled"
+
+    def tearDown(self) -> None:
+        if self._prev_provider is None:
+            os.environ.pop("DUCK_REVIEW_REWRITE_PROVIDER", None)
+        else:
+            os.environ["DUCK_REVIEW_REWRITE_PROVIDER"] = self._prev_provider
+
     def test_rewrite_suggestion_keeps_gift_and_shipping_anchors(self) -> None:
         rewrite = review_loop.build_rewrite_suggestion_text(
             {

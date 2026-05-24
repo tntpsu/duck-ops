@@ -1925,6 +1925,19 @@ def private_reply_remedy_line(draft_text: str) -> str:
 
 
 def build_rewrite_suggestion_text(item: dict[str, Any], hint: str = "") -> str | None:
+    """Generate a rewrite for the operator. LLM-first with rule-based fallback.
+
+    For review_reply items: try the LLM rewriter (gated by
+    DUCK_REVIEW_REWRITE_PROVIDER env var + sanity checks in
+    review_reply_rewriter_sanity). On any failure, fall back to the
+    deterministic rule-based path below. Other flows (weekly_sale, jeepfact)
+    keep their current dedicated builders.
+
+    The wrapping function returns the rewrite TEXT for backward compatibility
+    with callers. The structured LLM result (source, model, usage) is captured
+    via :func:`generate_rewrite_with_metadata` for callers that need it (the
+    review_loop command dispatch in particular).
+    """
     if str(item.get("flow") or "") == "weekly_sale":
         return build_weekly_sale_rewrite_text(item, hint=hint)
     if str(item.get("flow") or "") == "jeepfact":
@@ -1933,6 +1946,51 @@ def build_rewrite_suggestion_text(item: dict[str, Any], hint: str = "") -> str |
     if item.get("artifact_type") != "review_reply":
         return None
 
+    # Try LLM first; on any failure (disabled, missing key, sanity failure,
+    # provider error) fall through to the deterministic rules.
+    try:
+        from review_reply_rewriter_llm import generate_rewrite_via_llm
+        llm_result = generate_rewrite_via_llm(item, hint=hint)
+    except Exception:
+        llm_result = None
+    if llm_result and llm_result.get("text"):
+        return llm_result["text"]
+
+    return _build_review_reply_rewrite_rules(item, hint=hint)
+
+
+def generate_rewrite_with_metadata(item: dict[str, Any], hint: str = "") -> dict[str, Any] | None:
+    """Like build_rewrite_suggestion_text but returns the structured result.
+
+    Used by the command dispatch to extend the operator_state cache entry
+    with source/model/usage metadata. Falls back to a 'rules' source when
+    the LLM path doesn't fire.
+    """
+    if item.get("artifact_type") != "review_reply":
+        text = build_rewrite_suggestion_text(item, hint=hint)
+        if not text:
+            return None
+        return {"text": text, "source": "rules"}
+
+    try:
+        from review_reply_rewriter_llm import generate_rewrite_via_llm
+        llm_result = generate_rewrite_via_llm(item, hint=hint)
+    except Exception:
+        llm_result = None
+    if llm_result and llm_result.get("text"):
+        return llm_result
+    rules_text = _build_review_reply_rewrite_rules(item, hint=hint)
+    if not rules_text:
+        return None
+    return {"text": rules_text, "source": "rules"}
+
+
+def _build_review_reply_rewrite_rules(item: dict[str, Any], hint: str = "") -> str | None:
+    """Deterministic rule-based rewrite. Used as fallback when the LLM path
+    fails or is disabled. Kept here (instead of a separate module) to minimize
+    blast radius — review_loop.py is the historical owner of this logic and
+    other paths (render_rewrite_suggestion, the WhatsApp/email channels) still
+    call it directly."""
     preview = item.get("preview") or {}
     review_text = normalize_operator_text(preview.get("context_text"))
     draft_text = normalize_operator_text(preview.get("proposed_text"))
@@ -3235,7 +3293,8 @@ def handle_operator_text(
         return render_change_suggestions(target_item)
 
     if command == "rewrite":
-        rewrite_text = build_rewrite_suggestion_text(target_item, hint=note)
+        rewrite_result = generate_rewrite_with_metadata(target_item, hint=note)
+        rewrite_text = (rewrite_result or {}).get("text") if rewrite_result else None
         preview = target_item.get("preview") or {}
         rewrite_contract = None
         if target_item.get("artifact_type") == "review_reply":
@@ -3249,12 +3308,17 @@ def handle_operator_text(
             target_item.get("artifact_type") == "review_reply"
             or str(target_item.get("flow") or "") == "weekly_sale"
         ):
-            rewrite_cache[target_item["artifact_id"]] = {
+            cached_entry: dict[str, Any] = {
                 "text": rewrite_text,
-                "generated_at": now_iso(),
+                "generated_at": (rewrite_result or {}).get("generated_at") or now_iso(),
+                "source": (rewrite_result or {}).get("source") or "rules",
             }
+            for optional_key in ("model", "provider", "hint", "usage", "sanity"):
+                if (rewrite_result or {}).get(optional_key):
+                    cached_entry[optional_key] = rewrite_result[optional_key]
             if rewrite_contract:
-                rewrite_cache[target_item["artifact_id"]]["contract"] = rewrite_contract
+                cached_entry["contract"] = rewrite_contract
+            rewrite_cache[target_item["artifact_id"]] = cached_entry
         write_review_queue(state_bundle, operator_state)
         return render_rewrite_suggestion(target_item, hint=note)
 
