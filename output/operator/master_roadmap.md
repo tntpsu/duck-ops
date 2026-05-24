@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-05-18
+Last updated: 2026-05-23
 
 ## Document Ownership
 
@@ -52,6 +52,10 @@ Companion docs:
 - Workflow follow-through now includes root-cause style Why/Fix guidance.
 - Human-readable timestamps were added in key workflow areas.
 - Quality gate and customer action sections are more operator-first.
+- Daily profit email is now cadence-gated: `DUCK_PROFIT_EMAIL_CADENCE=weekly` + `DUCK_PROFIT_EMAIL_WEEKDAY=monday` defer the normal email to Monday while the 23:58 cron still refreshes workflow_control state and receipts. Operator inbox quiets without losing agent-readable data. Pattern mirrors the competitor cadence shipped earlier.
+- Anomaly-bypass overrides the cadence on bad days: `net_profit < 0`, `revenue` below the 30-day floor, `orders == 0`, or total Etsy data loss each trigger an immediate email. Cold-start (< 14 days history) suppresses metric-based bypasses but still emails on auth/credential failures. Receipt records both `last_side_effect` (kind=email, reason=anomaly_bypass) and `last_verification` (kind=operator_email_cadence, status=anomaly_bypass) for downstream readers.
+- Sanity floor prevents the operator from being emailed garbage: impossible metrics (revenue out of range, margin > 100%, negative orders, net > revenue) route to `state="blocked", state_reason="profit_metrics_impossible"` instead of sending. Bad numbers go to Scheduler Health, not the inbox.
+- Duck Ops now has a profit-intel data layer (`runtime/profit_intel.py`) that reads workflow_control receipts and computes yesterday's headline + 7-day trend + anomaly readout. The desk panel and full page surfaces consume this data layer (Slice C/D, pending). DuckAgent is the only evaluator of anomaly triggers — Duck Ops reads the result from receipt metadata, never recomputes. Cross-repo contract anchored in `operator_interface_contracts.py::PROFIT_ANOMALY_METADATA_CONTRACT`.
 
 ### 4. Review Carousel
 - Daily review stories now feed the carousel pool.
@@ -310,6 +314,20 @@ Why this matters:
 - DuckAgent and Duck Ops are getting more capable and more complex.
 - Skills now give Codex/agents a stable operating manual for recurring work.
 - The value now comes from enforcing them in real workflows, not from creating more skill files.
+
+### Priority 10: Operator Visibility For Cadence-Gated Reports
+
+The cadence-gating shipped for competitor and profit emails closes the daily-inbox-noise problem but opens a visibility gap: the human can no longer glance at their inbox to see yesterday's number. The lane state still flows through `workflow_control` for the agent, but no operator surface displays it yet.
+
+Plan: [PROFIT_INTEL_PANEL_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/PROFIT_INTEL_PANEL_PLAN.md).
+
+Next slices (in order):
+1. **Slice B — Weekly roll-up email content.** The Monday email today still ships single-day content; replace with a real 7-day roll-up (top-line totals, WoW deltas, per-day mini-table, anomalies-of-the-week, best/worst day callouts, drill-down deep-links). Anomaly-bypass days keep the single-day content so the operator sees the bad day's detail.
+2. **Slice C — Business Desk panel + minimal operator override endpoint.** Add `## Profit Intel` section to `business_desk.md` showing yesterday + 7d trend + anomaly badge + email-status line + freshness label. Ship `POST /portal/intel/profit/send-now` so the human always has an escape valve when bypass triggers don't fire on a day they'd want the email.
+3. **Slice D — Full page at `/portal/intel/profit`.** Drill-down with 30-day chart, channel breakdown, last-30-days table, embedded latest report, override button reusing the Phase 4 endpoint. Deep-link only — not added to top-nav.
+4. **Slice E — Cross-repo doc updates.** Plan + roadmap reflect shipped state.
+
+Once these slices land, the same pattern can be applied to the daily recommendations email and any other report still pushing operator-facing content unconditionally.
 
 ## Recommended Next 3 Steps
 
