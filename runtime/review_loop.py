@@ -39,6 +39,7 @@ STATE_DIR = ROOT / "state"
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
 TREND_RANKER_STATE_PATH = STATE_DIR / "trend_ranker_state.json"
 OVERRIDES_PATH = STATE_DIR / "overrides.jsonl"
+REVIEW_REPLY_FEEDBACK_PATH = STATE_DIR / "review_reply_feedback.jsonl"
 REVIEW_QUEUE_STATE_PATH = STATE_DIR / "review_queue.json"
 CUSTOMER_INTERACTION_QUEUE_PATH = STATE_DIR / "customer_interaction_queue.json"
 OPERATOR_STATE_PATH = STATE_DIR / "operator_state.json"
@@ -2721,6 +2722,50 @@ def record_action(
                 "state_source": source_name,
             },
         )
+
+    # Per-artifact feedback log for review_reply items. Captures the linkage
+    # between the rewrite the LLM produced (or rule-based fallback), the draft
+    # the operator originally saw, the text they ended up approving, and the
+    # operator's note. Used as the source for few-shot anchoring in future
+    # LLM rewrite prompts (see REVIEW_REPLY_REWRITE_LLM_PLAN.md Phase 3).
+    if decision.get("artifact_type") == "review_reply":
+        try:
+            operator_state = load_json(OPERATOR_STATE_PATH, {}) or {}
+        except Exception:
+            operator_state = {}
+        rewrite_cache = (operator_state.get("rewrite_suggestions") or {}) if isinstance(operator_state, dict) else {}
+        cached_rewrite = rewrite_cache.get(artifact_id) if isinstance(rewrite_cache, dict) else None
+        preview = decision.get("preview") or {}
+        feedback_entry = {
+            "at": human_review["recorded_at"],
+            "artifact_id": artifact_id,
+            "flow": decision.get("flow"),
+            "action": action,
+            "operator_action": operator_action,
+            "resolution": resolution,
+            "note": (note or "").strip() or None,
+            "channel": clean_channel or None,
+            "customer_review": (preview.get("context_text") or "").strip() or None,
+            "draft_reply": (preview.get("proposed_text") or "").strip() or None,
+            "approved_reply_text": (decision.get("approved_reply_text") or "").strip() or None,
+            "rewrite_source": (cached_rewrite or {}).get("source") if isinstance(cached_rewrite, dict) else None,
+            "rewrite_text": (cached_rewrite or {}).get("text") if isinstance(cached_rewrite, dict) else None,
+            "rewrite_model": (cached_rewrite or {}).get("model") if isinstance(cached_rewrite, dict) else None,
+            "rewrite_hint": (cached_rewrite or {}).get("hint") if isinstance(cached_rewrite, dict) else None,
+        }
+        # used_rewrite: did the operator approve the rewrite text or a different text?
+        if feedback_entry["approved_reply_text"] and feedback_entry["rewrite_text"]:
+            feedback_entry["used_rewrite"] = (
+                feedback_entry["approved_reply_text"].strip() == feedback_entry["rewrite_text"].strip()
+            )
+        else:
+            feedback_entry["used_rewrite"] = None
+        try:
+            append_jsonl(REVIEW_REPLY_FEEDBACK_PATH, feedback_entry)
+        except Exception:
+            # Logging is best-effort; never block operator action on a log write failure.
+            pass
+
     return record, source_name
 
 

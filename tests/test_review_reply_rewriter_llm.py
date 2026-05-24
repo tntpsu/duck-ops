@@ -134,5 +134,79 @@ class LLMRewriterTests(unittest.TestCase):
         self.assertIn("Echo at least one specific word", prompt)
 
 
+class FewShotAnchoringTests(unittest.TestCase):
+    """Approved past rewrites in the feedback log should appear as few-shot
+    examples in the LLM prompt (Slice K.3)."""
+
+    def setUp(self) -> None:
+        import tempfile
+        from pathlib import Path as _Path
+        self.tmp = tempfile.TemporaryDirectory()
+        self._feedback_path_patch = patch.object(
+            llm,
+            "REVIEW_REPLY_FEEDBACK_PATH",
+            _Path(self.tmp.name) / "review_reply_feedback.jsonl",
+        )
+        self._feedback_path_patch.start()
+        self.addCleanup(self._feedback_path_patch.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write_feedback(self, entries: list[dict]) -> None:
+        with open(llm.REVIEW_REPLY_FEEDBACK_PATH, "w", encoding="utf-8") as fh:
+            for e in entries:
+                fh.write(json.dumps(e) + "\n")
+
+    def test_empty_feedback_log_produces_no_few_shot_block(self) -> None:
+        examples = llm._load_approved_examples()
+        self.assertEqual(examples, [])
+        self.assertEqual(llm._format_few_shot_block(examples), "")
+
+    def test_approved_entries_become_few_shot_examples(self) -> None:
+        self._write_feedback([
+            {
+                "at": "2026-05-20T10:00:00-04:00",
+                "operator_action": "approve",
+                "customer_review": "So cute! Arrived safe and sound!",
+                "approved_reply_text": "So glad it arrived safe — thank you!",
+            },
+            {
+                "at": "2026-05-21T10:00:00-04:00",
+                "operator_action": "approve",
+                "customer_review": "Great graduation gift!",
+                "approved_reply_text": "Thank you — so glad it made a fun graduation gift.",
+            },
+        ])
+        examples = llm._load_approved_examples()
+        self.assertEqual(len(examples), 2)
+        # Newest first.
+        self.assertIn("graduation", examples[0]["review"])
+        block = llm._format_few_shot_block(examples)
+        self.assertIn("graduation gift", block)
+        self.assertIn("Approved past examples", block)
+
+    def test_non_approve_entries_are_skipped(self) -> None:
+        self._write_feedback([
+            {"operator_action": "discard", "customer_review": "X", "approved_reply_text": "Y"},
+            {"operator_action": "needs_changes", "customer_review": "X2", "approved_reply_text": "Y2"},
+            {"operator_action": "approve", "customer_review": "Real review!", "approved_reply_text": "Real reply!"},
+        ])
+        examples = llm._load_approved_examples()
+        self.assertEqual(len(examples), 1)
+        self.assertEqual(examples[0]["review"], "Real review!")
+
+    def test_few_shot_block_appears_in_prompt(self) -> None:
+        self._write_feedback([
+            {
+                "operator_action": "approve",
+                "customer_review": "Tiny but mighty duck!",
+                "approved_reply_text": "Thanks — so glad the little guy made you smile.",
+            },
+        ])
+        prompt = llm._build_prompt(NEPHEW_REVIEW, NEPHEW_DRAFT, hint="")
+        self.assertIn("Approved past examples", prompt)
+        self.assertIn("Tiny but mighty", prompt)
+        self.assertIn("little guy made you smile", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

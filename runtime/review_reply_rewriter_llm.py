@@ -33,15 +33,19 @@ from review_reply_rewriter_sanity import evaluate_sanity
 DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
 DUCK_AGENT_ROOT = DUCK_OPS_ROOT.parent / "duckAgent"
 LLM_CALL_LOG_PATH = DUCK_OPS_ROOT / "state" / "llm_call_log.jsonl"
+REVIEW_REPLY_FEEDBACK_PATH = DUCK_OPS_ROOT / "state" / "review_reply_feedback.jsonl"
 
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_PROVIDER = "openai"
 DEFAULT_TIMEOUT_SECONDS = 12.0
 MAX_TOKENS = 220  # ~3 sentence reply
+MAX_FEW_SHOT_EXAMPLES = 4
+MAX_FEW_SHOT_REVIEW_CHARS = 300
+MAX_FEW_SHOT_REPLY_CHARS = 320
 
 
 PROMPT_TEMPLATE = """You are drafting a public reply to a customer review for myJeepDuck, a small business that 3D-prints custom rubber-duck figurines. You are NOT a generic AI assistant; you are the shop owner replying.
-
+{few_shot_block}
 Customer review (verbatim):
 \"\"\"{review_text}\"\"\"
 
@@ -54,13 +58,74 @@ Operator's feedback for the rewrite:
 Constraints:
 - 1-3 sentences total, roughly 30-90 words.
 - Echo at least one specific word or detail from the review (e.g., a recipient, a feature mentioned, an emotion expressed).
-- Sound like a human shop owner — warm, specific, grounded.
+- Sound like a human shop owner — warm, specific, grounded. Match the voice of the approved examples above when available.
 - Never invent facts. Do not promise discounts, future products, refunds, or replacements unless the operator's feedback explicitly says to.
 - No emojis. No URLs. No template placeholders like [NAME] or {{customer_name}}.
 - Do not address the customer by name.
 - Do not say "as an AI" or otherwise reveal the rewrite is automated.
 
 Return ONLY the reply text, no preamble, no quotation marks around the reply."""
+
+
+def _load_approved_examples(*, limit: int = MAX_FEW_SHOT_EXAMPLES) -> list[dict[str, str]]:
+    """Read the most recent operator-approved review_reply rewrites from the
+    feedback log. Each example provides the LLM with a (review, approved reply)
+    pair grounded in the operator's own voice. Returns empty list if the log
+    doesn't exist yet (cold start) or no entries qualify.
+    """
+    if not REVIEW_REPLY_FEEDBACK_PATH.exists():
+        return []
+    examples: list[dict[str, str]] = []
+    seen_reviews: set[str] = set()
+    try:
+        # Read tail of file first by reading all and reversing — file stays tiny.
+        with REVIEW_REPLY_FEEDBACK_PATH.open("r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    for raw in reversed(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if entry.get("operator_action") != "approve":
+            continue
+        review = (entry.get("customer_review") or "").strip()
+        approved = (entry.get("approved_reply_text") or "").strip()
+        if not review or not approved:
+            continue
+        if len(review) > MAX_FEW_SHOT_REVIEW_CHARS:
+            continue
+        if len(approved) > MAX_FEW_SHOT_REPLY_CHARS:
+            continue
+        # Dedupe by review text (same customer review approved multiple times → keep newest)
+        review_key = review.lower()
+        if review_key in seen_reviews:
+            continue
+        seen_reviews.add(review_key)
+        examples.append({"review": review, "reply": approved})
+        if len(examples) >= limit:
+            break
+    return examples
+
+
+def _format_few_shot_block(examples: list[dict[str, str]]) -> str:
+    if not examples:
+        return ""
+    blocks = []
+    for ex in examples:
+        blocks.append(
+            "Customer review:\n\"\"\"" + ex["review"].strip() + "\"\"\"\n"
+            "Approved reply:\n\"\"\"" + ex["reply"].strip() + "\"\"\""
+        )
+    return (
+        "\nApproved past examples of the myJeepDuck voice (operator approved these — match this tone):\n\n"
+        + "\n\n".join(blocks)
+        + "\n"
+    )
 
 
 def _has_dotenv_loaded() -> bool:
@@ -108,10 +173,13 @@ def _format_hint(hint: str | None) -> str:
 
 
 def _build_prompt(review_text: str, draft_text: str, hint: str | None) -> str:
+    examples = _load_approved_examples()
+    few_shot_block = _format_few_shot_block(examples)
     return PROMPT_TEMPLATE.format(
         review_text=(review_text or "").strip() or "(no review text captured)",
         draft_text=(draft_text or "").strip() or "(no draft captured)",
         hint_text=_format_hint(hint),
+        few_shot_block=few_shot_block,
     )
 
 
@@ -245,12 +313,15 @@ def generate_rewrite_via_llm(
         _log_llm_call({
             "at": _now_iso(),
             "artifact_id": item.get("artifact_id"),
+            "kind": "review_reply_rewrite",
             "provider": provider,
             "model": model,
             "outcome": "api_failure",
             "error": (api_response or {}).get("error"),
             "body": (api_response or {}).get("body"),
             "elapsed_seconds": (api_response or {}).get("elapsed_seconds"),
+            "prompt": prompt,
+            "hint": (hint or "").strip(),
         })
         return None
 
@@ -258,9 +329,10 @@ def generate_rewrite_via_llm(
     sanity = evaluate_sanity(text, review_text=review_text)
     usage = api_response.get("usage") or {}
 
-    _log_llm_call({
+    log_entry: dict[str, Any] = {
         "at": _now_iso(),
         "artifact_id": item.get("artifact_id"),
+        "kind": "review_reply_rewrite",
         "provider": provider,
         "model": model,
         "outcome": "ok" if sanity["passed"] else "sanity_failed",
@@ -269,8 +341,16 @@ def generate_rewrite_via_llm(
         "completion_tokens": usage.get("completion_tokens"),
         "elapsed_seconds": api_response.get("elapsed_seconds"),
         "hint_present": bool((hint or "").strip()),
+        "hint": (hint or "").strip(),
         "output_length": len(text),
-    })
+        "prompt": prompt,
+    }
+    if sanity["passed"]:
+        log_entry["output_text"] = text
+    else:
+        # Capture failed output too so we can audit why sanity rejected it.
+        log_entry["rejected_output_text"] = text
+    _log_llm_call(log_entry)
 
     if not sanity["passed"]:
         return None
