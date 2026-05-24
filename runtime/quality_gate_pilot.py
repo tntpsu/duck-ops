@@ -39,7 +39,7 @@ OUTPUT_DIR = ROOT / "output"
 PUBLISH_CANDIDATES_PATH = NORMALIZED_DIR / "publish_candidates.json"
 DECISION_HISTORY_PATH = STATE_DIR / "decision_history.jsonl"
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
-EVALUATOR_VERSION = 8
+EVALUATOR_VERSION = 9
 QUALITY_GATE_PENDING_REVIEW_STATUSES = {"pending"}
 QUALITY_GATE_REVISION_REVIEW_STATUSES = {"needs_revision"}
 QUALITY_GATE_RESOLVED_REVIEW_STATUSES = {"approved", "rejected", "archived", "overridden"}
@@ -1085,13 +1085,19 @@ def evaluate_review_reply(candidate: dict[str, Any], age_days: int | None, priva
         reasoning.extend(f"Fail-closed trigger: {message}" for message in fail_closed)
 
     flow = "reviews_reply_private" if private_mode else "reviews_reply_positive"
+    # Flow-level default suggestions are generic style guidance. Including them on
+    # publish_ready items confuses the operator (boilerplate appears under
+    # "Why OpenClaw wants revision" labels in the Decision Inbox). Only attach
+    # defaults when the item actually needs revision so per-item-specific
+    # suggestions can speak for themselves on clean items.
+    flow_defaults = default_suggestions(flow) if decision != "publish_ready" else []
     return {
         "decision": decision,
         "score": score,
         "confidence": confidence,
         "priority": priority,
         "reasoning": reasoning,
-        "improvement_suggestions": list(dict.fromkeys(suggestions + default_suggestions(flow))),
+        "improvement_suggestions": list(dict.fromkeys(suggestions + flow_defaults)),
         "component_scores": {
             "support": support,
             "brand_fit": brand_fit,

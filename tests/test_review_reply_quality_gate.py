@@ -32,6 +32,44 @@ class ReviewReplyQualityGateTests(unittest.TestCase):
         self.assertEqual(outcome["decision"], "publish_ready")
         self.assertGreaterEqual(outcome["score"], 78)
 
+    def test_publish_ready_reply_has_no_boilerplate_style_notes(self) -> None:
+        outcome = quality_gate_pilot.evaluate_review_reply(
+            {
+                "source_refs": ["daily-summary"],
+                "candidate_summary": {
+                    "customer_review": "Definitely a high quality item! I absolutely love it!",
+                    "body": "It's wonderful to hear that you absolutely love it! I'm glad the quality came through clearly.",
+                },
+            },
+            age_days=0,
+            private_mode=False,
+        )
+
+        self.assertEqual(outcome["decision"], "publish_ready")
+        # publish_ready items must not carry the generic flow-level style
+        # guidance — see REVIEW_REPLY_INBOX_UX_PLAN.md Slice H.
+        for suggestion in outcome["improvement_suggestions"]:
+            self.assertNotIn("Keep public replies short", suggestion)
+            self.assertNotIn("Avoid overlong responses", suggestion)
+
+    def test_needs_revision_reply_keeps_flow_default_guidance(self) -> None:
+        outcome = quality_gate_pilot.evaluate_review_reply(
+            {
+                "source_refs": ["daily-summary"],
+                "candidate_summary": {
+                    "customer_review": "I thought they were plastic which would have been better.",
+                    "body": "Thanks so much for the kind review! Thanks again for the kind review.",
+                },
+            },
+            age_days=0,
+            private_mode=False,
+        )
+
+        self.assertEqual(outcome["decision"], "needs_revision")
+        # For revision-needed items, defaults still flow as helpful starting guidance.
+        joined = " ".join(outcome["improvement_suggestions"])
+        self.assertIn("Keep public replies short", joined)
+
     def test_public_reply_with_expectation_mismatch_needs_rewrite(self) -> None:
         outcome = quality_gate_pilot.evaluate_review_reply(
             {
