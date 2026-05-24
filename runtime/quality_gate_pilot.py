@@ -39,7 +39,7 @@ OUTPUT_DIR = ROOT / "output"
 PUBLISH_CANDIDATES_PATH = NORMALIZED_DIR / "publish_candidates.json"
 DECISION_HISTORY_PATH = STATE_DIR / "decision_history.jsonl"
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
-EVALUATOR_VERSION = 11
+EVALUATOR_VERSION = 12
 
 
 REVIEW_REPLY_SCORE_COMPONENT_MAX: dict[str, int] = {
@@ -1154,19 +1154,58 @@ def evaluate_review_reply(candidate: dict[str, Any], age_days: int | None, priva
 
     flow = "reviews_reply_private" if private_mode else "reviews_reply_positive"
 
+    component_scores_for_reason = {
+        "support": support,
+        "brand_fit": brand_fit,
+        "clarity": clarity,
+        "differentiation": differentiation,
+        "conversion_quality": conversion,
+        "timing_fit": timing,
+    }
+
+    # LLM gray-zone tie-breaker (Slice L). The rule-based scorer lands
+    # word-rich custom-build reviews like the nephew review in
+    # needs_revision because lexical_overlap is a brittle proxy for
+    # semantic alignment. Ask the LLM for a second opinion ONLY in the
+    # 60-77 gray zone; let it override the decision when it says the
+    # draft is publish-ready.
+    llm_score_verdict: dict[str, Any] | None = None
+    try:
+        from review_reply_scorer_llm import evaluate_gray_zone
+        if decision == "needs_revision" and not fail_closed:
+            llm_score_verdict = evaluate_gray_zone(
+                review_text=customer_review,
+                draft_text=response,
+                score=score,
+                component_scores=component_scores_for_reason,
+                fail_closed=fail_closed,
+                artifact_id=candidate.get("artifact_id"),
+            )
+    except Exception:
+        llm_score_verdict = None
+
+    if llm_score_verdict and llm_score_verdict.get("verdict") == "yes":
+        decision = "publish_ready"
+        reasoning.append(
+            f"LLM gray-zone tie-breaker overrode rule-based needs_revision: {llm_score_verdict.get('reason', '').strip()}"
+        )
+    elif llm_score_verdict and llm_score_verdict.get("verdict") == "no":
+        reason = (llm_score_verdict.get("reason") or "").strip()
+        if reason:
+            suggestions.insert(0, reason)
+            reasoning.append(f"LLM gray-zone tie-breaker confirmed needs_revision: {reason}")
+
     # Score-band gray-zone: needs_revision with no fail_closed, no contract
     # failures, and no per-item suggestion. Operator only sees generic style
     # guidance and can't tell *why* it was flagged. Surface the weakest score
-    # component as a concrete reason.
-    if decision == "needs_revision" and not fail_closed and not contract_failures and not suggestions:
-        component_scores_for_reason = {
-            "support": support,
-            "brand_fit": brand_fit,
-            "clarity": clarity,
-            "differentiation": differentiation,
-            "conversion_quality": conversion,
-            "timing_fit": timing,
-        }
+    # component as a concrete reason. Skipped when the LLM tie-breaker
+    # already added its own reason.
+    if (
+        decision == "needs_revision"
+        and not fail_closed
+        and not contract_failures
+        and not suggestions
+    ):
         weakest_reason = _weakest_review_reply_score_reason(component_scores_for_reason)
         if weakest_reason:
             suggestions.insert(0, weakest_reason)

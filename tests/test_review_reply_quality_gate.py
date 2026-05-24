@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 import json
@@ -16,6 +17,21 @@ import phase1_observer
 
 
 class ReviewReplyQualityGateTests(unittest.TestCase):
+    """Tests for the deterministic rule-based scorer. The LLM gray-zone
+    scorer is explicitly disabled so these tests stay deterministic
+    regardless of whether OPENAI_API_KEY is set locally. LLM-scorer tests
+    live in test_review_reply_scorer_llm.py."""
+
+    def setUp(self) -> None:
+        self._prev_scorer = os.environ.get("DUCK_REVIEW_SCORER_PROVIDER")
+        os.environ["DUCK_REVIEW_SCORER_PROVIDER"] = "disabled"
+
+    def tearDown(self) -> None:
+        if self._prev_scorer is None:
+            os.environ.pop("DUCK_REVIEW_SCORER_PROVIDER", None)
+        else:
+            os.environ["DUCK_REVIEW_SCORER_PROVIDER"] = self._prev_scorer
+
     def test_warm_specific_public_reply_can_publish_without_literal_thanks(self) -> None:
         outcome = quality_gate_pilot.evaluate_review_reply(
             {
