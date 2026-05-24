@@ -22,6 +22,7 @@ from engineering_governance_digest import (
     build_engineering_governance_digest,
     send_engineering_governance_digest_email,
 )
+from profit_intel import write_profit_intel
 from repo_ci_status import build_repo_ci_status
 from reliability_review import build_reliability_review
 from roi_triage import build_roi_triage
@@ -263,6 +264,25 @@ def build_operator_surface_refresh(
         }
 
     if not append_step(_run_step("roi_triage", roi_step)):
+        return _write_refresh_payload(
+            steps=steps,
+            send_email=send_email,
+            run_repo_ci=run_repo_ci,
+            repo_names=repo_names,
+            write_outputs=write_outputs,
+        )
+
+    def profit_intel_step() -> dict[str, Any]:
+        payload = write_profit_intel()
+        return {
+            "available": payload.get("available"),
+            "data_as_of": payload.get("data_as_of"),
+            "today_action": (payload.get("email_status") or {}).get("today_action") if payload.get("available") else None,
+            "anomaly_triggered": (payload.get("anomaly") or {}).get("triggered") if payload.get("available") else None,
+            "reason": payload.get("reason") if not payload.get("available") else None,
+        }
+
+    if not append_step(_run_step("profit_intel", profit_intel_step)):
         return _write_refresh_payload(
             steps=steps,
             send_email=send_email,

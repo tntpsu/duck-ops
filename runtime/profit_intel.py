@@ -159,6 +159,40 @@ def _trend_7d(receipts: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _per_day_row(receipt: dict[str, Any]) -> dict[str, Any]:
+    metadata = receipt.get("metadata") or {}
+    anomaly = metadata.get("anomaly") if isinstance(metadata.get("anomaly"), dict) else {}
+    return {
+        "date": receipt.get("_run_date"),
+        "orders": metadata.get("total_orders"),
+        "revenue": metadata.get("total_revenue"),
+        "net_profit": metadata.get("total_net_profit"),
+        "margin": metadata.get("overall_margin"),
+        "channels": _channel_breakdown(metadata),
+        "is_anomaly": bool(anomaly.get("triggered")),
+        "anomaly_reasons": list(anomaly.get("reasons") or []),
+    }
+
+
+def _channel_mix_window(receipts: list[dict[str, Any]]) -> dict[str, Any]:
+    shopify_orders = 0
+    etsy_orders = 0
+    shopify_revenue = 0.0
+    etsy_revenue = 0.0
+    for r in receipts:
+        meta = r.get("metadata") or {}
+        shopify_orders += int(meta.get("shopify_orders") or 0)
+        etsy_orders += int(meta.get("etsy_orders") or 0)
+        shopify_revenue += float(meta.get("shopify_revenue") or 0)
+        etsy_revenue += float(meta.get("etsy_revenue") or 0)
+    return {
+        "shopify_orders": shopify_orders,
+        "etsy_orders": etsy_orders,
+        "shopify_revenue": round(shopify_revenue, 2),
+        "etsy_revenue": round(etsy_revenue, 2),
+    }
+
+
 def _read_anomaly(receipt: dict[str, Any]) -> dict[str, Any]:
     metadata = receipt.get("metadata") or {}
     candidate = metadata.get("anomaly")
@@ -284,6 +318,9 @@ def build_profit_intel(*, lookback_days: int = 30, today: date | None = None) ->
         "trend_7d": _trend_7d(receipts),
         "anomaly": _read_anomaly(latest),
         "email_status": _email_status(today_receipt, latest, today_iso),
+        "per_day": [_per_day_row(r) for r in receipts],
+        "channel_mix_7d": _channel_mix_window(receipts[-7:]),
+        "channel_mix_30d": _channel_mix_window(receipts[-30:]),
         "route": ROUTE,
     }
     if today_receipt is None:
