@@ -19,6 +19,7 @@ from inventory_truth import INVENTORY_TRUTH_MD_PATH, build_inventory_truth
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
 from operator_interface_contracts import build_interface_contract_summary
 from product_concept_queue import PRODUCT_CONCEPT_QUEUE_MD_PATH, build_product_concept_queue
+from profit_intel import PROFIT_INTEL_MD_PATH, build_profit_intel, render_profit_intel_markdown
 from repo_ci_status import REPO_CI_MD_PATH, build_repo_ci_status
 from roi_triage import OUTPUT_MD_PATH as ROI_TRIAGE_MD_PATH
 from roi_triage import STATE_PATH as ROI_TRIAGE_PATH
@@ -1703,6 +1704,18 @@ def _load_scheduler_health_surface() -> dict[str, Any]:
     }
 
 
+def _load_profit_intel_surface() -> dict[str, Any]:
+    try:
+        payload = build_profit_intel()
+    except Exception:
+        return {"available": False, "reason": "load_error", "path": str(PROFIT_INTEL_MD_PATH)}
+    if not isinstance(payload, dict):
+        return {"available": False, "reason": "load_error", "path": str(PROFIT_INTEL_MD_PATH)}
+    enriched = dict(payload)
+    enriched["path"] = str(PROFIT_INTEL_MD_PATH)
+    return enriched
+
+
 def _load_dependency_health_surface() -> dict[str, Any]:
     try:
         payload = build_dependency_health(write_outputs=False)
@@ -2850,6 +2863,7 @@ def build_business_operator_desk(
     repo_ci_surface = _load_repo_ci_surface()
     scheduler_health_surface = _load_scheduler_health_surface()
     dependency_health_surface = _load_dependency_health_surface()
+    profit_intel_surface = _load_profit_intel_surface()
     interface_contract_surface = _load_interface_contract_surface()
     maintenance_freshness_surface = _load_maintenance_freshness_surface(
         learning_surface=learning_surface,
@@ -3052,7 +3066,9 @@ def build_business_operator_desk(
             "product_concept_queue": list(product_concept_surface.get("items") or [])[:6],
             "seo_outcomes": (list(seo_outcomes.get("attention_items") or []) or list(seo_outcomes.get("recent_wins") or []))[:4],
             "outcome_learning": list(outcome_learning_surface.get("items") or [])[:6],
+            "profit_intel": profit_intel_surface,
         },
+        "profit_intel_surface": profit_intel_surface,
     }
 
 
@@ -3398,6 +3414,12 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                 )
                 if item.get("summary"):
                     lines.append(f"    Why: {_trim_text(item.get('summary'), 160)}")
+    profit_intel_surface = payload.get("profit_intel_surface") or sections.get("profit_intel") or {}
+    if not profit_intel_surface or not isinstance(profit_intel_surface, dict):
+        profit_intel_surface = _load_profit_intel_surface()
+    profit_intel_md = render_profit_intel_markdown(profit_intel_surface).rstrip("\n")
+    lines.extend(["", profit_intel_md])
+
     lines.extend([
         "",
         "## Scheduler Health",

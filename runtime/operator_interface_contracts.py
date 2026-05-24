@@ -35,6 +35,50 @@ SHOPIFY_OPEN_ORDERS = STATE_DIR / "shopify_open_orders_snapshot.json"
 CUSTOMER_ACTION_PACKETS_DIR = OUTPUT_DIR / "customer_intelligence"
 
 
+PROFIT_ANOMALY_REASONS = (
+    "net_negative",
+    "revenue_below_30d_floor",
+    "orders_zero",
+    "etsy_total_data_loss",
+)
+
+PROFIT_ANOMALY_CONFIDENCE_VALUES = ("low", "normal")
+
+PROFIT_ANOMALY_METADATA_CONTRACT = {
+    "required_keys": ["triggered", "reasons", "sanity_blocked", "confidence"],
+    "field_types": {
+        "triggered": bool,
+        "reasons": list,
+        "sanity_blocked": bool,
+        "confidence": str,
+    },
+    "reasons_enum": PROFIT_ANOMALY_REASONS,
+    "confidence_enum": PROFIT_ANOMALY_CONFIDENCE_VALUES,
+}
+
+
+def validate_profit_anomaly_metadata(payload: Any) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return False, ["payload is not a dict"]
+    for key in PROFIT_ANOMALY_METADATA_CONTRACT["required_keys"]:
+        if key not in payload:
+            errors.append(f"missing required key: {key}")
+    if errors:
+        return False, errors
+    expected_types = PROFIT_ANOMALY_METADATA_CONTRACT["field_types"]
+    for key, expected in expected_types.items():
+        if not isinstance(payload[key], expected):
+            errors.append(f"{key} is {type(payload[key]).__name__}, expected {expected.__name__}")
+    if isinstance(payload.get("reasons"), list):
+        for reason in payload["reasons"]:
+            if reason not in PROFIT_ANOMALY_REASONS:
+                errors.append(f"unknown anomaly reason: {reason}")
+    if payload.get("confidence") and payload["confidence"] not in PROFIT_ANOMALY_CONFIDENCE_VALUES:
+        errors.append(f"unknown confidence value: {payload['confidence']}")
+    return (not errors), errors
+
+
 def load_json_file(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
