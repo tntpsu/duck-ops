@@ -39,7 +39,59 @@ OUTPUT_DIR = ROOT / "output"
 PUBLISH_CANDIDATES_PATH = NORMALIZED_DIR / "publish_candidates.json"
 DECISION_HISTORY_PATH = STATE_DIR / "decision_history.jsonl"
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
-EVALUATOR_VERSION = 10
+EVALUATOR_VERSION = 11
+
+
+REVIEW_REPLY_SCORE_COMPONENT_MAX: dict[str, int] = {
+    "support": 20,
+    "brand_fit": 20,
+    "clarity": 15,
+    "differentiation": 15,
+    "conversion_quality": 15,
+    "timing_fit": 10,
+}
+
+REVIEW_REPLY_SCORE_COMPONENT_REASONS: dict[str, str] = {
+    "support": "The customer review or draft response was missing or sparse — make sure both are captured before approving.",
+    "brand_fit": "Reply tone could be warmer or feel more like the way myJeepDuck talks to customers.",
+    "clarity": "Reply is too short, too long, or missing case-specific detail that grounds the response.",
+    "differentiation": "Reply is generic — it doesn't echo back what the customer specifically said. Try pulling a few of their own words into the response.",
+    "conversion_quality": "Reply lacks the warmth, recommendation, or resolution strength a 5-star reply should carry.",
+    "timing_fit": "Review is aging — replies land best within 1-3 days of the review arriving.",
+}
+
+
+def _weakest_review_reply_score_reason(component_scores: dict | None) -> str | None:
+    """Pick the weakest score component on a needs_revision review_reply item.
+
+    Items can land in the 60-77 score band ("needs revision") without any
+    fail_closed trigger, contract failure, or specific suggestion attached.
+    Operators see only generic style guidance from default_suggestions, and
+    can't tell *why* the item was flagged. Surface the component that's
+    pulling the score down so the operator gets a concrete reason.
+
+    See REVIEW_REPLY_INBOX_UX_PLAN.md Slice H.5.
+    """
+    if not isinstance(component_scores, dict):
+        return None
+    ratios: list[tuple[float, str]] = []
+    for key, max_val in REVIEW_REPLY_SCORE_COMPONENT_MAX.items():
+        actual = component_scores.get(key)
+        if actual is None:
+            continue
+        try:
+            ratio = float(actual) / float(max_val)
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+        ratios.append((ratio, key))
+    if not ratios:
+        return None
+    ratios.sort()
+    worst_ratio, worst_key = ratios[0]
+    # Only surface a reason when the component is meaningfully below par.
+    if worst_ratio >= 0.7:
+        return None
+    return REVIEW_REPLY_SCORE_COMPONENT_REASONS.get(worst_key)
 
 
 def _flow_improvement_suggestions(specifics: list[str], flow: str, decision: str) -> list[str]:
@@ -1101,6 +1153,24 @@ def evaluate_review_reply(candidate: dict[str, Any], age_days: int | None, priva
         reasoning.extend(f"Fail-closed trigger: {message}" for message in fail_closed)
 
     flow = "reviews_reply_private" if private_mode else "reviews_reply_positive"
+
+    # Score-band gray-zone: needs_revision with no fail_closed, no contract
+    # failures, and no per-item suggestion. Operator only sees generic style
+    # guidance and can't tell *why* it was flagged. Surface the weakest score
+    # component as a concrete reason.
+    if decision == "needs_revision" and not fail_closed and not contract_failures and not suggestions:
+        component_scores_for_reason = {
+            "support": support,
+            "brand_fit": brand_fit,
+            "clarity": clarity,
+            "differentiation": differentiation,
+            "conversion_quality": conversion,
+            "timing_fit": timing,
+        }
+        weakest_reason = _weakest_review_reply_score_reason(component_scores_for_reason)
+        if weakest_reason:
+            suggestions.insert(0, weakest_reason)
+
     return {
         "decision": decision,
         "score": score,

@@ -52,6 +52,57 @@ class ReviewReplyQualityGateTests(unittest.TestCase):
             self.assertNotIn("Keep public replies short", suggestion)
             self.assertNotIn("Avoid overlong responses", suggestion)
 
+    def test_gray_zone_needs_revision_surfaces_weakest_component_reason(self) -> None:
+        # Item 4 in Phil's live queue: positive sentiment, no policy failures,
+        # but the draft "Thank you so much for your kind words!" doesn't echo
+        # anything from "Once again, an amazing job. I ordered ducks for my
+        # nephew with his facial features..." — score lands in 60-77 gray zone
+        # with low differentiation. See REVIEW_REPLY_INBOX_UX_PLAN.md Slice H.5.
+        outcome = quality_gate_pilot.evaluate_review_reply(
+            {
+                "source_refs": ["daily-summary"],
+                "candidate_summary": {
+                    "customer_review": (
+                        "Once again, an amazing job. I ordered ducks for my nephew with his "
+                        "facial features and they turned out perfect."
+                    ),
+                    "body": (
+                        "Thank you so much for your kind words! I'm thrilled to hear that the "
+                        "ducks captured what you were hoping for."
+                    ),
+                },
+            },
+            age_days=0,
+            private_mode=False,
+        )
+
+        self.assertEqual(outcome["decision"], "needs_revision")
+        self.assertEqual(outcome["fail_closed"], [])
+        suggestions_text = " ".join(outcome["improvement_suggestions"])
+        # The weakest-component reason should land FIRST in suggestions, before
+        # the generic flow-default style notes.
+        self.assertIn("Reply is generic", outcome["improvement_suggestions"][0])
+        self.assertIn("differentiation", outcome["component_scores"])
+
+    def test_publish_ready_reply_does_not_surface_score_component_reason(self) -> None:
+        outcome = quality_gate_pilot.evaluate_review_reply(
+            {
+                "source_refs": ["daily-summary"],
+                "candidate_summary": {
+                    "customer_review": "Definitely a high quality item! I absolutely love it!",
+                    "body": "It's wonderful to hear that you absolutely love it! I'm glad the quality came through clearly.",
+                },
+            },
+            age_days=0,
+            private_mode=False,
+        )
+
+        self.assertEqual(outcome["decision"], "publish_ready")
+        # Score-component reasons should never appear on publish_ready items.
+        joined = " ".join(outcome["improvement_suggestions"])
+        for reason in quality_gate_pilot.REVIEW_REPLY_SCORE_COMPONENT_REASONS.values():
+            self.assertNotIn(reason, joined)
+
     def test_needs_revision_reply_keeps_flow_default_guidance(self) -> None:
         outcome = quality_gate_pilot.evaluate_review_reply(
             {
