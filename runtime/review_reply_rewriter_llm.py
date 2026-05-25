@@ -21,23 +21,25 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from llm_call_helpers import (
+    call_openai,
+    extract_text,
+    log_llm_call,
+    now_iso,
+    try_load_duckagent_env,
+    DEFAULT_MODEL,
+    DEFAULT_TIMEOUT_SECONDS,
+)
 from review_reply_rewriter_sanity import evaluate_sanity
 
 
 DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
-DUCK_AGENT_ROOT = DUCK_OPS_ROOT.parent / "duckAgent"
-LLM_CALL_LOG_PATH = DUCK_OPS_ROOT / "state" / "llm_call_log.jsonl"
 REVIEW_REPLY_FEEDBACK_PATH = DUCK_OPS_ROOT / "state" / "review_reply_feedback.jsonl"
 
-DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_PROVIDER = "openai"
-DEFAULT_TIMEOUT_SECONDS = 12.0
 MAX_TOKENS = 220  # ~3 sentence reply
 MAX_FEW_SHOT_EXAMPLES = 4
 MAX_FEW_SHOT_REVIEW_CHARS = 300
@@ -128,31 +130,6 @@ def _format_few_shot_block(examples: list[dict[str, str]]) -> str:
     )
 
 
-def _has_dotenv_loaded() -> bool:
-    return bool(os.getenv("OPENAI_API_KEY"))
-
-
-def _try_load_env() -> None:
-    if _has_dotenv_loaded():
-        return
-    env_path = DUCK_AGENT_ROOT / ".env"
-    try:
-        from dotenv import load_dotenv  # type: ignore
-    except Exception:
-        load_dotenv = None  # type: ignore[assignment]
-    if load_dotenv is not None:
-        load_dotenv(env_path, override=False)
-        return
-    if not env_path.exists():
-        return
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-
 def _provider() -> str:
     return os.environ.get("DUCK_REVIEW_REWRITE_PROVIDER", DEFAULT_PROVIDER).strip().lower()
 
@@ -183,62 +160,13 @@ def _build_prompt(review_text: str, draft_text: str, hint: str | None) -> str:
     )
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat()
-
-
-def _log_llm_call(payload: dict[str, Any]) -> None:
-    LLM_CALL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with LLM_CALL_LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-
-
-def _call_openai(prompt: str, *, model: str, timeout: float) -> dict[str, Any] | None:
-    """Return the parsed OpenAI chat-completion response, or None on failure."""
-    import requests  # local import keeps this module importable in test envs without requests
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "user", "content": prompt},
-        ],
-        "max_tokens": MAX_TOKENS,
-        "temperature": 0.5,
-    }
-    started = time.time()
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=timeout,
-        )
-    except Exception as exc:
-        return {"error": f"request_failed:{type(exc).__name__}:{exc}", "elapsed_seconds": time.time() - started}
-    elapsed = time.time() - started
-    if response.status_code >= 400:
-        return {"error": f"http_{response.status_code}", "body": response.text[:500], "elapsed_seconds": elapsed}
-    try:
-        return {**response.json(), "elapsed_seconds": elapsed}
-    except Exception as exc:
-        return {"error": f"json_decode_failed:{type(exc).__name__}:{exc}", "elapsed_seconds": elapsed}
-
-
-def _extract_text(api_response: dict[str, Any]) -> str:
-    choices = api_response.get("choices") or []
-    if not choices:
-        return ""
-    message = choices[0].get("message") or {}
-    return str(message.get("content") or "").strip()
+# Test/mock-compatible aliases for the shared helpers. Existing tests patch
+# `_call_openai` on this module; preserve that attachment after the refactor.
+_call_openai = call_openai
+_log_llm_call = log_llm_call
+_now_iso = now_iso
+_try_load_env = try_load_duckagent_env
+_extract_text = extract_text
 
 
 def _clean_output(text: str) -> str:

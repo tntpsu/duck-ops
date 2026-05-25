@@ -23,20 +23,22 @@ OS producer in K.4 surfaces it alongside the rewriter health.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
-import time
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
+from llm_call_helpers import (
+    call_openai,
+    extract_text,
+    log_llm_call,
+    now_iso,
+    try_load_duckagent_env,
+    DEFAULT_MODEL,
+)
 
-DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
-DUCK_AGENT_ROOT = DUCK_OPS_ROOT.parent / "duckAgent"
-LLM_CALL_LOG_PATH = DUCK_OPS_ROOT / "state" / "llm_call_log.jsonl"
 
-DEFAULT_MODEL = "gpt-4o-mini"
+from pathlib import Path
+
 DEFAULT_PROVIDER = "openai"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_TOKENS = 120
@@ -44,9 +46,15 @@ MAX_TOKENS = 120
 GRAY_ZONE_MIN = 60
 GRAY_ZONE_MAX = 77  # 78 = publish_ready threshold, so gray = [60, 77]
 
+DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
+REVIEW_REPLY_FEEDBACK_PATH = DUCK_OPS_ROOT / "state" / "review_reply_feedback.jsonl"
+MAX_FEW_SHOT_PER_LABEL = 2  # 2 approve examples + 2 reject examples
+MAX_FEW_SHOT_REVIEW_CHARS = 300
+MAX_FEW_SHOT_REPLY_CHARS = 320
+
 
 PROMPT_TEMPLATE = """You are a quality reviewer for myJeepDuck, a small business that 3D-prints custom rubber-duck figurines. The owner replies to every customer review personally — your job is to decide whether a specific draft reply is good enough to publish as-is or needs more work.
-
+{few_shot_block}
 Customer review (verbatim):
 \"\"\"{review_text}\"\"\"
 
@@ -66,6 +74,8 @@ A draft "needs revision" when:
   - It overpromises or invents facts.
   - It's the wrong size for the review (overlong vs short, or vice versa).
 
+Use the operator's past decisions above as calibration — match their bar.
+
 Reply in this exact format:
   Line 1: just the word "yes" or "no"
   Line 2: a one-sentence reason (under 200 chars), naming the specific quality signal you used.
@@ -73,29 +83,89 @@ Reply in this exact format:
 No preamble, no extra lines."""
 
 
-def _has_dotenv_loaded() -> bool:
-    return bool(os.getenv("OPENAI_API_KEY"))
+def _load_feedback_calibration_examples(
+    *,
+    per_label: int = MAX_FEW_SHOT_PER_LABEL,
+) -> dict[str, list[dict[str, str]]]:
+    """Read recent operator-labeled review_reply decisions from the feedback log
+    and return calibration examples grouped by label.
 
+    Returns:
+        {"approved": [{"review": ..., "draft": ...}, ...],
+         "rejected": [{"review": ..., "draft": ...}, ...]}
 
-def _try_load_env() -> None:
-    if _has_dotenv_loaded():
-        return
-    env_path = DUCK_AGENT_ROOT / ".env"
+    Approved examples teach the LLM the operator's "publish_ready" bar.
+    Rejected examples (discard / needs_changes) teach what the operator
+    sends back. Each label is independently capped at `per_label` to keep
+    the prompt bounded.
+    """
+    out: dict[str, list[dict[str, str]]] = {"approved": [], "rejected": []}
+    if not REVIEW_REPLY_FEEDBACK_PATH.exists():
+        return out
+    seen_reviews: set[str] = set()
     try:
-        from dotenv import load_dotenv  # type: ignore
-    except Exception:
-        load_dotenv = None  # type: ignore[assignment]
-    if load_dotenv is not None:
-        load_dotenv(env_path, override=False)
-        return
-    if not env_path.exists():
-        return
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        with REVIEW_REPLY_FEEDBACK_PATH.open("r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return out
+    for raw in reversed(lines):
+        line = raw.strip()
+        if not line:
             continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        try:
+            import json
+            entry = json.loads(line)
+        except (ValueError, Exception):
+            continue
+        action = entry.get("operator_action")
+        review = (entry.get("customer_review") or "").strip()
+        draft = (entry.get("draft_reply") or "").strip()
+        if not review or not draft:
+            continue
+        if len(review) > MAX_FEW_SHOT_REVIEW_CHARS or len(draft) > MAX_FEW_SHOT_REPLY_CHARS:
+            continue
+        review_key = review.lower()
+        if review_key in seen_reviews:
+            continue
+        if action == "approve" and len(out["approved"]) < per_label:
+            out["approved"].append({"review": review, "draft": draft})
+            seen_reviews.add(review_key)
+        elif action in {"discard", "needs_changes"} and len(out["rejected"]) < per_label:
+            out["rejected"].append({"review": review, "draft": draft})
+            seen_reviews.add(review_key)
+        if len(out["approved"]) >= per_label and len(out["rejected"]) >= per_label:
+            break
+    return out
+
+
+def _format_few_shot_block(examples: dict[str, list[dict[str, str]]]) -> str:
+    approved = examples.get("approved") or []
+    rejected = examples.get("rejected") or []
+    if not approved and not rejected:
+        return ""
+    parts = ["\nOperator's recent calibration (use this to match their judgment bar):\n"]
+    for ex in approved:
+        parts.append(
+            "Operator APPROVED this draft as publish-ready:\n"
+            "Customer review:\n\"\"\"" + ex["review"].strip() + "\"\"\"\n"
+            "Draft reply:\n\"\"\"" + ex["draft"].strip() + "\"\"\""
+        )
+    for ex in rejected:
+        parts.append(
+            "Operator sent THIS DRAFT BACK (discard or needs_changes):\n"
+            "Customer review:\n\"\"\"" + ex["review"].strip() + "\"\"\"\n"
+            "Draft reply:\n\"\"\"" + ex["draft"].strip() + "\"\"\""
+        )
+    parts.append("")  # trailing blank line for prompt readability
+    return "\n\n".join(parts)
+
+
+# Module-level aliases preserve test patch points after the refactor.
+_call_openai = call_openai
+_log_llm_call = log_llm_call
+_now_iso = now_iso
+_try_load_env = try_load_duckagent_env
+_extract_text = extract_text
 
 
 def _provider() -> str:
@@ -114,58 +184,6 @@ def is_in_gray_zone(score: int, fail_closed: list[Any] | None) -> bool:
     if fail_closed:
         return False
     return GRAY_ZONE_MIN <= score <= GRAY_ZONE_MAX
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat()
-
-
-def _log_llm_call(payload: dict[str, Any]) -> None:
-    LLM_CALL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with LLM_CALL_LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
-
-
-def _call_openai(prompt: str, *, model: str, timeout: float) -> dict[str, Any] | None:
-    import requests
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": MAX_TOKENS,
-        "temperature": 0.2,
-    }
-    started = time.time()
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=timeout,
-        )
-    except Exception as exc:
-        return {"error": f"request_failed:{type(exc).__name__}:{exc}", "elapsed_seconds": time.time() - started}
-    elapsed = time.time() - started
-    if response.status_code >= 400:
-        return {"error": f"http_{response.status_code}", "body": response.text[:500], "elapsed_seconds": elapsed}
-    try:
-        return {**response.json(), "elapsed_seconds": elapsed}
-    except Exception as exc:
-        return {"error": f"json_decode_failed:{type(exc).__name__}:{exc}", "elapsed_seconds": elapsed}
-
-
-def _extract_text(api_response: dict[str, Any]) -> str:
-    choices = api_response.get("choices") or []
-    if not choices:
-        return ""
-    message = choices[0].get("message") or {}
-    return str(message.get("content") or "").strip()
 
 
 def _parse_verdict(text: str) -> dict[str, Any] | None:
@@ -257,11 +275,13 @@ def evaluate_gray_zone(
     component_summary = ", ".join(
         f"{k}={v}" for k, v in (component_scores or {}).items() if v is not None
     ) or "n/a"
+    few_shot_block = _format_few_shot_block(_load_feedback_calibration_examples())
     prompt = PROMPT_TEMPLATE.format(
         review_text=review_text.strip(),
         draft_text=(draft_text or "").strip() or "(no draft captured)",
         score=score,
         component_summary=component_summary,
+        few_shot_block=few_shot_block,
     )
 
     provider = _provider()
