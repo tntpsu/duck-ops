@@ -95,6 +95,34 @@ class ProfitIntelTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def test_desk_load_writes_profit_intel_state_file(self) -> None:
+        """The Business Operator Desk's _load_profit_intel_surface
+        must write state/profit_intel.json — that's the canonical file
+        the OS health tile reads for the data_as_of freshness check.
+
+        If this test fails because someone reverted the wrapper to
+        build_profit_intel() (which only computes in memory), the OS
+        tile will quietly go red ~24h later with no other signal.
+        Re-instate write_profit_intel() in business_operator_desk
+        rather than removing this assertion."""
+        import business_operator_desk as desk
+        _seed_history(self.state_dir, today=self.today, days=20)
+        _write_receipt(
+            self.state_dir,
+            self.today.isoformat(),
+            state="verified",
+            state_reason="report_emailed",
+            metadata=_normal_metadata(),
+        )
+        state_path = self.state_dir / "profit_intel.json"
+        self.assertFalse(state_path.exists(), "fixture should start clean")
+        surface = desk._load_profit_intel_surface()
+        self.assertTrue(surface.get("available"))
+        self.assertTrue(state_path.exists(), "desk loader did not write state file")
+        on_disk = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["available"], surface["available"])
+        self.assertEqual(on_disk["data_as_of"], surface["data_as_of"])
+
     def test_contract_shape_available(self) -> None:
         _seed_history(self.state_dir, today=self.today, days=20)
         _write_receipt(

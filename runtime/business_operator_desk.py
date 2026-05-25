@@ -19,7 +19,7 @@ from inventory_truth import INVENTORY_TRUTH_MD_PATH, build_inventory_truth
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
 from operator_interface_contracts import build_interface_contract_summary
 from product_concept_queue import PRODUCT_CONCEPT_QUEUE_MD_PATH, build_product_concept_queue
-from profit_intel import PROFIT_INTEL_MD_PATH, build_profit_intel, render_profit_intel_markdown
+from profit_intel import PROFIT_INTEL_MD_PATH, build_profit_intel, render_profit_intel_markdown, write_profit_intel
 from repo_ci_status import REPO_CI_MD_PATH, build_repo_ci_status
 from roi_triage import OUTPUT_MD_PATH as ROI_TRIAGE_MD_PATH
 from roi_triage import STATE_PATH as ROI_TRIAGE_PATH
@@ -1705,10 +1705,21 @@ def _load_scheduler_health_surface() -> dict[str, Any]:
 
 
 def _load_profit_intel_surface() -> dict[str, Any]:
+    # Build AND write the canonical state file. The desk producer is
+    # scheduled daily; piggybacking the surface refresh on it removes
+    # the need for a separate launchd job and guarantees the file the
+    # OS health tile reads (state/profit_intel.json) keeps pace with
+    # the desk. If you change this back to build_profit_intel(), the
+    # surface file goes stale and the OS tile reports red ~24h later.
     try:
-        payload = build_profit_intel()
+        payload = write_profit_intel()
     except Exception:
-        return {"available": False, "reason": "load_error", "path": str(PROFIT_INTEL_MD_PATH)}
+        # Fall back to the in-memory build so the desk still renders
+        # if the write fails (disk full, permission glitch, etc.).
+        try:
+            payload = build_profit_intel()
+        except Exception:
+            return {"available": False, "reason": "load_error", "path": str(PROFIT_INTEL_MD_PATH)}
     if not isinstance(payload, dict):
         return {"available": False, "reason": "load_error", "path": str(PROFIT_INTEL_MD_PATH)}
     enriched = dict(payload)
