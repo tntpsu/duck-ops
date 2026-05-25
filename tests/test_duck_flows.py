@@ -98,6 +98,43 @@ class FlowSpecContractTests(unittest.TestCase):
                 f"{name}: None payload was misclassified as published",
             )
 
+    def test_no_ghost_entries(self) -> None:
+        """Every registered flow must declare at least one of:
+        publish-state probe (state_file + probe keys), reply_actions,
+        or handoff_actions. An entry with only a ``name`` field has
+        no effect on any consumer and is dead code waiting to confuse
+        the next reader. This guard converts that mistake into a test
+        failure at PR time."""
+        for name, spec in duck_flows.FLOWS.items():
+            does_something = (
+                spec.has_publish_state()
+                or len(spec.reply_actions) > 0
+                or len(spec.handoff_actions) > 0
+            )
+            self.assertTrue(
+                does_something,
+                f"FLOWS[{name!r}] is a ghost entry — it declares no "
+                f"publish-state probe, no reply_actions, and no "
+                f"handoff_actions, so no consumer reads it. Either "
+                f"add the missing fields or remove the entry.",
+            )
+
+    def test_handoff_target_flow_is_non_empty_when_set(self) -> None:
+        """If a flow declares handoff_target_flow, it must be a
+        non-empty stripped string. The value is a DuckAgent-side name
+        (e.g. reviews_story → 'reviews'), so we can't validate
+        against the registry — but we can catch empty/whitespace
+        typos before they cause silent dispatch fall-throughs."""
+        for name, spec in duck_flows.FLOWS.items():
+            target = spec.handoff_target_flow
+            if not target:
+                continue
+            self.assertIsInstance(target, str)
+            self.assertGreater(
+                len(target.strip()), 0,
+                f"{name}: handoff_target_flow set to whitespace-only string",
+            )
+
     def test_has_publish_state_partitions_correctly(self) -> None:
         """Flows that mutate external services directly without a
         per-run state file (shopify_seo, shopify_draft_activation,
