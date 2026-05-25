@@ -1260,6 +1260,33 @@ def weekly_sale_change_lines(item: dict[str, Any]) -> list[str]:
 
 
 def build_weekly_sale_rewrite_text(item: dict[str, Any], hint: str = "") -> str | None:
+    """LLM-first rewriter for the weekly sale playbook summary.
+
+    Computes the deterministic rule-based summary first (it's the source of
+    truth for the playbook content), then asks the LLM to refine it per the
+    operator's hint. LLM failure or sanity rejection → return the rule-based
+    summary unchanged. Gated by DUCK_WEEKLY_SALE_REWRITE_PROVIDER env var.
+    """
+    rule_based_text = _build_weekly_sale_rewrite_rules(item, hint=hint)
+    if rule_based_text is None:
+        return None
+    try:
+        from weekly_sale_rewriter_llm import generate_weekly_sale_rewrite_via_llm
+        llm_result = generate_weekly_sale_rewrite_via_llm(item, base_text=rule_based_text, hint=hint)
+    except Exception:
+        llm_result = None
+    if llm_result and llm_result.get("text"):
+        return llm_result["text"]
+    return rule_based_text
+
+
+def _build_weekly_sale_rewrite_rules(item: dict[str, Any], hint: str = "") -> str | None:
+    """Deterministic rule-based summary of the weekly sale playbook.
+
+    Used as the canonical source-of-truth feed for the LLM rewriter AND as
+    the fallback when the LLM path is disabled or rejected. Kept inline in
+    review_loop.py because callers expect this module to own the rewrite
+    surface."""
     if str(item.get("flow") or "") != "weekly_sale":
         return None
     sale_playbook = load_weekly_sale_playbook(item.get("run_id"))
@@ -1302,6 +1329,64 @@ def build_weekly_sale_rewrite_text(item: dict[str, Any], hint: str = "") -> str 
 
 
 def build_jeepfact_rewrite_text(item: dict[str, Any], hint: str = "") -> str | None:
+    """Jeepfact rewriter: produces a structured config the downstream pipeline
+    consumes. Rule-based parsing of the hint is the source of truth; the LLM
+    augments it via jeepfact_rewriter_llm when the hint contains free-text
+    instructions the rules can't decode (gated by DUCK_JEEPFACT_REWRITE_PROVIDER).
+    LLM overrides are merged over the rule-based defaults; the LLM never
+    deletes config the rules set."""
+    rule_config = _build_jeepfact_config_rules(item, hint=hint)
+    if rule_config is None:
+        return None
+    llm_overrides: dict[str, Any] | None = None
+    try:
+        from jeepfact_rewriter_llm import generate_jeepfact_config_via_llm
+        llm_result = generate_jeepfact_config_via_llm(item, hint=hint)
+        if llm_result and isinstance(llm_result.get("config"), dict):
+            llm_overrides = llm_result["config"]
+    except Exception:
+        llm_overrides = None
+
+    if llm_overrides:
+        merged: dict[str, Any] = dict(rule_config)
+        for key in ("selection_mode", "hook_style", "caption_tone", "template_policy", "operator_note"):
+            if key in llm_overrides:
+                merged[key] = llm_overrides[key]
+        if "prefer_tags" in llm_overrides:
+            existing = merged.get("prefer_tags") or []
+            merged["prefer_tags"] = sorted(dict.fromkeys(list(existing) + list(llm_overrides["prefer_tags"])))
+        if "avoid_tags" in llm_overrides:
+            existing = merged.get("avoid_tags") or []
+            merged["avoid_tags"] = sorted(dict.fromkeys(list(existing) + list(llm_overrides["avoid_tags"])))
+        rule_config = merged
+
+    return _format_jeepfact_config(rule_config)
+
+
+def _format_jeepfact_config(config: dict[str, Any]) -> str:
+    """Render a jeepfact config dict to the line-based text format the
+    downstream pipeline expects. Order and keys match the original
+    deterministic builder so consumers don't see a shape change."""
+    lines = [
+        "selection_mode: " + str(config.get("selection_mode") or "reroll_all"),
+        "avoid_recent_weeks: 6",
+    ]
+    if config.get("avoid_tags"):
+        lines.append("avoid_tags: " + ", ".join(config["avoid_tags"]))
+    if config.get("prefer_tags"):
+        lines.append("prefer_tags: " + ", ".join(config["prefer_tags"]))
+    lines.extend([
+        "hook_style: " + str(config.get("hook_style") or "punchy"),
+        "caption_tone: " + str(config.get("caption_tone") or "standard"),
+        "template_policy: " + str(config.get("template_policy") or "new_templates"),
+        "operator_note: " + str(config.get("operator_note") or "Pick a fresher duck slate, avoid recent repeats, and tighten the Jeep Fact package."),
+    ])
+    return "\n".join(lines)
+
+
+def _build_jeepfact_config_rules(item: dict[str, Any], hint: str = "") -> dict[str, Any] | None:
+    """Deterministic hint-to-config parser. Source of truth for the rule
+    path; also the baseline the LLM overrides merge on top of."""
     if str(item.get("flow") or "") != "jeepfact":
         return None
 
@@ -1341,23 +1426,15 @@ def build_jeepfact_rewrite_text(item: dict[str, Any], hint: str = "") -> str | N
         template_policy = "keep_templates"
 
     operator_note = normalize_operator_note(hint) or "Pick a fresher duck slate, avoid recent repeats, and tighten the Jeep Fact package."
-    lines = [
-        "selection_mode: " + selection_mode,
-        "avoid_recent_weeks: 6",
-    ]
-    if avoid_tags:
-        lines.append("avoid_tags: " + ", ".join(dict.fromkeys(avoid_tags)))
-    if prefer_tags:
-        lines.append("prefer_tags: " + ", ".join(dict.fromkeys(prefer_tags)))
-    lines.extend(
-        [
-            "hook_style: " + hook_style,
-            "caption_tone: " + caption_tone,
-            "template_policy: " + template_policy,
-            "operator_note: " + operator_note,
-        ]
-    )
-    return "\n".join(lines)
+    return {
+        "selection_mode": selection_mode,
+        "hook_style": hook_style,
+        "caption_tone": caption_tone,
+        "template_policy": template_policy,
+        "operator_note": operator_note,
+        "avoid_tags": list(dict.fromkeys(avoid_tags)),
+        "prefer_tags": list(dict.fromkeys(prefer_tags)),
+    }
 
 
 def _render_jeepfact_contract_card(contract_text: str) -> list[str]:
