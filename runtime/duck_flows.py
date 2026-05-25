@@ -106,6 +106,10 @@ class FlowSpec:
     # duck-ops route it to DuckAgent? {"approve": "publish"} means an
     # approve from the operator triggers DuckAgent's publish path.
     handoff_actions: dict[str, str] = field(default_factory=dict)
+    # Optional override: the flow name DuckAgent expects on the
+    # receiving end. Defaults to ``name`` if unset. Used by
+    # ``reviews_story`` which hands off to DuckAgent's ``reviews`` flow.
+    handoff_target_flow: str = ""
 
     # ── Portal display ───────────────────────────────────────────────
     # Hint for the operator-facing language. Today this is informal;
@@ -144,6 +148,46 @@ class FlowSpec:
             or bool(self.publish_truthy_keys)
             or bool(self.scheduled_at_keys)
         )
+
+    def publish_status(self, payload: dict[str, Any]) -> str:
+        """Return the lower-cased value of ``publish_status_key`` in
+        ``payload``, or '' if the key isn't declared or populated.
+        Used by reconciliation to distinguish success from failure
+        statuses; ``publish_succeeded`` only checks the success set."""
+        if not self.publish_status_key:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        return str(payload.get(self.publish_status_key) or "").strip().lower()
+
+    def extract_recorded_at(self, payload: dict[str, Any]) -> str:
+        """Return the first populated value among ``scheduled_at_keys``,
+        or '' when none are set. Used to stamp the reconciliation
+        receipt with the actual publish/schedule time rather than 'now'."""
+        if not isinstance(payload, dict):
+            return ""
+        for key in self.scheduled_at_keys:
+            value = payload.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    def handoff_for(self, operator_action: str) -> dict[str, str] | None:
+        """Resolve an operator action ('approve', 'needs_changes', ...)
+        to a DuckAgent handoff descriptor, or None if this flow does
+        not declare a handoff for the action. Drop-in for the legacy
+        DUCK_AGENT_HANDOFF_FLOWS dict shape.
+
+        Honors ``handoff_target_flow`` when set so flows like
+        ``reviews_story`` can hand off to a differently-named DuckAgent
+        flow (``reviews``)."""
+        target_action = self.handoff_actions.get(str(operator_action or "").strip().lower())
+        if not target_action:
+            return None
+        return {
+            "flow": self.handoff_target_flow or self.name,
+            "action": target_action,
+        }
 
 
 # ── The registry ────────────────────────────────────────────────────
@@ -203,6 +247,9 @@ FLOWS: dict[str, FlowSpec] = {
         scheduled_at_keys=("reviews_story_published_at",),
         reconciliation_note="Reconciled automatically because DuckAgent already shows this review story as sent.",
         handoff_actions={"approve": "publish"},
+        # DuckAgent's main_agent.handle_mail_event listens on flow="reviews"
+        # for this lane (not "reviews_story") — match the existing mapping.
+        handoff_target_flow="reviews",
     ),
     "shopify_draft_activation": FlowSpec(
         name="shopify_draft_activation",

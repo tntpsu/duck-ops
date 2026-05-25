@@ -27,6 +27,7 @@ from typing import Any
 from business_operator_desk import render_business_section
 from concept_name_quality import concept_name_quality
 from decision_writer import ensure_parent, load_output_patterns, render_pattern, write_decision
+from duck_flows import FLOWS as _DUCK_FLOWS, FlowSpec, get_flow as _duck_flow_get
 from ops_control import sync_ops_control
 from review_reply_contract import build_review_reply_contract, contract_failure_messages, public_issue_reply_lines
 from trend_ranker import build_trend_concepts
@@ -50,77 +51,13 @@ DUCK_AGENT_RUNS_DIR = Path("/Users/philtullai/ai-agents/duckAgent/runs")
 DUCK_AGENT_ROOT = Path("/Users/philtullai/ai-agents/duckAgent")
 SYSTEM_HEALTH_PATH = DUCK_AGENT_ROOT / "creative_agent" / "runtime" / "output" / "operator" / "system_health.json"
 DUCK_AGENT_PYTHON = DUCK_AGENT_ROOT / ".venv" / "bin" / "python"
-DUCK_AGENT_HANDOFF_FLOWS = {
-    "meme": {
-        "approve": {"flow": "meme", "action": "publish"},
-        "needs_changes": {"flow": "meme", "action": "revise"},
-    },
-    "jeepfact": {
-        "approve": {"flow": "jeepfact", "action": "publish"},
-        "needs_changes": {"flow": "jeepfact", "action": "revise"},
-    },
-    "thursday": {
-        "approve": {"flow": "thursday", "action": "publish"},
-        "needs_changes": {"flow": "thursday", "action": "revise"},
-    },
-    "weekly_sale": {
-        "approve": {"flow": "weekly_sale", "action": "publish"},
-        "needs_changes": {"flow": "weekly_sale", "action": "revise"},
-    },
-    "reviews_story": {
-        "approve": {"flow": "reviews", "action": "publish"},
-    },
-}
+# DUCK_AGENT_HANDOFF_FLOWS dict lives on duck_flows.FlowSpec
+# (handoff_actions + handoff_target_flow). Use spec.handoff_for(action).
 PUBLISH_SUCCESS_STATUSES = {"success", "partial", "scheduled", "published_now", "published"}
 PUBLISH_FAILURE_STATUSES = {"failed", "blocked", "error", "cancelled", "canceled"}
-DUCKAGENT_PUBLISH_RECONCILIATION_SPECS = {
-    "newduck": {
-        "state_file": "state_newduck.json",
-        "truthy_keys": ["newduck_published", "shopify_product_id", "etsy_listing_id"],
-        "recorded_at_keys": ["newduck_published_at", "published_at"],
-        "note": "Reconciled automatically because DuckAgent already shows this listing as published.",
-    },
-    "weekly_sale": {
-        "state_file": "state_weekly.json",
-        "truthy_keys": ["weekly_sale_published"],
-        "recorded_at_keys": ["weekly_sale_published_at"],
-        "note": "Reconciled automatically because DuckAgent already shows this weekly sale as published.",
-    },
-    "meme": {
-        "state_file": "state_meme.json",
-        "status_key": "meme_publish_status",
-        "recorded_at_keys": ["meme_scheduled_at", "meme_published_at"],
-        "note": "Reconciled automatically because DuckAgent already shows this meme as scheduled or published.",
-    },
-    "jeepfact": {
-        "state_file": "state_jeepfact.json",
-        "status_key": "jeepfact_publish_status",
-        "recorded_at_keys": ["jeepfact_scheduled_at", "jeepfact_published_at"],
-        "note": "Reconciled automatically because DuckAgent already shows this Jeep Fact post as scheduled or published.",
-    },
-    "thursday": {
-        "state_file": "state_thursday.json",
-        "truthy_keys": ["thursday_published"],
-        "recorded_at_keys": ["thursday_publish_time"],
-        "note": "Reconciled automatically because DuckAgent already shows this Thursday post as published.",
-    },
-    "gtdf": {
-        "state_file": "state_gtdf.json",
-        "recorded_at_keys": ["gtdf_scheduled_at"],
-        "note": "Reconciled automatically because DuckAgent already shows this GTDF post as scheduled.",
-    },
-    "reviews_story": {
-        "state_file": "state_reviews.json",
-        "status_key": "reviews_story_publish_status",
-        "truthy_keys": ["reviews_story_published"],
-        "recorded_at_keys": ["reviews_story_published_at"],
-        "note": "Reconciled automatically because DuckAgent already shows this review story as sent.",
-    },
-}
-DUCKAGENT_ARTIFACT_FLOW_ALIASES = {
-    "listing": "newduck",
-    "promotion": "weekly_sale",
-}
+# DuckAgent publish-state and artifact-type aliases live in
+# duck_flows.FLOWS / duck_flows.FLOW_ALIASES (single source of truth).
+# The reconciliation functions below consult that registry directly.
 DUCKAGENT_GATEWAY_FLOW_ALIASES = {
     "reviews": "reviews_story",
 }
@@ -412,48 +349,52 @@ def latest_override_index() -> dict[str, dict[str, Any]]:
 
 
 def duckagent_reconciliation_flow(decision: dict[str, Any]) -> str:
-    flow = str(decision.get("flow") or "").strip()
-    if flow in DUCKAGENT_PUBLISH_RECONCILIATION_SPECS:
-        return flow
-    artifact_type = str(decision.get("artifact_type") or "").strip()
-    return DUCKAGENT_ARTIFACT_FLOW_ALIASES.get(artifact_type, flow)
-
-
-def first_payload_value(payload: dict[str, Any], keys: list[str] | tuple[str, ...]) -> Any:
-    for key in keys:
-        value = payload.get(key)
-        if value:
-            return value
-    return None
+    """Resolve a decision to a registered flow name. Prefers the
+    decision's explicit ``flow`` field, then falls back to its
+    ``artifact_type`` (which goes through duck_flows.FLOW_ALIASES).
+    Returns '' when neither resolves to a registered flow."""
+    spec = _duck_flow_get(decision.get("flow"))
+    if spec is not None:
+        return spec.name
+    spec = _duck_flow_get(decision.get("artifact_type"))
+    if spec is not None:
+        return spec.name
+    return str(decision.get("flow") or "").strip()
 
 
 def duckagent_publish_reconciliation_from_state(
     *,
     run_id: str,
-    flow: str,
-    spec: dict[str, Any],
+    spec: FlowSpec,
 ) -> dict[str, Any] | None:
-    state_path = DUCK_AGENT_RUNS_DIR / run_id / str(spec.get("state_file") or "")
+    """Read the DuckAgent state file for this flow/run and return a
+    reconciliation receipt if the publish reached the platform.
+
+    Per-flow probe rules (status key, truthy keys, scheduled-at keys)
+    live on the FlowSpec; this function is now flow-agnostic."""
+    if not spec.has_publish_state():
+        return None
+    state_path = DUCK_AGENT_RUNS_DIR / run_id / spec.state_file
     if not state_path.name:
         return None
     payload = load_json(state_path, {})
     if not isinstance(payload, dict):
         return None
-
-    status_key = str(spec.get("status_key") or "").strip()
-    status = str(payload.get(status_key) or "").strip().lower() if status_key else ""
-    if status in PUBLISH_FAILURE_STATUSES:
+    # Explicit failure short-circuit must beat publish_succeeded — a
+    # state file with `status: failed` shouldn't be treated as
+    # complete even if some optional truthy key happens to be set.
+    if spec.publish_status(payload) in PUBLISH_FAILURE_STATUSES:
         return None
-    has_success_status = bool(status and status in PUBLISH_SUCCESS_STATUSES)
-    has_truthy_key = bool(first_payload_value(payload, list(spec.get("truthy_keys") or [])))
-    recorded_at = first_payload_value(payload, list(spec.get("recorded_at_keys") or []))
-    if not (has_success_status or has_truthy_key or recorded_at):
+    if not spec.publish_succeeded(payload):
         return None
-
+    recorded_at = spec.extract_recorded_at(payload)
+    note = spec.reconciliation_note or (
+        f"Reconciled automatically because DuckAgent already shows {spec.name} as complete."
+    )
     return {
         "recorded_at": str(recorded_at or now_iso()),
         "resolution": "approve",
-        "note": str(spec.get("note") or f"Reconciled automatically because DuckAgent already shows {flow} as complete."),
+        "note": note,
         "source": str(state_path),
     }
 
@@ -462,12 +403,10 @@ def duckagent_publish_reconciliation(decision: dict[str, Any]) -> dict[str, Any]
     run_id = str(decision.get("run_id") or "").strip()
     if not run_id:
         return None
-
-    flow = duckagent_reconciliation_flow(decision)
-    spec = DUCKAGENT_PUBLISH_RECONCILIATION_SPECS.get(flow)
-    if not spec:
+    spec = _duck_flow_get(decision.get("flow")) or _duck_flow_get(decision.get("artifact_type"))
+    if spec is None:
         return None
-    return duckagent_publish_reconciliation_from_state(run_id=run_id, flow=flow, spec=spec)
+    return duckagent_publish_reconciliation_from_state(run_id=run_id, spec=spec)
 
 
 def newer_newduck_run_reconciliation(decision: dict[str, Any]) -> dict[str, Any] | None:
@@ -2935,13 +2874,17 @@ def invoke_duckagent_mail_event(flow: str, run_id: str | None, title: str, actio
 
 def maybe_handoff_duckagent_publish_after_operator_action(decision: dict[str, Any]) -> dict[str, Any] | None:
     flow = str(decision.get("flow") or "")
-    mapping = DUCK_AGENT_HANDOFF_FLOWS.get(flow)
-    if not mapping:
+    # Handoff descriptors live on duck_flows.FlowSpec.handoff_actions
+    # (single source of truth). spec.handoff_for(action) returns the
+    # legacy {"flow": ..., "action": ...} shape so this call site
+    # doesn't need to know about the registry internals.
+    spec = _duck_flow_get(flow)
+    if spec is None or not spec.handoff_actions:
         return None
 
     operator_resolution = decision.get("operator_resolution") or {}
     operator_action = str(operator_resolution.get("action") or "")
-    callback = mapping.get(operator_action)
+    callback = spec.handoff_for(operator_action)
     if not callback:
         return None
 
@@ -3087,7 +3030,11 @@ def record_decision_and_dispatch(
     gateway_flow = normalize_decision_gateway_flow(flow)
     clean_run_id = str(run_id or "").strip()
     resolution = decision_gateway_resolution(action)
-    if gateway_flow not in DUCK_AGENT_HANDOFF_FLOWS:
+    # "Owned by the gateway" == "has a handoff_actions mapping in
+    # duck_flows.FLOWS". Anything else returns the unsupported_flow
+    # receipt below.
+    _gateway_spec = _duck_flow_get(gateway_flow)
+    if _gateway_spec is None or not _gateway_spec.handoff_actions:
         return _decision_gateway_result(
             handled=False,
             ok=True,

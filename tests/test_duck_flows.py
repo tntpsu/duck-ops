@@ -152,6 +152,68 @@ class RequireFlowTests(unittest.TestCase):
         self.assertEqual(duck_flows.require_flow("Newduck").name, "newduck")
 
 
+class HandoffTests(unittest.TestCase):
+    def test_meme_approve_handoff_matches_legacy_dict(self) -> None:
+        """The handoff_for() helper must return the same {'flow',
+        'action'} shape that the legacy DUCK_AGENT_HANDOFF_FLOWS dict
+        in review_loop.py returned, so call sites can swap in cleanly."""
+        spec = duck_flows.FLOWS["meme"]
+        self.assertEqual(
+            spec.handoff_for("approve"),
+            {"flow": "meme", "action": "publish"},
+        )
+        self.assertEqual(
+            spec.handoff_for("needs_changes"),
+            {"flow": "meme", "action": "revise"},
+        )
+        # Action not declared in handoff_actions → None
+        self.assertIsNone(spec.handoff_for("discard"))
+
+    def test_reviews_story_uses_handoff_target_flow_override(self) -> None:
+        """reviews_story hands off to DuckAgent's flow=reviews
+        (different name). handoff_target_flow honors that override.
+        Regression: without this, DuckAgent's handle_mail_event
+        wouldn't receive the right event and the review-story publish
+        would silently fall through."""
+        spec = duck_flows.FLOWS["reviews_story"]
+        self.assertEqual(
+            spec.handoff_for("approve"),
+            {"flow": "reviews", "action": "publish"},
+        )
+
+    def test_no_handoff_flows_have_no_handoff(self) -> None:
+        """Flows that don't declare handoff_actions return None — they
+        live outside the gateway's responsibility."""
+        for name in ("shopify_seo", "shopify_draft_activation"):
+            spec = duck_flows.FLOWS[name]
+            self.assertIsNone(spec.handoff_for("approve"))
+
+
+class ReconciliationTests(unittest.TestCase):
+    def test_publish_status_lowercases(self) -> None:
+        spec = duck_flows.FLOWS["meme"]
+        self.assertEqual(spec.publish_status({"meme_publish_status": "SUCCESS"}), "success")
+        self.assertEqual(spec.publish_status({"meme_publish_status": "  Failed  "}), "failed")
+        self.assertEqual(spec.publish_status({}), "")
+        # Flows without a status_key return ''
+        self.assertEqual(duck_flows.FLOWS["weekly_sale"].publish_status({"x": 1}), "")
+
+    def test_extract_recorded_at_walks_keys_in_order(self) -> None:
+        """The first populated scheduled_at_keys field wins — same
+        precedence as the legacy first_payload_value() helper."""
+        spec = duck_flows.FLOWS["meme"]
+        # scheduled_at_keys = (meme_scheduled_at, meme_published_at)
+        self.assertEqual(
+            spec.extract_recorded_at({"meme_published_at": "X", "meme_scheduled_at": "Y"}),
+            "Y",
+        )
+        self.assertEqual(
+            spec.extract_recorded_at({"meme_published_at": "X"}),
+            "X",
+        )
+        self.assertEqual(spec.extract_recorded_at({}), "")
+
+
 class ReplyActionsTests(unittest.TestCase):
     def test_flows_with_buttons_declare_them(self) -> None:
         """The flows the operator interacts with via email buttons
