@@ -1621,6 +1621,22 @@ def extract_publish_execution_state(flow: str, payload: dict[str, Any], run_dir:
             "published_at": str(published_at) if published_at else None,
             "state_source": str(run_dir / "state_thursday.json"),
         }
+    if flow == "review_carousel":
+        # Carousel publish_result.json is written by
+        # schedule_review_carousel_publish_candidate when the operator
+        # approves (via email or portal). Presence + non-draft status
+        # means scheduled or published on Instagram.
+        publish_result = payload.get("publish_result") if isinstance(payload, dict) else {}
+        status = str((publish_result or {}).get("status") or "").lower()
+        scheduled_for = (publish_result or {}).get("scheduled_for")
+        already_published = status in {"scheduled", "published_now", "published"}
+        return {
+            "already_published": already_published,
+            "state": "published" if already_published else "draft",
+            "published_channels": ["instagram"] if already_published else [],
+            "published_at": str(scheduled_for) if scheduled_for else None,
+            "state_source": str(run_dir / "publish_result.json"),
+        }
     return {
         "already_published": False,
         "state": "draft",
@@ -1950,6 +1966,82 @@ def normalize_publish_candidates(
         payload = load_json(path)
         for candidate in build_thursday_publish_candidates_from_state(path, payload, products, publications, trend_candidates):
             merge_publish_candidate(candidates, candidate)
+
+    # Review carousel candidates. Distinct from every other flow above
+    # because the carousel run dir lives under runs/outputs/<run_id>/
+    # (creative_agent layout), not runs/<run_id>/state_<flow>.json.
+    # publish_token is set to the carousel's created_at so the 7-day
+    # cutoff in _pending_approvals works the same way it does for
+    # other flows. state_source points at publish_result.json so its
+    # presence + status drives draft vs published.
+    review_carousel_outputs = DUCKAGENT_RUNS_DIR.parent / "creative_agent" / "runtime" / "runs" / "outputs"
+    if review_carousel_outputs.exists():
+        for run_dir in sorted(review_carousel_outputs.glob("review_carousel_*")):
+            if not run_dir.is_dir():
+                continue
+            review_carousel_path = run_dir / "review_carousel.json"
+            if not review_carousel_path.exists():
+                continue
+            review_carousel_payload = load_json(review_carousel_path)
+            slides = review_carousel_payload.get("slides") or []
+            if not slides:
+                continue
+            approval_bundle = load_json(run_dir / "approval_bundle.json") if (run_dir / "approval_bundle.json").exists() else {}
+            artifact_id = str(approval_bundle.get("artifact_id") or f"publish::review_carousel::{run_dir.name}")
+            caption = str(review_carousel_payload.get("caption") or "").strip()
+            headline = str(review_carousel_payload.get("headline") or "Review Carousel Bundle").strip()
+            body_preview = (caption[:200] + ("…" if len(caption) > 200 else "")) if caption else ""
+            if body_preview and slides:
+                body_preview = f"{body_preview} | Slides: {len(slides)}"
+            elif slides and not caption:
+                body_preview = f"Slides: {len(slides)}"
+            preview_image = run_dir / "preview.png"
+            publish_result_payload = load_json(run_dir / "publish_result.json") if (run_dir / "publish_result.json").exists() else {}
+            # Carousel artifact created_at lives on approval_bundle, not the run_dir name.
+            # Use it as publish_token so the 7-day cutoff in
+            # _pending_approvals can parse it as an ISO timestamp.
+            created_at = str(
+                approval_bundle.get("created_at")
+                or approval_bundle.get("generated_at")
+                or review_carousel_payload.get("generated_at")
+                or ""
+            ).strip()
+            merge_publish_candidate(
+                candidates,
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_type": "social_carousel",
+                    "flow": "review_carousel",
+                    "run_id": run_dir.name,
+                    "source_refs": [{"path": str(review_carousel_path), "source_type": "review_carousel"}],
+                    "candidate_summary": {
+                        "title": f"Review Carousel — {headline}",
+                        "body": caption,
+                        "body_preview": body_preview,
+                        "images": [str(preview_image)] if preview_image.exists() else [],
+                        "platform_targets": ["instagram"],
+                        "publish_token": created_at or None,
+                        "slide_count": len(slides),
+                        "preview_url": str(preview_image) if preview_image.exists() else None,
+                    },
+                    "supporting_context": {
+                        "brand_family": "review_carousel",
+                        "catalog_overlap": [],
+                        "publication_coverage": [],
+                        "trend_refs": [],
+                    },
+                    "normalization_notes": {
+                        "source_mode": "review_carousel_run_dir",
+                        "completeness": "high",
+                        "input_confidence_cap": 0.85,
+                    },
+                    "execution_state": extract_publish_execution_state(
+                        "review_carousel",
+                        {"publish_result": publish_result_payload},
+                        run_dir,
+                    ),
+                },
+            )
 
     for email_item in mailbox_items:
         subject_data = email_item.get("subject_metadata", {})

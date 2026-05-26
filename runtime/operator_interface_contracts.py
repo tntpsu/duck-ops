@@ -104,7 +104,15 @@ def run_id_from_state_source(state_source: str | None) -> str | None:
     parts = state_source.split("/")
     try:
         idx = parts.index("runs")
-        return parts[idx + 1]
+        candidate = parts[idx + 1]
+        # creative_agent runs use a `runs/outputs/<run_id>/...` layout
+        # (review_carousel, jeepfact_image, etc.). Treat that case
+        # specifically so the parser returns the actual run_id rather
+        # than the literal string "outputs". Every other flow uses
+        # `runs/<run_id>/...` and stays unaffected.
+        if candidate == "outputs" and len(parts) > idx + 2:
+            return parts[idx + 2]
+        return candidate
     except (ValueError, IndexError):
         return None
 
