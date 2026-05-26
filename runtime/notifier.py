@@ -26,6 +26,11 @@ from urllib.parse import urlparse
 
 from customer_action_packets import build_customer_action_packets
 from customer_interaction_cases import build_customer_interaction_queue
+from email_cadence_gate import (
+    CadenceDecision,
+    log_cadence_decision,
+    should_send_email,
+)
 from etsy_conversation_browser_sync import build_etsy_conversation_browser_sync
 from nightly_action_summary import (
     build_nightly_action_summary,
@@ -2119,6 +2124,46 @@ def send_message(settings: dict[str, Any], msg: EmailMessage) -> None:
         server.send_message(msg)
 
 
+# Artifact kinds that flow through email_cadence_gate. Unmapped kinds
+# (digest, trend_digest, urgent, etc.) pass through unfiltered — their
+# cadence is already handled by their own should_send_* signature
+# functions upstream. Add a kind here only when its surface has a
+# corresponding CadencePolicy.
+_CADENCE_SURFACE_BY_ARTIFACT_KIND: dict[str, str] = {
+    "learning_change_digest": "learnings",
+}
+
+
+def cadence_gate_decision_for_artifact(
+    artifact: dict[str, Any],
+) -> CadenceDecision | None:
+    """Look up the cadence policy for ``artifact['kind']``. Returns
+    None for kinds with no policy, meaning "no extra gate; send."
+
+    Pulls the bypass signal into the payload shape the policy expects.
+    For learnings, current_learnings.json nests the attention count
+    under change_notifier — the digest flattens it, so re-nest here so
+    the policy's dotted-path bypass key matches."""
+    surface = _CADENCE_SURFACE_BY_ARTIFACT_KIND.get(artifact["kind"])
+    if surface is None:
+        return None
+    payload = artifact.get("payload") or {}
+    if surface == "learnings":
+        gate_payload = {
+            "change_notifier": {
+                "attention_change_count": int(payload.get("attention_change_count") or 0),
+            }
+        }
+    else:
+        gate_payload = payload
+    decision = should_send_email(surface, gate_payload)
+    log_cadence_decision(
+        decision,
+        extra={"artifact_kind": artifact["kind"], "json_path": str(artifact.get("json_path"))},
+    )
+    return decision
+
+
 def send_whatsapp_message(
     settings: dict[str, Any],
     message: str,
@@ -2267,15 +2312,27 @@ def main() -> int:
 
     for artifact in artifacts:
         msg = build_message(settings, artifact)
+        cadence_decision = cadence_gate_decision_for_artifact(artifact)
         if args.dry_run:
             print(f"DRY RUN :: {artifact['kind']} :: {msg['Subject']}")
             if artifact.get("send_reason"):
                 print(f"REASON :: {artifact['send_reason']}")
+            if cadence_decision is not None:
+                verb = "PROCEED" if cadence_decision.should_send else "DEFER"
+                print(f"CADENCE :: {verb} :: {cadence_decision.reason}")
             print(f"TO :: {msg['To']}")
             print(f"SOURCE :: {artifact['json_path']}")
             print("---")
             print(preview_message_text(msg, artifact)[:2000])
             print("===")
+            continue
+
+        if cadence_decision is not None and not cadence_decision.should_send:
+            print(
+                f"[notifier] Cadence gate deferred {artifact['kind']}: "
+                f"{cadence_decision.reason}",
+                file=sys.stderr,
+            )
             continue
 
         if not all((settings.get("host"), settings.get("user"), settings.get("password"), settings.get("to"))):
