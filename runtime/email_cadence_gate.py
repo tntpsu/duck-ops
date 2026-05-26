@@ -183,6 +183,22 @@ POLICIES: dict[str, CadencePolicy] = {
         deferred_note="Weekly insights refreshed in the portal; email "
                       "scheduled for Monday. Action items trigger a same-day send.",
     ),
+    "engineering_governance": CadencePolicy(
+        surface_name="engineering_governance",
+        cadence="weekly_monday",
+        bypass_keys=("high_severity_finding_count",),
+        deferred_note="Engineering governance digest refreshed; weekly rollup "
+                      "scheduled for Monday. High-severity findings trigger a "
+                      "same-day send.",
+    ),
+    "shopify_seo": CadencePolicy(
+        surface_name="shopify_seo",
+        cadence="weekly_monday",
+        bypass_keys=("high_severity_issue_count",),
+        deferred_note="Shopify SEO review refreshed in the portal; email "
+                      "scheduled for Monday. High-severity issues trigger a "
+                      "same-day send.",
+    ),
 }
 
 

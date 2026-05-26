@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from email_cadence_gate import log_cadence_decision, should_send_email
 from governance_review_common import age_hours
 
 
@@ -983,6 +984,22 @@ def render_engineering_governance_email(payload: dict[str, Any], *, render_repor
 def send_engineering_governance_digest_email() -> dict[str, Any]:
     send_email, render_report_email, report_badge, report_card, report_link = _ensure_duckagent_imports()
     payload = build_engineering_governance_digest()
+    high_severity = sum(
+        1
+        for finding in (payload.get("findings") or [])
+        if isinstance(finding, dict) and str(finding.get("status") or "").lower() == "bad"
+    )
+    decision = should_send_email(
+        "engineering_governance",
+        {"high_severity_finding_count": high_severity},
+    )
+    log_cadence_decision(decision, extra={"high_severity_finding_count": high_severity})
+    payload["cadence_decision"] = {
+        "should_send": decision.should_send,
+        "cadence": decision.cadence,
+        "reason": decision.reason,
+        "next_send_iso": decision.next_send_iso,
+    }
     subject, text_body, html_body = render_engineering_governance_email(
         payload,
         render_report_email=render_report_email,
@@ -990,8 +1007,17 @@ def send_engineering_governance_digest_email() -> dict[str, Any]:
         report_card=report_card,
         report_link=report_link,
     )
-    send_email(subject, html_body, text_body)
     payload["email_subject"] = subject
+    if not decision.should_send:
+        print(
+            f"[engineering_governance] Cadence gate deferred today's email "
+            f"— {decision.reason}",
+            file=sys.stderr,
+        )
+        _write_json(DIGEST_STATE_PATH, payload)
+        DIGEST_OUTPUT_PATH.write_text(render_engineering_governance_markdown(payload), encoding="utf-8")
+        return payload
+    send_email(subject, html_body, text_body)
     _write_json(DIGEST_STATE_PATH, payload)
     DIGEST_OUTPUT_PATH.write_text(render_engineering_governance_markdown(payload), encoding="utf-8")
     return payload

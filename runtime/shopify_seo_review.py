@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from email_cadence_gate import log_cadence_decision, should_send_email
 from shopify_seo_audit import build_shopify_seo_audit
 
 
@@ -932,14 +933,56 @@ def send_shopify_seo_review_email(
         issue_category=issue_category,
         auto_send_next_category=auto_send_next_category,
     )
+    high_severity = _count_high_severity_issues(payload)
+    decision = should_send_email(
+        "shopify_seo",
+        {"high_severity_issue_count": high_severity},
+    )
+    log_cadence_decision(
+        decision,
+        extra={"high_severity_issue_count": high_severity, "run_id": payload.get("run_id")},
+    )
+    payload["cadence_decision"] = {
+        "should_send": decision.should_send,
+        "cadence": decision.cadence,
+        "reason": decision.reason,
+        "next_send_iso": decision.next_send_iso,
+    }
     _, send_email = _ensure_duckagent_imports()
     subject, text_body, html_body = render_shopify_seo_review_email(payload)
-    send_email(subject, html_body, text_body)
     payload["email_subject"] = subject
+    if not decision.should_send:
+        payload["status"] = "deferred_by_cadence"
+        print(
+            f"[shopify_seo_review] Cadence gate deferred today's email "
+            f"— {decision.reason}",
+            file=sys.stderr,
+        )
+        _review_run_path(payload["run_id"]).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _latest_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return payload
+    send_email(subject, html_body, text_body)
     payload["status"] = "awaiting_review"
     _review_run_path(payload["run_id"]).write_text(json.dumps(payload, indent=2), encoding="utf-8")
     _latest_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
+
+
+def _count_high_severity_issues(payload: dict[str, Any]) -> int:
+    """Sum of severity=high issues across all candidates in this run.
+    Feeds the cadence gate's bypass: real urgency = same-day send."""
+    candidates = payload.get("candidates") or payload.get("top_actions") or []
+    if not isinstance(candidates, list):
+        return 0
+    total = 0
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        issues = cand.get("issues") if isinstance(cand.get("issues"), list) else []
+        for issue in issues:
+            if isinstance(issue, dict) and str(issue.get("severity") or "").lower() == "high":
+                total += 1
+    return total
 
 
 def send_next_shopify_seo_category_review_email(*, after_category: str | None = None, force_audit: bool = False) -> dict[str, Any] | None:

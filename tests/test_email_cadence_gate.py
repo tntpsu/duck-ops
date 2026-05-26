@@ -39,16 +39,18 @@ def _at(date_iso: str) -> datetime:
 
 
 class PolicyRegistryTests(unittest.TestCase):
-    def test_all_six_surfaces_registered(self) -> None:
+    def test_all_eight_surfaces_registered(self) -> None:
         self.assertEqual(
             known_surfaces(),
             (
                 "business_intelligence",
                 "competitors",
+                "engineering_governance",
                 "learnings",
                 "profit",
                 "recommendations",
                 "reviews",
+                "shopify_seo",
             ),
         )
 
