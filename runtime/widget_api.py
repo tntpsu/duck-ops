@@ -142,7 +142,64 @@ def reject_publish_candidate(artifact_id: str) -> dict[str, Any]:
     flow = str(candidate.get("flow") or "?")
     title = str((candidate.get("candidate_summary") or {}).get("title") or "(untitled)")[:80]
     _log_approval(f"REJECT artifact={artifact_id} flow={flow} title={title!r}")
-    return {"ok": True, "artifactId": artifact_id, "flow": flow}
+
+    # For review_carousel, hiding the row in the portal isn't enough —
+    # the underlying pending_carousel in queue.json keeps the lane
+    # blocked from regenerating. Emit a Re: ... | ACTION:needs_changes
+    # email so the IMAP poller calls reset_review_carousel_run, which
+    # clears the pending and frees the queue for next week's build.
+    # Pairs with the Commit-C handler in main_agent.py.
+    needs_changes_email_result: dict[str, Any] | None = None
+    if flow == "review_carousel":
+        needs_changes_email_result = _send_review_carousel_needs_changes_email(candidate)
+    response: dict[str, Any] = {"ok": True, "artifactId": artifact_id, "flow": flow}
+    if needs_changes_email_result is not None:
+        response["needs_changes_email"] = needs_changes_email_result
+    return response
+
+
+def _send_review_carousel_needs_changes_email(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Send a Re: MJD: ... | ACTION:needs_changes email for a
+    carousel reject, mirroring the same SMTP plumbing approve_publish_candidate
+    uses but with a different ACTION verb. Fail-soft: if SMTP isn't
+    configured, return an error description without raising; the
+    portal-side rejection still went through (artifact is in
+    rejected_ids), just the regenerate trigger didn't fire."""
+    summary = candidate.get("candidate_summary") or {}
+    flow = str(candidate.get("flow") or "review_carousel")
+    title = str(summary.get("title") or "(untitled)")[:80]
+    state_source = (candidate.get("execution_state") or {}).get("state_source")
+    run_id = run_id_from_state_source(state_source) or summary.get("publish_token") or "?"
+
+    subject = f"Re: MJD: [{flow}] {title} | FLOW:{flow} | RUN:{run_id} | ACTION:needs_changes"
+    body = "needs_changes\n\n(rejected via portal /portal/decisions)\n"
+
+    creds = _load_smtp_creds()
+    missing = [key for key in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS") if not creds.get(key)]
+    if missing:
+        return {"ok": False, "error": f"missing SMTP env: {missing}"}
+
+    msg = EmailMessage()
+    msg["From"] = creds["SMTP_USER"]
+    msg["To"] = creds["SMTP_USER"]
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    try:
+        port = int(creds["SMTP_PORT"])
+        if port == 465:
+            with smtplib.SMTP_SSL(creds["SMTP_HOST"], port, timeout=10) as smtp:
+                smtp.login(creds["SMTP_USER"], creds["SMTP_PASS"])
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(creds["SMTP_HOST"], port, timeout=10) as smtp:
+                smtp.starttls()
+                smtp.login(creds["SMTP_USER"], creds["SMTP_PASS"])
+                smtp.send_message(msg)
+    except Exception as exc:
+        return {"ok": False, "error": f"smtp send failed: {exc}"}
+    _log_approval(f"NEEDS_CHANGES carousel artifact={candidate.get('artifact_id')} run={run_id} subject={subject!r}")
+    return {"ok": True, "subject": subject, "run_id": run_id}
 
 
 def approve_publish_candidate(artifact_id: str, dry_run: bool = False) -> dict[str, Any]:
