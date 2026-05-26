@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -17,15 +18,21 @@ import competitor_benchmark_collector
 
 class CompetitorBenchmarkCollectorTests(unittest.TestCase):
     def test_build_competitor_benchmark_uses_recent_reports(self) -> None:
+        # Today-relative so the fixture stays inside the 30-day
+        # window_days filter regardless of when the test runs.
+        today = datetime.now().date()
+        report_day = today - timedelta(days=2)
+        report_day_iso = report_day.isoformat()
+        listing_created_iso = (report_day - timedelta(days=1)).isoformat() + "T11:00:00"
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            competitor_state = root / "runs" / "2026-04-15" / "state_competitor.json"
+            competitor_state = root / "runs" / report_day_iso / "state_competitor.json"
             competitor_state.parent.mkdir(parents=True, exist_ok=True)
             competitor_state.write_text(
                 json.dumps(
                     {
                         "competitor_report": {
-                            "report_date": "2026-04-15",
+                            "report_date": report_day_iso,
                             "total_competitor_shops": 3,
                             "total_competitor_listings": 120,
                             "new_competitor_listings": 12,
@@ -43,7 +50,7 @@ class CompetitorBenchmarkCollectorTests(unittest.TestCase):
                                 {
                                     "listing_id": "a",
                                     "title": "Cowgirl Duck Artist Duck",
-                                    "created_ts": "2026-04-14T11:00:00",
+                                    "created_ts": listing_created_iso,
                                     "views": 800,
                                     "num_favorers": 110,
                                     "tags": ["cowgirl duck", "artist duck"],

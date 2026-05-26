@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -17,6 +18,12 @@ import operator_interface_contracts as contracts  # noqa: E402
 
 class OperatorInterfaceContractsTests(unittest.TestCase):
     def test_compact_surface_and_widget_payload_share_the_same_contract(self) -> None:
+        # _pending_approvals filters anything older than 7 days via
+        # publish_token. Compute a today-relative token so the fixture
+        # survives wall-clock advance.
+        recent_token = (
+            datetime.now(timezone.utc).astimezone() - timedelta(hours=12)
+        ).isoformat(timespec="seconds")
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             packets_dir = root / "customer_intelligence"
@@ -76,7 +83,7 @@ class OperatorInterfaceContractsTests(unittest.TestCase):
                                 },
                                 "candidate_summary": {
                                     "title": "Orange Cat Duck Meme",
-                                    "publish_token": "2026-04-24T07:15:00-04:00",
+                                    "publish_token": recent_token,
                                     "platform_targets": ["instagram", "facebook"],
                                     "body": "Fresh orange cat duck energy.",
                                 },
