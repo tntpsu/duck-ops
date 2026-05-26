@@ -131,7 +131,12 @@ class LLMRewriterTests(unittest.TestCase):
         self.assertIn("dimples", prompt)
         self.assertIn(NEPHEW_DRAFT, prompt)
         self.assertIn("lean into the personal/emotional angle", prompt)
-        self.assertIn("Echo at least one specific word", prompt)
+        # The prompt now leads with a CRITICAL RULE that demands a
+        # specific-detail echo. Pin both halves so a future prompt
+        # tweak can't accidentally water this down — the absence of
+        # this instruction was the original 19% echo_check failure mode.
+        self.assertIn("MUST reference at least one specific detail", prompt)
+        self.assertIn("will be REJECTED", prompt)
 
 
 class FewShotAnchoringTests(unittest.TestCase):

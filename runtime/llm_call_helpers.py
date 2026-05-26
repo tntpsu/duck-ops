@@ -87,6 +87,11 @@ def log_llm_call(payload: dict[str, Any]) -> None:
         pass
 
 
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_BASE_BACKOFF_SECONDS = 1.0
+
+
 def call_openai(
     prompt: str,
     *,
@@ -98,6 +103,13 @@ def call_openai(
     """Single-turn OpenAI chat completion. Returns the parsed JSON response
     on HTTP success, or a dict with an `error` key on failure. Returns None
     only when OPENAI_API_KEY is missing.
+
+    Retries up to _MAX_RETRIES times on transient HTTP errors
+    (429/5xx) and request exceptions with exponential backoff. A
+    successful response on retry is reported with `retry_count` so
+    the call log captures how flaky the provider was. Non-retryable
+    errors (4xx other than 429, JSON decode failures) return
+    immediately.
 
     Caller is responsible for checking `error` key vs successful response
     shape.
@@ -113,36 +125,56 @@ def call_openai(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    started = time.time()
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=timeout,
-        )
-    except Exception as exc:
-        return {
-            "error": f"request_failed:{type(exc).__name__}:{exc}",
-            "elapsed_seconds": time.time() - started,
-        }
-    elapsed = time.time() - started
-    if response.status_code >= 400:
-        return {
-            "error": f"http_{response.status_code}",
-            "body": response.text[:500],
-            "elapsed_seconds": elapsed,
-        }
-    try:
-        return {**response.json(), "elapsed_seconds": elapsed}
-    except Exception as exc:
-        return {
-            "error": f"json_decode_failed:{type(exc).__name__}:{exc}",
-            "elapsed_seconds": elapsed,
-        }
+    overall_started = time.time()
+    last_error: dict[str, Any] | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            last_error = {
+                "error": f"request_failed:{type(exc).__name__}:{exc}",
+                "elapsed_seconds": time.time() - overall_started,
+                "retry_count": attempt,
+            }
+            if attempt < _MAX_RETRIES - 1:
+                time.sleep(_BASE_BACKOFF_SECONDS * (2 ** attempt))
+                continue
+            return last_error
+        if response.status_code >= 400:
+            err = {
+                "error": f"http_{response.status_code}",
+                "body": response.text[:500],
+                "elapsed_seconds": time.time() - overall_started,
+                "retry_count": attempt,
+            }
+            if response.status_code in _RETRYABLE_STATUS and attempt < _MAX_RETRIES - 1:
+                last_error = err
+                time.sleep(_BASE_BACKOFF_SECONDS * (2 ** attempt))
+                continue
+            return err
+        try:
+            return {
+                **response.json(),
+                "elapsed_seconds": time.time() - overall_started,
+                "retry_count": attempt,
+            }
+        except Exception as exc:
+            return {
+                "error": f"json_decode_failed:{type(exc).__name__}:{exc}",
+                "elapsed_seconds": time.time() - overall_started,
+                "retry_count": attempt,
+            }
+    # Should be unreachable — loop either returns success or returns
+    # the last error after exhausting retries. Guard for safety.
+    return last_error or {"error": "exhausted_retries", "elapsed_seconds": time.time() - overall_started}
 
 
 def extract_text(api_response: dict[str, Any]) -> str:
