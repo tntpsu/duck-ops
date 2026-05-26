@@ -17,16 +17,20 @@ Each row is a use case shipped this cycle. Each cell is one of:
 | Use case | Happy path | `run_id` parser bug (returns "outputs") | SMTP creds missing | Concurrent observer + email-reply race | Operator clicks Approve twice | Operator clicks Reject after carousel scheduled | META not configured |
 |---|---|---|---|---|---|---|---|
 | Observer discovers carousel in publish_candidates | ✅ test_phase1_observer_review_carousel.py | ✅ same file (RunIdParserTests×2) | n/a | ⚠️  manual:cron-cadence-race | n/a | n/a | n/a |
-| Portal Approve → Instagram schedule | ✅ test_review_carousel_publish_contract.py | ✅ widget_api_carousel_reject (subject pin) | ✅ widget_api_carousel_reject | 🔴 MISSING | ✅ contract test idempotency | 🔴 MISSING | ✅ contract test policy-block path |
-| Portal Reject → emit needs_changes email | ✅ test_widget_api_carousel_reject.py | ✅ same file (RUN: assertion) | ✅ same file (fail-soft) | 🔴 MISSING | n/a:reject-idempotent | 🔴 MISSING | n/a |
-| Email-reply `publish` → publish helper | ✅ test_main_agent_carousel_dispatch.py | n/a:already-tested-at-observer | n/a | 🔴 MISSING | ✅ publish helper has its own idempotency | 🔴 MISSING | n/a |
-| Email-reply `needs_changes` / `reject` → reset helper | ✅ test_main_agent_carousel_dispatch.py | n/a | n/a | 🔴 MISSING | ⚠️  manual:reset-after-reset-is-safe-but-untested | 🔴 MISSING | n/a |
-| Reset helper clears pending + rebuilds queue | ✅ test_review_carousel_reset.py | n/a | n/a | n/a | ✅ rebuild is idempotent | n/a | n/a |
+| Portal Approve → Instagram schedule | ✅ test_review_carousel_publish_contract.py | ✅ widget_api_carousel_reject (subject pin) | ✅ widget_api_carousel_reject | ✅ contract test idempotency (race_detected flag) | ✅ contract test idempotency | ✅ test_review_carousel_reset.py::test_reject_after_schedule_is_no_op | ✅ contract test policy-block path |
+| Portal Reject → emit needs_changes email | ✅ test_widget_api_carousel_reject.py | ✅ same file (RUN: assertion) | ✅ same file (fail-soft) | ✅ idempotency below | n/a:reject-idempotent | ✅ reset_no_op test | n/a |
+| Email-reply `publish` → publish helper | ✅ test_main_agent_carousel_dispatch.py | n/a:already-tested-at-observer | n/a | ✅ publish helper race_detected | ✅ publish helper idempotent | ✅ reset_no_op test | n/a |
+| Email-reply `needs_changes` / `reject` → reset helper | ✅ test_main_agent_carousel_dispatch.py | n/a | n/a | ✅ reset blocks gracefully if already scheduled | ⚠️  manual:reset-after-reset-is-safe-but-untested | ✅ reset_no_op test | n/a |
+| Reset helper clears pending + rebuilds queue | ✅ test_review_carousel_reset.py | n/a | n/a | ✅ blocks if already scheduled | ✅ rebuild is idempotent | ✅ same | n/a |
 | Carousel state reads correctly into Agent OS | ⚠️  manual:portal-render-check | n/a:run_id-not-rendered | n/a | n/a | n/a | n/a | n/a |
 
-**Gap summary:** 4 cells of "concurrent observer + email-reply race" untested. Realistic scenario: observer fires at T=0 (writes draft row to publish_candidates), operator hits Approve in portal at T=1s, observer fires again at T=30s with the now-scheduled publish_result.json. The publish helper has idempotency guards, but the publish_candidates row state can disagree with the workflow_control state in that window. Verdict: **acceptable risk** because (a) publish helper no-ops on second call, (b) observer regen frequency is minutes, (c) operator-visible failure mode is at worst "duplicate feedback email." Mark `manual:cron-cadence-race` with note in next /retro.
+**Gap summary (updated 2026-05-26 after closing two product calls):**
 
-**Gap summary 2:** "Reject after schedule" — what if the operator clicks Reject AFTER the publish already scheduled at 7 PM? Reset would clear pending_carousel and slides could be re-selected; the scheduled IG post would still publish. That's the failure mode the contract test `test_blocked_publish_records_policy_block_not_scheduled` is closest to but not exact. Verdict: **add test** if this scenario is realistic. For now mark `MISSING` and discuss in /retro.
+- ✅ **CLOSED: Concurrent observer + email-reply race.** Product decision 2A: when a duplicate publish request hits an already-scheduled run, return `race_detected: true` with explicit "race detected" messaging so the operator sees their second click was ignored. Updated `publish_review_carousel_run`'s already-scheduled summary; updated two existing contract assertions to pin the new wording.
+
+- ✅ **CLOSED: Reject after schedule.** Product decision 1A: reject is a no-op once the carousel is already scheduled. `reset_review_carousel_run` now reads `publish_result.json` upfront; if status is scheduled/published_now/published, returns `{status: "blocked", summary: "already scheduled — reject is a no-op", scheduled_for}` WITHOUT firing a workflow_control transition (so the stale-approvals card doesn't re-surface it). New test `test_reject_after_schedule_is_no_op`.
+
+Remaining `manual:cron-cadence-race` cells (observer discovery only): the observer running while the helper writes publish_result.json mid-cycle is genuinely a low-impact case — observer just re-reads and gets the newer state next tick. Verdict: stays manual.
 
 ---
 
@@ -154,8 +158,8 @@ Each row is a use case shipped this cycle. Each cell is one of:
 **Realistic remediation queue, in order of leverage:**
 
 1. **🔴 Portal UI end-to-end** — a Playwright test that opens `/portal/decisions`, clicks Approve on a fixture carousel row, asserts workflow_control transitions correctly. Highest-value missing test; would catch the entire portal→email→helper chain breaking. Estimate: 4-6 hours including Playwright harness setup.
-2. **🔴 Reject-after-schedule race** — what if operator clicks Reject after the publish_result.json is already written? Need to decide expected behavior first, then test.
-3. **🔴 Concurrent observer + email-reply** — same scenario class. Document expected behavior in /retro then test.
+2. ✅ **CLOSED 2026-05-26: Reject-after-schedule** — product decision 1A + `test_reject_after_schedule_is_no_op` pins it.
+3. ✅ **CLOSED 2026-05-26: Concurrent observer + email-reply race** — product decision 2A + race_detected flag on `publish_review_carousel_run`.
 4. **🔴 Stress / soak** — sidecar runs every 6h × multiple weeks. publish_candidates.json grows. Run a synthetic week-of-data soak test once.
 5. **⚠️  Secret-leak automation** — `gitleaks detect --staged` as a pre-commit step. Currently relies on careful human review.
 
