@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-05-23
+Last updated: 2026-05-26
 
 ## Document Ownership
 
@@ -148,6 +148,19 @@ Companion docs:
 - A derived `decision_detail` contract now lets the browser show the artifact, decision question, recommendation, blocked reasons, receipts, and safe action before raw logs or pipeline controls.
 - Decision Inbox groups pending work into Needs My Decision, Ready To Continue, Blocked, and Recently Completed lanes.
 - HMI smoke coverage now checks the local console pages, action registry, decision inbox wiring, upload handling, and latest-run deep links before manual operator testing.
+
+### 12. Cadence Gate Unification & Browser Guard Hardening
+- Shared `runtime/email_cadence_gate.py` registry now covers all 8 operator-facing intel surfaces (profit, recommendations, reviews, learnings, competitors, business_intelligence, engineering_governance, shopify_seo). Each surface declares `cadence + bypass_keys + deferred_note`; per-flow env-var configs were retired and a `legacy_env_warning` helper flags stale `.env` lines.
+- All 5 original daily intel emails now have matching `/portal/intel/<surface>` pages (profit, recommendations, reviews, learnings, competitors). Each page reads its source state file, uses the shared `_render_portal_shell`, and surfaces the cadence decision (cadence, next_email_at, bypass_active) so the operator can see what was deferred and why.
+- Cadence decisions are now appended to `state/email_cadence_decisions.jsonl` — "why didn't today's email fire?" is grep-able.
+- Cross-repo `helpers/cadence_gate_loader.py` carries the sibling-checkout import + fail-open pattern for the three duckAgent flows (reviews, profit, competitor) that gate through it.
+- New `runtime/workflow_cooldown_sweeper.py` auto-clears stale cooldown-style `workflow_control` failures (>4h old on a whitelisted state_reason). Wired into the sidecar as the first step. Prevents the April 24 → May 26 stuck-state pattern from recurring silently.
+- Etsy browser guard `runtime/etsy_browser_guard.py` tuned: local-only Playwright ops (snapshot, state-load, state-save, open, close) no longer count toward `MAX_COMMANDS_PER_WINDOW` (Etsy can't see them); `.click(` inside an eval no longer auto-flagged mutating — the specific marker `submit.click(` is now the trigger. Submission detection still fires correctly; routine inbox sync no longer self-trips.
+- New Agent OS card `etsy_browser_guard_health` distinguishes Etsy-imposed blocks (BLOCK_PHRASES → red, manual fix) from self-imposed cooldowns (rate_limit_preemptive_cooldown → yellow, auto-clears).
+- Review reply rewriter prompt hardened (commit `e4df8d7`): CRITICAL RULE leads, REJECTED EXAMPLE shows the exact echo_check failure mode from the live log, two-step chain-of-thought forces specific-detail identification before reply generation. Shared `call_openai` now retries 429/5xx with exponential backoff (3 attempts, max ~7s).
+- Review-reply auto-drain enabled (`auto_execution_enabled=true`, `auto_drain_max_submits_per_run=2`). Sidecar drain step fires once per day in the afternoon window (13–19) with 0–30 min random jitter and a 20h marker-file cooldown — natural shop-owner rhythm rather than every-6h bot pattern. Operator one-time browser-path approval remains the gating prerequisite.
+- New `duck-os-triage` skill (`~/.claude/skills/duck-os-triage/` + `duck-ops/runtime/agent_os_triage.py`) turns any "Repair now" finding on the Agent OS portal into a structured root-cause brief — failure modes by category (prompt / code / data / provider), sample rejected outputs from the call log, and a fix-category recommendation.
+- Prompt Contract Audit Phase 0 inventory complete: 7 LLM prompts catalogued across both repos with risk tier and output discipline. See [PROMPT_CONTRACT_AUDIT_PHASE_0_INVENTORY.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/PROMPT_CONTRACT_AUDIT_PHASE_0_INVENTORY.md). 1 HIGH-risk (review reply rewriter), 5 MEDIUM, 1 LOW. 4 of 7 already use JSON-mode + schema validation; the 3 free-text-with-regex prompts are the Phase 1 targets in order.
 
 ## Active Operational Lanes
 
@@ -315,34 +328,35 @@ Why this matters:
 - Skills now give Codex/agents a stable operating manual for recurring work.
 - The value now comes from enforcing them in real workflows, not from creating more skill files.
 
-### Priority 10: Operator Visibility For Cadence-Gated Reports
+### Priority 10: Operator Visibility For Cadence-Gated Reports — substantially complete
 
-The cadence-gating shipped for competitor and profit emails closes the daily-inbox-noise problem but opens a visibility gap: the human can no longer glance at their inbox to see yesterday's number. The lane state still flows through `workflow_control` for the agent, but no operator surface displays it yet.
+The cadence-gating shipped for competitor and profit emails closed the daily-inbox-noise problem but opened a visibility gap. As of 2026-05-26 the gap is mostly closed; see Section 12 of Completed Major Work for details.
 
 Plan: [PROFIT_INTEL_PANEL_PLAN.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/PROFIT_INTEL_PANEL_PLAN.md).
 
-Next slices (in order):
-1. **Slice B — Weekly roll-up email content.** The Monday email today still ships single-day content; replace with a real 7-day roll-up (top-line totals, WoW deltas, per-day mini-table, anomalies-of-the-week, best/worst day callouts, drill-down deep-links). Anomaly-bypass days keep the single-day content so the operator sees the bad day's detail.
-2. **Slice C — Business Desk panel + minimal operator override endpoint.** Add `## Profit Intel` section to `business_desk.md` showing yesterday + 7d trend + anomaly badge + email-status line + freshness label. Ship `POST /portal/intel/profit/send-now` so the human always has an escape valve when bypass triggers don't fire on a day they'd want the email.
-3. **Slice D — Full page at `/portal/intel/profit`.** Drill-down with 30-day chart, channel breakdown, last-30-days table, embedded latest report, override button reusing the Phase 4 endpoint. Deep-link only — not added to top-nav.
-4. **Slice E — Cross-repo doc updates.** Plan + roadmap reflect shipped state.
+Slice status:
+1. **Slice B — Weekly roll-up email content.** ✅ Shipped. Profit Monday email now produces a 7-day rollup (`flows/profit/weekly_rollup.py`); anomaly-bypass days preserve single-day content.
+2. **Slice C — Business Desk panel + override endpoint.** ✅ Shipped. The 5 portal intel pages (profit, recommendations, reviews, learnings, competitors) and the new Agent OS card pattern surface the cadence decision + next-email-at + freshness on the operator surface. Per-page `metricCard` summary feeds the Desk; per-area `_status_reason` + `_attention_subtype` feeds Agent OS.
+3. **Slice D — Full pages at `/portal/intel/<surface>`.** ✅ Shipped. All 5 surfaces have full drill-down pages reading their source state files.
+4. **Slice E — Cross-repo doc updates.** ✅ This update (2026-05-26). Plan + roadmap now reflect shipped state.
 
-Once these slices land, the same pattern can be applied to the daily recommendations email and any other report still pushing operator-facing content unconditionally.
+The pattern has been extended past the original 5 surfaces — business_intelligence, engineering_governance, and shopify_seo were added to the cadence registry in the same shape. Any future report-style email follows the same recipe: portal page + cadence policy + OS card + tests.
 
 ## Recommended Next 3 Steps
 
-### 1. Resume Review / Reliability Hardening In Safe Windows
-- When Etsy access is safe again, continue `Review Inbox` and supervised posting stabilization with stronger failure breadcrumbs.
-- Keep this in observe-first mode so the operator surface stays trustworthy.
+### 1. Promote Weekly Sale Into The Autonomy Gate (Priority 1 next slice)
+- Foundations from the 2026-05-26 work now make this safe: cadence gate covers 8 surfaces, browser guard no longer self-trips on routine sync, workflow_cooldown_sweeper auto-recovers stuck lanes, and the Agent OS now has a guard-source card that distinguishes self-imposed from Etsy-imposed blocks.
+- Concrete first move: use the Promotion Readiness gate on Business Desk to advance weekly sale from manual email approval → auto-apply after operator approval, with rollback receipts.
+- Pattern model for the other policy/watch/promote lanes (Meme Monday, Tuesday review carousel, Jeep Fact Wednesday) once weekly sale proves the path.
 
-### 2. Turn Learnings Into Stronger Weekly Execution Guidance
+### 2. Phase 1 Of The Prompt Contract Audit (Priority 5)
+- Phase 0 inventory complete (2026-05-26) — see [PROMPT_CONTRACT_AUDIT_PHASE_0_INVENTORY.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/PROMPT_CONTRACT_AUDIT_PHASE_0_INVENTORY.md).
+- Phase 1 first pick: refactor `review_reply_rewriter_llm.py` to JSON-mode with `specific_detail_echoed` as a load-bearing schema field instead of a post-hoc `echo_check` regex. This is the only HIGH-risk prompt and the only one writing publicly to Etsy.
+- Second and third picks (review reply scorer, jeepfact hint parser) follow the same JSON-mode + schema-validation pattern.
+
+### 3. Turn Learnings Into Stronger Weekly Execution Guidance (carried forward)
 - Use the steadier competitor signal plus the new learnings notifier to sharpen the weekly experiment list and promotion-readiness calls.
 - Keep the recommendations explicit: what stayed stable, what is worth testing once, and what should not be copied.
-
-### 3. Harden Promotion Watch Into The Autonomy Gate
-- Weekly sale, Meme Monday, Tuesday review carousel, and Jeep Fact Wednesday now share the policy/watch/promote pattern.
-- Every promotion candidate now names the owner, side effect, allowed tier, approval boundary, current mode, target mode, and source config before the operator is asked to promote anything.
-- Keep the same model: supervised first, evidence in workflow control, promotion surfaced in the business desk, and default-off until the operator explicitly approves the mode change.
 
 ## Lower-Priority / Nice-to-Have
 - Continue backfilling more exact Etsy `/messages/<id>` URLs.
