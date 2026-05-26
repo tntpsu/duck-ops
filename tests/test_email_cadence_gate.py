@@ -39,10 +39,17 @@ def _at(date_iso: str) -> datetime:
 
 
 class PolicyRegistryTests(unittest.TestCase):
-    def test_all_five_surfaces_registered(self) -> None:
+    def test_all_six_surfaces_registered(self) -> None:
         self.assertEqual(
             known_surfaces(),
-            ("competitors", "learnings", "profit", "recommendations", "reviews"),
+            (
+                "business_intelligence",
+                "competitors",
+                "learnings",
+                "profit",
+                "recommendations",
+                "reviews",
+            ),
         )
 
     def test_require_policy_raises_on_unknown(self) -> None:

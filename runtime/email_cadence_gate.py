@@ -176,6 +176,13 @@ POLICIES: dict[str, CadencePolicy] = {
                       "rollup scheduled for Monday. New build candidates trigger "
                       "a same-day send.",
     ),
+    "business_intelligence": CadencePolicy(
+        surface_name="business_intelligence",
+        cadence="weekly_monday",
+        bypass_keys=("action_items_count",),
+        deferred_note="Weekly insights refreshed in the portal; email "
+                      "scheduled for Monday. Action items trigger a same-day send.",
+    ),
 }
 
 
