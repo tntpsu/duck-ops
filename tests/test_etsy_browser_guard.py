@@ -48,6 +48,94 @@ class EtsyBrowserGuardTests(unittest.TestCase):
                 self.assertTrue(state["blocked_until"])
                 self.assertEqual(state["block_reason"], "unusual activity")
 
+    def test_local_only_commands_excluded_from_burst_budget(self) -> None:
+        """The 8:37 stuck-state burst was 18 commands of which 10 were
+        local Playwright ops Etsy can't see (snapshot, state-save,
+        state-load, open). Those must not count toward
+        MAX_COMMANDS_PER_WINDOW or the guard trips on normal inbox
+        sync activity."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "guard.json"
+            now = datetime.now().astimezone()
+            local_events = [
+                {
+                    "at": (now - timedelta(seconds=10 + i)).isoformat(),
+                    "session": "esd",
+                    "command": cmd,
+                    "mutating": False,
+                }
+                for i, cmd in enumerate(
+                    ["snapshot", "snapshot", "snapshot", "snapshot", "snapshot",
+                     "snapshot", "state-load", "state-save", "state-save", "open",
+                     "snapshot", "snapshot", "snapshot", "snapshot", "snapshot",
+                     "state-save", "state-save", "state-save", "state-save", "state-save"]
+                )
+            ]
+            with patch.object(etsy_browser_guard, "STATE_PATH", state_path):
+                etsy_browser_guard.save_state(
+                    {"blocked_until": None, "block_reason": None, "events": local_events}
+                )
+                with patch.object(etsy_browser_guard, "cleanup_stale_playwright_processes"):
+                    # 20 local-only events queued; a fresh click should
+                    # be allowed because none count toward the budget.
+                    try:
+                        etsy_browser_guard.before_command("esd", ("click", "#thread"))
+                    except RuntimeError as exc:  # pragma: no cover — defensive
+                        self.fail(f"local-only events tripped the budget: {exc}")
+
+    def test_eval_with_dot_click_no_longer_mutating(self) -> None:
+        """`.click(` matches every "click to expand thread" eval. Real
+        Etsy review-reply submits use `submit.click(` (specific token).
+        Today's burst had 4 evals with `.click(` flagged mutating
+        despite being read-only thread expansions."""
+        eval_args = ("eval", "document.querySelector('a.thread').click(); return true;")
+        self.assertFalse(etsy_browser_guard._is_mutating_command(eval_args))
+
+    def test_eval_submit_click_still_mutating(self) -> None:
+        """The real review-reply submit pattern from
+        review_reply_executor.py:1357 must still flag mutating."""
+        submit_eval = (
+            "eval",
+            "if (submit.disabled) return {ok:false}; submit.click(); return {ok:true};",
+        )
+        self.assertTrue(etsy_browser_guard._is_mutating_command(submit_eval))
+
+    def test_navigation_eval_still_mutating(self) -> None:
+        """location.assign / window.location are genuine page changes."""
+        nav_eval = ("eval", "window.location.href = '/listings/123/edit';")
+        self.assertTrue(etsy_browser_guard._is_mutating_command(nav_eval))
+
+    def test_click_command_still_mutating(self) -> None:
+        """Direct Playwright `click` commands hit Etsy regardless of
+        selector. Keep treating all of them as mutating."""
+        self.assertTrue(etsy_browser_guard._is_mutating_command(("click", "#button")))
+        self.assertTrue(etsy_browser_guard._is_mutating_command(("fill", "input", "text")))
+
+    def test_burst_still_trips_on_visible_commands(self) -> None:
+        """The guard must still catch a real burst of Etsy-visible
+        commands. Regression-pin so a future tweak doesn't disable it."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "guard.json"
+            now = datetime.now().astimezone()
+            max_visible = etsy_browser_guard.MAX_COMMANDS_PER_WINDOW
+            visible_events = [
+                {
+                    "at": (now - timedelta(seconds=10 + i)).isoformat(),
+                    "session": "esd",
+                    "command": "click",
+                    "mutating": True,
+                }
+                for i in range(max_visible)
+            ]
+            with patch.object(etsy_browser_guard, "STATE_PATH", state_path):
+                etsy_browser_guard.save_state(
+                    {"blocked_until": None, "block_reason": None, "events": visible_events}
+                )
+                with patch.object(etsy_browser_guard, "cleanup_stale_playwright_processes"):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        etsy_browser_guard.before_command("esd", ("click", "#anything"))
+            self.assertIn("cooling down", str(ctx.exception))
+
     def test_cleanup_stale_playwright_processes_respects_keepalive(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "guard.json"

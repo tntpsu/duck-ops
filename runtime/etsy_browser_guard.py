@@ -27,6 +27,15 @@ MAX_COMMANDS_PER_WINDOW = 18
 MAX_MUTATING_COMMANDS_PER_WINDOW = 8
 MIN_GAP_SECONDS = 1.25
 MIN_MUTATING_GAP_SECONDS = 3.5
+
+# Local Playwright/disk operations Etsy literally can't see. They
+# don't trigger Etsy's bot heuristics, so they shouldn't count toward
+# the shared burst budget. The April 24 → May 26 stuck-state and
+# today's 8:37 burst both tripped because a normal inbox-sync cycle
+# (18 events: 6 snapshots + 2 state-saves + 1 state-load + 1 open + 8
+# evals) was hitting MAX_COMMANDS_PER_WINDOW even though only 8 of
+# those were actually visible to Etsy.
+_LOCAL_ONLY_COMMANDS = frozenset({"snapshot", "state-load", "state-save", "open", "close"})
 PLAYWRIGHT_STALE_AFTER_SECONDS = 2 * 60 * 60
 PLAYWRIGHT_CLEANUP_MIN_INTERVAL_SECONDS = 5 * 60
 PLAYWRIGHT_CLEANUP_HISTORY_LIMIT = 20
@@ -96,15 +105,40 @@ def save_state(payload: dict[str, Any]) -> None:
     STATE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _is_etsy_visible(args: tuple[str, ...]) -> bool:
+    """Return True for commands that actually hit Etsy. Local
+    Playwright/disk operations (snapshot, state-load, state-save,
+    open, close) return False and are excluded from the burst budget.
+    """
+    if not args:
+        return False
+    return str(args[0] or "").strip().lower() not in _LOCAL_ONLY_COMMANDS
+
+
 def _is_mutating_command(args: tuple[str, ...]) -> bool:
     if not args:
         return False
     command = str(args[0] or "").strip().lower()
-    if command in {"click", "fill", "type", "press"}:
+    # Form-input commands write to Etsy's UI state.
+    if command in {"fill", "type", "press", "click"}:
         return True
     if command == "eval":
         script = " ".join(str(part or "") for part in args[1:]).lower()
-        return any(token in script for token in (".click(", "location.assign", "window.location", ".submit("))
+        # Previously matched `.click(` too — that caught every "click
+        # to expand thread" / "click to load more" eval and fired the
+        # mutating budget on read-only inbox browsing. The specific
+        # marker for real Etsy review-reply submits is `submit.click(`
+        # (see review_reply_executor.py — the open-reply-form click is
+        # `button.click(` and is NOT a submission). Keep navigation
+        # and form.submit matches because those *do* change Etsy
+        # state.
+        return any(token in script for token in (
+            "submit.click(",
+            ".submit()",
+            "form.submit",
+            "location.assign",
+            "window.location",
+        ))
     return False
 
 
@@ -400,8 +434,17 @@ def before_command(session: str, args: tuple[str, ...]) -> None:
 
     events = _prune_events(list(state.get("events") or []))
     mutating = _is_mutating_command(args)
-    mutating_count = sum(1 for event in events if bool(event.get("mutating")))
-    if len(events) >= MAX_COMMANDS_PER_WINDOW or (mutating and mutating_count >= MAX_MUTATING_COMMANDS_PER_WINDOW):
+    # Only count Etsy-visible commands toward the burst budget.
+    # Snapshots / state-load / state-save are local Playwright ops
+    # Etsy can't see, so they shouldn't trigger their bot heuristics.
+    visible_events = [
+        event
+        for event in events
+        if str(event.get("command") or "").strip().lower() not in _LOCAL_ONLY_COMMANDS
+    ]
+    mutating_count = sum(1 for event in visible_events if bool(event.get("mutating")))
+    visible_count = len(visible_events)
+    if visible_count >= MAX_COMMANDS_PER_WINDOW or (mutating and mutating_count >= MAX_MUTATING_COMMANDS_PER_WINDOW):
         cooldown_until = now + timedelta(minutes=15)
         state["blocked_until"] = cooldown_until.isoformat()
         state["block_reason"] = "rate_limit_preemptive_cooldown"
