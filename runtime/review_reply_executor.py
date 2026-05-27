@@ -49,7 +49,12 @@ from workflow_control import record_workflow_transition
 ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / "state"
 OUTPUT_DIR = ROOT / "output"
-DUCK_AGENT_ROOT = ROOT.parents[2] / "duckAgent"
+# duckAgent lives as a sibling to duck-ops, not 3 levels up.
+# Previously ROOT.parents[2] which resolved to "/Users/duckAgent"
+# (correct shape: /Users/philtullai/ai-agents/duckAgent). The bug
+# slept until 2026-05-26 when the auth-required-alert path tried to
+# load helpers/email_helper.py and crashed the drain.
+DUCK_AGENT_ROOT = ROOT.parent / "duckAgent"
 CONFIG_DIR = ROOT / "config"
 
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
