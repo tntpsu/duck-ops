@@ -39,7 +39,12 @@ OUTPUT_DIR = ROOT / "output"
 PUBLISH_CANDIDATES_PATH = NORMALIZED_DIR / "publish_candidates.json"
 DECISION_HISTORY_PATH = STATE_DIR / "decision_history.jsonl"
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
-EVALUATOR_VERSION = 12
+# 2026-05-28: bumped from 12 → 13 to force re-evaluation under the
+# new evaluate_review_carousel branch. Without the bump, the cached
+# input_hash in quality_gate_state.json would skip all carousel
+# artifacts and they'd keep showing the old discard/score 42 result
+# until their content changed.
+EVALUATOR_VERSION = 13
 
 
 REVIEW_REPLY_SCORE_COMPONENT_MAX: dict[str, int] = {
@@ -1031,6 +1036,141 @@ def evaluate_review_story(candidate: dict[str, Any], age_days: int | None) -> di
     }
 
 
+def evaluate_review_carousel(candidate: dict[str, Any], age_days: int | None) -> dict[str, Any]:
+    """Score a `flow=review_carousel` candidate.
+
+    Distinct from the generic publish scorer because a carousel's
+    `body` field is just the Instagram caption (~150-200 chars), not
+    a full publishable artifact. Applying the newduck/weekly_sale
+    rubric (which expects body_len >= 180 and clarity to track body
+    completeness) produces false-negative `discard` decisions on
+    perfectly fine carousels — that's what the operator hit on
+    2026-05-28 when yesterday's carousel scored 42/100 with
+    "materially incomplete" fail-closed.
+
+    Carousel-appropriate criteria:
+    - Support: slide count (≥3 needed for publishability)
+    - Clarity: caption + slide content present
+    - Differentiation: 5 slides ideal, fewer is less differentiated
+    - Conversion: caption has CTA-like prompt
+    - Timing: ≤1 day old is fresh
+    """
+    summary = candidate.get("candidate_summary") or {}
+    supporting = candidate.get("supporting_context") or {}
+    source_refs = candidate.get("source_refs") or []
+    caption = str(summary.get("body") or "")
+    headline = str(summary.get("title") or "").replace("Review Carousel — ", "").strip()
+    slide_count = int(summary.get("slide_count") or 0)
+    has_image = bool(summary.get("images") or summary.get("preview_url"))
+
+    reasoning: list[str] = []
+    suggestions: list[str] = []
+    fail_closed: list[str] = []
+
+    # Support: slide count is the load-bearing signal. 5 is the
+    # target (IG carousel max we use), 3 is the minimum for a
+    # publishable mix.
+    support = 5 + min(15, slide_count * 3)
+    support = int(clamp(support, 0, 20))
+    reasoning.append(
+        f"Support score {support}/20 from {slide_count} slide(s); 5 slides is the target IG carousel mix."
+    )
+
+    brand_fit = 18 if any(t in caption.lower() for t in ("myjeepduck", "duck", "flock", "customer")) else 12
+    reasoning.append(
+        f"Brand-fit score {brand_fit}/20 based on whether the caption uses on-brand language."
+    )
+
+    clarity = 4
+    if len(caption) >= 60:
+        clarity += 4
+    if slide_count >= 3:
+        clarity += 4
+    if has_image:
+        clarity += 3
+    clarity = int(clamp(clarity, 0, 15))
+    reasoning.append(
+        f"Clarity score {clarity}/15 from caption length, slide count, and preview asset."
+    )
+
+    differentiation = 9 + min(6, slide_count)
+    differentiation = int(clamp(differentiation, 0, 15))
+    reasoning.append(
+        f"Differentiation score {differentiation}/15 — IG carousels benefit from a richer slide mix."
+    )
+
+    conversion = 6
+    if any(t in caption.lower() for t in ("favorite", "which", "your", "?")):
+        conversion += 6
+    if len(caption.split()) >= 12:
+        conversion += 3
+    conversion = int(clamp(conversion, 0, 15))
+    reasoning.append(
+        f"Conversion-quality score {conversion}/15 from caption CTA strength and length."
+    )
+
+    timing = 10 if age_days is not None and age_days <= 1 else 7 if age_days is not None and age_days <= 3 else 4
+    reasoning.append(f"Timing score {timing}/10 based on carousel build age.")
+
+    risk_penalty = 0
+    if not has_image:
+        risk_penalty += 2
+        suggestions.append("Attach the carousel preview image so the operator can see the staged composition.")
+    if not caption:
+        risk_penalty += 2
+    risk_penalty = int(clamp(risk_penalty, 0, 5))
+    reasoning.append(
+        f"Risk penalty {risk_penalty}/5 from missing preview image or caption."
+    )
+
+    score = int(clamp(support + brand_fit + clarity + differentiation + conversion + timing - risk_penalty, 0, 100))
+
+    # Fail-closed criteria: ONLY things that make the carousel
+    # genuinely un-publishable. The newduck `body_len < 180` rule is
+    # specifically excluded — a carousel caption is short by design.
+    if slide_count == 0:
+        fail_closed.append("Carousel has no slides.")
+    if slide_count < 3:
+        fail_closed.append(f"Carousel has {slide_count} slide(s); needs at least 3 for publication.")
+    if not caption.strip():
+        fail_closed.append("Carousel caption is empty.")
+    if age_days is not None and age_days >= 14:
+        fail_closed.append(f"Carousel build is {age_days} days old; refresh before publishing.")
+
+    if fail_closed:
+        decision = "discard" if score < 60 else "needs_revision"
+    else:
+        decision = "publish_ready" if score >= 72 else "needs_revision" if score >= 55 else "discard"
+
+    priority = "high" if decision != "discard" else "medium"
+    raw_confidence = 0.62 + min(0.10, 0.02 * slide_count) + (0.05 if has_image else 0.0)
+    if len(caption) >= 100:
+        raw_confidence += 0.05
+    confidence = round(clamp(raw_confidence, 0.30, confidence_cap(candidate)), 2)
+
+    if fail_closed:
+        reasoning.extend(f"Fail-closed trigger: {message}" for message in fail_closed)
+
+    return {
+        "decision": decision,
+        "score": score,
+        "confidence": confidence,
+        "priority": priority,
+        "reasoning": reasoning,
+        "improvement_suggestions": _flow_improvement_suggestions(suggestions, "review_carousel", decision),
+        "component_scores": {
+            "support": support,
+            "brand_fit": brand_fit,
+            "clarity": clarity,
+            "differentiation": differentiation,
+            "conversion_quality": conversion,
+            "timing_fit": timing,
+            "risk_penalty": risk_penalty,
+        },
+        "fail_closed": fail_closed,
+    }
+
+
 def evaluate_review_reply(candidate: dict[str, Any], age_days: int | None, private_mode: bool) -> dict[str, Any]:
     summary = candidate.get("candidate_summary") or {}
     source_refs = candidate.get("source_refs") or []
@@ -1280,6 +1420,41 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
                 "confidence_cap": confidence_cap(candidate),
                 "component_scores": outcome["component_scores"],
                 "fail_closed": outcome["fail_closed"],
+            },
+        }
+
+    if flow == "review_carousel":
+        outcome = evaluate_review_carousel(candidate, age_days)
+        evidence_refs = [ref.get("path", "") for ref in source_refs[:5] if ref.get("path")]
+        preview_url = summary.get("preview_url") or (summary.get("images") or [None])[0]
+        return {
+            "artifact_id": candidate["artifact_id"],
+            "artifact_type": candidate.get("artifact_type", "social_carousel"),
+            "flow": flow,
+            "run_id": candidate.get("run_id"),
+            "artifact_slug": slugify(f"{flow}-{candidate.get('run_id', 'unknown')}"),
+            "decision": outcome["decision"],
+            "score": outcome["score"],
+            "confidence": outcome["confidence"],
+            "priority": outcome["priority"],
+            "reasoning": outcome["reasoning"],
+            "improvement_suggestions": outcome["improvement_suggestions"],
+            "evidence_refs": evidence_refs,
+            "review_status": "pending",
+            "created_at": now_iso(),
+            "title": title,
+            "preview": {
+                "proposed_label": "Caption",
+                "proposed_text": preview_text(body),
+                "asset_url": str(preview_url) if preview_url else None,
+            },
+            "quality_gate_metadata": {
+                "age_days": age_days,
+                "source_mode": notes.get("source_mode"),
+                "confidence_cap": confidence_cap(candidate),
+                "component_scores": outcome["component_scores"],
+                "fail_closed": outcome["fail_closed"],
+                "slide_count": int((summary.get("slide_count") or 0)),
             },
         }
 
