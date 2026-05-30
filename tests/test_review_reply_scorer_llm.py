@@ -16,6 +16,8 @@ import review_reply_scorer_llm as scorer
 
 
 def _success_response(text: str) -> dict:
+    """Raw completion shape — used for negative tests that intentionally
+    return non-conforming content to exercise the JSON-contract path."""
     return {
         "choices": [{"message": {"content": text}}],
         "usage": {"prompt_tokens": 280, "completion_tokens": 30},
@@ -23,29 +25,68 @@ def _success_response(text: str) -> dict:
     }
 
 
-class ScorerParsingTests(unittest.TestCase):
-    def test_parse_yes_verdict(self) -> None:
-        out = scorer._parse_verdict("yes\nThe draft echoes 'nephew' and 'dimples' from the review.")
+def _success_json_response(*, verdict: str, reason: str) -> dict:
+    """JSON-mode-compliant completion shape. Happy-path tests use this so
+    the test surface mirrors the live contract post-refactor."""
+    import json as _json
+    return _success_response(_json.dumps({"verdict": verdict, "reason": reason}))
+
+
+class ScorerJsonContractParsingTests(unittest.TestCase):
+    """Pin the JSON contract added by the 2026-05-30 refactor. Replaces
+    the prior two-line free-text parser; the back-compat shim
+    `_parse_verdict` still exists for callers, but the load-bearing
+    work happens in `_parse_json_output` + `_validate_json_shape`."""
+
+    def test_yes_verdict_passes(self) -> None:
+        out = scorer._parse_verdict(
+            '{"verdict": "yes", "reason": "draft echoes the nephew detail"}'
+        )
         self.assertEqual(out["verdict"], "yes")
         self.assertIn("nephew", out["reason"])
 
-    def test_parse_no_verdict(self) -> None:
-        out = scorer._parse_verdict("no\nGeneric thank-you with no specific echo.")
+    def test_no_verdict_passes(self) -> None:
+        out = scorer._parse_verdict(
+            '{"verdict": "no", "reason": "Generic thank-you with no specific echo."}'
+        )
         self.assertEqual(out["verdict"], "no")
         self.assertIn("Generic", out["reason"])
 
-    def test_parse_handles_line_prefixes(self) -> None:
-        out = scorer._parse_verdict("Line 1: yes\nReason: echoes the gift mention.")
+    def test_yes_with_trailing_punctuation_tolerated(self) -> None:
+        """Real OpenAI JSON-mode outputs sometimes have 'yes.' or 'Yes'
+        in the verdict field. Strict yes/no comparison would over-reject
+        these — the validator lowercases + strips trailing punctuation."""
+        out = scorer._parse_verdict(
+            '{"verdict": "Yes.", "reason": "matches the operator bar"}'
+        )
+        self.assertIsNotNone(out)
         self.assertEqual(out["verdict"], "yes")
-        self.assertIn("gift", out["reason"])
 
-    def test_parse_rejects_unparseable(self) -> None:
+    def test_unparseable_returns_none(self) -> None:
         self.assertIsNone(scorer._parse_verdict(""))
         self.assertIsNone(scorer._parse_verdict("maybe\nnot sure"))
 
-    def test_parse_rejects_overly_long_reason(self) -> None:
-        long_reason = "yes\n" + ("x" * 300)
-        self.assertIsNone(scorer._parse_verdict(long_reason))
+    def test_missing_verdict_returns_none(self) -> None:
+        self.assertIsNone(scorer._parse_verdict('{"reason": "no verdict"}'))
+
+    def test_missing_reason_returns_none(self) -> None:
+        self.assertIsNone(scorer._parse_verdict('{"verdict": "yes"}'))
+
+    def test_verdict_not_yes_or_no_returns_none(self) -> None:
+        self.assertIsNone(scorer._parse_verdict('{"verdict": "maybe", "reason": "x"}'))
+
+    def test_overly_long_reason_returns_none(self) -> None:
+        import json as _json
+        payload = _json.dumps({"verdict": "yes", "reason": "x" * 300})
+        self.assertIsNone(scorer._parse_verdict(payload))
+
+    def test_code_fence_wrapped_is_accepted(self) -> None:
+        """Tolerate the ```json ... ``` wrapper OpenAI sometimes adds."""
+        out = scorer._parse_verdict(
+            '```json\n{"verdict": "yes", "reason": "echoes the gift mention"}\n```'
+        )
+        self.assertEqual(out["verdict"], "yes")
+        self.assertIn("gift", out["reason"])
 
 
 class ScorerGrayZoneTests(unittest.TestCase):
@@ -95,8 +136,9 @@ class ScorerLLMOrchestrationTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_returns_yes_verdict(self) -> None:
-        with patch.object(scorer, "_call_openai", return_value=_success_response(
-            "yes\nThe draft echoes 'nephew' and 'features' from the review."
+        with patch.object(scorer, "_call_openai", return_value=_success_json_response(
+            verdict="yes",
+            reason="The draft echoes 'nephew' and 'features' from the review.",
         )):
             result = scorer.evaluate_gray_zone(
                 review_text="Ordered ducks for my nephew with his facial features.",
@@ -110,8 +152,9 @@ class ScorerLLMOrchestrationTests(unittest.TestCase):
         self.assertIn("nephew", result["reason"])
 
     def test_returns_no_verdict_with_reason(self) -> None:
-        with patch.object(scorer, "_call_openai", return_value=_success_response(
-            "no\nReply is generic — doesn't echo any specific review detail."
+        with patch.object(scorer, "_call_openai", return_value=_success_json_response(
+            verdict="no",
+            reason="Reply is generic — doesn't echo any specific review detail.",
         )):
             result = scorer.evaluate_gray_zone(
                 review_text="Cute! Arrived safe and sound.",
@@ -125,6 +168,9 @@ class ScorerLLMOrchestrationTests(unittest.TestCase):
         self.assertIn("generic", result["reason"].lower())
 
     def test_returns_none_on_unparseable_response(self) -> None:
+        # Pre-refactor: prose verdict bypassed the two-line parser.
+        # Post-refactor: same prose is unparseable JSON → routed to
+        # sanity_failed → None returned. Caller-side contract preserved.
         with patch.object(scorer, "_call_openai", return_value=_success_response(
             "Well, it depends on what you consider publish-ready..."
         )):
@@ -136,6 +182,27 @@ class ScorerLLMOrchestrationTests(unittest.TestCase):
                 fail_closed=[],
             )
         self.assertIsNone(result)
+
+    def test_response_format_is_json_object(self) -> None:
+        """Native JSON mode is requested from the provider, not just
+        hinted at in the prompt. Without response_format the API can
+        return prose and the schema becomes prompt-only."""
+        captured: dict = {}
+        def fake_call(prompt: str, **kwargs) -> dict:
+            captured["kwargs"] = kwargs
+            return _success_json_response(verdict="yes", reason="echoes")
+        with patch.object(scorer, "_call_openai", side_effect=fake_call):
+            scorer.evaluate_gray_zone(
+                review_text="Ordered ducks for my nephew",
+                draft_text="So glad the nephew's ducks turned out.",
+                score=75,
+                component_scores={},
+                fail_closed=[],
+            )
+        self.assertEqual(
+            captured["kwargs"].get("response_format"),
+            {"type": "json_object"},
+        )
 
 
 class EvaluateReviewReplyIntegrationTests(unittest.TestCase):
@@ -152,8 +219,9 @@ class EvaluateReviewReplyIntegrationTests(unittest.TestCase):
 
     def test_llm_yes_flips_decision_to_publish_ready(self) -> None:
         # Use the same nephew review that lands in the gray zone.
-        with patch.object(scorer, "_call_openai", return_value=_success_response(
-            "yes\nDraft echoes 'nephew' and 'features' specifically."
+        with patch.object(scorer, "_call_openai", return_value=_success_json_response(
+            verdict="yes",
+            reason="Draft echoes 'nephew' and 'features' specifically.",
         )):
             outcome = quality_gate_pilot.evaluate_review_reply(
                 {
@@ -174,8 +242,9 @@ class EvaluateReviewReplyIntegrationTests(unittest.TestCase):
         )
 
     def test_llm_no_keeps_needs_revision_and_adds_reason(self) -> None:
-        with patch.object(scorer, "_call_openai", return_value=_success_response(
-            "no\nReply is generic — doesn't mention the nephew at all."
+        with patch.object(scorer, "_call_openai", return_value=_success_json_response(
+            verdict="no",
+            reason="Reply is generic — doesn't mention the nephew at all.",
         )):
             outcome = quality_gate_pilot.evaluate_review_reply(
                 {
@@ -251,7 +320,9 @@ class ScorerFewShotTests(unittest.TestCase):
         self._write_feedback([
             {"operator_action": "approve", "customer_review": "Adorable little duck!", "draft_reply": "So glad the little one made you smile."},
         ])
-        with patch.object(scorer, "_call_openai", return_value=_success_response("no\nNot specific enough.")):
+        with patch.object(scorer, "_call_openai", return_value=_success_json_response(
+            verdict="no", reason="Not specific enough.",
+        )):
             scorer.evaluate_gray_zone(
                 review_text="Once again amazing job for my nephew",
                 draft_text="Thanks!",

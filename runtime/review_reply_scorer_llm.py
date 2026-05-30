@@ -23,6 +23,7 @@ OS producer in K.4 surfaces it alongside the rewriter health.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any
@@ -76,11 +77,8 @@ A draft "needs revision" when:
 
 Use the operator's past decisions above as calibration — match their bar.
 
-Reply in this exact format:
-  Line 1: just the word "yes" or "no"
-  Line 2: a one-sentence reason (under 200 chars), naming the specific quality signal you used.
-
-No preamble, no extra lines."""
+OUTPUT CONTRACT — return ONLY a JSON object, no preamble, no markdown fences:
+{{"verdict": "yes" or "no", "reason": "<one sentence, under 200 chars, naming the specific quality signal you used>"}}"""
 
 
 def _load_feedback_calibration_examples(
@@ -186,41 +184,87 @@ def is_in_gray_zone(score: int, fail_closed: list[Any] | None) -> bool:
     return GRAY_ZONE_MIN <= score <= GRAY_ZONE_MAX
 
 
+MAX_REASON_CHARS = 240
+
+
+_CODE_FENCE_OPEN = re.compile(r"^```(?:json)?\s*", re.IGNORECASE)
+_CODE_FENCE_CLOSE = re.compile(r"\s*```\s*$")
+
+
+def _strip_code_fence(text: str) -> str:
+    """Tolerate stray ```json ... ``` wrappers OpenAI sometimes adds
+    even with response_format=json_object set."""
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = _CODE_FENCE_OPEN.sub("", cleaned)
+        cleaned = _CODE_FENCE_CLOSE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def _parse_json_output(text: str) -> dict[str, Any] | None:
+    cleaned = _strip_code_fence(text)
+    if not cleaned:
+        return None
+    try:
+        data = json.loads(cleaned)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _validate_json_shape(
+    parsed: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Validate the scorer JSON contract.
+
+    Returns (verdict_dict, failure_list). verdict_dict is None when any
+    contract violation fired. The failure_list names exactly which
+    rules tripped so the call log captures audit-quality detail."""
+    failures: list[str] = []
+    if parsed is None:
+        return None, ["json_unparseable"]
+
+    verdict_raw = parsed.get("verdict")
+    reason_raw = parsed.get("reason")
+
+    if not isinstance(verdict_raw, str):
+        failures.append("missing_verdict")
+    else:
+        verdict_clean = verdict_raw.strip().lower().rstrip(".:,;!?\"'")
+        # Tolerate "yes." / "Yes," / "YES" — strict JSON-mode usually
+        # returns clean "yes"/"no" but enums aren't enforced by
+        # response_format alone, so be lenient about whitespace and
+        # trailing punctuation. Reject anything else.
+        if verdict_clean not in {"yes", "no"}:
+            failures.append("verdict_not_yes_or_no")
+
+    if not isinstance(reason_raw, str):
+        failures.append("missing_reason")
+    elif len(reason_raw.strip()) > MAX_REASON_CHARS:
+        # Same 240-char limit as the prior two-line parser. Catches
+        # the model dumping paragraphs into the reason field.
+        failures.append("reason_too_long")
+
+    if failures:
+        return None, failures
+
+    return {
+        "verdict": verdict_clean,
+        "reason": reason_raw.strip(),
+    }, []
+
+
 def _parse_verdict(text: str) -> dict[str, Any] | None:
-    """Parse the LLM's two-line response into a structured verdict.
-
-    Expected shape:
-      Line 1: "yes" or "no" (case-insensitive)
-      Line 2: short reason
-
-    Returns None on any malformed output (sanity gate).
-    """
-    if not text:
-        return None
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if not lines:
-        return None
-    # Strip "Line 1:", "Answer:", "Verdict:" style prefixes some models add
-    first_raw = re.sub(
-        r"^(line\s*1:?\s*|answer:?\s*|verdict:?\s*)",
-        "",
-        lines[0],
-        flags=re.IGNORECASE,
-    ).strip()
-    first = first_raw.lower().strip().rstrip(".:,;!?\"'")
-    if first not in {"yes", "no"}:
-        first_match = re.match(r"^(yes|no)\b", first)
-        if not first_match:
-            return None
-        first = first_match.group(1)
-    reason = ""
-    if len(lines) >= 2:
-        reason = lines[1]
-        # Strip "Line 2:" or "Reason:" prefixes if the model added them.
-        reason = re.sub(r"^(line\s*2:?\s*|reason:?\s*)", "", reason, flags=re.IGNORECASE).strip()
-    if len(reason) > 240:
-        return None
-    return {"verdict": first, "reason": reason}
+    """Compatibility shim — exercises the JSON contract end-to-end so
+    callers and tests that built on the old two-line parser keep
+    working. Returns None on any contract violation (same sanity-gate
+    behavior as before; the failure modes are different in JSON mode
+    but the caller contract is preserved)."""
+    parsed = _parse_json_output(text or "")
+    verdict, _ = _validate_json_shape(parsed)
+    return verdict
 
 
 def evaluate_gray_zone(
@@ -295,7 +339,18 @@ def evaluate_gray_zone(
         })
         return None
 
-    api_response = _call_openai(prompt, model=model, timeout=timeout_seconds)
+    api_response = _call_openai(
+        prompt,
+        model=model,
+        timeout=timeout_seconds,
+        # Native JSON mode — same pattern as the rewriter. Schema
+        # ({verdict, reason}) is enforced by _validate_json_shape;
+        # response_format only guarantees parseability.
+        response_format={"type": "json_object"},
+        # Lower temperature for structured output, mirrors the
+        # rewriter refactor.
+        temperature=0.3,
+    )
     if api_response is None or "error" in api_response:
         _log_llm_call({
             "at": _now_iso(),
@@ -312,7 +367,8 @@ def evaluate_gray_zone(
         return None
 
     raw_text = _extract_text(api_response)
-    parsed = _parse_verdict(raw_text)
+    parsed_json = _parse_json_output(raw_text)
+    verdict, schema_failures = _validate_json_shape(parsed_json)
     usage = api_response.get("usage") or {}
     log_entry: dict[str, Any] = {
         "at": _now_iso(),
@@ -320,28 +376,28 @@ def evaluate_gray_zone(
         "kind": "review_reply_score",
         "provider": provider,
         "model": model,
-        "outcome": "ok" if parsed else "sanity_failed",
-        "sanity_failures": [] if parsed else ["unparseable_output"],
+        "outcome": "ok" if verdict else "sanity_failed",
+        "sanity_failures": schema_failures,
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
         "elapsed_seconds": api_response.get("elapsed_seconds"),
         "rule_based_score": score,
         "prompt": prompt,
     }
-    if parsed:
-        log_entry["verdict"] = parsed["verdict"]
-        log_entry["reason"] = parsed["reason"]
+    if verdict:
+        log_entry["verdict"] = verdict["verdict"]
+        log_entry["reason"] = verdict["reason"]
         log_entry["output_text"] = raw_text
     else:
         log_entry["rejected_output_text"] = raw_text
     _log_llm_call(log_entry)
 
-    if not parsed:
+    if not verdict:
         return None
 
     return {
-        "verdict": parsed["verdict"],
-        "reason": parsed["reason"],
+        "verdict": verdict["verdict"],
+        "reason": verdict["reason"],
         "model": model,
         "provider": provider,
         "generated_at": _now_iso(),
