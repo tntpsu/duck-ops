@@ -40,11 +40,12 @@ PUBLISH_CANDIDATES_PATH = NORMALIZED_DIR / "publish_candidates.json"
 DECISION_HISTORY_PATH = STATE_DIR / "decision_history.jsonl"
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
 # 2026-05-28: bumped from 12 → 13 to force re-evaluation under the
-# new evaluate_review_carousel branch. Without the bump, the cached
-# input_hash in quality_gate_state.json would skip all carousel
-# artifacts and they'd keep showing the old discard/score 42 result
-# until their content changed.
-EVALUATOR_VERSION = 13
+# new evaluate_review_carousel branch. Bumped 13 → 14 the same day
+# to force re-evaluation so the Thursday `thursday_option_visibility`
+# metadata field gets populated on existing artifacts (otherwise the
+# cached input_hash skips them and the portal RECOMMENDED badge
+# would only appear on artifacts whose content changes).
+EVALUATOR_VERSION = 14
 
 
 REVIEW_REPLY_SCORE_COMPONENT_MAX: dict[str, int] = {
@@ -1624,6 +1625,16 @@ def evaluate_quality_gate(candidate: dict[str, Any]) -> dict[str, Any]:
                 "thursday_option_id": summary.get("option_id") or notes.get("thursday_option_id"),
                 "thursday_option_a": summary.get("option_a"),
                 "thursday_option_b": summary.get("option_b"),
+                # 2026-05-28: preserve the upstream visibility tag
+                # ("recommended" | "reviewable" | "quality_hidden") so
+                # the portal can render a RECOMMENDED badge on the
+                # operator's preferred pick. Without this, the
+                # operator sees two cards with scores 85 vs 57 and
+                # has to infer which one the Thursday flow flagged.
+                "thursday_option_visibility": (
+                    (candidate.get("supporting_context") or {}).get("thursday_option_visibility")
+                    or "reviewable"
+                ),
             },
         }
 
