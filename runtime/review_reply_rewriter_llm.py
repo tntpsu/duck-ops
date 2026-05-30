@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,11 @@ from llm_call_helpers import (
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT_SECONDS,
 )
-from review_reply_rewriter_sanity import evaluate_sanity
+from review_reply_rewriter_sanity import (
+    _STOPWORDS,
+    _non_stopword_tokens,
+    evaluate_sanity,
+)
 
 
 DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
@@ -80,10 +85,11 @@ Constraints:
 
 REJECTED EXAMPLE (do not produce output like this):
 Review: "I ordered ducks for my nephew with his facial features. Right down to his dimples."
-Bad reply: "Thanks so much for the kind review! Means a lot to me." ← zero specifics from the review, will be rejected.
-Good reply: "Capturing the dimples meant looking at the photos again and again — so glad the resemblance hit. Hope your nephew gets a kick out of his lookalike duck."
+Bad JSON: {{"specific_detail_echoed": "kind review", "reply_text": "Thanks so much for the kind review! Means a lot to me."}} ← "kind review" is a generic stopword phrase, not a real detail from the customer.
+Good JSON: {{"specific_detail_echoed": "dimples", "reply_text": "Capturing the dimples meant looking at the photos again and again — so glad the resemblance hit. Hope your nephew gets a kick out of his lookalike duck."}}
 
-Return ONLY the reply text, no preamble, no quotation marks around the reply."""
+OUTPUT CONTRACT — return ONLY a JSON object, no preamble, no markdown fences:
+{{"specific_detail_echoed": "<2-5 word phrase that you copied or paraphrased from the customer's review above — must be content, not generic words like 'review' or 'kind'>", "reply_text": "<your 1-3 sentence reply that weaves that phrase in>"}}"""
 
 
 def _load_approved_examples(*, limit: int = MAX_FEW_SHOT_EXAMPLES) -> list[dict[str, str]]:
@@ -194,6 +200,73 @@ def _clean_output(text: str) -> str:
     return cleaned
 
 
+_CODE_FENCE_OPEN = re.compile(r"^```(?:json)?\s*", re.IGNORECASE)
+_CODE_FENCE_CLOSE = re.compile(r"\s*```\s*$")
+
+
+def _strip_code_fence(text: str) -> str:
+    """Tolerate stray ```json ... ``` wrappers OpenAI sometimes adds
+    even with response_format=json_object set."""
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = _CODE_FENCE_OPEN.sub("", cleaned)
+        cleaned = _CODE_FENCE_CLOSE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def _parse_json_output(text: str) -> dict[str, Any] | None:
+    cleaned = _strip_code_fence(text)
+    if not cleaned:
+        return None
+    try:
+        data = json.loads(cleaned)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _validate_json_shape(
+    parsed: dict[str, Any] | None,
+    *,
+    review_text: str,
+) -> tuple[str | None, list[str]]:
+    """Validate the JSON contract. Returns (reply_text, failure_list).
+
+    reply_text is None when any required field is missing or the
+    specific_detail_echoed isn't a real review-content phrase. The
+    failure_list names exactly which contract violations fired so the
+    log captures audit-quality detail for prompt-tuning."""
+    failures: list[str] = []
+    if parsed is None:
+        return None, ["json_unparseable"]
+
+    detail = parsed.get("specific_detail_echoed")
+    reply_raw = parsed.get("reply_text")
+
+    if not isinstance(detail, str) or not detail.strip():
+        failures.append("missing_specific_detail_echoed")
+    if not isinstance(reply_raw, str) or not reply_raw.strip():
+        failures.append("missing_reply_text")
+    if failures:
+        return None, failures
+
+    detail_clean = detail.strip()
+    detail_tokens = _non_stopword_tokens(detail_clean)
+    if not detail_tokens:
+        failures.append("specific_detail_too_generic")
+    else:
+        review_tokens = _non_stopword_tokens(review_text)
+        if review_tokens and not (detail_tokens & review_tokens):
+            failures.append("specific_detail_not_in_review")
+
+    if failures:
+        return None, failures
+
+    return reply_raw.strip(), []
+
+
 def generate_rewrite_via_llm(
     item: dict[str, Any],
     *,
@@ -244,7 +317,20 @@ def generate_rewrite_via_llm(
 
     api_response: dict[str, Any] | None
     if provider == "openai":
-        api_response = _call_openai(prompt, model=model, timeout=timeout_seconds)
+        api_response = _call_openai(
+            prompt,
+            model=model,
+            timeout=timeout_seconds,
+            # Native JSON mode: the API guarantees a parseable JSON
+            # string. Schema (specific_detail_echoed + reply_text) is
+            # still enforced by _validate_json_shape below — JSON mode
+            # alone does not guarantee shape, only parseability.
+            response_format={"type": "json_object"},
+            # 2026-05-30: tightened from default 0.5 → 0.3. Structured
+            # output benefits from less sampling variance; warmth in
+            # the reply still has headroom at 0.3.
+            temperature=0.3,
+        )
     else:
         # Future: gemini branch. For now, only openai is implemented.
         _log_llm_call({
@@ -270,9 +356,39 @@ def generate_rewrite_via_llm(
         })
         return None
 
-    text = _clean_output(_extract_text(api_response))
-    sanity = evaluate_sanity(text, review_text=review_text)
+    raw_output = _extract_text(api_response)
+    parsed = _parse_json_output(raw_output)
+    reply_from_json, schema_failures = _validate_json_shape(parsed, review_text=review_text)
     usage = api_response.get("usage") or {}
+
+    if reply_from_json is None:
+        # JSON-mode contract failures route to sanity_failed (NOT
+        # api_failure) — the provider responded successfully; the
+        # model's output didn't satisfy the schema. This keeps the OS
+        # health card classifier (viewer.py:24755-24759) bucketing it
+        # as a prompt/model quality issue rather than a provider
+        # outage.
+        _log_llm_call({
+            "at": _now_iso(),
+            "artifact_id": item.get("artifact_id"),
+            "kind": "review_reply_rewrite",
+            "provider": provider,
+            "model": model,
+            "outcome": "sanity_failed",
+            "sanity_failures": schema_failures,
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "elapsed_seconds": api_response.get("elapsed_seconds"),
+            "hint_present": bool((hint or "").strip()),
+            "hint": (hint or "").strip(),
+            "rejected_output_text": raw_output,
+            "output_length": len(raw_output),
+            "prompt": prompt,
+        })
+        return None
+
+    text = _clean_output(reply_from_json)
+    sanity = evaluate_sanity(text, review_text=review_text)
 
     log_entry: dict[str, Any] = {
         "at": _now_iso(),
@@ -288,6 +404,7 @@ def generate_rewrite_via_llm(
         "hint_present": bool((hint or "").strip()),
         "hint": (hint or "").strip(),
         "output_length": len(text),
+        "specific_detail_echoed": (parsed or {}).get("specific_detail_echoed"),
         "prompt": prompt,
     }
     if sanity["passed"]:
@@ -309,4 +426,5 @@ def generate_rewrite_via_llm(
         "hint": (hint or "").strip(),
         "sanity": sanity,
         "usage": usage,
+        "specific_detail_echoed": (parsed or {}).get("specific_detail_echoed"),
     }

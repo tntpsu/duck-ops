@@ -34,11 +34,25 @@ NEPHEW_DRAFT = "Thank you so much for your kind words! I'm thrilled to hear the 
 
 
 def _success_response(text: str) -> dict:
+    """Wrap a raw text payload as if it were an OpenAI completion. Used
+    only for negative tests that exercise the JSON-parse/contract path
+    with intentionally non-conforming content."""
     return {
         "choices": [{"message": {"content": text}}],
         "usage": {"prompt_tokens": 200, "completion_tokens": 50},
         "elapsed_seconds": 0.5,
     }
+
+
+def _success_json_response(*, specific_detail_echoed: str, reply_text: str) -> dict:
+    """Build the JSON-mode-compliant completion shape the production
+    rewriter expects post-refactor. Every happy-path test uses this so
+    the test surface mirrors the live contract."""
+    payload = json.dumps({
+        "specific_detail_echoed": specific_detail_echoed,
+        "reply_text": reply_text,
+    })
+    return _success_response(payload)
 
 
 class LLMRewriterTests(unittest.TestCase):
@@ -80,9 +94,16 @@ class LLMRewriterTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_returns_none_when_output_fails_sanity_echo(self) -> None:
-        # Generic output that doesn't echo any review token.
-        with patch.object(llm, "_call_openai", return_value=_success_response(
-            "Thanks so much for the kind review! Thanks again for the kind review. Means a lot to me."
+        # The historical "Thanks so much for the kind review" stock
+        # reply now fails at the JSON contract layer because
+        # specific_detail_echoed="kind review" tokenizes to all
+        # stopwords. Pre-refactor this was caught one layer later
+        # by echo_check; post-refactor the schema rejects it before
+        # evaluate_sanity even runs. Either failure mode returns
+        # None, so the caller-side contract is preserved.
+        with patch.object(llm, "_call_openai", return_value=_success_json_response(
+            specific_detail_echoed="kind review",
+            reply_text="Thanks so much for the kind review! Thanks again for the kind review. Means a lot to me.",
         )):
             result = llm.generate_rewrite_via_llm(_item(NEPHEW_REVIEW, NEPHEW_DRAFT))
         self.assertIsNone(result)
@@ -92,13 +113,17 @@ class LLMRewriterTests(unittest.TestCase):
             "So glad the ducks captured your nephew down to the dimples — that's exactly "
             "what I was hoping for when you ordered them. Means a lot."
         )
-        with patch.object(llm, "_call_openai", return_value=_success_response(good_rewrite)):
+        with patch.object(llm, "_call_openai", return_value=_success_json_response(
+            specific_detail_echoed="dimples",
+            reply_text=good_rewrite,
+        )):
             result = llm.generate_rewrite_via_llm(_item(NEPHEW_REVIEW, NEPHEW_DRAFT), hint="mention the nephew")
         self.assertIsNotNone(result)
         self.assertEqual(result["text"], good_rewrite)
         self.assertEqual(result["source"], "llm")
         self.assertEqual(result["provider"], "openai")
         self.assertEqual(result["hint"], "mention the nephew")
+        self.assertEqual(result["specific_detail_echoed"], "dimples")
         self.assertTrue(result["sanity"]["passed"])
         self.assertEqual(result["usage"]["prompt_tokens"], 200)
 
@@ -107,7 +132,10 @@ class LLMRewriterTests(unittest.TestCase):
             '"So glad the ducks captured your nephew down to the dimples — exactly what I '
             'was hoping for. Means a lot."'
         )
-        with patch.object(llm, "_call_openai", return_value=_success_response(quoted)):
+        with patch.object(llm, "_call_openai", return_value=_success_json_response(
+            specific_detail_echoed="dimples",
+            reply_text=quoted,
+        )):
             result = llm.generate_rewrite_via_llm(_item(NEPHEW_REVIEW, NEPHEW_DRAFT))
         self.assertIsNotNone(result)
         self.assertFalse(result["text"].startswith('"'))
@@ -115,11 +143,15 @@ class LLMRewriterTests(unittest.TestCase):
 
     def test_prompt_contains_review_draft_and_hint(self) -> None:
         captured: dict = {}
-        def fake_call(prompt: str, *, model: str, timeout: float) -> dict:
+        def fake_call(prompt: str, **kwargs) -> dict:
             captured["prompt"] = prompt
-            return _success_response(
-                "So glad your nephew's ducks turned out incredible — the dimples detail "
-                "is the kind of thing that makes this project worth doing. Thanks again."
+            captured["kwargs"] = kwargs
+            return _success_json_response(
+                specific_detail_echoed="dimples",
+                reply_text=(
+                    "So glad your nephew's ducks turned out incredible — the dimples detail "
+                    "is the kind of thing that makes this project worth doing. Thanks again."
+                ),
             )
         with patch.object(llm, "_call_openai", side_effect=fake_call):
             llm.generate_rewrite_via_llm(
@@ -137,6 +169,137 @@ class LLMRewriterTests(unittest.TestCase):
         # this instruction was the original 19% echo_check failure mode.
         self.assertIn("MUST reference at least one specific detail", prompt)
         self.assertIn("will be REJECTED", prompt)
+        # The OUTPUT CONTRACT line is the load-bearing instruction
+        # for the JSON-mode refactor — pin its two required keys.
+        self.assertIn("specific_detail_echoed", prompt)
+        self.assertIn("reply_text", prompt)
+        # response_format flows through to call_openai so native
+        # JSON mode is actually requested from the provider, not
+        # just hinted at in the prompt.
+        self.assertEqual(
+            captured["kwargs"].get("response_format"),
+            {"type": "json_object"},
+            "response_format must be json_object — without it the API "
+            "can return prose and the schema becomes prompt-only.",
+        )
+
+
+class JSONContractTests(unittest.TestCase):
+    """Pin the schema contract added by the 2026-05-30 JSON-mode
+    refactor. Every failure mode here used to slip through the
+    free-text + post-hoc echo_check path. The whole point of moving
+    to JSON-mode is that these checks fire BEFORE the reply text is
+    cleaned, scored, or fed to evaluate_sanity — schema is the
+    load-bearing gate."""
+
+    def setUp(self) -> None:
+        self.env_patches = [
+            patch.dict(llm.os.environ, {
+                "OPENAI_API_KEY": "test-key",
+                "DUCK_REVIEW_REWRITE_PROVIDER": "openai",
+            }, clear=False),
+        ]
+        for p in self.env_patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self.env_patches])
+
+    def _logged(self, captured_log: list) -> dict:
+        """Return the most recent log entry of kind review_reply_rewrite.
+        Filters out the missing_api_key / unsupported_provider entries
+        that don't carry a kind."""
+        for entry in reversed(captured_log):
+            if entry.get("kind") == "review_reply_rewrite":
+                return entry
+        return {}
+
+    def _patch_log(self, captured_log: list):
+        return patch.object(llm, "_log_llm_call", side_effect=lambda payload: captured_log.append(payload))
+
+    def test_json_unparseable_routes_to_sanity_failed(self) -> None:
+        """A response that's not parseable JSON at all is bucketed as
+        sanity_failed, NOT api_failure — the provider responded fine;
+        the model's output is broken."""
+        captured: list = []
+        with patch.object(llm, "_call_openai", return_value=_success_response("not json at all, just prose")), \
+             self._patch_log(captured):
+            result = llm.generate_rewrite_via_llm(_item(NEPHEW_REVIEW, NEPHEW_DRAFT))
+        self.assertIsNone(result)
+        entry = self._logged(captured)
+        self.assertEqual(entry.get("outcome"), "sanity_failed")
+        self.assertIn("json_unparseable", entry.get("sanity_failures") or [])
+
+    def test_missing_specific_detail_echoed_fails(self) -> None:
+        captured: list = []
+        with patch.object(llm, "_call_openai", return_value=_success_response(
+            json.dumps({"reply_text": "So glad the dimples turned out — thanks for sharing photos."})
+        )), self._patch_log(captured):
+            result = llm.generate_rewrite_via_llm(_item(NEPHEW_REVIEW, NEPHEW_DRAFT))
+        self.assertIsNone(result)
+        entry = self._logged(captured)
+        self.assertIn("missing_specific_detail_echoed", entry.get("sanity_failures") or [])
+
+    def test_missing_reply_text_fails(self) -> None:
+        captured: list = []
+        with patch.object(llm, "_call_openai", return_value=_success_response(
+            json.dumps({"specific_detail_echoed": "dimples"})
+        )), self._patch_log(captured):
+            result = llm.generate_rewrite_via_llm(_item(NEPHEW_REVIEW, NEPHEW_DRAFT))
+        self.assertIsNone(result)
+        entry = self._logged(captured)
+        self.assertIn("missing_reply_text", entry.get("sanity_failures") or [])
+
+    def test_specific_detail_must_be_non_stopword(self) -> None:
+        """If specific_detail_echoed tokenizes entirely to stopwords
+        (e.g. "kind review"), the schema rejects it — the model
+        dodged the instruction by quoting filler. This is the exact
+        2026-05-26 / 2026-05-28 failure pattern the refactor targets."""
+        captured: list = []
+        with patch.object(llm, "_call_openai", return_value=_success_response(
+            json.dumps({
+                "specific_detail_echoed": "kind review",
+                "reply_text": "Thanks so much for the kind review — means a lot to me.",
+            })
+        )), self._patch_log(captured):
+            result = llm.generate_rewrite_via_llm(_item(NEPHEW_REVIEW, NEPHEW_DRAFT))
+        self.assertIsNone(result)
+        entry = self._logged(captured)
+        self.assertIn("specific_detail_too_generic", entry.get("sanity_failures") or [])
+
+    def test_specific_detail_must_appear_in_review(self) -> None:
+        """The echo claim must be grounded — if the model invents a
+        detail that isn't in the review (e.g. 'spaceship' for a review
+        about nephews and dimples), the schema rejects it. Catches
+        hallucination at the schema layer."""
+        captured: list = []
+        with patch.object(llm, "_call_openai", return_value=_success_response(
+            json.dumps({
+                "specific_detail_echoed": "spaceship adventure",
+                "reply_text": "So glad the spaceship adventure paid off — thrilled it landed well.",
+            })
+        )), self._patch_log(captured):
+            result = llm.generate_rewrite_via_llm(_item(NEPHEW_REVIEW, NEPHEW_DRAFT))
+        self.assertIsNone(result)
+        entry = self._logged(captured)
+        self.assertIn("specific_detail_not_in_review", entry.get("sanity_failures") or [])
+
+    def test_code_fence_wrapped_json_is_accepted(self) -> None:
+        """OpenAI native JSON mode usually returns bare JSON, but some
+        responses (especially under markdown-heavy prompts) still wrap
+        the payload in ```json fences. _strip_code_fence tolerates it
+        so the schema check runs on the inner object."""
+        good_rewrite = (
+            "So glad the ducks captured your nephew down to the dimples — "
+            "exactly what I was hoping for. Means a lot."
+        )
+        fenced = "```json\n" + json.dumps({
+            "specific_detail_echoed": "dimples",
+            "reply_text": good_rewrite,
+        }) + "\n```"
+        with patch.object(llm, "_call_openai", return_value=_success_response(fenced)):
+            result = llm.generate_rewrite_via_llm(_item(NEPHEW_REVIEW, NEPHEW_DRAFT))
+        self.assertIsNotNone(result)
+        self.assertEqual(result["text"], good_rewrite)
+        self.assertEqual(result["specific_detail_echoed"], "dimples")
 
 
 class FewShotAnchoringTests(unittest.TestCase):

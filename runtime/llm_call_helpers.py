@@ -99,6 +99,7 @@ def call_openai(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     max_tokens: int = 220,
     temperature: float = 0.5,
+    response_format: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Single-turn OpenAI chat completion. Returns the parsed JSON response
     on HTTP success, or a dict with an `error` key on failure. Returns None
@@ -111,6 +112,13 @@ def call_openai(
     errors (4xx other than 429, JSON decode failures) return
     immediately.
 
+    `response_format` flows through to the OpenAI request payload
+    when set — typically `{"type": "json_object"}` for JSON-mode
+    lanes. The caller is still responsible for parsing the response
+    string and validating its schema; native JSON mode only
+    guarantees the response is parseable JSON, not that it matches
+    a given shape.
+
     Caller is responsible for checking `error` key vs successful response
     shape.
     """
@@ -119,12 +127,14 @@ def call_openai(
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return None
-    payload = {
+    payload: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    if response_format is not None:
+        payload["response_format"] = response_format
     overall_started = time.time()
     last_error: dict[str, Any] | None = None
     for attempt in range(_MAX_RETRIES):
