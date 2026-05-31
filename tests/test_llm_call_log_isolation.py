@@ -49,6 +49,31 @@ def test_llm_call_log_path_is_redirected_during_tests():
     )
 
 
+def test_workflow_control_state_dir_is_redirected_during_tests():
+    """Sister pin to the LLM call log: workflow_control writers
+    accept a state_dir override but tests don't always pass it.
+    The autouse fixture also patches WORKFLOW_CONTROL_STATE_DIR so
+    tests that omit the kwarg land in a tmp dir instead of
+    polluting production receipts.
+
+    Discovered 2026-05-31: one stranded fixture
+    (gtdf-winner-test-gtdf-winner-blocked.json) had been sitting
+    in production workflow_control since 2026-05-26."""
+    import workflow_control as _wc
+    prod_path = "/Users/philtullai/ai-agents/duck-ops/state/workflow_control"
+    actual = str(_wc.WORKFLOW_CONTROL_STATE_DIR)
+    assert actual != prod_path, (
+        f"WORKFLOW_CONTROL_STATE_DIR must be redirected during "
+        f"tests. Got the production path: {actual!r}. The autouse "
+        f"fixture in conftest.py was the fix for the 2026-05-31 "
+        f"gtdf-winner-test stranded receipt."
+    )
+    assert "pytest" in actual.lower() or "tmp" in actual.lower(), (
+        f"WORKFLOW_CONTROL_STATE_DIR should land in a pytest tmp "
+        f"dir; got {actual!r}"
+    )
+
+
 def test_log_llm_call_writes_only_to_redirected_path():
     """End-to-end pin: calling log_llm_call inside a test must not
     grow the production file. Uses Path.stat for the byte size

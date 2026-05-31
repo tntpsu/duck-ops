@@ -63,4 +63,25 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
     # function object — they read the patched constant. Test files
     # that did `import llm_call_helpers` similarly see the patched
     # value. No per-caller patching needed.
+
+    # Workflow-control receipt isolation. Discovered 2026-05-31
+    # alongside the LLM log pollution: one stranded test fixture
+    # (gtdf-winner-test-gtdf-winner-blocked.json) had been sitting
+    # in production workflow_control since 2026-05-26. The writers
+    # in workflow_control.py accept a state_dir kwarg defaulting
+    # to the production path; not every test was passing it. Patch
+    # the module-level constant so even tests that omit the kwarg
+    # land in a tmp dir.
+    try:
+        import workflow_control as _wc
+    except ImportError:
+        yield
+        return
+    tmp_wc = tmp_path / "workflow_control"
+    tmp_wc.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_wc, "WORKFLOW_CONTROL_STATE_DIR", tmp_wc)
+    if hasattr(_wc, "WORKFLOW_RECEIPT_STATE_DIR"):
+        tmp_receipts = tmp_path / "workflow_receipts"
+        tmp_receipts.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(_wc, "WORKFLOW_RECEIPT_STATE_DIR", tmp_receipts)
     yield
