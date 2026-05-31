@@ -1037,6 +1037,13 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Reply `publish`", social_action["secondary_command"])
 
     def test_weekly_sale_policy_counts_successful_manual_publish_as_clean_gated(self) -> None:
+        # 2026-05-31: updated to use 2 sale_rotation_published entries.
+        # The prior fixture had a second entry at state_reason
+        # awaiting_sale_review with decision manual_review_required;
+        # under the new filter that gets excluded because the receipt
+        # never reached a sale-lane terminal state — operator was
+        # asked but never replied that week, so it shouldn't count
+        # toward a "consistent clean publish" promotion signal.
         states = [
             {
                 "lane": "weekly",
@@ -1055,12 +1062,13 @@ class BusinessOperatorDeskTests(unittest.TestCase):
                 "lane": "weekly",
                 "run_id": "2026-04-19",
                 "updated_at": "2026-04-19T09:00:00-04:00",
-                "state_reason": "awaiting_sale_review",
+                "state_reason": "sale_rotation_published",
                 "metadata": {
                     "sale_theme_name": "Spring Ducks",
-                    "weekly_sale_policy_decision": "manual_review_required",
+                    "weekly_sale_policy_decision": "manual_publish_allowed",
+                    "weekly_sale_policy_reason": "policy_checks_passed",
                     "weekly_sale_policy_blockers": [],
-                    "weekly_sale_policy_manual_review_reasons": ["approval_gated_mode"],
+                    "weekly_sale_policy_manual_review_reasons": [],
                 },
             },
         ]
@@ -1076,15 +1084,51 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertEqual(surface["clean_gated_recent_count"], 2)
         self.assertIn("1 more clean gated run", surface["readiness_headline"])
 
-    def test_weekly_sale_policy_does_not_count_failed_manual_publish_as_clean_gated(self) -> None:
+    def test_weekly_sale_policy_filters_out_blog_lane_contamination(self) -> None:
+        """Regression for the 2026-05-31 finding: the lane="weekly"
+        bucket is shared with blog/article subflows that evaluate the
+        sale policy as a dependency. Their receipts carry
+        weekly_sale_policy_decision metadata but end at upstream
+        state_reasons like draft_article_ready — NOT a sale-lane
+        verdict. Pre-fix, those entries broke the streak loop one
+        entry in (manual_publish_allowed decision + non-publish
+        state_reason failed _is_clean_gated_policy_entry's check).
+
+        Live data on 2026-05-31 had 4 consecutive clean sale publishes
+        (5-31, 5-24, 5-17, 4-26) but the streak showed 1 because a
+        4-08 blog receipt with state_reason=draft_article_ready was
+        interleaved between them by updated_at ordering. Promotion
+        readiness was permanently stuck.
+
+        Pin: with this exact contamination pattern, the streak must
+        walk through ALL the sale publishes (filter excludes the
+        blog entry entirely)."""
         states = [
+            # Most recent: a clean sale publish.
             {
                 "lane": "weekly",
-                "run_id": "2026-04-26",
-                "updated_at": "2026-04-27T17:37:15-04:00",
-                "state_reason": "execution_failed",
+                "run_id": "2026-05-31",
+                "updated_at": "2026-05-31T08:48:00-04:00",
+                "state_reason": "sale_rotation_published",
                 "metadata": {
-                    "sale_theme_name": "Sports & Athletics",
+                    "sale_theme_name": "Quirky Ducks",
+                    "weekly_sale_policy_decision": "manual_publish_allowed",
+                    "weekly_sale_policy_reason": "policy_checks_passed",
+                    "weekly_sale_policy_blockers": [],
+                    "weekly_sale_policy_manual_review_reasons": [],
+                },
+            },
+            # The contaminating blog entry — sorted between the sale
+            # publishes by updated_at because its receipt was
+            # overwritten weeks after the original 4-08 run.
+            {
+                "lane": "weekly",
+                "run_id": "2026-04-08",
+                "updated_at": "2026-05-26T19:16:40-04:00",
+                "state_reason": "draft_article_ready",
+                "metadata": {
+                    "article_id": 123,
+                    "blog_title": "Weekly Sale Ducks Worth Grabbing Right Now",
                     "weekly_sale_policy_decision": "manual_publish_allowed",
                     "weekly_sale_policy_reason": "policy_checks_passed",
                     "weekly_sale_policy_blockers": [],
@@ -1093,14 +1137,28 @@ class BusinessOperatorDeskTests(unittest.TestCase):
             },
             {
                 "lane": "weekly",
-                "run_id": "2026-04-19",
-                "updated_at": "2026-04-19T09:00:00-04:00",
-                "state_reason": "awaiting_sale_review",
+                "run_id": "2026-05-24",
+                "updated_at": "2026-05-24T07:30:00-04:00",
+                "state_reason": "sale_rotation_published",
                 "metadata": {
-                    "sale_theme_name": "Spring Ducks",
-                    "weekly_sale_policy_decision": "manual_review_required",
+                    "sale_theme_name": "Top Ducks Weekend",
+                    "weekly_sale_policy_decision": "manual_publish_allowed",
+                    "weekly_sale_policy_reason": "policy_checks_passed",
                     "weekly_sale_policy_blockers": [],
-                    "weekly_sale_policy_manual_review_reasons": ["approval_gated_mode"],
+                    "weekly_sale_policy_manual_review_reasons": [],
+                },
+            },
+            {
+                "lane": "weekly",
+                "run_id": "2026-05-17",
+                "updated_at": "2026-05-17T11:24:00-04:00",
+                "state_reason": "sale_rotation_published",
+                "metadata": {
+                    "sale_theme_name": "Game On Sports",
+                    "weekly_sale_policy_decision": "manual_publish_allowed",
+                    "weekly_sale_policy_reason": "policy_checks_passed",
+                    "weekly_sale_policy_blockers": [],
+                    "weekly_sale_policy_manual_review_reasons": [],
                 },
             },
         ]
@@ -1111,9 +1169,71 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         ):
             surface = _load_weekly_sale_policy_surface()
 
-        self.assertEqual(surface["latest_decision"], "manual_publish_allowed")
+        # The blog entry must be excluded from recent_runs entirely.
+        run_ids = [r["run_id"] for r in surface["recent_runs"]]
+        self.assertNotIn("2026-04-08", run_ids, (
+            f"draft_article_ready blog entry must be filtered out — "
+            f"its state_reason isn't a sale-lane verdict. Got "
+            f"recent_runs: {run_ids}"
+        ))
+        # All 3 sale publishes must be walked.
+        self.assertEqual(surface["clean_gated_streak"], 3, (
+            f"streak must walk through all 3 sale publishes; the blog "
+            f"contamination used to break it at 1. got: "
+            f"{surface['clean_gated_streak']}"
+        ))
+        self.assertTrue(surface["promote_ready"])
+        self.assertIn("ready for promotion", surface["readiness_headline"])
+
+    def test_weekly_sale_policy_does_not_count_blocked_publish_as_clean_gated(self) -> None:
+        # 2026-05-31: rewritten to use policy_blocked (a real sale-
+        # lane terminal state) instead of the prior execution_failed
+        # (which the sale lane doesn't emit and which the new filter
+        # excludes entirely). Same semantic intent: a failure-bucket
+        # publish must NOT count toward the clean-gated streak.
+        states = [
+            {
+                "lane": "weekly",
+                "run_id": "2026-04-26",
+                "updated_at": "2026-04-27T17:37:15-04:00",
+                "state_reason": "policy_blocked",
+                "metadata": {
+                    "sale_theme_name": "Sports & Athletics",
+                    "weekly_sale_policy_decision": "blocked",
+                    "weekly_sale_policy_reason": "freshness_check_failed",
+                    "weekly_sale_policy_blockers": ["stale_input"],
+                    "weekly_sale_policy_manual_review_reasons": [],
+                },
+            },
+            {
+                "lane": "weekly",
+                "run_id": "2026-04-19",
+                "updated_at": "2026-04-19T09:00:00-04:00",
+                "state_reason": "sale_rotation_published",
+                "metadata": {
+                    "sale_theme_name": "Spring Ducks",
+                    "weekly_sale_policy_decision": "manual_publish_allowed",
+                    "weekly_sale_policy_blockers": [],
+                    "weekly_sale_policy_manual_review_reasons": [],
+                },
+            },
+        ]
+
+        with (
+            patch("business_operator_desk.load_json", return_value={"mode": "approval_gated"}),
+            patch("business_operator_desk.list_workflow_states", return_value=states),
+        ):
+            surface = _load_weekly_sale_policy_surface()
+
+        # Latest is the blocked one (most recent updated_at).
+        self.assertEqual(surface["latest_decision"], "blocked")
+        # Blocked breaks the streak before the second entry is reached.
         self.assertEqual(surface["clean_gated_streak"], 0)
+        # The second (4-19) sale_rotation_published entry IS counted in
+        # the recent_count window — it passes _is_clean_gated_policy_entry
+        # — but the streak doesn't reach it because the blocker is first.
         self.assertEqual(surface["clean_gated_recent_count"], 1)
+        self.assertEqual(surface["blocked_recent_count"], 1)
 
     def test_jeepfact_policy_respects_configured_promotion_threshold(self) -> None:
         states = [

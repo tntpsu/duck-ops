@@ -49,6 +49,34 @@ MEME_POLICY_PROMOTION_THRESHOLD = 3
 REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD = 3
 JEEPFACT_POLICY_PROMOTION_THRESHOLD = 3
 
+# Sale-lane TERMINAL state_reasons — these mark a weekly receipt as a
+# sale-lane decision point. A weekly receipt without one of these has
+# only had upstream observation steps (draft_article_ready,
+# theme_ready, etc.) or non-sale subflows write to it; the sale lane
+# never reached a definitive verdict for that week.
+#
+# 2026-05-31: discovered the readiness streak was stuck at 1/3
+# because the filter at _load_weekly_sale_policy_surface accepted ANY
+# weekly receipt with weekly_sale_policy_decision metadata — including
+# blog-article entries (state_reason=draft_article_ready) that
+# evaluated the sale policy as a dependency but didn't represent a
+# sale publish. Those entries' state_reason isn't in
+# publish_success_state_reasons, so they broke the streak loop one
+# entry in. Tighter filter below restricts to receipts whose final
+# state_reason actually represents a sale-lane outcome.
+#
+# Emission sites (see duckAgent/flows/weekly/steps.py):
+#   sale_rotation_published (line 289) — sale published cleanly
+#   policy_blocked          (line 303) — sale policy blocked
+#   auto_apply_pending      (line 319) — sale queued for auto-apply
+#   auto_apply_failed       (line 3283) — auto-apply branch errored
+WEEKLY_SALE_TERMINAL_STATE_REASONS = frozenset({
+    "sale_rotation_published",
+    "policy_blocked",
+    "auto_apply_pending",
+    "auto_apply_failed",
+})
+
 
 def _promotion_threshold_from_config(config: dict[str, Any], default_threshold: int) -> int:
     """Allow individual lanes to ask for a longer observation window."""
@@ -246,11 +274,18 @@ def _load_weekly_sale_policy_surface() -> dict[str, Any]:
     config_payload = load_json(WEEKLY_SALE_EXECUTION_CONFIG_PATH, {})
     config = config_payload if isinstance(config_payload, dict) else {}
     mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
+    # Filter to sale-lane DECISION POINTS only. The lane="weekly" bucket
+    # is shared with blog/article/coordination subflows that also
+    # evaluate the sale policy as a dependency — their receipts carry
+    # weekly_sale_policy_decision metadata but end at upstream states
+    # like draft_article_ready, which is NOT a sale-lane verdict. See
+    # WEEKLY_SALE_TERMINAL_STATE_REASONS above for the cause history.
     workflow_items = [
         item for item in list_workflow_states()
         if str(item.get("lane") or "").strip() == "weekly"
         and isinstance(item.get("metadata"), dict)
         and str((item.get("metadata") or {}).get("weekly_sale_policy_decision") or "").strip()
+        and str(item.get("state_reason") or "").strip() in WEEKLY_SALE_TERMINAL_STATE_REASONS
     ]
     workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
     recent = workflow_items[:6]
