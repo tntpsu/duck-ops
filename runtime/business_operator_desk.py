@@ -397,10 +397,28 @@ def _weekly_sale_policy_promotion_candidate(policy_surface: dict[str, Any]) -> d
         promotion_state = "observing"
         action_title = "Weekly sale auto-apply still building evidence"
 
+    # 2026-05-31: add a concrete safety counter to the evidence list
+    # so the operator sees the actual recent-window breakdown
+    # (clean / blocked / auto-apply-failed) instead of just the
+    # aggregate streak. This is the load-bearing "would auto-apply
+    # have made the same decision the operator did" signal — N clean
+    # in a row means N weeks where auto-apply would have published
+    # exactly when the operator did.
+    clean_recent = int(policy_surface.get("clean_gated_recent_count") or 0)
+    blocked_recent = int(policy_surface.get("blocked_recent_count") or 0)
+    window_size = len(policy_surface.get("recent_runs") or [])
+    safety_counter_line = (
+        f"Last {window_size} sale-lane verdicts: "
+        f"{clean_recent} clean, {blocked_recent} blocked."
+        if window_size
+        else None
+    )
     evidence: list[str] = [
         f"Clean gated streak {clean_streak}/{threshold}.",
         f"Mode is {mode}.",
     ]
+    if safety_counter_line:
+        evidence.append(safety_counter_line)
     if policy_surface.get("readiness_headline"):
         evidence.append(str(policy_surface.get("readiness_headline")))
     if blockers:
