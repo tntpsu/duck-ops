@@ -49,32 +49,75 @@ MEME_POLICY_PROMOTION_THRESHOLD = 3
 REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD = 3
 JEEPFACT_POLICY_PROMOTION_THRESHOLD = 3
 
-# Sale-lane TERMINAL state_reasons — these mark a weekly receipt as a
-# sale-lane decision point. A weekly receipt without one of these has
-# only had upstream observation steps (draft_article_ready,
-# theme_ready, etc.) or non-sale subflows write to it; the sale lane
-# never reached a definitive verdict for that week.
+# LANE TERMINAL state_reasons — these mark a workflow_control receipt
+# as the lane's actual execution outcome (publish, block, fail), not
+# an upstream draft / awaiting-reply / bulk-dismiss artifact. Receipts
+# whose state_reason isn't in the lane's terminal set don't represent
+# a definitive verdict for that week and shouldn't drive promotion-
+# readiness math.
 #
-# 2026-05-31: discovered the readiness streak was stuck at 1/3
-# because the filter at _load_weekly_sale_policy_surface accepted ANY
-# weekly receipt with weekly_sale_policy_decision metadata — including
-# blog-article entries (state_reason=draft_article_ready) that
-# evaluated the sale policy as a dependency but didn't represent a
-# sale publish. Those entries' state_reason isn't in
-# publish_success_state_reasons, so they broke the streak loop one
-# entry in. Tighter filter below restricts to receipts whose final
-# state_reason actually represents a sale-lane outcome.
+# 2026-05-31: discovered three failure modes the per-lane filter
+# couldn't see before:
+#   1. Weekly_sale: lane="weekly" is shared with blog/article subflows
+#      that also evaluate weekly_sale_policy. Blog receipts with
+#      state_reason=draft_article_ready were being walked as if they
+#      were sale verdicts; the first non-publish entry broke the
+#      streak.
+#   2. Review_carousel: a 2026-04-13 receipt was re-stamped during a
+#      bulk-dismiss maintenance pass with decision=blocked though the
+#      original publish completed. Re-stamping made the entry's
+#      state_reason (`scheduled`) inconsistent with its policy
+#      decision (`blocked`), and it bubbled to the recent window via
+#      updated_at sort. Filter on terminal-state catches this.
+#   3. Jeepfact: bulk-dismiss receipts with state_reason=
+#      dismissed_as_stale_backlog were counting as clean-gated via
+#      _is_clean_gated_policy_entry's unconditional manual_review_required
+#      path. They aren't lane verdicts.
 #
-# Emission sites (see duckAgent/flows/weekly/steps.py):
-#   sale_rotation_published (line 289) — sale published cleanly
-#   policy_blocked          (line 303) — sale policy blocked
-#   auto_apply_pending      (line 319) — sale queued for auto-apply
-#   auto_apply_failed       (line 3283) — auto-apply branch errored
+# Emission sites:
+#   weekly_sale: duckAgent/flows/weekly/steps.py (sale_rotation_published
+#     line 289, policy_blocked 303, auto_apply_pending 319,
+#     auto_apply_failed 3283)
+#   meme: duckAgent/flows/meme/steps.py (scheduled 326/1147,
+#     policy_blocked 340/370/973, execution_failed 355/1147,
+#     auto_schedule_pending 386, auto_schedule_failed 792,
+#     manual_intervention_required 1001)
+#   jeepfact: duckAgent/flows/jeepfact/steps.py (scheduled 485/1370,
+#     policy_blocked 517/1180, execution_failed 502/796/1208,
+#     auto_schedule_pending 533, auto_schedule_failed 1014,
+#     partial_platform_failure 466)
+#   review_carousel: duckAgent/helpers/review_carousel_publish_helper.py
+#     (scheduled 318/530/606, policy_blocked 329/552,
+#     execution_failed 329/634, auto_schedule_pending 342,
+#     dismissed_by_operator 482)
 WEEKLY_SALE_TERMINAL_STATE_REASONS = frozenset({
     "sale_rotation_published",
     "policy_blocked",
     "auto_apply_pending",
     "auto_apply_failed",
+})
+MEME_TERMINAL_STATE_REASONS = frozenset({
+    "scheduled",
+    "policy_blocked",
+    "execution_failed",
+    "auto_schedule_pending",
+    "auto_schedule_failed",
+    "manual_intervention_required",
+})
+JEEPFACT_TERMINAL_STATE_REASONS = frozenset({
+    "scheduled",
+    "policy_blocked",
+    "execution_failed",
+    "auto_schedule_pending",
+    "auto_schedule_failed",
+    "partial_platform_failure",
+})
+REVIEW_CAROUSEL_TERMINAL_STATE_REASONS = frozenset({
+    "scheduled",
+    "policy_blocked",
+    "execution_failed",
+    "auto_schedule_pending",
+    "dismissed_by_operator",
 })
 
 
@@ -454,12 +497,17 @@ def _load_meme_policy_surface() -> dict[str, Any]:
     config_payload = load_json(MEME_EXECUTION_CONFIG_PATH, {})
     config = config_payload if isinstance(config_payload, dict) else {}
     mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
+    # Filter to MEME_TERMINAL_STATE_REASONS — see the constant above
+    # for the audit history. Receipts at upstream states (draft_ready,
+    # copy_prepared) or bulk-dismiss artifacts shouldn't shape the
+    # promotion streak.
     workflow_items = [
         item
         for item in list_workflow_states()
         if str(item.get("lane") or "").strip() == "meme"
         and isinstance(item.get("metadata"), dict)
         and str((item.get("metadata") or {}).get("meme_policy_decision") or "").strip()
+        and str(item.get("state_reason") or "").strip() in MEME_TERMINAL_STATE_REASONS
     ]
     workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
     recent = workflow_items[:6]
@@ -604,12 +652,22 @@ def _load_review_carousel_policy_surface() -> dict[str, Any]:
     config_payload = load_json(REVIEW_CAROUSEL_EXECUTION_CONFIG_PATH, {})
     config = config_payload if isinstance(config_payload, dict) else {}
     mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
+    # Filter to REVIEW_CAROUSEL_TERMINAL_STATE_REASONS — see the
+    # constant above. The 2026-04-13 receipt that had been re-stamped
+    # by bulk-dismiss with decision=blocked though state_reason
+    # remained `scheduled` (original publish completed) would still
+    # be admitted here (scheduled IS terminal), but the policy
+    # decision now sits at blocked so _is_clean_gated correctly
+    # rejects it. Upstream draft_ready / awaiting_review / approval_
+    # reminder_sent entries get filtered out before they can pollute
+    # the streak.
     workflow_items = [
         item
         for item in list_workflow_states()
         if str(item.get("lane") or "").strip() == "review_carousel"
         and isinstance(item.get("metadata"), dict)
         and str((item.get("metadata") or {}).get("review_carousel_policy_decision") or "").strip()
+        and str(item.get("state_reason") or "").strip() in REVIEW_CAROUSEL_TERMINAL_STATE_REASONS
     ]
     workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
     recent = workflow_items[:6]
@@ -755,12 +813,17 @@ def _load_jeepfact_policy_surface() -> dict[str, Any]:
     config = config_payload if isinstance(config_payload, dict) else {}
     mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
     promotion_threshold = _promotion_threshold_from_config(config, JEEPFACT_POLICY_PROMOTION_THRESHOLD)
+    # Filter to JEEPFACT_TERMINAL_STATE_REASONS — see the constant
+    # above. Pre-fix, dismissed_as_stale_backlog entries (bulk-dismiss
+    # maintenance artifacts) were counting as clean-gated via the
+    # manual_review_required unconditional path, inflating the streak.
     workflow_items = [
         item
         for item in list_workflow_states()
         if str(item.get("lane") or "").strip() == "jeepfact"
         and isinstance(item.get("metadata"), dict)
         and str((item.get("metadata") or {}).get("jeepfact_policy_decision") or "").strip()
+        and str(item.get("state_reason") or "").strip() in JEEPFACT_TERMINAL_STATE_REASONS
     ]
     workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
     recent = workflow_items[:6]

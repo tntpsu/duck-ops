@@ -1235,18 +1235,228 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertEqual(surface["clean_gated_recent_count"], 1)
         self.assertEqual(surface["blocked_recent_count"], 1)
 
+    def test_meme_policy_filters_out_upstream_state_reasons(self) -> None:
+        """Pin: meme policy streak math must skip receipts at upstream
+        states (draft_ready, copy_prepared, awaiting_review,
+        rendered_with_local_fallback). Only lane-terminal verdicts
+        (scheduled / policy_blocked / execution_failed / etc.) shape
+        the streak.
+
+        Pre-2026-05-31 fix, an awaiting_review entry would count as
+        clean-gated via _is_clean_gated_policy_entry's unconditional
+        manual_review_required path, inflating the streak. With the
+        terminal filter, the operator's promotion signal reflects
+        only weeks where the lane actually reached a verdict."""
+        states = [
+            {
+                "lane": "meme",
+                "run_id": "2026-05-25",
+                "updated_at": "2026-05-25T19:00:00-04:00",
+                "state_reason": "scheduled",
+                "metadata": {
+                    "meme_policy_decision": "manual_publish_allowed",
+                    "meme_policy_blockers": [],
+                    "meme_policy_manual_review_reasons": [],
+                },
+            },
+            # This upstream awaiting_review entry must be filtered
+            # out — it would inflate the streak under the old logic.
+            {
+                "lane": "meme",
+                "run_id": "2026-05-18",
+                "updated_at": "2026-05-18T19:00:00-04:00",
+                "state_reason": "awaiting_review",
+                "metadata": {
+                    "meme_policy_decision": "manual_review_required",
+                    "meme_policy_blockers": [],
+                    "meme_policy_manual_review_reasons": ["approval_gated_mode"],
+                },
+            },
+            {
+                "lane": "meme",
+                "run_id": "2026-05-11",
+                "updated_at": "2026-05-11T19:00:00-04:00",
+                "state_reason": "scheduled",
+                "metadata": {
+                    "meme_policy_decision": "manual_publish_allowed",
+                    "meme_policy_blockers": [],
+                    "meme_policy_manual_review_reasons": [],
+                },
+            },
+        ]
+        with (
+            patch("business_operator_desk.load_json", return_value={"mode": "approval_gated"}),
+            patch("business_operator_desk.list_workflow_states", return_value=states),
+        ):
+            from business_operator_desk import _load_meme_policy_surface as _load_meme
+            surface = _load_meme()
+        run_ids = [r["run_id"] for r in surface["recent_runs"]]
+        self.assertNotIn("2026-05-18", run_ids, (
+            "awaiting_review entry must be filtered — it's an upstream "
+            "state, not a lane verdict. Counting it inflates promotion-"
+            "readiness streaks with weeks where the lane never reached "
+            "publish."
+        ))
+        # Streak walks 5-25 (scheduled, clean) → 5-11 (scheduled,
+        # clean) without the intermediate awaiting_review breaking it.
+        self.assertEqual(surface["clean_gated_streak"], 2)
+
+    def test_review_carousel_policy_excludes_bulk_dismiss_artifacts(self) -> None:
+        """Pin: review_carousel must skip receipts that were re-stamped
+        by bulk-dismiss maintenance. Those carry state_reason values
+        outside the lane's terminal set (e.g. approval_reminder_sent,
+        awaiting_review) or have inconsistent decision/state pairs
+        from re-evaluation passes.
+
+        Live 2026-05-31 data had 4 carousel receipts in the recent
+        window, of which 2 were at upstream states
+        (approval_reminder_sent, awaiting_review). Pre-fix those were
+        polluting the streak count. Post-fix only the 3 receipts at
+        terminal state_reason `scheduled` are walked."""
+        states = [
+            # The April 13 receipt with re-stamped decision=blocked
+            # but state_reason=scheduled (a real artifact from the
+            # 2026-05-26 bulk-dismiss). Includes here so the test
+            # mirrors live data — fix keeps it in but the streak
+            # correctly breaks on decision=blocked.
+            {
+                "lane": "review_carousel",
+                "run_id": "review_carousel_20260413_120000",
+                "updated_at": "2026-05-26T19:16:32-04:00",
+                "state_reason": "scheduled",
+                "metadata": {
+                    "review_carousel_policy_decision": "blocked",
+                    "review_carousel_policy_blockers": [
+                        "slide_assets_missing", "caption_missing",
+                    ],
+                    "review_carousel_policy_manual_review_reasons": [],
+                },
+            },
+            # Upstream awaiting_review — must be excluded
+            {
+                "lane": "review_carousel",
+                "run_id": "review_carousel_20260527_160004",
+                "updated_at": "2026-05-27T16:00:10-04:00",
+                "state_reason": "awaiting_review",
+                "metadata": {
+                    "review_carousel_policy_decision": "manual_review_required",
+                    "review_carousel_policy_blockers": [],
+                    "review_carousel_policy_manual_review_reasons": ["approval_gated_mode"],
+                },
+            },
+            # Upstream approval_reminder_sent — must be excluded
+            {
+                "lane": "review_carousel",
+                "run_id": "review_carousel_20260422_160003",
+                "updated_at": "2026-05-26T14:38:10-04:00",
+                "state_reason": "approval_reminder_sent",
+                "metadata": {
+                    "review_carousel_policy_decision": "manual_review_required",
+                    "review_carousel_policy_blockers": [],
+                    "review_carousel_policy_manual_review_reasons": ["approval_gated_mode"],
+                },
+            },
+            # Real publish
+            {
+                "lane": "review_carousel",
+                "run_id": "review_carousel_20260526_144032",
+                "updated_at": "2026-05-26T15:08:52-04:00",
+                "state_reason": "scheduled",
+                "metadata": {
+                    "review_carousel_policy_decision": "manual_publish_allowed",
+                    "review_carousel_policy_blockers": [],
+                    "review_carousel_policy_manual_review_reasons": [],
+                },
+            },
+        ]
+        with (
+            patch("business_operator_desk.load_json", return_value={"mode": "approval_gated"}),
+            patch("business_operator_desk.list_workflow_states", return_value=states),
+        ):
+            from business_operator_desk import _load_review_carousel_policy_surface as _load_carousel
+            surface = _load_carousel()
+        run_ids = [r["run_id"] for r in surface["recent_runs"]]
+        self.assertNotIn("review_carousel_20260527_160004", run_ids)
+        self.assertNotIn("review_carousel_20260422_160003", run_ids)
+        # 4-13 stays in (state_reason=scheduled IS terminal) but its
+        # re-stamped decision=blocked correctly breaks the streak.
+        self.assertIn("review_carousel_20260413_120000", run_ids)
+        self.assertEqual(surface["clean_gated_streak"], 0)
+
+    def test_jeepfact_policy_excludes_bulk_dismiss_artifacts(self) -> None:
+        """Pin: jeepfact must skip dismissed_as_stale_backlog
+        receipts. Those are bulk-dismiss maintenance artifacts, not
+        lane verdicts, and were inflating the streak via the
+        unconditional manual_review_required clean-gated path."""
+        states = [
+            # Bulk-dismiss artifact #1 — must be filtered out
+            {
+                "lane": "jeepfact",
+                "run_id": "2026-05-06",
+                "updated_at": "2026-05-26T19:16:31-04:00",
+                "state_reason": "dismissed_as_stale_backlog",
+                "metadata": {
+                    "jeepfact_policy_decision": "manual_review_required",
+                    "jeepfact_policy_blockers": [],
+                    "jeepfact_policy_manual_review_reasons": ["approval_gated_mode"],
+                },
+            },
+            # Bulk-dismiss artifact #2 — must be filtered out
+            {
+                "lane": "jeepfact",
+                "run_id": "2026-05-13",
+                "updated_at": "2026-05-26T19:16:30-04:00",
+                "state_reason": "dismissed_as_stale_backlog",
+                "metadata": {
+                    "jeepfact_policy_decision": "manual_review_required",
+                    "jeepfact_policy_blockers": [],
+                    "jeepfact_policy_manual_review_reasons": ["approval_gated_mode"],
+                },
+            },
+            # Real publish that should count
+            {
+                "lane": "jeepfact",
+                "run_id": "2026-04-22",
+                "updated_at": "2026-04-22T19:00:00-04:00",
+                "state_reason": "scheduled",
+                "metadata": {
+                    "jeepfact_policy_decision": "manual_publish_allowed",
+                    "jeepfact_policy_blockers": [],
+                    "jeepfact_policy_manual_review_reasons": [],
+                },
+            },
+        ]
+        with (
+            patch("business_operator_desk.load_json", return_value={"mode": "approval_gated"}),
+            patch("business_operator_desk.list_workflow_states", return_value=states),
+        ):
+            from business_operator_desk import _load_jeepfact_policy_surface as _load_jeep
+            surface = _load_jeep()
+        run_ids = [r["run_id"] for r in surface["recent_runs"]]
+        self.assertNotIn("2026-05-06", run_ids, (
+            "dismissed_as_stale_backlog is a bulk-dismiss maintenance "
+            "artifact, not a jeepfact-lane verdict. Pre-fix it counted "
+            "as clean-gated, masking weeks where the lane never reached "
+            "publish."
+        ))
+        self.assertNotIn("2026-05-13", run_ids)
+        self.assertEqual(surface["clean_gated_streak"], 1)
+        self.assertEqual(surface["recent_runs"][0]["run_id"], "2026-04-22")
+
     def test_jeepfact_policy_respects_configured_promotion_threshold(self) -> None:
         states = [
             {
                 "lane": "jeepfact",
                 "run_id": f"jeepfact-2026-04-{day}",
                 "updated_at": f"2026-04-{day}T19:00:00-04:00",
-                "state_reason": "awaiting_review",
+                # 2026-05-31: terminal-state filter requires this be a
+                # jeepfact-lane verdict, not an interim awaiting_review.
+                "state_reason": "scheduled",
                 "metadata": {
                     "cover_hook": f"Jeep Fact {day}",
-                    "jeepfact_policy_decision": "manual_review_required",
+                    "jeepfact_policy_decision": "manual_publish_allowed",
                     "jeepfact_policy_blockers": [],
-                    "jeepfact_policy_manual_review_reasons": ["approval_gated_mode"],
+                    "jeepfact_policy_manual_review_reasons": [],
                 },
             }
             for day in (29, 22, 15)
