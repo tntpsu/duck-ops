@@ -170,21 +170,38 @@ class ProfitIntelTestCase(unittest.TestCase):
         self.assertEqual(payload["reason"], "stale_data")
         self.assertNotIn("email_status", payload)
 
-    def test_pending_when_today_not_run_but_history_exists(self) -> None:
-        """email_status reflects today's missing receipt, but the banner
-        is silent before the cron's scheduled window. setUp's `now` is
-        noon — the 23:58 ingest can't have fired yet, so flagging
-        "check Scheduler Health" would be a false alarm. The state
-        still reports today_action=pending so the email-cadence logic
-        keeps working unchanged."""
+    def test_today_action_is_awaiting_schedule_before_cron_window(self) -> None:
+        """Pre-23:58 the daily run is by-design not yet attempted.
+        Before this fix, today_action came back as `pending` and the
+        Desk card rendered a yellow "PENDING" badge with "Today's
+        profit run hasn't fired yet" — same false-alarm pattern as
+        the banner. After 2026-05-30 the renderer returns a distinct
+        `awaiting_schedule` so every consumer (page pill, Desk badge,
+        weekly text) can show "on schedule" instead of a problem.
+
+        setUp's now = noon, so the cron window has not elapsed."""
         _seed_history(self.state_dir, today=self.today, days=14)
         payload = profit_intel.build_profit_intel(today=self.today)
         self.assertTrue(payload["available"])
+        self.assertEqual(
+            payload["email_status"]["today_action"],
+            "awaiting_schedule",
+            "Pre-23:58 the absent receipt is the by-design state; "
+            "today_action must NOT come back as 'pending' or the Desk "
+            "card flips back to yellow PENDING.",
+        )
+        self.assertNotIn("banner", payload)
+
+    def test_today_action_flips_to_pending_after_cron_window(self) -> None:
+        """Past 23:58 + grace with today's receipt still missing, the
+        run is genuinely overdue and today_action returns the literal
+        `pending` so the Desk card, page, and email surface it as a
+        problem worth investigating."""
+        _seed_history(self.state_dir, today=self.today, days=14)
+        # 23:58 + 30min grace = 00:28 next day; test at 00:35.
+        now = datetime(2026, 5, 24, 0, 35, tzinfo=timezone(timedelta(hours=-4)))
+        payload = profit_intel.build_profit_intel(today=self.today, now=now)
         self.assertEqual(payload["email_status"]["today_action"], "pending")
-        self.assertNotIn("banner", payload, (
-            "Pre-23:58 the daily run is not yet expected; surfacing a "
-            "Scheduler-Health banner at noon was the bug fixed 2026-05-30."
-        ))
 
     def test_banner_silent_before_scheduled_run_window(self) -> None:
         """Pin: at any time before today's 23:58 + grace, the banner

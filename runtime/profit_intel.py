@@ -218,8 +218,22 @@ def _read_anomaly(receipt: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _today_action(receipt: dict[str, Any] | None, today_iso: str) -> str:
+def _today_action(
+    receipt: dict[str, Any] | None,
+    today_iso: str,
+    *,
+    now: datetime | None = None,
+) -> str:
     if receipt is None or receipt.get("_run_date") != today_iso:
+        # Distinguish "the scheduled cron hasn't fired yet — by design"
+        # from "the run was attempted and is in pending state". Pre-23:58
+        # the absent receipt is the expected state; downstream displays
+        # (page email-status pill, Desk card PENDING badge, weekly
+        # narrative) should render this as on-schedule, not as a
+        # problem. 2026-05-30 operator question on the Desk card was
+        # the same false-alarm pattern as the banner fix shipped earlier.
+        if not _profit_run_window_elapsed(now or _now(), run_date=date.fromisoformat(today_iso)):
+            return "awaiting_schedule"
         return "pending"
     state = str(receipt.get("state") or "").lower()
     reason = str(receipt.get("state_reason") or "").lower()
@@ -255,8 +269,8 @@ def _next_weekly_email_iso(today: date, cadence_metadata: dict[str, Any] | None)
     return (today + timedelta(days=days_ahead)).isoformat()
 
 
-def _email_status(today_receipt: dict[str, Any] | None, latest_receipt: dict[str, Any] | None, today_iso: str) -> dict[str, Any] | None:
-    today_action = _today_action(today_receipt, today_iso)
+def _email_status(today_receipt: dict[str, Any] | None, latest_receipt: dict[str, Any] | None, today_iso: str, *, now: datetime | None = None) -> dict[str, Any] | None:
+    today_action = _today_action(today_receipt, today_iso, now=now)
     cadence_source = today_receipt if today_receipt is not None else latest_receipt
     if cadence_source is None:
         return None
@@ -356,7 +370,7 @@ def build_profit_intel(
         "yesterday": _yesterday_block(latest),
         "trend_7d": _trend_7d(receipts),
         "anomaly": _read_anomaly(latest),
-        "email_status": _email_status(today_receipt, latest, today_iso),
+        "email_status": _email_status(today_receipt, latest, today_iso, now=now_dt),
         "per_day": [_per_day_row(r) for r in receipts],
         "channel_mix_7d": _channel_mix_window(receipts[-7:]),
         "channel_mix_30d": _channel_mix_window(receipts[-30:]),
@@ -486,6 +500,8 @@ def render_profit_intel_markdown(payload: dict[str, Any]) -> str:
         status_line = "⚡ anomaly bypass — email sent immediately"
     elif today_action == "errored":
         status_line = "❌ blocked — see Scheduler Health"
+    elif today_action == "awaiting_schedule":
+        status_line = "⏰ today's run scheduled for 23:58"
     elif today_action == "pending":
         status_line = "⌛ today's run hasn't fired yet"
     elif today_action == "blocked":
