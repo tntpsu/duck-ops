@@ -64,7 +64,10 @@ PROMPT_TEMPLATE = """You are parsing an operator's free-text feedback for a Jeep
 Operator's feedback:
 \"\"\"{hint_text}\"\"\"
 
-Return a single JSON object with ONLY these keys (omit any key the feedback doesn't speak to):
+REQUIRED field — always present in your JSON output:
+  acknowledged_terms: array of 1-6 short strings (each 1-5 words) naming the SPECIFIC things you understood from the operator's feedback above. NOT generic words like "feedback" or "hint" — concrete phrases from the operator like "no sports", "make it shorter", "holiday angle". This is your receipt that you actually read the feedback. If the operator's feedback is gibberish or unparseable, return acknowledged_terms with one entry naming why (e.g. ["unparseable"]). Empty arrays are never valid — if you can't acknowledge anything, the feedback is unparseable.
+
+Optional fields — include ONLY when the feedback speaks to them:
 
   selection_mode: "reroll_all" | "same_ducks_new_facts" | "new_ducks_same_facts"
   hook_style: "punchy" | "curious" | "funny"
@@ -75,10 +78,13 @@ Return a single JSON object with ONLY these keys (omit any key the feedback does
   operator_note: a one-sentence paraphrase of what the operator is asking for, suitable for the downstream generator
 
 Rules:
-- Output ONLY the JSON object. No preamble, no markdown fences, no quotation marks around the whole thing.
+- Output ONLY a JSON object. No preamble, no markdown fences, no quotation marks around the whole thing.
 - Use only the allowed values above. If the feedback names something outside the allowed values, drop that key.
 - Don't invent feedback — if the operator didn't speak to a key, leave it out.
-- Empty/whitespace feedback → return {{}}."""
+- acknowledged_terms is ALWAYS required. A bare {{}} response is never valid — it's indistinguishable from "the LLM lost the prompt" and the operator's hint would get silently dropped.
+
+Example good output for hint "keep it brief and no sports angle":
+  {{"acknowledged_terms": ["keep it brief", "no sports angle"], "caption_tone": "shorter", "avoid_tags": ["sports"]}}"""
 
 
 def _provider() -> str:
@@ -118,9 +124,59 @@ def _parse_config(raw: str) -> dict[str, Any] | None:
     return data
 
 
+_MAX_ACKNOWLEDGED_TERMS = 6
+_MAX_TERM_WORDS = 5
+
+
+def _validate_acknowledged_terms(raw_config: dict[str, Any]) -> tuple[list[str] | None, list[str]]:
+    """Validate the required acknowledged_terms field.
+
+    Returns (cleaned_terms, failure_list). cleaned_terms is None when
+    the field is missing, wrong type, or empty — those are the exact
+    "LLM lost the prompt" failure modes the 2026-05-30 schema
+    tightening targets. Before this gate, a bare `{}` response was
+    indistinguishable from a healthy "no config overrides apply"
+    response, and the operator's hint silently disappeared.
+
+    failure_list names which specific contract violation fired so
+    the call log captures audit-quality detail for prompt-tuning."""
+    failures: list[str] = []
+    terms = raw_config.get("acknowledged_terms")
+    if terms is None:
+        return None, ["missing_acknowledged_terms"]
+    if not isinstance(terms, list):
+        return None, ["acknowledged_terms_wrong_type"]
+    cleaned: list[str] = []
+    for term in terms[:_MAX_ACKNOWLEDGED_TERMS]:
+        if not isinstance(term, str):
+            continue
+        s = term.strip()
+        if not s:
+            continue
+        if len(s.split()) > _MAX_TERM_WORDS:
+            # Cap word length per term — the prompt asks for short
+            # phrases. Long blobs usually mean the model dumped
+            # paraphrased prose into the field instead of pulled
+            # discrete tokens from the hint.
+            continue
+        cleaned.append(s)
+    if not cleaned:
+        # Empty list (or all entries filtered) is the exact failure
+        # we're guarding against — bare `{}` repackaged as
+        # `{"acknowledged_terms": []}` would still leave the hint
+        # invisible. Force a non-empty acknowledgment.
+        failures.append("acknowledged_terms_empty")
+        return None, failures
+    return cleaned, []
+
+
 def _validate_config(raw_config: dict[str, Any]) -> dict[str, Any]:
     """Drop keys/values outside the allowed schema. Returns the cleaned
-    config (may be empty). Never raises."""
+    config (may be empty). Never raises.
+
+    Does NOT check acknowledged_terms — that's the schema gate, run
+    upstream in generate_jeepfact_config_via_llm. This function is
+    only the per-key config-value cleanup."""
     cleaned: dict[str, Any] = {}
     for key, allowed in ALLOWED_CONFIG_SCHEMA.items():
         value = raw_config.get(key)
@@ -187,6 +243,11 @@ def generate_jeepfact_config_via_llm(
         timeout=timeout_seconds,
         max_tokens=MAX_TOKENS,
         temperature=0.1,  # structured-output task — low temperature
+        # Native JSON mode (same pattern as the rewriter/scorer
+        # refactors shipped 2026-05-30). Schema (acknowledged_terms +
+        # the optional config keys) is enforced by the validators
+        # below — response_format only guarantees parseability.
+        response_format={"type": "json_object"},
     )
     if api_response is None or "error" in api_response:
         _log_llm_call({
@@ -206,13 +267,25 @@ def generate_jeepfact_config_via_llm(
 
     text = _extract_text(api_response)
     raw_config = _parse_config(text)
-    config = _validate_config(raw_config) if raw_config is not None else {}
     usage = api_response.get("usage") or {}
 
-    # "sanity_failed" only when output was truly unparseable or all keys
-    # got filtered. An empty {} on whitespace-equivalent feedback is a
-    # legitimate signal that no config overrides apply.
-    sanity_passed = raw_config is not None
+    # Two-stage validation:
+    #   1. JSON must parse (raw_config is not None).
+    #   2. acknowledged_terms must be present, a list, non-empty.
+    # Stage 2 is the 2026-05-30 schema tightening — a bare {} response
+    # used to count as a healthy "no config overrides apply" output;
+    # now it routes to sanity_failed so the operator's hint isn't
+    # silently dropped.
+    schema_failures: list[str] = []
+    if raw_config is None:
+        schema_failures = ["unparseable_json"]
+        acknowledged: list[str] | None = None
+        config: dict[str, Any] = {}
+    else:
+        acknowledged, schema_failures = _validate_acknowledged_terms(raw_config)
+        config = _validate_config(raw_config)
+
+    sanity_passed = not schema_failures
     log_entry: dict[str, Any] = {
         "at": _now_iso(),
         "artifact_id": item.get("artifact_id"),
@@ -220,7 +293,7 @@ def generate_jeepfact_config_via_llm(
         "provider": provider,
         "model": model,
         "outcome": "ok" if sanity_passed else "sanity_failed",
-        "sanity_failures": [] if sanity_passed else ["unparseable_json"],
+        "sanity_failures": schema_failures,
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
         "elapsed_seconds": api_response.get("elapsed_seconds"),
@@ -232,6 +305,7 @@ def generate_jeepfact_config_via_llm(
     if sanity_passed:
         log_entry["output_text"] = text
         log_entry["parsed_config"] = config
+        log_entry["acknowledged_terms"] = acknowledged
     else:
         log_entry["rejected_output_text"] = text
     _log_llm_call(log_entry)
@@ -240,6 +314,7 @@ def generate_jeepfact_config_via_llm(
         return None
     return {
         "config": config,
+        "acknowledged_terms": acknowledged,
         "source": "llm",
         "model": model,
         "provider": provider,
