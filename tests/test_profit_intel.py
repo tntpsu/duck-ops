@@ -171,11 +171,82 @@ class ProfitIntelTestCase(unittest.TestCase):
         self.assertNotIn("email_status", payload)
 
     def test_pending_when_today_not_run_but_history_exists(self) -> None:
+        """email_status reflects today's missing receipt, but the banner
+        is silent before the cron's scheduled window. setUp's `now` is
+        noon — the 23:58 ingest can't have fired yet, so flagging
+        "check Scheduler Health" would be a false alarm. The state
+        still reports today_action=pending so the email-cadence logic
+        keeps working unchanged."""
         _seed_history(self.state_dir, today=self.today, days=14)
         payload = profit_intel.build_profit_intel(today=self.today)
         self.assertTrue(payload["available"])
         self.assertEqual(payload["email_status"]["today_action"], "pending")
-        self.assertIn("banner", payload)
+        self.assertNotIn("banner", payload, (
+            "Pre-23:58 the daily run is not yet expected; surfacing a "
+            "Scheduler-Health banner at noon was the bug fixed 2026-05-30."
+        ))
+
+    def test_banner_silent_before_scheduled_run_window(self) -> None:
+        """Pin: at any time before today's 23:58 + grace, the banner
+        must stay silent even when today's receipt is missing.
+
+        Critical because the cron fires at 23:58 by design (captures
+        full-day totals at end-of-day). Before the cron, "no run
+        today yet" is the expected state for 23h58m of every day —
+        the banner the operator saw on 2026-05-30 morning was firing
+        on a healthy schedule and pointing them at a green Scheduler
+        Health card. Without this pin a future refactor can re-add
+        the unconditional banner and the false-alarm recurs every
+        single day."""
+        _seed_history(self.state_dir, today=self.today, days=14)
+        # Sweep multiple pre-cron times to lock the silence window.
+        for hour, minute in [(0, 1), (8, 38), (12, 0), (18, 0), (23, 57)]:
+            now = datetime(2026, 5, 23, hour, minute, tzinfo=timezone(timedelta(hours=-4)))
+            payload = profit_intel.build_profit_intel(today=self.today, now=now)
+            self.assertNotIn("banner", payload, (
+                f"banner must stay silent at {hour:02d}:{minute:02d} — "
+                f"the 23:58 cron hasn't fired yet so 'no run today' is "
+                f"the by-design state, not a problem."
+            ))
+
+    def test_banner_fires_when_daily_run_is_overdue(self) -> None:
+        """Pin: past today's 23:58 + 30min grace, a missing receipt is
+        a genuine miss and the banner should fire. The grace window
+        (PROFIT_DAILY_RUN_GRACE_MINUTES) accommodates the gap between
+        the cron firing and the receipt landing on disk."""
+        _seed_history(self.state_dir, today=self.today, days=14)
+        # 23:58 + 30min grace = 00:28 next day; test at 00:35 to be
+        # safely past the boundary.
+        now = datetime(2026, 5, 24, 0, 35, tzinfo=timezone(timedelta(hours=-4)))
+        payload = profit_intel.build_profit_intel(today=self.today, now=now)
+        self.assertIn("banner", payload, (
+            "banner must fire when the scheduled 23:58 cron + grace "
+            "has elapsed with no receipt for today — this is a real "
+            "missed-run signal worth surfacing."
+        ))
+        self.assertIn("overdue", payload["banner"].lower(), (
+            f"banner copy should name 'overdue' so the operator "
+            f"knows the schedule is the issue, not that the run "
+            f"hasn't been attempted. Got: {payload['banner']!r}"
+        ))
+
+    def test_banner_silent_when_today_receipt_present(self) -> None:
+        """Pin: once today's 23:58 run completes, the banner stays
+        silent regardless of time-of-day. Defensive — the receipt
+        check should short-circuit before the time gate is even
+        evaluated."""
+        _seed_history(self.state_dir, today=self.today, days=14)
+        _write_receipt(
+            self.state_dir,
+            self.today.isoformat(),
+            state="verified",
+            state_reason="report_emailed",
+            metadata=_normal_metadata(),
+        )
+        # Past 23:58 + grace; with today's receipt present, no banner.
+        now = datetime(2026, 5, 24, 0, 35, tzinfo=timezone(timedelta(hours=-4)))
+        payload = profit_intel.build_profit_intel(today=self.today, now=now)
+        self.assertNotIn("banner", payload)
 
     def test_anomaly_round_trip_from_receipt_metadata(self) -> None:
         _seed_history(self.state_dir, today=self.today, days=20)

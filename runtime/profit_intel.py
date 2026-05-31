@@ -37,6 +37,16 @@ STALE_WARN_HOURS = 6
 STALE_BANNER_HOURS = 24
 EMPTY_STATE_STALE_HOURS = 48
 
+# The profit ingest cron fires once per day at 23:58 local time
+# (com.philtullai.duckagent.profit.daily.plist). Before that time
+# each day, "today's receipt is missing" is the expected state by
+# design — the run captures the full day at end-of-day. The banner
+# below should only flag a problem when the scheduled window has
+# actually elapsed without a receipt landing.
+PROFIT_DAILY_RUN_HOUR = 23
+PROFIT_DAILY_RUN_MINUTE = 58
+PROFIT_DAILY_RUN_GRACE_MINUTES = 30  # ~32min between cron + write
+
 _DEFAULT_ANOMALY = {
     "triggered": False,
     "reasons": [],
@@ -280,10 +290,39 @@ def _staleness_reason(data_as_of_iso: str | None) -> str | None:
     return None
 
 
-def build_profit_intel(*, lookback_days: int = 30, today: date | None = None) -> dict[str, Any]:
-    today = today or _now().date()
+def _profit_run_window_elapsed(now: datetime, *, run_date: date) -> bool:
+    """True iff `run_date`'s scheduled profit run + grace window is past.
+
+    Caller passes the date whose receipt is being checked (the
+    business "today" for the page) — NOT now's calendar date. After
+    midnight rollover, `now.date()` advances but the prior day's
+    23:58 run is what we're looking for, so the scheduled time must
+    anchor to `run_date`, not `now`.
+
+    Returns True when `now >= run_date 23:58 + grace`. Before then,
+    "no receipt yet" is the designed state and the banner stays
+    silent."""
+    scheduled = datetime(
+        run_date.year,
+        run_date.month,
+        run_date.day,
+        PROFIT_DAILY_RUN_HOUR,
+        PROFIT_DAILY_RUN_MINUTE,
+        tzinfo=now.tzinfo,
+    )
+    return now >= scheduled + timedelta(minutes=PROFIT_DAILY_RUN_GRACE_MINUTES)
+
+
+def build_profit_intel(
+    *,
+    lookback_days: int = 30,
+    today: date | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    now_dt = now if now is not None else _now()
+    today = today or now_dt.date()
     today_iso = today.isoformat()
-    generated_at = _now().isoformat()
+    generated_at = now_dt.isoformat()
 
     receipts = _collect_recent_receipts(lookback_days=lookback_days, today=today)
     if not receipts:
@@ -323,8 +362,15 @@ def build_profit_intel(*, lookback_days: int = 30, today: date | None = None) ->
         "channel_mix_30d": _channel_mix_window(receipts[-30:]),
         "route": ROUTE,
     }
-    if today_receipt is None:
-        payload["banner"] = "No profit run yet today — check Scheduler Health"
+    if today_receipt is None and _profit_run_window_elapsed(now_dt, run_date=today):
+        # The 23:58 cron + grace has elapsed and we still don't have
+        # today's receipt. That's a genuine miss worth surfacing. Before
+        # the window elapses, "no receipt yet" is the by-design state
+        # and we stay silent. 2026-05-30 operator question: prior to
+        # this gate the banner fired 23h58m of every day, making it
+        # both untrue (run not yet expected) and misleading ("check
+        # Scheduler Health" while Scheduler Health was green).
+        payload["banner"] = "Today's 23:58 profit run is overdue — check Scheduler Health"
     return payload
 
 
