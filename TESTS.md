@@ -1,6 +1,6 @@
 # TESTS — Coverage Matrix (Duck Ops + DuckAgent)
 
-Last updated: 2026-05-26 (post carousel-to-portal integration)
+Last updated: 2026-06-02 (post OS observability two-card bracket)
 
 Built by running `/coverage-matrix` against the 2026-05-25 → 2026-05-26 shipped work after the operator surfaced that some integration-boundary tests had been skipped. This matrix lives next to [master_roadmap.md](output/operator/master_roadmap.md) per the skill's convention.
 
@@ -162,6 +162,23 @@ Remaining `manual:cron-cadence-race` cells (observer discovery only): the observ
 3. ✅ **CLOSED 2026-05-26: Concurrent observer + email-reply race** — product decision 2A + race_detected flag on `publish_review_carousel_run`.
 4. **🔴 Stress / soak** — sidecar runs every 6h × multiple weeks. publish_candidates.json grows. Run a synthetic week-of-data soak test once.
 5. ✅ **CLOSED 2026-05-26: Secret-leak automation** — `scripts/secret_scan.py --all`. Zero install, scans tracked files via curated regex patterns. Clean across duck-ops/duckAgent/paint-to-print-3d (795 files). Manual invocation before commits; gitleaks upgrade path documented if patterns need expanding.
+
+---
+
+## Surface 5 — OS observability two-card bracket (commits f4b3ec9, c60d472, in duckAgent)
+
+The 2026-05-31 audit found a 7-week silent outage on Etsy review-reply posting that NO existing OS card had caught. Two new cards shipped to bracket the failure modes — input filter sanity + output throughput. See [feedback-two-card-observability-bracket](file:///Users/philtullai/.claude/projects/-Users-philtullai-ai-agents/memory/feedback_two_card_observability_bracket.md).
+
+| Card | Happy (green) | Specific failure shape (red) | Stale data outside window | Cold start (idle) | Fail-soft on missing dependency |
+|---|---|---|---|---|---|
+| `review_reply_throughput` | ✅ `test_review_reply_throughput_green_when_posts_keep_pace` | ✅ `test_review_reply_throughput_red_when_approvals_with_zero_posts` (pins exact 2026-05-31 shape: 12 approved / 0 posted → RED) | ✅ `test_review_reply_throughput_excludes_receipts_outside_window` | ✅ `test_review_reply_throughput_green_when_idle` | ✅ `available=False` path returns yellow with "throughput can't be evaluated" |
+| `filter_sanity` — drain split-brain check | ✅ `test_filter_sanity_split_brain_green_when_queue_mirrors_workflow_control` | ✅ `test_filter_sanity_split_brain_red_when_workflow_control_has_more_than_queue` (5 wc receipts / 0 queue items → RED) | n/a — instantaneous check, no window | n/a — covered by aggregate green-when-all-checks-green | ✅ each check wrapped in `try/except` so card degrades but doesn't crash OS surface |
+| `filter_sanity` — test pollution check | ✅ `test_filter_sanity_green_with_clean_log` | ✅ `test_filter_sanity_test_pollution_detected_in_llm_log` (3+ entries with `test::` aid or body=`"boom"` → RED, names `conftest.py:_redirect_llm_call_log` as inspection target) | n/a | n/a | ✅ missing log file = check absent, doesn't trip |
+| `filter_sanity` — meme filter check | ⚠️  manual:live-only (needs runs/ dir with state_meme.json + duckAgent on sys.path) — live-verified 2026-06-02 returns 1 product id for gym-girl-duck | ✅ pinned at unit level in `duckAgent/tests/test_meme_recently_used_filter.py::test_reads_per_flow_state_meme_json` (and 4 sister tests; the filter_sanity card uses the same function) | n/a | n/a | ✅ Import failure routes to yellow |
+
+**Coverage:** 5 throughput tests + 4 filter_sanity tests + 5 meme-filter tests = 14 pinned today. Both cards live-verified post-deploy: throughput reads RED ("35 approved + 0 posted") with the exact diagnostic; filter_sanity reads GREEN (all 3 checks pass, proving yesterday's three fixes are stable). If the meme-filter regression test breaks, the OS card flips RED within ~6h.
+
+**Gap:** the meme-filter check's "broken" path doesn't have a live OS-card test (only the unit-level test in the duckAgent file). If `_get_recently_used_products` regresses, the unit test fails before the OS card test would. Verdict: acceptable — the unit test pins the filter; the OS card pins the cross-system wiring.
 
 ---
 
