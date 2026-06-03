@@ -182,6 +182,34 @@ The 2026-05-31 audit found a 7-week silent outage on Etsy review-reply posting t
 
 ---
 
+## Surface 6 — Workflows card + Tier-3 off switch (2026-06-03)
+
+The Workflows card on the operator desk + portal shows all 7 lane/manual flows (weekly_sale, meme, review_carousel, jeepfact, thursday, gtdf, blog) with their current mode (auto / approval_gated / manual / off), streak progress toward auto-promotion (for approval-gated lanes), and a Tier 3 off switch. The off switch is a production-mutation per AGENT_GOVERNANCE_POLICY.md — operator must type a reason + tick a confirm checkbox to flip.
+
+| Use case | Card surface output | Off-switch flip | Off-mode short-circuit in flow runner | Boundary rejection on missing confirm | Boundary rejection on missing reason | Atomic write safety |
+|---|---|---|---|---|---|---|
+| 4 promotion lanes (weekly_sale, meme, review_carousel, jeepfact) | ✅ `test_card_lists_all_seven_flows`, `test_gated_lane_with_clean_streak_shows_progress_toward_promotion`, `test_auto_lane_shows_auto_label_and_green_dot` | ✅ `test_off_flip_with_valid_confirm_persists_to_disk` | ✅ `test_run_all_short_circuits_on_off_mode`, `test_run_only_short_circuits_on_off_mode`, `test_run_from_short_circuits_on_off_mode` (parametrized across all 7 + gtdf_winner) | ✅ `test_missing_operator_confirm_is_rejected` | ✅ `test_empty_reason_is_rejected` | ✅ `test_atomic_write_does_not_leave_corrupted_state` |
+| 3 manual flows (thursday, gtdf, blog) | ✅ `test_manual_flow_shows_no_streak_progress` (pins no "clean gated" copy on manual rows) | ✅ same helper | ✅ same guard | ✅ same | ✅ same | ✅ same |
+| Off-mode display | ✅ `test_off_mode_shows_red_dot_and_off_label` | n/a | n/a | n/a | n/a | n/a |
+| Counts / aggregate | ✅ `test_counts_match_flow_states` (mixed off/auto/gated/manual) | n/a | n/a | n/a | n/a | n/a |
+| Mutation endpoint per flow | ✅ `test_mutation_endpoint_url_pattern_is_per_flow` | ✅ via portal SPA POST | n/a | n/a | n/a | n/a |
+| Audit trail (operator_mode_history) | n/a | ✅ `test_off_flip_with_valid_confirm_persists_to_disk` asserts `from`/`to`/`reason` | n/a | n/a | n/a | ✅ `test_audit_history_capped_at_32_entries` |
+| Illegal mode for flow kind | n/a | ✅ `test_illegal_mode_for_manual_flow_is_rejected` (thursday cannot flip to auto_apply_shopify) | n/a | n/a | n/a | n/a |
+| Unknown flow | n/a | ✅ `test_unknown_flow_is_rejected` | ✅ `test_unknown_flow_does_not_short_circuit` (no config = treat as on) | n/a | n/a | n/a |
+| LanePolicyConfig registry coverage | ✅ `test_lane_policy_registry_contains_all_known_lanes` (extended to include all 7) | n/a | n/a | n/a | n/a | n/a |
+| Contract: every config has required fields | ✅ `test_every_registered_lane_has_required_contract_fields` (no_auto_progression branch) | n/a | n/a | n/a | n/a | n/a |
+| Portal SPA renders dot + label + switch | ⚠️ manual:portal-render-check (verify in browser after launchctl kickstart -k) | ⚠️ manual:portal-confirm-modal | n/a | n/a | n/a | n/a |
+| Markdown ⇔ portal-SPA parity (same dict) | ✅ both consume `build_workflows_card_surface()` directly; no parallel path can drift | n/a | n/a | n/a | n/a | n/a |
+| OS observability bracket | ⚠️ gap — no "flows stuck off > 7 days" watchdog yet; ⚠️ gap — no "flows skipped_off count last 24h" throughput | n/a | n/a | n/a | n/a | n/a |
+
+**Coverage:** 9 card-surface tests + 9 mutation-helper tests + 5 main_agent off-guard tests + 6 contract tests = 29 pinned. Cross-repo: tests live in both `duck-ops/tests/test_workflows_card_surface.py` and `duckAgent/tests/test_main_agent_off_mode_guard.py` + `duckAgent/creative_agent/runtime/tests/test_workflows_card_mutation.py`.
+
+**Known gaps (acceptable for ship):**
+- Portal UI render is `manual:portal-render-check`. The Tier 3 confirm modal logic is exercised at the helper level (operator_confirm boundary) but the modal HTML itself is not Playwright-tested.
+- No OS observability cards yet for "flows stuck off too long" or "skipped_off throughput." Per the two-card-bracket memory, both should be added before any flow is left off for > 1 week.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

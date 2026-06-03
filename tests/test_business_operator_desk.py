@@ -2442,10 +2442,13 @@ class LanePolicyConfigContractTests(unittest.TestCase):
 
     def test_lane_policy_registry_contains_all_known_lanes(self) -> None:
         from business_operator_desk import (
+            BLOG_LANE_CONFIG,
+            GTDF_LANE_CONFIG,
             JEEPFACT_LANE_CONFIG,
             LANE_POLICY_CONFIGS,
             MEME_LANE_CONFIG,
             REVIEW_CAROUSEL_LANE_CONFIG,
+            THURSDAY_LANE_CONFIG,
             WEEKLY_SALE_LANE_CONFIG,
         )
 
@@ -2455,34 +2458,51 @@ class LanePolicyConfigContractTests(unittest.TestCase):
             MEME_LANE_CONFIG,
             REVIEW_CAROUSEL_LANE_CONFIG,
             JEEPFACT_LANE_CONFIG,
+            THURSDAY_LANE_CONFIG,
+            GTDF_LANE_CONFIG,
+            BLOG_LANE_CONFIG,
         }
         self.assertEqual(
             registered, expected,
             "Every lane defined as LanePolicyConfig must be appended "
             "to LANE_POLICY_CONFIGS so it's automatically enrolled in "
-            "the promotion contract. A missing entry means the lane "
-            "won't appear on the operator desk promotion-watch "
-            "surface.",
+            "the promotion contract / workflows card. A missing entry "
+            "means the lane won't appear on the operator desk.",
         )
 
     def test_every_registered_lane_has_required_contract_fields(self) -> None:
+        """Promotion-progression lanes need the full promotion contract;
+        no_auto_progression lanes only need the core identification +
+        config fields. The workflows-card aggregator handles both."""
         from business_operator_desk import LANE_POLICY_CONFIGS
 
-        required_fields = (
-            "lane", "metadata_key_prefix", "terminal_state_reasons",
-            "publish_success_state_reasons", "auto_eligible_decision",
-            "config_path", "promotion_threshold", "display_name",
-            "weekday", "auto_mode_label", "promotion_id",
-            "promotion_lane_label", "promotion_title",
+        always_required = (
+            "lane", "metadata_key_prefix", "config_path", "display_name",
+        )
+        promotion_required = (
+            "terminal_state_reasons", "publish_success_state_reasons",
+            "auto_eligible_decision", "promotion_threshold", "weekday",
+            "auto_mode_label", "promotion_id", "promotion_lane_label",
+            "promotion_title",
         )
         for config in LANE_POLICY_CONFIGS:
-            for field in required_fields:
+            for field in always_required:
                 value = getattr(config, field, None)
                 self.assertTrue(
                     value or value == 0,
                     f"LanePolicyConfig for lane={config.lane!r} is "
-                    f"missing required field {field!r}. The generic "
-                    "machinery will produce wrong output without it.",
+                    f"missing always-required field {field!r}.",
+                )
+            if config.no_auto_progression:
+                continue
+            for field in promotion_required:
+                value = getattr(config, field, None)
+                self.assertTrue(
+                    value or value == 0,
+                    f"Promotion-progression LanePolicyConfig for "
+                    f"lane={config.lane!r} is missing field {field!r}. "
+                    "The generic machinery will produce wrong output "
+                    "without it.",
                 )
 
     def test_every_registered_lane_loads_a_valid_policy_surface(self) -> None:
@@ -2529,11 +2549,11 @@ class LanePolicyConfigContractTests(unittest.TestCase):
                 "as blank or 'unknown'.",
             )
 
-    def test_every_registered_lane_builds_a_valid_promotion_candidate(self) -> None:
-        """Every lane in the registry must produce a candidate dict
-        with the promotion-contract fields the operator desk +
-        portal action panel read. Test in 'active' mode (recent_runs
-        may be empty)."""
+    def test_every_promotion_lane_builds_a_valid_promotion_candidate(self) -> None:
+        """Every promotion-progression lane must produce a candidate
+        dict with the promotion-contract fields the operator desk +
+        portal action panel read. no_auto_progression lanes are
+        expected to return None (they have no auto mode to promote)."""
         from business_operator_desk import (
             LANE_POLICY_CONFIGS,
             build_lane_promotion_candidate,
@@ -2560,6 +2580,15 @@ class LanePolicyConfigContractTests(unittest.TestCase):
                 surface = load_lane_policy_surface(config)
                 candidate = build_lane_promotion_candidate(config, surface)
 
+            if config.no_auto_progression:
+                self.assertIsNone(
+                    candidate,
+                    f"Lane {config.lane!r} marked no_auto_progression "
+                    "must return None (no promotion candidate), but "
+                    "got a non-None candidate.",
+                )
+                continue
+
             self.assertIsNotNone(
                 candidate,
                 f"Lane {config.lane!r} produced None candidate in "
@@ -2574,12 +2603,17 @@ class LanePolicyConfigContractTests(unittest.TestCase):
             )
 
     def test_lane_promotion_ids_are_unique(self) -> None:
-        """Two lanes sharing a promotion_id would collide in
-        PROMOTION_CONTROL_METADATA and silently inherit each other's
-        approval boundary copy."""
+        """Two promotion-progression lanes sharing a promotion_id
+        would collide in PROMOTION_CONTROL_METADATA and silently
+        inherit each other's approval boundary copy. Empty
+        promotion_id is legal on no_auto_progression lanes."""
         from business_operator_desk import LANE_POLICY_CONFIGS
 
-        promotion_ids = [config.promotion_id for config in LANE_POLICY_CONFIGS]
+        promotion_ids = [
+            config.promotion_id
+            for config in LANE_POLICY_CONFIGS
+            if not config.no_auto_progression
+        ]
         self.assertEqual(
             len(promotion_ids), len(set(promotion_ids)),
             "Two lanes share a promotion_id: "

@@ -45,6 +45,9 @@ MEME_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/
 REVIEW_CAROUSEL_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/review_carousel_execution.json")
 JEEPFACT_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/jeepfact_execution.json")
 REVIEW_REPLY_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duck-ops/config/review_reply_execution.json")
+THURSDAY_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/thursday_execution.json")
+GTDF_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/gtdf_execution.json")
+BLOG_EXECUTION_CONFIG_PATH = Path("/Users/philtullai/ai-agents/duckAgent/config/blog_execution.json")
 WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD = 3
 MEME_POLICY_PROMOTION_THRESHOLD = 3
 REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD = 3
@@ -335,6 +338,11 @@ class LanePolicyConfig:
     # Optional reason-text translator (lane-specific copy)
     reason_text_translator: Callable[[str], str] | None = None
 
+    # 2026-06-03: lanes that have no streak-to-promote concept
+    # (thursday/gtdf/blog). The workflows-card loader short-circuits
+    # streak math for these and shows only mode + last-run status.
+    no_auto_progression: bool = False
+
 
 def _lane_threshold(config: LanePolicyConfig, raw_config: dict[str, Any]) -> int:
     """Resolve the promotion threshold for a lane. Most lanes use a
@@ -361,6 +369,65 @@ def load_lane_policy_surface(config: LanePolicyConfig) -> dict[str, Any]:
     functions read."""
     raw_config = load_json(config.config_path, {})
     raw_config = raw_config if isinstance(raw_config, dict) else {}
+
+    if config.no_auto_progression:
+        # 2026-06-03: Thursday/GTDF/Blog flows. No streak math, no
+        # promotion candidate. Surface just the mode + recent runs so
+        # the workflows card can show on/off + last-run status.
+        mode = str(raw_config.get("mode") or "manual").strip() or "manual"
+        workflow_items = [
+            item
+            for item in list_workflow_states()
+            if str(item.get("lane") or "").strip() == config.lane
+        ]
+        workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
+        recent = workflow_items[:4]
+        latest = recent[0] if recent else {}
+        latest_metadata = latest.get("metadata") if isinstance(latest.get("metadata"), dict) else {}
+        return {
+            "available": True,
+            "path": str(config.config_path),
+            "mode": mode,
+            "no_auto_progression": True,
+            "promotion_threshold": 0,
+            "clean_gated_streak": 0,
+            "clean_gated_recent_count": 0,
+            "blocked_recent_count": 0,
+            "auto_eligible_recent_count": 0,
+            "auto_apply_eligible_recent_count": 0,
+            "auto_schedule_eligible_recent_count": 0,
+            "promote_ready": False,
+            "latest_run_id": str(latest.get("run_id") or latest.get("entity_id") or "").strip() or None,
+            "latest_decision": None,
+            "latest_reason": None,
+            "latest_blockers": [],
+            "latest_manual_review_reasons": [],
+            "latest_updated_at": latest.get("updated_at"),
+            "latest_state_reason": str(latest.get("state_reason") or "").strip() or None,
+            "readiness_headline": f"{config.display_name} is a manual flow (no auto-promotion).",
+            "recommended_action": (
+                f"Toggle {config.display_name} OFF in the workflows card to pause it. "
+                "There is no auto-promotion to reach."
+            ),
+            "recent_runs": [
+                {
+                    "run_id": str(item.get("run_id") or item.get("entity_id") or "").strip() or None,
+                    "updated_at": item.get("updated_at"),
+                    "state_reason": str(item.get("state_reason") or "").strip() or None,
+                    "title": str(
+                        (item.get("metadata") or {}).get("display_label")
+                        or item.get("display_label")
+                        or config.default_title
+                    ).strip(),
+                }
+                for item in recent
+            ],
+            "safety_counter_line": (
+                f"Last {len(recent)} {config.lane}-lane verdicts: status only (no streak)."
+                if recent else None
+            ),
+        }
+
     mode = str(raw_config.get("mode") or "approval_gated").strip() or "approval_gated"
     threshold = _lane_threshold(config, raw_config)
 
@@ -503,6 +570,12 @@ def build_lane_promotion_candidate(
     per-lane functions. Reads from the policy_surface dict that
     load_lane_policy_surface emits."""
     if not policy_surface.get("available"):
+        return None
+    # 2026-06-03: lanes without an auto progression (thursday/gtdf/
+    # blog) never produce a promotion candidate — they have no auto
+    # mode to promote to. The workflows card surfaces their state
+    # via build_workflows_card_surface instead.
+    if config.no_auto_progression or policy_surface.get("no_auto_progression"):
         return None
     if not list(policy_surface.get("recent_runs") or []) and str(policy_surface.get("mode") or "") != config.auto_mode_label:
         return None
@@ -685,14 +758,185 @@ JEEPFACT_LANE_CONFIG = LanePolicyConfig(
     reason_text_translator=_jeepfact_policy_reason_text,
 )
 
+# 2026-06-03: Flows with no streak-to-promote progression. The
+# workflows card shows them with on/off + last-run status only.
+# Sharing the LanePolicyConfig shape (instead of a parallel registry)
+# keeps markdown + portal renderers reading the same dict — the
+# Markdown ≠ portal HTML drift trap.
+THURSDAY_LANE_CONFIG = LanePolicyConfig(
+    lane="thursday",
+    metadata_key_prefix="thursday",
+    terminal_state_reasons=frozenset(),
+    publish_success_state_reasons=frozenset(),
+    auto_eligible_decision="",
+    config_path=THURSDAY_EXECUTION_CONFIG_PATH,
+    promotion_threshold=0,
+    promotion_threshold_config_key="",
+    display_name="Thursday batch",
+    weekday="Thursday",
+    auto_mode_label="",
+    auto_action_verb="run",
+    promotion_id="",
+    promotion_lane_label="thursday",
+    promotion_title="Thursday batch",
+    default_title="Thursday batch",
+    no_auto_progression=True,
+)
+
+GTDF_LANE_CONFIG = LanePolicyConfig(
+    lane="gtdf",
+    metadata_key_prefix="gtdf",
+    terminal_state_reasons=frozenset(),
+    publish_success_state_reasons=frozenset(),
+    auto_eligible_decision="",
+    config_path=GTDF_EXECUTION_CONFIG_PATH,
+    promotion_threshold=0,
+    promotion_threshold_config_key="",
+    display_name="GTDF",
+    weekday="",
+    auto_mode_label="",
+    auto_action_verb="run",
+    promotion_id="",
+    promotion_lane_label="gtdf",
+    promotion_title="GTDF",
+    default_title="GTDF",
+    no_auto_progression=True,
+)
+
+BLOG_LANE_CONFIG = LanePolicyConfig(
+    lane="blog",
+    metadata_key_prefix="blog",
+    terminal_state_reasons=frozenset(),
+    publish_success_state_reasons=frozenset(),
+    auto_eligible_decision="",
+    config_path=BLOG_EXECUTION_CONFIG_PATH,
+    promotion_threshold=0,
+    promotion_threshold_config_key="",
+    display_name="Weekly blog",
+    weekday="",
+    auto_mode_label="",
+    auto_action_verb="run",
+    promotion_id="",
+    promotion_lane_label="blog",
+    promotion_title="Weekly blog",
+    default_title="Weekly blog",
+    no_auto_progression=True,
+)
+
 # Registry of all known lanes. Add new entries here so they're picked
-# up by build_promotion_watch_surface + the filter_sanity OS card.
+# up by build_promotion_watch_surface + the filter_sanity OS card +
+# the workflows card.
 LANE_POLICY_CONFIGS: tuple[LanePolicyConfig, ...] = (
     WEEKLY_SALE_LANE_CONFIG,
     MEME_LANE_CONFIG,
     REVIEW_CAROUSEL_LANE_CONFIG,
     JEEPFACT_LANE_CONFIG,
+    THURSDAY_LANE_CONFIG,
+    GTDF_LANE_CONFIG,
+    BLOG_LANE_CONFIG,
 )
+
+
+# 2026-06-03: Workflows-card surface. One row per flow, showing
+# auto / streak-progress / manual + on/off switch. Single source of
+# truth for markdown + portal renderers.
+def _workflows_card_status(
+    config: LanePolicyConfig, surface: dict[str, Any]
+) -> tuple[str, str, str]:
+    """Returns (progression_kind, status_dot, status_label).
+
+    progression_kind: "auto" | "gated" | "manual"
+    status_dot:       "green" | "yellow" | "red" | "gray"
+    """
+    mode = str(surface.get("mode") or "").strip()
+    if mode == "off":
+        return ("off", "red", f"OFF — operator-paused")
+    if config.no_auto_progression:
+        last = surface.get("latest_updated_at")
+        last_state = surface.get("latest_state_reason") or "n/a"
+        last_seg = f"last run {last} ({last_state})" if last else "no recent runs"
+        return ("manual", "gray", f"Manual flow — {last_seg}")
+    if mode == config.auto_mode_label and config.auto_mode_label:
+        return ("auto", "green", f"AUTO — {mode}")
+    # Approval-gated lane: show streak progress.
+    streak = int(surface.get("clean_gated_streak") or 0)
+    threshold = int(surface.get("promotion_threshold") or config.promotion_threshold or 0)
+    if streak >= threshold and threshold > 0:
+        return ("gated", "yellow", f"{streak}/{threshold} clean — ready to promote to auto")
+    return (
+        "gated",
+        "yellow",
+        f"{streak}/{threshold} clean gated runs — need {threshold} to promote to auto",
+    )
+
+
+def build_workflows_card_surface(
+    configs: tuple[LanePolicyConfig, ...] = LANE_POLICY_CONFIGS,
+    surface_loader: Callable[[LanePolicyConfig], dict[str, Any]] = load_lane_policy_surface,
+) -> dict[str, Any]:
+    """Single source of truth for the Workflows card. Iterates the
+    LANE_POLICY_CONFIGS registry and emits one entry per flow with:
+
+      - mode + on/off state
+      - progression_kind: auto vs gated vs manual
+      - status_dot + status_label (the visible card text)
+      - streak / threshold (for gated lanes only)
+      - last run timestamp + state
+      - the mutation endpoint URL the portal toggle POSTs to
+
+    Both the desk markdown renderer and the portal SPA card read this
+    dict so they can never drift apart."""
+    flows: list[dict[str, Any]] = []
+    off_count = 0
+    auto_count = 0
+    ready_to_promote = 0
+    for config in configs:
+        surface = surface_loader(config)
+        mode = str(surface.get("mode") or "").strip()
+        is_off = mode == "off"
+        if is_off:
+            off_count += 1
+        progression_kind, status_dot, status_label = _workflows_card_status(
+            config, surface
+        )
+        if progression_kind == "auto":
+            auto_count += 1
+        if (
+            progression_kind == "gated"
+            and int(surface.get("clean_gated_streak") or 0)
+            >= int(surface.get("promotion_threshold") or 0) > 0
+        ):
+            ready_to_promote += 1
+        flows.append({
+            "flow": config.lane,
+            "display_name": config.display_name or config.lane,
+            "mode": mode or ("manual" if config.no_auto_progression else "approval_gated"),
+            "off": is_off,
+            "progression_kind": progression_kind,
+            "status_dot": status_dot,
+            "status_label": status_label,
+            "clean_gated_streak": int(surface.get("clean_gated_streak") or 0),
+            "promotion_threshold": int(surface.get("promotion_threshold") or 0),
+            "auto_mode_label": config.auto_mode_label or None,
+            "last_run_at": surface.get("latest_updated_at"),
+            "last_run_state": surface.get("latest_state_reason"),
+            "config_path": str(config.config_path),
+            "mutation_endpoint": f"/api/workflows/{config.lane}/mode",
+            "off_switch_tier": (
+                "Tier 3 — explicit operator approval required per flip"
+            ),
+            "no_auto_progression": bool(config.no_auto_progression),
+        })
+    return {
+        "available": True,
+        "flows": flows,
+        "counts": {
+            "total": len(flows),
+            "off": off_count,
+            "auto": auto_count,
+            "ready_to_promote": ready_to_promote,
+        },
+    }
 
 
 def _is_clean_gated_policy_entry(
@@ -2831,6 +3075,7 @@ def build_business_operator_desk(
         review_carousel_policy_surface=review_carousel_policy_surface,
         jeepfact_policy_surface=jeepfact_policy_surface,
     )
+    workflows_card_surface = build_workflows_card_surface()
     approval_chain_surface = _load_approval_chain_surface(
         seo_outcomes=seo_outcomes,
         promotion_watch_surface=promotion_watch_surface,
@@ -2978,6 +3223,7 @@ def build_business_operator_desk(
         "review_carousel_policy_surface": review_carousel_policy_surface,
         "jeepfact_policy_surface": jeepfact_policy_surface,
         "promotion_watch_surface": promotion_watch_surface,
+        "workflows_card_surface": workflows_card_surface,
         "approval_chain_surface": approval_chain_surface,
         "outcome_learning_surface": outcome_learning_surface,
         "sections": {
@@ -3214,6 +3460,33 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
                     lines.append(f"    Boundary: {_trim_text(item.get('approval_boundary'), 170)}")
                 if item.get("recommended_action"):
                     lines.append(f"    Next: {_trim_text(item.get('recommended_action'), 170)}")
+    workflows_card_surface = payload.get("workflows_card_surface") or {}
+    if workflows_card_surface.get("available"):
+        lines.extend(["", "## Workflows", ""])
+        counts = workflows_card_surface.get("counts") or {}
+        lines.append(
+            f"- Total flows: `{counts.get('total', 0)}` | "
+            f"On auto: `{counts.get('auto', 0)}` | "
+            f"Off: `{counts.get('off', 0)}` | "
+            f"Ready to promote: `{counts.get('ready_to_promote', 0)}`"
+        )
+        for entry in workflows_card_surface.get("flows") or []:
+            dot_map = {"green": "🟢", "yellow": "🟡", "red": "🔴", "gray": "⚪"}
+            dot = dot_map.get(str(entry.get("status_dot") or "gray"), "⚪")
+            lines.append(
+                f"- {dot} **{entry.get('display_name')}** "
+                f"(`{entry.get('flow')}`) — {entry.get('status_label')}"
+            )
+            if entry.get("off"):
+                lines.append(
+                    f"    Mode: `off` — flow runner skips this lane until "
+                    f"operator flips it back. Config: `{entry.get('config_path')}`"
+                )
+        lines.append(
+            "- OFF switch: `POST /api/workflows/<flow>/mode` "
+            "(Tier 3 — operator confirm + reason required)"
+        )
+
     lines.extend([
         "",
         "## Promotion Watch",
@@ -4246,6 +4519,11 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
         "product_concepts": "product_concept_queue",
         "product_concept_queue": "product_concept_queue",
         "idea_queue": "product_concept_queue",
+        "flows": "workflows_card",
+        "workflows_card": "workflows_card",
+        "auto": "workflows_card",
+        "flow_modes": "workflows_card",
+        "kill_switch": "workflows_card",
     }
     normalized = aliases.get(section_key, section_key)
     if normalized == "next_actions":
@@ -4559,6 +4837,32 @@ def render_business_section(payload: dict[str, Any], section: str) -> str:
                 lines.append(f"- {_trim_text(item.get('headline'), 150)}")
         return "\n".join(lines)
 
+    if normalized == "workflows_card":
+        lines = ["Duck Ops Workflows", ""]
+        workflows_surface = payload.get("workflows_card_surface") or {}
+        if not workflows_surface.get("available"):
+            workflows_surface = build_workflows_card_surface()
+        counts = workflows_surface.get("counts") or {}
+        lines.append(
+            f"Total flows: {counts.get('total', 0)} | "
+            f"On auto: {counts.get('auto', 0)} | "
+            f"Off: {counts.get('off', 0)} | "
+            f"Ready to promote: {counts.get('ready_to_promote', 0)}"
+        )
+        lines.append("")
+        dot_map = {"green": "🟢", "yellow": "🟡", "red": "🔴", "gray": "⚪"}
+        for entry in workflows_surface.get("flows") or []:
+            dot = dot_map.get(str(entry.get("status_dot") or "gray"), "⚪")
+            lines.append(
+                f"{dot} {entry.get('display_name')} ({entry.get('flow')}): "
+                f"{entry.get('status_label')}"
+            )
+        lines.append("")
+        lines.append(
+            "Off switch: POST /api/workflows/<flow>/mode "
+            "(Tier 3 — operator confirm + reason required)."
+        )
+        return "\n".join(lines)
     if normalized == "promotion_watch":
         lines = ["Duck Ops Promotion Watch", ""]
         promotion_watch_surface = payload.get("promotion_watch_surface") or {}
