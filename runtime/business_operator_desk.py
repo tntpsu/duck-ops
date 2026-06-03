@@ -8,10 +8,11 @@ specialized queues that already exist.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from dependency_health import DEPENDENCY_HEALTH_MD_PATH, build_dependency_health
 from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
@@ -264,6 +265,436 @@ def _jeepfact_policy_reason_text(value: Any) -> str:
     return JEEPFACT_POLICY_REASON_LABELS.get(key, key.replace("_", " "))
 
 
+# ============================================================================
+# Generic promotion-readiness machinery (Roadmap Priority 1, slice 2)
+# ============================================================================
+#
+# 2026-06-02: extracted from 4 near-identical lane-specific loaders +
+# candidate functions (~650 lines of duplicate code across
+# weekly_sale, meme, review_carousel, jeepfact). Adding a new
+# approval-policy lane previously meant copying ~160 lines per lane;
+# now it's one LanePolicyConfig instance + one call. See the bottom
+# of this file for an example of how to add a 5th lane.
+#
+# Variation captured in LanePolicyConfig:
+#   - which workflow_control lane to read
+#   - which metadata key prefix the policy decision lives under
+#   - which state_reasons count as terminal lane outcomes
+#   - which state_reasons count as publish-success
+#   - which auto-mode decision string (auto_apply_allowed vs
+#     auto_schedule_allowed)
+#   - human display names (lane label, target mode, weekday, etc.)
+#   - the reason-text translator (lane-specific copy)
+#
+# Invariants the generic loader preserves:
+#   - Same return-dict shape as the prior per-lane loaders
+#     (existing consumers like _load_promotion_watch_surface keep
+#     working).
+#   - Same streak counting + threshold logic.
+#   - Same _is_clean_gated_policy_entry call.
+
+
+@dataclass(frozen=True)
+class LanePolicyConfig:
+    """Per-lane configuration that drives the generic promotion-
+    readiness loader + candidate builder.
+
+    Adding a new approval-policy lane: create a LanePolicyConfig
+    instance + add it to LANE_POLICY_CONFIGS at the bottom of this
+    file. The generic machinery picks it up automatically — no need
+    to copy a 90-line loader function.
+    """
+
+    # Lane identification
+    lane: str                                # workflow_control "lane" filter
+    metadata_key_prefix: str                 # e.g. "meme_policy" -> *_decision/_blockers/_reason
+
+    # State filtering
+    terminal_state_reasons: frozenset[str]   # which receipts represent actual lane verdicts
+    publish_success_state_reasons: frozenset[str]  # which state_reasons mean "published cleanly"
+    auto_eligible_decision: str              # "auto_apply_allowed" or "auto_schedule_allowed"
+
+    # Config
+    config_path: Path                        # MEME_EXECUTION_CONFIG_PATH, etc.
+    promotion_threshold: int                 # MEME_POLICY_PROMOTION_THRESHOLD, etc.
+    promotion_threshold_config_key: str = "promote_after_clean_streak"  # jeepfact uses configured threshold
+
+    # Display + promotion
+    display_name: str = ""                   # "Meme Monday", "Weekly sale", etc.
+    weekday: str = ""                        # "Monday", "Sunday" — used in copy
+    auto_mode_label: str = ""                # "auto_schedule_meta", "auto_apply_shopify", etc.
+    auto_action_verb: str = "auto-schedule"  # "auto-apply", "auto-schedule" — for headline copy
+    promotion_id: str = ""                   # e.g. "meme_auto_schedule"
+    promotion_lane_label: str = ""           # used in candidate as "lane" field (e.g. "meme_policy")
+    promotion_title: str = ""                # candidate title ("Meme Monday auto-schedule")
+
+    # Title resolution
+    title_metadata_keys: tuple[str, ...] = ("display_label",)
+    default_title: str = "Promotion lane"
+
+    # Optional reason-text translator (lane-specific copy)
+    reason_text_translator: Callable[[str], str] | None = None
+
+
+def _lane_threshold(config: LanePolicyConfig, raw_config: dict[str, Any]) -> int:
+    """Resolve the promotion threshold for a lane. Most lanes use a
+    fixed constant; jeepfact allows operator config override via
+    `promotion_watch.promote_after_clean_streak`."""
+    if config.promotion_threshold_config_key:
+        return _promotion_threshold_from_config(raw_config, config.promotion_threshold)
+    return config.promotion_threshold
+
+
+def load_lane_policy_surface(config: LanePolicyConfig) -> dict[str, Any]:
+    """Generic loader that replaces the 4 near-identical per-lane
+    functions (_load_meme_policy_surface, _load_weekly_sale_policy_
+    surface, etc.). Returns the same dict shape so existing consumers
+    don't need to change.
+
+    Reads:
+      - The lane's execution config file (mode flag)
+      - workflow_control receipts matching config.lane +
+        terminal_state_reasons (the 2026-05-31 filter)
+      - Lane-specific metadata fields prefixed by metadata_key_prefix
+
+    Returns the policy-surface dict the existing per-lane candidate
+    functions read."""
+    raw_config = load_json(config.config_path, {})
+    raw_config = raw_config if isinstance(raw_config, dict) else {}
+    mode = str(raw_config.get("mode") or "approval_gated").strip() or "approval_gated"
+    threshold = _lane_threshold(config, raw_config)
+
+    decision_key = f"{config.metadata_key_prefix}_decision"
+    reason_key = f"{config.metadata_key_prefix}_reason"
+    blockers_key = f"{config.metadata_key_prefix}_blockers"
+    review_reasons_key = f"{config.metadata_key_prefix}_manual_review_reasons"
+
+    workflow_items = [
+        item
+        for item in list_workflow_states()
+        if str(item.get("lane") or "").strip() == config.lane
+        and isinstance(item.get("metadata"), dict)
+        and str((item.get("metadata") or {}).get(decision_key) or "").strip()
+        and str(item.get("state_reason") or "").strip() in config.terminal_state_reasons
+    ]
+    workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
+    recent = workflow_items[:6]
+
+    def _resolve_title(metadata: dict[str, Any], display_label: str) -> str:
+        for key in config.title_metadata_keys:
+            value = metadata.get(key)
+            if value:
+                return str(value).strip()
+        if display_label:
+            return str(display_label).strip()
+        return config.default_title
+
+    def _recent_entry(item: dict[str, Any]) -> dict[str, Any]:
+        metadata = item.get("metadata") or {}
+        return {
+            "run_id": str(item.get("run_id") or item.get("entity_id") or "").strip() or None,
+            "updated_at": item.get("updated_at"),
+            "decision": str(metadata.get(decision_key) or "").strip() or "unknown",
+            "reason": str(metadata.get(reason_key) or "").strip() or None,
+            "blockers": [str(v).strip() for v in list(metadata.get(blockers_key) or []) if str(v).strip()],
+            "manual_review_reasons": [str(v).strip() for v in list(metadata.get(review_reasons_key) or []) if str(v).strip()],
+            "state_reason": str(item.get("state_reason") or "").strip() or None,
+            "title": _resolve_title(metadata, str(item.get("display_label") or "")),
+        }
+
+    recent_runs = [_recent_entry(item) for item in recent]
+
+    def _is_clean_gated(entry: dict[str, Any]) -> bool:
+        return _is_clean_gated_policy_entry(
+            entry, publish_success_state_reasons=config.publish_success_state_reasons,
+        )
+
+    clean_gated_streak = 0
+    for entry in recent_runs:
+        if _is_clean_gated(entry):
+            clean_gated_streak += 1
+            continue
+        break
+
+    blocked_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "blocked")
+    clean_gated_recent_count = sum(1 for entry in recent_runs if _is_clean_gated(entry))
+    auto_eligible_recent_count = sum(
+        1 for entry in recent_runs
+        if str(entry.get("decision") or "") == config.auto_eligible_decision
+    )
+    latest = recent_runs[0] if recent_runs else {}
+    promote_ready = bool(mode == "approval_gated" and clean_gated_streak >= threshold)
+
+    # Headline + recommended_action — generic copy with lane variables.
+    if mode == config.auto_mode_label:
+        readiness_headline = f"{config.display_name} {config.auto_action_verb} is already enabled."
+        recommended_action = (
+            f"Watch the next {config.weekday} run closely and keep the manual "
+            "`publish` reply as the fallback if the lane degrades."
+        )
+    elif promote_ready:
+        readiness_headline = (
+            f"{config.display_name} policy is ready for promotion after "
+            f"{clean_gated_streak} clean gated run(s)."
+        )
+        recommended_action = (
+            f"Flip `{config.config_path.name}` from `approval_gated` to "
+            f"`{config.auto_mode_label}`, then supervise the next {config.weekday} run."
+        )
+    elif recent_runs:
+        remaining = max(0, threshold - clean_gated_streak)
+        readiness_headline = (
+            f"{config.display_name} policy is not ready for promotion yet; "
+            f"{remaining} more clean gated run(s) are recommended."
+        )
+        recommended_action = (
+            f"Keep replying `publish` on {config.weekday} while the policy streak builds "
+            "and watch for any blocked decisions."
+        )
+    else:
+        readiness_headline = f"{config.display_name} policy history is not available yet."
+        recommended_action = (
+            f"Run {config.display_name} a few times in approval-gated mode so Duck Ops "
+            "can judge whether promotion is safe."
+        )
+
+    # 2026-05-31: concrete safety counter (was a weekly_sale-only
+    # field but applies to every lane).
+    window_size = len(recent_runs)
+    safety_counter_line = (
+        f"Last {window_size} {config.lane}-lane verdicts: "
+        f"{clean_gated_recent_count} clean, {blocked_recent_count} blocked."
+        if window_size else None
+    )
+
+    return {
+        "available": True,
+        "path": str(config.config_path),
+        "mode": mode,
+        "promotion_threshold": threshold,
+        "clean_gated_streak": clean_gated_streak,
+        "clean_gated_recent_count": clean_gated_recent_count,
+        "blocked_recent_count": blocked_recent_count,
+        "auto_eligible_recent_count": auto_eligible_recent_count,
+        # Legacy per-lane key names — kept for now so any internal
+        # consumer that grabbed the old name doesn't silently get
+        # None. Migrate consumers to the canonical names above.
+        "auto_apply_eligible_recent_count": auto_eligible_recent_count,
+        "auto_schedule_eligible_recent_count": auto_eligible_recent_count,
+        "promote_ready": promote_ready,
+        "latest_run_id": latest.get("run_id"),
+        "latest_decision": latest.get("decision"),
+        "latest_reason": latest.get("reason"),
+        "latest_blockers": list(latest.get("blockers") or []),
+        "latest_manual_review_reasons": list(latest.get("manual_review_reasons") or []),
+        "latest_updated_at": latest.get("updated_at"),
+        "readiness_headline": readiness_headline,
+        "recommended_action": recommended_action,
+        "recent_runs": recent_runs[:4],
+        "safety_counter_line": safety_counter_line,
+    }
+
+
+def build_lane_promotion_candidate(
+    config: LanePolicyConfig,
+    policy_surface: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Generic candidate builder that replaces the 4 near-identical
+    per-lane functions. Reads from the policy_surface dict that
+    load_lane_policy_surface emits."""
+    if not policy_surface.get("available"):
+        return None
+    if not list(policy_surface.get("recent_runs") or []) and str(policy_surface.get("mode") or "") != config.auto_mode_label:
+        return None
+
+    mode = str(policy_surface.get("mode") or "approval_gated").strip() or "approval_gated"
+    clean_streak = int(policy_surface.get("clean_gated_streak") or 0)
+    threshold = int(policy_surface.get("promotion_threshold") or config.promotion_threshold)
+    latest_decision = str(policy_surface.get("latest_decision") or "").strip()
+
+    translator = config.reason_text_translator
+    if translator is not None:
+        blockers = [
+            translator(value)
+            for value in list(policy_surface.get("latest_blockers") or [])
+            if translator(value)
+        ]
+        review_reasons = [
+            translator(value)
+            for value in list(policy_surface.get("latest_manual_review_reasons") or [])
+            if translator(value)
+        ]
+    else:
+        blockers = [str(v).strip() for v in list(policy_surface.get("latest_blockers") or []) if str(v).strip()]
+        review_reasons = [str(v).strip() for v in list(policy_surface.get("latest_manual_review_reasons") or []) if str(v).strip()]
+
+    if mode == config.auto_mode_label:
+        promotion_state = "active"
+        action_title = f"{config.promotion_title} active"
+    elif bool(policy_surface.get("promote_ready")):
+        promotion_state = "ready"
+        action_title = f"Promote {config.promotion_title}"
+    elif latest_decision == "blocked":
+        promotion_state = "blocked"
+        action_title = f"{config.promotion_title} promotion blocked"
+    else:
+        promotion_state = "observing"
+        action_title = f"{config.promotion_title} still building evidence"
+
+    evidence: list[str] = [
+        f"Clean gated streak {clean_streak}/{threshold}.",
+        f"Mode is {mode}.",
+    ]
+    if policy_surface.get("safety_counter_line"):
+        evidence.append(str(policy_surface.get("safety_counter_line")))
+    if policy_surface.get("readiness_headline"):
+        evidence.append(str(policy_surface.get("readiness_headline")))
+    if blockers:
+        evidence.extend(blockers[:2])
+    elif review_reasons:
+        evidence.extend(review_reasons[:2])
+
+    return _with_promotion_controls({
+        "promotion_id": config.promotion_id,
+        "lane": config.promotion_lane_label,
+        "title": config.promotion_title,
+        "action_title": action_title,
+        "promotion_state": promotion_state,
+        "ready": promotion_state == "ready",
+        "already_promoted": promotion_state == "active",
+        "summary": str(policy_surface.get("readiness_headline") or "").strip()
+        or f"Clean gated streak {clean_streak}/{threshold}.",
+        "recommended_action": str(policy_surface.get("recommended_action") or "").strip() or None,
+        "secondary_action": str(policy_surface.get("path") or "").strip() or None,
+        "source_path": str(policy_surface.get("path") or "").strip() or None,
+        "updated_at": policy_surface.get("latest_updated_at"),
+        "latest_run_id": policy_surface.get("latest_run_id"),
+        "progress_label": f"{clean_streak}/{threshold} clean gated run(s)",
+        "threshold": threshold,
+        "progress_value": clean_streak,
+        "blockers": blockers[:3],
+        "manual_review_reasons": review_reasons[:3],
+        "evidence": evidence[:4],
+    }, current_mode=mode)
+
+
+# ============================================================================
+# LANE_POLICY_CONFIGS — one entry per approval-policy lane.
+# ============================================================================
+#
+# Adding a new lane (e.g., reels_publish) is now a single config instance
+# below — no need to copy a 90-line loader function. Required fields:
+#   - lane: workflow_control "lane" string written by the producer
+#   - metadata_key_prefix: the "X_policy" prefix for *_decision, *_blockers,
+#     *_reason, *_manual_review_reasons (must match the producer's emit)
+#   - terminal_state_reasons: the producer's terminal state_reasons (see
+#     existing constants at lines 86-122)
+#   - publish_success_state_reasons: subset that means "actually published"
+#   - auto_eligible_decision: "auto_apply_allowed" or "auto_schedule_allowed"
+#     depending on the lane's auto-mode convention
+#   - config_path / promotion_threshold: lane's execution config file +
+#     how many clean runs needed before promotion-readiness goes green
+#   - display_name / weekday / auto_mode_label: human copy
+#   - promotion_id / promotion_lane_label / promotion_title: candidate
+#     identifiers used by PROMOTION_CONTROL_METADATA + the Business Desk
+#   - title_metadata_keys: per-run title field(s) (e.g., "product_title",
+#     "sale_theme_name", "cover_hook")
+#   - reason_text_translator: lane-specific human-readable reason copy
+
+WEEKLY_SALE_LANE_CONFIG = LanePolicyConfig(
+    lane="weekly",
+    metadata_key_prefix="weekly_sale_policy",
+    terminal_state_reasons=WEEKLY_SALE_TERMINAL_STATE_REASONS,
+    publish_success_state_reasons=frozenset({"sale_rotation_published"}),
+    auto_eligible_decision="auto_apply_allowed",
+    config_path=WEEKLY_SALE_EXECUTION_CONFIG_PATH,
+    promotion_threshold=WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD,
+    promotion_threshold_config_key="",  # weekly_sale uses fixed constant
+    display_name="Weekly sale",
+    weekday="Sunday",
+    auto_mode_label="auto_apply_shopify",
+    auto_action_verb="auto-apply",
+    promotion_id="weekly_sale_auto_apply",
+    promotion_lane_label="weekly_sale_policy",
+    promotion_title="Weekly sale auto-apply",
+    title_metadata_keys=("sale_theme_name", "theme_name"),
+    default_title="Weekly sale",
+    reason_text_translator=_weekly_sale_policy_reason_text,
+)
+
+MEME_LANE_CONFIG = LanePolicyConfig(
+    lane="meme",
+    metadata_key_prefix="meme_policy",
+    terminal_state_reasons=MEME_TERMINAL_STATE_REASONS,
+    publish_success_state_reasons=frozenset({"scheduled"}),
+    auto_eligible_decision="auto_schedule_allowed",
+    config_path=MEME_EXECUTION_CONFIG_PATH,
+    promotion_threshold=MEME_POLICY_PROMOTION_THRESHOLD,
+    promotion_threshold_config_key="",
+    display_name="Meme Monday",
+    weekday="Monday",
+    auto_mode_label="auto_schedule_meta",
+    auto_action_verb="auto-schedule",
+    promotion_id="meme_auto_schedule",
+    promotion_lane_label="meme_policy",
+    promotion_title="Meme Monday auto-schedule",
+    title_metadata_keys=("product_title",),
+    default_title="Meme Monday",
+    reason_text_translator=_meme_policy_reason_text,
+)
+
+REVIEW_CAROUSEL_LANE_CONFIG = LanePolicyConfig(
+    lane="review_carousel",
+    metadata_key_prefix="review_carousel_policy",
+    terminal_state_reasons=REVIEW_CAROUSEL_TERMINAL_STATE_REASONS,
+    publish_success_state_reasons=frozenset({"scheduled"}),
+    auto_eligible_decision="auto_schedule_allowed",
+    config_path=REVIEW_CAROUSEL_EXECUTION_CONFIG_PATH,
+    promotion_threshold=REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD,
+    promotion_threshold_config_key="",
+    display_name="Tuesday review carousel",
+    weekday="Tuesday",
+    auto_mode_label="auto_schedule_instagram",
+    auto_action_verb="auto-schedule",
+    promotion_id="review_carousel_auto_schedule",
+    promotion_lane_label="review_carousel_policy",
+    promotion_title="Tuesday review carousel auto-schedule",
+    title_metadata_keys=("headline",),
+    default_title="Tuesday review carousel",
+    reason_text_translator=_review_carousel_policy_reason_text,
+)
+
+JEEPFACT_LANE_CONFIG = LanePolicyConfig(
+    lane="jeepfact",
+    metadata_key_prefix="jeepfact_policy",
+    terminal_state_reasons=JEEPFACT_TERMINAL_STATE_REASONS,
+    publish_success_state_reasons=frozenset({"scheduled"}),
+    auto_eligible_decision="auto_schedule_allowed",
+    config_path=JEEPFACT_EXECUTION_CONFIG_PATH,
+    promotion_threshold=JEEPFACT_POLICY_PROMOTION_THRESHOLD,
+    promotion_threshold_config_key="promote_after_clean_streak",  # configurable
+    display_name="Jeep Fact Wednesday",
+    weekday="Wednesday",
+    auto_mode_label="auto_schedule_meta",
+    auto_action_verb="auto-schedule",
+    promotion_id="jeepfact_auto_schedule",
+    promotion_lane_label="jeepfact_policy",
+    promotion_title="Jeep Fact Wednesday auto-schedule",
+    title_metadata_keys=("cover_hook",),
+    default_title="Jeep Fact Wednesday",
+    reason_text_translator=_jeepfact_policy_reason_text,
+)
+
+# Registry of all known lanes. Add new entries here so they're picked
+# up by build_promotion_watch_surface + the filter_sanity OS card.
+LANE_POLICY_CONFIGS: tuple[LanePolicyConfig, ...] = (
+    WEEKLY_SALE_LANE_CONFIG,
+    MEME_LANE_CONFIG,
+    REVIEW_CAROUSEL_LANE_CONFIG,
+    JEEPFACT_LANE_CONFIG,
+)
+
+
 def _is_clean_gated_policy_entry(
     entry: dict[str, Any],
     *,
@@ -313,655 +744,42 @@ def _with_promotion_controls(candidate: dict[str, Any], *, current_mode: str | N
     return candidate
 
 
+# Per-lane wrappers — thin delegates to the generic machinery above.
+# Each lane's behavior is encoded in its LanePolicyConfig (see the
+# constants near line 580). To change behavior, edit the config, not
+# the wrapper. To add a new lane, add a LanePolicyConfig and wrappers
+# in this style; the rest of the system picks it up automatically.
+
 def _load_weekly_sale_policy_surface() -> dict[str, Any]:
-    config_payload = load_json(WEEKLY_SALE_EXECUTION_CONFIG_PATH, {})
-    config = config_payload if isinstance(config_payload, dict) else {}
-    mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
-    # Filter to sale-lane DECISION POINTS only. The lane="weekly" bucket
-    # is shared with blog/article/coordination subflows that also
-    # evaluate the sale policy as a dependency — their receipts carry
-    # weekly_sale_policy_decision metadata but end at upstream states
-    # like draft_article_ready, which is NOT a sale-lane verdict. See
-    # WEEKLY_SALE_TERMINAL_STATE_REASONS above for the cause history.
-    workflow_items = [
-        item for item in list_workflow_states()
-        if str(item.get("lane") or "").strip() == "weekly"
-        and isinstance(item.get("metadata"), dict)
-        and str((item.get("metadata") or {}).get("weekly_sale_policy_decision") or "").strip()
-        and str(item.get("state_reason") or "").strip() in WEEKLY_SALE_TERMINAL_STATE_REASONS
-    ]
-    workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
-    recent = workflow_items[:6]
-
-    def _recent_entry(item: dict[str, Any]) -> dict[str, Any]:
-        metadata = item.get("metadata") or {}
-        return {
-            "run_id": str(item.get("run_id") or item.get("entity_id") or "").strip() or None,
-            "updated_at": item.get("updated_at"),
-            "decision": str(metadata.get("weekly_sale_policy_decision") or "").strip() or "unknown",
-            "reason": str(metadata.get("weekly_sale_policy_reason") or "").strip() or None,
-            "blockers": [str(v).strip() for v in list(metadata.get("weekly_sale_policy_blockers") or []) if str(v).strip()],
-            "manual_review_reasons": [str(v).strip() for v in list(metadata.get("weekly_sale_policy_manual_review_reasons") or []) if str(v).strip()],
-            "state_reason": str(item.get("state_reason") or "").strip() or None,
-            "title": str(metadata.get("sale_theme_name") or metadata.get("theme_name") or item.get("display_label") or "Weekly sale").strip(),
-        }
-
-    recent_runs = [_recent_entry(item) for item in recent]
-
-    def _is_clean_gated(entry: dict[str, Any]) -> bool:
-        return _is_clean_gated_policy_entry(entry, publish_success_state_reasons={"sale_rotation_published"})
-
-    clean_gated_streak = 0
-    for entry in recent_runs:
-        if _is_clean_gated(entry):
-            clean_gated_streak += 1
-            continue
-        break
-
-    blocked_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "blocked")
-    clean_gated_recent_count = sum(1 for entry in recent_runs if _is_clean_gated(entry))
-    auto_apply_eligible_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "auto_apply_allowed")
-    latest = recent_runs[0] if recent_runs else {}
-    promote_ready = bool(
-        mode == "approval_gated"
-        and clean_gated_streak >= WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD
-    )
-    if mode == "auto_apply_shopify":
-        readiness_headline = "Weekly sale auto-apply is already enabled."
-        recommended_action = "Watch the next Sunday run closely and keep the manual `publish` reply as the fallback if the lane degrades."
-    elif promote_ready:
-        readiness_headline = (
-            f"Weekly sale policy is ready for promotion after {clean_gated_streak} clean gated run(s)."
-        )
-        recommended_action = (
-            "Flip `weekly_sale_execution.json` from `approval_gated` to `auto_apply_shopify`, "
-            "then supervise the next Sunday run."
-        )
-    elif recent_runs:
-        remaining = max(0, WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD - clean_gated_streak)
-        readiness_headline = (
-            f"Weekly sale policy is not ready for promotion yet; {remaining} more clean gated run(s) are recommended."
-        )
-        recommended_action = "Keep replying `publish` on Sunday while the policy streak builds and watch for any blocked decisions."
-    else:
-        readiness_headline = "Weekly sale policy history is not available yet."
-        recommended_action = "Run the weekly sale flow a few times in approval-gated mode so Duck Ops can judge whether promotion is safe."
-
-    return {
-        "available": True,
-        "path": str(WEEKLY_SALE_EXECUTION_CONFIG_PATH),
-        "mode": mode,
-        "promotion_threshold": WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD,
-        "clean_gated_streak": clean_gated_streak,
-        "clean_gated_recent_count": clean_gated_recent_count,
-        "blocked_recent_count": blocked_recent_count,
-        "auto_apply_eligible_recent_count": auto_apply_eligible_recent_count,
-        "promote_ready": promote_ready,
-        "latest_run_id": latest.get("run_id"),
-        "latest_decision": latest.get("decision"),
-        "latest_reason": latest.get("reason"),
-        "latest_blockers": list(latest.get("blockers") or []),
-        "latest_manual_review_reasons": list(latest.get("manual_review_reasons") or []),
-        "latest_updated_at": latest.get("updated_at"),
-        "readiness_headline": readiness_headline,
-        "recommended_action": recommended_action,
-        "recent_runs": recent_runs[:4],
-    }
+    return load_lane_policy_surface(WEEKLY_SALE_LANE_CONFIG)
 
 
 def _weekly_sale_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict[str, Any] | None:
-    if not policy_surface.get("available"):
-        return None
-
-    mode = str(policy_surface.get("mode") or "approval_gated").strip() or "approval_gated"
-    clean_streak = int(policy_surface.get("clean_gated_streak") or 0)
-    threshold = int(policy_surface.get("promotion_threshold") or WEEKLY_SALE_POLICY_PROMOTION_THRESHOLD)
-    latest_decision = str(policy_surface.get("latest_decision") or "").strip()
-    blockers = [
-        _weekly_sale_policy_reason_text(value)
-        for value in list(policy_surface.get("latest_blockers") or [])
-        if _weekly_sale_policy_reason_text(value)
-    ]
-    review_reasons = [
-        _weekly_sale_policy_reason_text(value)
-        for value in list(policy_surface.get("latest_manual_review_reasons") or [])
-        if _weekly_sale_policy_reason_text(value)
-    ]
-    if mode == "auto_apply_shopify":
-        promotion_state = "active"
-        action_title = "Weekly sale auto-apply active"
-    elif bool(policy_surface.get("promote_ready")):
-        promotion_state = "ready"
-        action_title = "Promote weekly sale auto-apply"
-    elif latest_decision == "blocked":
-        promotion_state = "blocked"
-        action_title = "Weekly sale auto-apply promotion blocked"
-    else:
-        promotion_state = "observing"
-        action_title = "Weekly sale auto-apply still building evidence"
-
-    # 2026-05-31: add a concrete safety counter to the evidence list
-    # so the operator sees the actual recent-window breakdown
-    # (clean / blocked / auto-apply-failed) instead of just the
-    # aggregate streak. This is the load-bearing "would auto-apply
-    # have made the same decision the operator did" signal — N clean
-    # in a row means N weeks where auto-apply would have published
-    # exactly when the operator did.
-    clean_recent = int(policy_surface.get("clean_gated_recent_count") or 0)
-    blocked_recent = int(policy_surface.get("blocked_recent_count") or 0)
-    window_size = len(policy_surface.get("recent_runs") or [])
-    safety_counter_line = (
-        f"Last {window_size} sale-lane verdicts: "
-        f"{clean_recent} clean, {blocked_recent} blocked."
-        if window_size
-        else None
-    )
-    evidence: list[str] = [
-        f"Clean gated streak {clean_streak}/{threshold}.",
-        f"Mode is {mode}.",
-    ]
-    if safety_counter_line:
-        evidence.append(safety_counter_line)
-    if policy_surface.get("readiness_headline"):
-        evidence.append(str(policy_surface.get("readiness_headline")))
-    if blockers:
-        evidence.extend(blockers[:2])
-    elif review_reasons:
-        evidence.extend(review_reasons[:2])
-
-    return _with_promotion_controls({
-        "promotion_id": "weekly_sale_auto_apply",
-        "lane": "weekly_sale_policy",
-        "title": "Weekly sale auto-apply",
-        "action_title": action_title,
-        "promotion_state": promotion_state,
-        "ready": promotion_state == "ready",
-        "already_promoted": promotion_state == "active",
-        "summary": str(policy_surface.get("readiness_headline") or "").strip()
-        or f"Clean gated streak {clean_streak}/{threshold}.",
-        "recommended_action": str(policy_surface.get("recommended_action") or "").strip() or None,
-        "secondary_action": str(policy_surface.get("path") or "").strip() or None,
-        "source_path": str(policy_surface.get("path") or "").strip() or None,
-        "updated_at": policy_surface.get("latest_updated_at"),
-        "latest_run_id": policy_surface.get("latest_run_id"),
-        "progress_label": f"{clean_streak}/{threshold} clean gated run(s)",
-        "threshold": threshold,
-        "progress_value": clean_streak,
-        "blockers": blockers[:3],
-        "manual_review_reasons": review_reasons[:3],
-        "evidence": evidence[:4],
-    }, current_mode=mode)
+    return build_lane_promotion_candidate(WEEKLY_SALE_LANE_CONFIG, policy_surface)
 
 
 def _load_meme_policy_surface() -> dict[str, Any]:
-    config_payload = load_json(MEME_EXECUTION_CONFIG_PATH, {})
-    config = config_payload if isinstance(config_payload, dict) else {}
-    mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
-    # Filter to MEME_TERMINAL_STATE_REASONS — see the constant above
-    # for the audit history. Receipts at upstream states (draft_ready,
-    # copy_prepared) or bulk-dismiss artifacts shouldn't shape the
-    # promotion streak.
-    workflow_items = [
-        item
-        for item in list_workflow_states()
-        if str(item.get("lane") or "").strip() == "meme"
-        and isinstance(item.get("metadata"), dict)
-        and str((item.get("metadata") or {}).get("meme_policy_decision") or "").strip()
-        and str(item.get("state_reason") or "").strip() in MEME_TERMINAL_STATE_REASONS
-    ]
-    workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
-    recent = workflow_items[:6]
-
-    def _recent_entry(item: dict[str, Any]) -> dict[str, Any]:
-        metadata = item.get("metadata") or {}
-        return {
-            "run_id": str(item.get("run_id") or item.get("entity_id") or "").strip() or None,
-            "updated_at": item.get("updated_at"),
-            "decision": str(metadata.get("meme_policy_decision") or "").strip() or "unknown",
-            "reason": str(metadata.get("meme_policy_reason") or "").strip() or None,
-            "blockers": [str(v).strip() for v in list(metadata.get("meme_policy_blockers") or []) if str(v).strip()],
-            "manual_review_reasons": [str(v).strip() for v in list(metadata.get("meme_policy_manual_review_reasons") or []) if str(v).strip()],
-            "state_reason": str(item.get("state_reason") or "").strip() or None,
-            "title": str(metadata.get("product_title") or item.get("display_label") or "Meme Monday").strip(),
-        }
-
-    recent_runs = [_recent_entry(item) for item in recent]
-
-    def _is_clean_gated(entry: dict[str, Any]) -> bool:
-        return _is_clean_gated_policy_entry(entry, publish_success_state_reasons={"scheduled"})
-
-    clean_gated_streak = 0
-    for entry in recent_runs:
-        if _is_clean_gated(entry):
-            clean_gated_streak += 1
-            continue
-        break
-
-    blocked_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "blocked")
-    auto_schedule_eligible_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "auto_schedule_allowed")
-    latest = recent_runs[0] if recent_runs else {}
-    promote_ready = bool(mode == "approval_gated" and clean_gated_streak >= MEME_POLICY_PROMOTION_THRESHOLD)
-
-    if mode == "auto_schedule_meta":
-        readiness_headline = "Meme Monday auto-schedule is already enabled."
-        recommended_action = "Watch the next Monday run closely and keep the manual `publish` reply as the fallback if the lane degrades."
-    elif promote_ready:
-        readiness_headline = f"Meme Monday policy is ready for promotion after {clean_gated_streak} clean gated run(s)."
-        recommended_action = (
-            "Flip `meme_execution.json` from `approval_gated` to `auto_schedule_meta`, "
-            "then supervise the next Monday run."
-        )
-    elif recent_runs:
-        remaining = max(0, MEME_POLICY_PROMOTION_THRESHOLD - clean_gated_streak)
-        readiness_headline = f"Meme Monday policy is not ready for promotion yet; {remaining} more clean gated run(s) are recommended."
-        recommended_action = "Keep replying `publish` on Monday while the policy streak builds and watch for any blocked decisions."
-    else:
-        readiness_headline = "Meme Monday policy history is not available yet."
-        recommended_action = "Run Meme Monday a few times in approval-gated mode so Duck Ops can judge whether promotion is safe."
-
-    return {
-        "available": True,
-        "path": str(MEME_EXECUTION_CONFIG_PATH),
-        "mode": mode,
-        "promotion_threshold": MEME_POLICY_PROMOTION_THRESHOLD,
-        "clean_gated_streak": clean_gated_streak,
-        "blocked_recent_count": blocked_recent_count,
-        "auto_schedule_eligible_recent_count": auto_schedule_eligible_recent_count,
-        "promote_ready": promote_ready,
-        "latest_run_id": latest.get("run_id"),
-        "latest_decision": latest.get("decision"),
-        "latest_reason": latest.get("reason"),
-        "latest_blockers": list(latest.get("blockers") or []),
-        "latest_manual_review_reasons": list(latest.get("manual_review_reasons") or []),
-        "latest_updated_at": latest.get("updated_at"),
-        "readiness_headline": readiness_headline,
-        "recommended_action": recommended_action,
-        "recent_runs": recent_runs[:4],
-    }
+    return load_lane_policy_surface(MEME_LANE_CONFIG)
 
 
 def _meme_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict[str, Any] | None:
-    if not policy_surface.get("available"):
-        return None
-    if not list(policy_surface.get("recent_runs") or []) and str(policy_surface.get("mode") or "") != "auto_schedule_meta":
-        return None
-
-    mode = str(policy_surface.get("mode") or "approval_gated").strip() or "approval_gated"
-    clean_streak = int(policy_surface.get("clean_gated_streak") or 0)
-    threshold = int(policy_surface.get("promotion_threshold") or MEME_POLICY_PROMOTION_THRESHOLD)
-    latest_decision = str(policy_surface.get("latest_decision") or "").strip()
-    blockers = [
-        _meme_policy_reason_text(value)
-        for value in list(policy_surface.get("latest_blockers") or [])
-        if _meme_policy_reason_text(value)
-    ]
-    review_reasons = [
-        _meme_policy_reason_text(value)
-        for value in list(policy_surface.get("latest_manual_review_reasons") or [])
-        if _meme_policy_reason_text(value)
-    ]
-    if mode == "auto_schedule_meta":
-        promotion_state = "active"
-        action_title = "Meme Monday auto-schedule active"
-    elif bool(policy_surface.get("promote_ready")):
-        promotion_state = "ready"
-        action_title = "Promote Meme Monday auto-schedule"
-    elif latest_decision == "blocked":
-        promotion_state = "blocked"
-        action_title = "Meme Monday auto-schedule promotion blocked"
-    else:
-        promotion_state = "observing"
-        action_title = "Meme Monday auto-schedule still building evidence"
-
-    evidence: list[str] = [
-        f"Clean gated streak {clean_streak}/{threshold}.",
-        f"Mode is {mode}.",
-    ]
-    if policy_surface.get("readiness_headline"):
-        evidence.append(str(policy_surface.get("readiness_headline")))
-    if blockers:
-        evidence.extend(blockers[:2])
-    elif review_reasons:
-        evidence.extend(review_reasons[:2])
-
-    return _with_promotion_controls({
-        "promotion_id": "meme_auto_schedule",
-        "lane": "meme_policy",
-        "title": "Meme Monday auto-schedule",
-        "action_title": action_title,
-        "promotion_state": promotion_state,
-        "ready": promotion_state == "ready",
-        "already_promoted": promotion_state == "active",
-        "summary": str(policy_surface.get("readiness_headline") or "").strip()
-        or f"Clean gated streak {clean_streak}/{threshold}.",
-        "recommended_action": str(policy_surface.get("recommended_action") or "").strip() or None,
-        "secondary_action": str(policy_surface.get("path") or "").strip() or None,
-        "source_path": str(policy_surface.get("path") or "").strip() or None,
-        "updated_at": policy_surface.get("latest_updated_at"),
-        "latest_run_id": policy_surface.get("latest_run_id"),
-        "progress_label": f"{clean_streak}/{threshold} clean gated run(s)",
-        "threshold": threshold,
-        "progress_value": clean_streak,
-        "blockers": blockers[:3],
-        "manual_review_reasons": review_reasons[:3],
-        "evidence": evidence[:4],
-    }, current_mode=mode)
+    return build_lane_promotion_candidate(MEME_LANE_CONFIG, policy_surface)
 
 
 def _load_review_carousel_policy_surface() -> dict[str, Any]:
-    config_payload = load_json(REVIEW_CAROUSEL_EXECUTION_CONFIG_PATH, {})
-    config = config_payload if isinstance(config_payload, dict) else {}
-    mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
-    # Filter to REVIEW_CAROUSEL_TERMINAL_STATE_REASONS — see the
-    # constant above. The 2026-04-13 receipt that had been re-stamped
-    # by bulk-dismiss with decision=blocked though state_reason
-    # remained `scheduled` (original publish completed) would still
-    # be admitted here (scheduled IS terminal), but the policy
-    # decision now sits at blocked so _is_clean_gated correctly
-    # rejects it. Upstream draft_ready / awaiting_review / approval_
-    # reminder_sent entries get filtered out before they can pollute
-    # the streak.
-    workflow_items = [
-        item
-        for item in list_workflow_states()
-        if str(item.get("lane") or "").strip() == "review_carousel"
-        and isinstance(item.get("metadata"), dict)
-        and str((item.get("metadata") or {}).get("review_carousel_policy_decision") or "").strip()
-        and str(item.get("state_reason") or "").strip() in REVIEW_CAROUSEL_TERMINAL_STATE_REASONS
-    ]
-    workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
-    recent = workflow_items[:6]
-
-    def _recent_entry(item: dict[str, Any]) -> dict[str, Any]:
-        metadata = item.get("metadata") or {}
-        return {
-            "run_id": str(item.get("run_id") or item.get("entity_id") or "").strip() or None,
-            "updated_at": item.get("updated_at"),
-            "decision": str(metadata.get("review_carousel_policy_decision") or "").strip() or "unknown",
-            "reason": str(metadata.get("review_carousel_policy_reason") or "").strip() or None,
-            "blockers": [str(v).strip() for v in list(metadata.get("review_carousel_policy_blockers") or []) if str(v).strip()],
-            "manual_review_reasons": [str(v).strip() for v in list(metadata.get("review_carousel_policy_manual_review_reasons") or []) if str(v).strip()],
-            "state_reason": str(item.get("state_reason") or "").strip() or None,
-            "title": str(metadata.get("headline") or item.get("display_label") or "Tuesday review carousel").strip(),
-        }
-
-    recent_runs = [_recent_entry(item) for item in recent]
-
-    def _is_clean_gated(entry: dict[str, Any]) -> bool:
-        return _is_clean_gated_policy_entry(entry, publish_success_state_reasons={"scheduled"})
-
-    clean_gated_streak = 0
-    for entry in recent_runs:
-        if _is_clean_gated(entry):
-            clean_gated_streak += 1
-            continue
-        break
-
-    blocked_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "blocked")
-    auto_schedule_eligible_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "auto_schedule_allowed")
-    latest = recent_runs[0] if recent_runs else {}
-    promote_ready = bool(mode == "approval_gated" and clean_gated_streak >= REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD)
-
-    if mode == "auto_schedule_instagram":
-        readiness_headline = "Tuesday review carousel auto-schedule is already enabled."
-        recommended_action = "Watch the next Tuesday run closely and keep the manual `publish` reply as the fallback if the lane degrades."
-    elif promote_ready:
-        readiness_headline = f"Tuesday review carousel policy is ready for promotion after {clean_gated_streak} clean gated run(s)."
-        recommended_action = (
-            "Flip `review_carousel_execution.json` from `approval_gated` to `auto_schedule_instagram`, "
-            "then supervise the next Tuesday run."
-        )
-    elif recent_runs:
-        remaining = max(0, REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD - clean_gated_streak)
-        readiness_headline = f"Tuesday review carousel policy is not ready for promotion yet; {remaining} more clean gated run(s) are recommended."
-        recommended_action = "Keep replying `publish` on Tuesday while the policy streak builds and watch for any blocked decisions."
-    else:
-        readiness_headline = "Tuesday review carousel policy history is not available yet."
-        recommended_action = "Run the Tuesday carousel a few times in approval-gated mode so Duck Ops can judge whether promotion is safe."
-
-    return {
-        "available": True,
-        "path": str(REVIEW_CAROUSEL_EXECUTION_CONFIG_PATH),
-        "mode": mode,
-        "promotion_threshold": REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD,
-        "clean_gated_streak": clean_gated_streak,
-        "blocked_recent_count": blocked_recent_count,
-        "auto_schedule_eligible_recent_count": auto_schedule_eligible_recent_count,
-        "promote_ready": promote_ready,
-        "latest_run_id": latest.get("run_id"),
-        "latest_decision": latest.get("decision"),
-        "latest_reason": latest.get("reason"),
-        "latest_blockers": list(latest.get("blockers") or []),
-        "latest_manual_review_reasons": list(latest.get("manual_review_reasons") or []),
-        "latest_updated_at": latest.get("updated_at"),
-        "readiness_headline": readiness_headline,
-        "recommended_action": recommended_action,
-        "recent_runs": recent_runs[:4],
-    }
+    return load_lane_policy_surface(REVIEW_CAROUSEL_LANE_CONFIG)
 
 
 def _review_carousel_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict[str, Any] | None:
-    if not policy_surface.get("available"):
-        return None
-    if not list(policy_surface.get("recent_runs") or []) and str(policy_surface.get("mode") or "") != "auto_schedule_instagram":
-        return None
-
-    mode = str(policy_surface.get("mode") or "approval_gated").strip() or "approval_gated"
-    clean_streak = int(policy_surface.get("clean_gated_streak") or 0)
-    threshold = int(policy_surface.get("promotion_threshold") or REVIEW_CAROUSEL_POLICY_PROMOTION_THRESHOLD)
-    latest_decision = str(policy_surface.get("latest_decision") or "").strip()
-    blockers = [
-        _review_carousel_policy_reason_text(value)
-        for value in list(policy_surface.get("latest_blockers") or [])
-        if _review_carousel_policy_reason_text(value)
-    ]
-    review_reasons = [
-        _review_carousel_policy_reason_text(value)
-        for value in list(policy_surface.get("latest_manual_review_reasons") or [])
-        if _review_carousel_policy_reason_text(value)
-    ]
-    if mode == "auto_schedule_instagram":
-        promotion_state = "active"
-        action_title = "Tuesday review carousel auto-schedule active"
-    elif bool(policy_surface.get("promote_ready")):
-        promotion_state = "ready"
-        action_title = "Promote Tuesday review carousel auto-schedule"
-    elif latest_decision == "blocked":
-        promotion_state = "blocked"
-        action_title = "Tuesday review carousel promotion blocked"
-    else:
-        promotion_state = "observing"
-        action_title = "Tuesday review carousel still building evidence"
-
-    evidence: list[str] = [
-        f"Clean gated streak {clean_streak}/{threshold}.",
-        f"Mode is {mode}.",
-    ]
-    if policy_surface.get("readiness_headline"):
-        evidence.append(str(policy_surface.get("readiness_headline")))
-    if blockers:
-        evidence.extend(blockers[:2])
-    elif review_reasons:
-        evidence.extend(review_reasons[:2])
-
-    return _with_promotion_controls({
-        "promotion_id": "review_carousel_auto_schedule",
-        "lane": "review_carousel_policy",
-        "title": "Tuesday review carousel auto-schedule",
-        "action_title": action_title,
-        "promotion_state": promotion_state,
-        "ready": promotion_state == "ready",
-        "already_promoted": promotion_state == "active",
-        "summary": str(policy_surface.get("readiness_headline") or "").strip()
-        or f"Clean gated streak {clean_streak}/{threshold}.",
-        "recommended_action": str(policy_surface.get("recommended_action") or "").strip() or None,
-        "secondary_action": str(policy_surface.get("path") or "").strip() or None,
-        "source_path": str(policy_surface.get("path") or "").strip() or None,
-        "updated_at": policy_surface.get("latest_updated_at"),
-        "latest_run_id": policy_surface.get("latest_run_id"),
-        "progress_label": f"{clean_streak}/{threshold} clean gated run(s)",
-        "threshold": threshold,
-        "progress_value": clean_streak,
-        "blockers": blockers[:3],
-        "manual_review_reasons": review_reasons[:3],
-        "evidence": evidence[:4],
-    }, current_mode=mode)
+    return build_lane_promotion_candidate(REVIEW_CAROUSEL_LANE_CONFIG, policy_surface)
 
 
 def _load_jeepfact_policy_surface() -> dict[str, Any]:
-    config_payload = load_json(JEEPFACT_EXECUTION_CONFIG_PATH, {})
-    config = config_payload if isinstance(config_payload, dict) else {}
-    mode = str(config.get("mode") or "approval_gated").strip() or "approval_gated"
-    promotion_threshold = _promotion_threshold_from_config(config, JEEPFACT_POLICY_PROMOTION_THRESHOLD)
-    # Filter to JEEPFACT_TERMINAL_STATE_REASONS — see the constant
-    # above. Pre-fix, dismissed_as_stale_backlog entries (bulk-dismiss
-    # maintenance artifacts) were counting as clean-gated via the
-    # manual_review_required unconditional path, inflating the streak.
-    workflow_items = [
-        item
-        for item in list_workflow_states()
-        if str(item.get("lane") or "").strip() == "jeepfact"
-        and isinstance(item.get("metadata"), dict)
-        and str((item.get("metadata") or {}).get("jeepfact_policy_decision") or "").strip()
-        and str(item.get("state_reason") or "").strip() in JEEPFACT_TERMINAL_STATE_REASONS
-    ]
-    workflow_items.sort(key=lambda item: _parse_iso(item.get("updated_at")), reverse=True)
-    recent = workflow_items[:6]
-
-    def _recent_entry(item: dict[str, Any]) -> dict[str, Any]:
-        metadata = item.get("metadata") or {}
-        return {
-            "run_id": str(item.get("run_id") or item.get("entity_id") or "").strip() or None,
-            "updated_at": item.get("updated_at"),
-            "decision": str(metadata.get("jeepfact_policy_decision") or "").strip() or "unknown",
-            "reason": str(metadata.get("jeepfact_policy_reason") or "").strip() or None,
-            "blockers": [str(v).strip() for v in list(metadata.get("jeepfact_policy_blockers") or []) if str(v).strip()],
-            "manual_review_reasons": [str(v).strip() for v in list(metadata.get("jeepfact_policy_manual_review_reasons") or []) if str(v).strip()],
-            "state_reason": str(item.get("state_reason") or "").strip() or None,
-            "title": str(metadata.get("cover_hook") or item.get("display_label") or "Jeep Fact Wednesday").strip(),
-        }
-
-    recent_runs = [_recent_entry(item) for item in recent]
-
-    def _is_clean_gated(entry: dict[str, Any]) -> bool:
-        return _is_clean_gated_policy_entry(entry, publish_success_state_reasons={"scheduled"})
-
-    clean_gated_streak = 0
-    for entry in recent_runs:
-        if _is_clean_gated(entry):
-            clean_gated_streak += 1
-            continue
-        break
-
-    blocked_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "blocked")
-    auto_schedule_eligible_recent_count = sum(1 for entry in recent_runs if str(entry.get("decision") or "") == "auto_schedule_allowed")
-    latest = recent_runs[0] if recent_runs else {}
-    promote_ready = bool(mode == "approval_gated" and clean_gated_streak >= promotion_threshold)
-
-    if mode == "auto_schedule_meta":
-        readiness_headline = "Jeep Fact Wednesday auto-schedule is already enabled."
-        recommended_action = "Watch the next Wednesday run closely and keep the manual `publish` reply as the fallback if the lane degrades."
-    elif promote_ready:
-        readiness_headline = f"Jeep Fact Wednesday policy is ready for promotion after {clean_gated_streak} clean gated run(s)."
-        recommended_action = (
-            "Flip `jeepfact_execution.json` from `approval_gated` to `auto_schedule_meta`, "
-            "then supervise the next Wednesday run."
-        )
-    elif recent_runs:
-        remaining = max(0, promotion_threshold - clean_gated_streak)
-        readiness_headline = f"Jeep Fact Wednesday policy is not ready for promotion yet; {remaining} more clean gated run(s) are recommended."
-        recommended_action = "Keep replying `publish` on Wednesday while the policy streak builds and watch for any blocked decisions."
-    else:
-        readiness_headline = "Jeep Fact Wednesday policy history is not available yet."
-        recommended_action = "Run Jeep Fact Wednesday a few times in approval-gated mode so Duck Ops can judge whether promotion is safe."
-
-    return {
-        "available": True,
-        "path": str(JEEPFACT_EXECUTION_CONFIG_PATH),
-        "mode": mode,
-        "promotion_threshold": promotion_threshold,
-        "clean_gated_streak": clean_gated_streak,
-        "blocked_recent_count": blocked_recent_count,
-        "auto_schedule_eligible_recent_count": auto_schedule_eligible_recent_count,
-        "promote_ready": promote_ready,
-        "latest_run_id": latest.get("run_id"),
-        "latest_decision": latest.get("decision"),
-        "latest_reason": latest.get("reason"),
-        "latest_blockers": list(latest.get("blockers") or []),
-        "latest_manual_review_reasons": list(latest.get("manual_review_reasons") or []),
-        "latest_updated_at": latest.get("updated_at"),
-        "readiness_headline": readiness_headline,
-        "recommended_action": recommended_action,
-        "recent_runs": recent_runs[:4],
-    }
+    return load_lane_policy_surface(JEEPFACT_LANE_CONFIG)
 
 
 def _jeepfact_policy_promotion_candidate(policy_surface: dict[str, Any]) -> dict[str, Any] | None:
-    if not policy_surface.get("available"):
-        return None
-    if not list(policy_surface.get("recent_runs") or []) and str(policy_surface.get("mode") or "") != "auto_schedule_meta":
-        return None
-
-    mode = str(policy_surface.get("mode") or "approval_gated").strip() or "approval_gated"
-    clean_streak = int(policy_surface.get("clean_gated_streak") or 0)
-    threshold = int(policy_surface.get("promotion_threshold") or JEEPFACT_POLICY_PROMOTION_THRESHOLD)
-    latest_decision = str(policy_surface.get("latest_decision") or "").strip()
-    blockers = [
-        _jeepfact_policy_reason_text(value)
-        for value in list(policy_surface.get("latest_blockers") or [])
-        if _jeepfact_policy_reason_text(value)
-    ]
-    review_reasons = [
-        _jeepfact_policy_reason_text(value)
-        for value in list(policy_surface.get("latest_manual_review_reasons") or [])
-        if _jeepfact_policy_reason_text(value)
-    ]
-    if mode == "auto_schedule_meta":
-        promotion_state = "active"
-        action_title = "Jeep Fact Wednesday auto-schedule active"
-    elif bool(policy_surface.get("promote_ready")):
-        promotion_state = "ready"
-        action_title = "Promote Jeep Fact Wednesday auto-schedule"
-    elif latest_decision == "blocked":
-        promotion_state = "blocked"
-        action_title = "Jeep Fact Wednesday promotion blocked"
-    else:
-        promotion_state = "observing"
-        action_title = "Jeep Fact Wednesday still building evidence"
-
-    evidence: list[str] = [
-        f"Clean gated streak {clean_streak}/{threshold}.",
-        f"Mode is {mode}.",
-    ]
-    if policy_surface.get("readiness_headline"):
-        evidence.append(str(policy_surface.get("readiness_headline")))
-    if blockers:
-        evidence.extend(blockers[:2])
-    elif review_reasons:
-        evidence.extend(review_reasons[:2])
-
-    return _with_promotion_controls({
-        "promotion_id": "jeepfact_auto_schedule",
-        "lane": "jeepfact_policy",
-        "title": "Jeep Fact Wednesday auto-schedule",
-        "action_title": action_title,
-        "promotion_state": promotion_state,
-        "ready": promotion_state == "ready",
-        "already_promoted": promotion_state == "active",
-        "summary": str(policy_surface.get("readiness_headline") or "").strip()
-        or f"Clean gated streak {clean_streak}/{threshold}.",
-        "recommended_action": str(policy_surface.get("recommended_action") or "").strip() or None,
-        "secondary_action": str(policy_surface.get("path") or "").strip() or None,
-        "source_path": str(policy_surface.get("path") or "").strip() or None,
-        "updated_at": policy_surface.get("latest_updated_at"),
-        "latest_run_id": policy_surface.get("latest_run_id"),
-        "progress_label": f"{clean_streak}/{threshold} clean gated run(s)",
-        "threshold": threshold,
-        "progress_value": clean_streak,
-        "blockers": blockers[:3],
-        "manual_review_reasons": review_reasons[:3],
-        "evidence": evidence[:4],
-    }, current_mode=mode)
+    return build_lane_promotion_candidate(JEEPFACT_LANE_CONFIG, policy_surface)
 
 
 def _load_promotion_watch_surface(

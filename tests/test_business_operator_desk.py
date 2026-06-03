@@ -1562,7 +1562,11 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertTrue(autonomy_gate["operator_must_promote"])
         self.assertFalse(autonomy_gate["self_promotion_allowed"])
         action = next(item for item in (payload.get("next_actions") or []) if item.get("lane") == "weekly_sale_policy")
-        self.assertEqual(action["title"], "Promote weekly sale auto-apply")
+        # 2026-06-02: capitalization fixed during the generic lane
+        # extraction (was "weekly sale" — a typo where every other
+        # lane correctly capitalized its display name). Generic
+        # builder uses the LanePolicyConfig.promotion_title verbatim.
+        self.assertEqual(action["title"], "Promote Weekly sale auto-apply")
         self.assertIn("3 clean gated run", action["summary"])
         self.assertIn("## Promotion Watch", markdown)
         self.assertIn("1 promotion candidate(s) are ready to promote.", markdown)
@@ -2412,6 +2416,187 @@ class BusinessOperatorDeskTests(unittest.TestCase):
         self.assertIn("Duck Ops Interface Contracts", section_output)
         self.assertIn("Ducks to pack today: 4", section_output)
         self.assertIn("Orange pet ducks | score 9.0 | partial", section_output)
+
+
+class LanePolicyConfigContractTests(unittest.TestCase):
+    """Pins the "add a new lane → contract is automatically inherited"
+    guarantee for slice 2 of the producer-consumer-drift roadmap.
+
+    Pre-2026-06-02 each lane had ~150 LOC of duplicated loader +
+    candidate code. A bug fixed in one lane wouldn't reach the other
+    three without a hand-merge — same drift shape as the meme/
+    jeepfact filename bug and the channel-mix field bug.
+
+    Now every lane flows through LanePolicyConfig +
+    load_lane_policy_surface + build_lane_promotion_candidate. These
+    tests pin that:
+      1. The registry lists every known lane.
+      2. Each LanePolicyConfig carries the required contract fields.
+      3. Each config produces a non-crashing policy surface with the
+         contract keys downstream consumers read.
+      4. Each config produces a non-crashing promotion candidate.
+
+    If a future lane is added via LanePolicyConfig + appended to
+    LANE_POLICY_CONFIGS, these tests automatically cover it — that's
+    the "add new lane → contract is automatic" guarantee."""
+
+    def test_lane_policy_registry_contains_all_known_lanes(self) -> None:
+        from business_operator_desk import (
+            JEEPFACT_LANE_CONFIG,
+            LANE_POLICY_CONFIGS,
+            MEME_LANE_CONFIG,
+            REVIEW_CAROUSEL_LANE_CONFIG,
+            WEEKLY_SALE_LANE_CONFIG,
+        )
+
+        registered = set(LANE_POLICY_CONFIGS)
+        expected = {
+            WEEKLY_SALE_LANE_CONFIG,
+            MEME_LANE_CONFIG,
+            REVIEW_CAROUSEL_LANE_CONFIG,
+            JEEPFACT_LANE_CONFIG,
+        }
+        self.assertEqual(
+            registered, expected,
+            "Every lane defined as LanePolicyConfig must be appended "
+            "to LANE_POLICY_CONFIGS so it's automatically enrolled in "
+            "the promotion contract. A missing entry means the lane "
+            "won't appear on the operator desk promotion-watch "
+            "surface.",
+        )
+
+    def test_every_registered_lane_has_required_contract_fields(self) -> None:
+        from business_operator_desk import LANE_POLICY_CONFIGS
+
+        required_fields = (
+            "lane", "metadata_key_prefix", "terminal_state_reasons",
+            "publish_success_state_reasons", "auto_eligible_decision",
+            "config_path", "promotion_threshold", "display_name",
+            "weekday", "auto_mode_label", "promotion_id",
+            "promotion_lane_label", "promotion_title",
+        )
+        for config in LANE_POLICY_CONFIGS:
+            for field in required_fields:
+                value = getattr(config, field, None)
+                self.assertTrue(
+                    value or value == 0,
+                    f"LanePolicyConfig for lane={config.lane!r} is "
+                    f"missing required field {field!r}. The generic "
+                    "machinery will produce wrong output without it.",
+                )
+
+    def test_every_registered_lane_loads_a_valid_policy_surface(self) -> None:
+        """Every config in the registry must round-trip through
+        load_lane_policy_surface without raising AND produce a dict
+        with the contract keys downstream consumers read.
+
+        If a future lane is added via LanePolicyConfig but with a
+        missing or malformed field, this test fails loud at the
+        boundary instead of silently rendering a broken card."""
+        from business_operator_desk import (
+            LANE_POLICY_CONFIGS,
+            load_lane_policy_surface,
+        )
+
+        contract_keys = {
+            "available", "path", "mode", "promotion_threshold",
+            "clean_gated_streak", "blocked_recent_count",
+            "auto_eligible_recent_count", "promote_ready",
+            "latest_run_id", "latest_decision", "latest_blockers",
+            "latest_manual_review_reasons", "latest_updated_at",
+            "readiness_headline", "recommended_action",
+            "recent_runs", "safety_counter_line",
+        }
+        for config in LANE_POLICY_CONFIGS:
+            with (
+                patch(
+                    "business_operator_desk.list_workflow_states",
+                    return_value=[],
+                ),
+                patch(
+                    "business_operator_desk.load_json",
+                    return_value={"mode": "approval_gated"},
+                ),
+            ):
+                surface = load_lane_policy_surface(config)
+
+            missing = contract_keys - set(surface.keys())
+            self.assertFalse(
+                missing,
+                f"Lane {config.lane!r} policy surface is missing "
+                f"contract keys: {sorted(missing)}. The desk markdown "
+                "+ portal cards read these keys; missing keys render "
+                "as blank or 'unknown'.",
+            )
+
+    def test_every_registered_lane_builds_a_valid_promotion_candidate(self) -> None:
+        """Every lane in the registry must produce a candidate dict
+        with the promotion-contract fields the operator desk +
+        portal action panel read. Test in 'active' mode (recent_runs
+        may be empty)."""
+        from business_operator_desk import (
+            LANE_POLICY_CONFIGS,
+            build_lane_promotion_candidate,
+            load_lane_policy_surface,
+        )
+
+        contract_keys = {
+            "promotion_id", "lane", "title", "action_title",
+            "promotion_state", "ready", "already_promoted", "summary",
+            "progress_label", "threshold", "progress_value",
+            "evidence",
+        }
+        for config in LANE_POLICY_CONFIGS:
+            with (
+                patch(
+                    "business_operator_desk.list_workflow_states",
+                    return_value=[],
+                ),
+                patch(
+                    "business_operator_desk.load_json",
+                    return_value={"mode": config.auto_mode_label},
+                ),
+            ):
+                surface = load_lane_policy_surface(config)
+                candidate = build_lane_promotion_candidate(config, surface)
+
+            self.assertIsNotNone(
+                candidate,
+                f"Lane {config.lane!r} produced None candidate in "
+                "auto-mode; the operator desk would skip it instead "
+                "of showing 'active'.",
+            )
+            missing = contract_keys - set(candidate.keys())  # type: ignore[arg-type]
+            self.assertFalse(
+                missing,
+                f"Lane {config.lane!r} promotion candidate is missing "
+                f"contract keys: {sorted(missing)}.",
+            )
+
+    def test_lane_promotion_ids_are_unique(self) -> None:
+        """Two lanes sharing a promotion_id would collide in
+        PROMOTION_CONTROL_METADATA and silently inherit each other's
+        approval boundary copy."""
+        from business_operator_desk import LANE_POLICY_CONFIGS
+
+        promotion_ids = [config.promotion_id for config in LANE_POLICY_CONFIGS]
+        self.assertEqual(
+            len(promotion_ids), len(set(promotion_ids)),
+            "Two lanes share a promotion_id: "
+            f"{[pid for pid in promotion_ids if promotion_ids.count(pid) > 1]}",
+        )
+
+    def test_lane_metadata_key_prefixes_are_unique(self) -> None:
+        """metadata_key_prefix collisions would cause two lanes to
+        read each other's workflow_control metadata fields."""
+        from business_operator_desk import LANE_POLICY_CONFIGS
+
+        prefixes = [config.metadata_key_prefix for config in LANE_POLICY_CONFIGS]
+        self.assertEqual(
+            len(prefixes), len(set(prefixes)),
+            "Two lanes share a metadata_key_prefix: "
+            f"{[p for p in prefixes if prefixes.count(p) > 1]}",
+        )
 
 
 if __name__ == "__main__":
