@@ -113,7 +113,9 @@ class WorkflowsCardSurfaceTests(unittest.TestCase):
         row = surface["flows"][0]
         self.assertEqual(row["progression_kind"], "auto")
         self.assertEqual(row["status_dot"], "green")
-        self.assertIn("AUTO", row["status_label"])
+        # status_label deliberately doesn't repeat the mode (shown as
+        # a chip elsewhere). It just signals the lane is running auto.
+        self.assertIn("auto", row["status_label"].lower())
 
     def test_manual_flow_shows_no_streak_progress(self) -> None:
         """thursday/gtdf/blog must NOT show 'X/Y clean gated runs' —

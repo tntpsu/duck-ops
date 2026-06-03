@@ -847,22 +847,23 @@ def _workflows_card_status(
 
     progression_kind: "auto" | "gated" | "manual"
     status_dot:       "green" | "yellow" | "red" | "gray"
+
+    status_label is the one-line headline. It deliberately does NOT
+    repeat the mode (shown as a chip in the UI) or the last-run
+    timestamp (shown in the meta row). One signal per element.
     """
     mode = str(surface.get("mode") or "").strip()
     if mode == "off":
-        return ("off", "red", f"OFF — operator-paused")
+        return ("off", "red", "OFF — paused by operator")
     if config.no_auto_progression:
-        last = surface.get("latest_updated_at")
-        last_state = surface.get("latest_state_reason") or "n/a"
-        last_seg = f"last run {last} ({last_state})" if last else "no recent runs"
-        return ("manual", "gray", f"Manual flow — {last_seg}")
+        return ("manual", "gray", "Manual flow — operator-triggered, no auto-promotion")
     if mode == config.auto_mode_label and config.auto_mode_label:
-        return ("auto", "green", f"AUTO — {mode}")
+        return ("auto", "green", "Running on auto-schedule")
     # Approval-gated lane: show streak progress.
     streak = int(surface.get("clean_gated_streak") or 0)
     threshold = int(surface.get("promotion_threshold") or config.promotion_threshold or 0)
     if streak >= threshold and threshold > 0:
-        return ("gated", "yellow", f"{streak}/{threshold} clean — ready to promote to auto")
+        return ("gated", "yellow", f"{streak}/{threshold} clean runs — ready to promote to auto")
     return (
         "gated",
         "yellow",
