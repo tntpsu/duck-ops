@@ -210,6 +210,28 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 
 ---
 
+## Surface 7 — IG-side our-own scheduling queue (2026-06-04)
+
+**Background:** verified 2026-06-03 that Meta's IG Graph API silently ignores the `scheduled_publish_time` field for most app permission tiers. The jeepfact post scheduled for 6pm went live at 10:19am (the moment of the API call). All five social lanes (jeepfact, meme, gtdf, gtdf_winner, blog, review_carousel) are affected. See `duckAgent/KNOWN_QUIRKS.md` for the dated incident record.
+
+**Fix shape:** a per-flow local queue (`duckAgent/states/social_publish_queue/`) + a launchd sidecar (`scripts/social_publish_due.py`, every 10 min). Lane publish steps pass `lane`+`run_id` to the IG schedule helpers; if scheduled_unix > now+60s, the helpers enqueue instead of calling Meta. Sidecar wakes, finds due entries, and publishes via `bypass_queue=True`.
+
+| Use case | Enqueue contract | Due-entry filter | Lifecycle (post / fail / quarantine) | Helper routing (queue vs Meta) | OS observability (overdue lag) | Malformed entry tolerance |
+|---|---|---|---|---|---|---|
+| jeepfact, meme, gtdf, gtdf_winner, blog (helpers/meta_helper.py) | ✅ `EnqueueIgPostContractTests` (5 tests: valid enqueue, empty image URLs, empty caption, malformed scheduled_at, grep-friendly id) | ✅ `DueEntryFilterTests::test_past_entries_are_due`, `test_future_entries_are_not_due`, `test_due_entries_sorted_earliest_first` | ✅ `LifecycleTests` (4 tests: mark_posted, attempt retry budget, retry-cap → failed, quarantine) | ✅ `MetaHelperRoutingTests` (4 tests: future + lane → queue; no lane → Meta; bypass_queue → Meta; imminent < 60s → Meta) | ✅ `QueueSummaryTests::test_overdue_lag_observable_for_os_card` (pins ~30 min overdue → `max_overdue_minutes ≈ 30`) | ✅ `test_malformed_entry_file_does_not_crash_due_scan` |
+| review_carousel (creative_agent runtime publish_bridge) | ✅ same enqueue contract (shared module) | ✅ same filter | ✅ same | ✅ `PublishBridgeRoutingTests` (3 tests: carousel future + lane → queue; bypass_queue → Meta; single image route) | ✅ same | ✅ same |
+| Sidecar heartbeat + late warnings | ⚠️ manual:smoke — `scripts/social_publish_due.py --dry-run --print-json` verified writes heartbeat + reports actions | n/a | n/a | n/a | n/a | n/a |
+| launchd install on Mac mini | ⚠️ manual:operator-install — `duckAgent_runtime/com.philtullai.duckagent.social_publish_due.plist` drafted, operator runs `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/...` | n/a | n/a | n/a | n/a | n/a |
+
+**Coverage:** 23 unit tests live in `duckAgent/tests/test_social_publish_queue.py`. All 5 social lanes wired to pass `lane`+`run_id` (5 production files modified).
+
+**Known gaps (acceptable for ship):**
+- No OS observability card yet for "sidecar stopped firing" or "queue has overdue entries." Per the two-card-bracket memory, both should be added before relying on the sidecar long-term. Followup #99 in the task list.
+- Sidecar's actual Meta publish path is not mocked end-to-end; the `bypass_queue=True` branch is covered by the existing helper tests for jeepfact/etc., but there's no test asserting "queue entry → sidecar runs → Meta called with bypass=True → mark_posted fires." Followup integration test.
+- review_carousel runs Tuesdays — first live verification will be 2026-06-09.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
