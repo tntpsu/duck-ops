@@ -8,6 +8,7 @@ from governance_review_common import DUCK_OPS_ROOT, OUTPUT_OPERATOR_DIR, age_hou
 
 
 SOCIAL_ROLLUPS_PATH = DUCK_OPS_ROOT / "state" / "social_performance_rollups.json"
+SOCIAL_POSTS_PATH = DUCK_OPS_ROOT / "state" / "social_performance_posts.json"
 COMPETITOR_BENCHMARK_PATH = DUCK_OPS_ROOT / "state" / "social_competitor_benchmark.json"
 COMPETITOR_SOCIAL_BENCHMARK_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_benchmark.json"
 COMPETITOR_SOCIAL_SNAPSHOTS_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_snapshots.json"
@@ -21,6 +22,7 @@ MATERIAL_CHANGE_KINDS = {
     "weekly_strategy_alternate_lane_won",
     "weekly_strategy_different_lane_won",
     "weekly_strategy_slot_missed",
+    "weekly_strategy_feed_stale",
     "weekly_strategy_execution_truth_changed",
     "weekly_strategy_lane_ready_to_scale",
     "weekly_strategy_lane_pull_back",
@@ -33,6 +35,7 @@ MATERIAL_CHANGE_KINDS = {
 }
 ATTENTION_CHANGE_KINDS = {
     "weekly_strategy_slot_missed",
+    "weekly_strategy_feed_stale",
     "weekly_strategy_lane_pull_back",
     "weekly_strategy_guardrail_changed",
     "competitor_social_freshness_degraded",
@@ -173,12 +176,18 @@ def _changes(
     competitor_market_payload: dict[str, Any],
     competitor_social_payload: dict[str, Any],
     competitor_social_freshness: dict[str, Any],
+    *,
+    live_posts_payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     changes: list[dict[str, Any]] = []
     for item in social_payload.get("changes_since_previous") or []:
         if isinstance(item, dict):
             changes.append({"source": "own_social", **item})
-    for item in _weekly_strategy_changes(weekly_strategy_feedback, previous_current_learnings_payload):
+    for item in _weekly_strategy_changes(
+        weekly_strategy_feedback,
+        previous_current_learnings_payload,
+        live_posts_payload=live_posts_payload,
+    ):
         changes.append({"source": "weekly_strategy", **item})
     for item in competitor_market_payload.get("changes_since_previous") or []:
         if isinstance(item, dict):
@@ -466,9 +475,89 @@ def _weekly_strategy_beliefs(feedback_payload: dict[str, Any]) -> list[dict[str,
     return beliefs[:4]
 
 
+# 2026-06-04: Live-posts verification to suppress false-positive
+# weekly_strategy_slot_missed emissions. Root cause: the weekly_
+# strategy_recommendation_packet is generated from a snapshot of
+# social_performance_posts.json. The current_learnings emitter
+# reads slot_outcomes from the cached packet. If the packet was
+# generated before social_performance_posts was refreshed for the
+# day, every executed slot still reads "no_post_observed" — and
+# the email goes out claiming a slot was missed even though the
+# post is sitting in the live posts file.
+#
+# Verified incident 2026-06-04: jeepfact posted Wed 6pm (FB) +
+# Wed 10:19am (IG due to the Meta IG quirk). Both in the live
+# posts file. But current_learnings ran at 07:10 against a packet
+# generated before social_performance_posts refresh and emitted
+# "Slot 2 has no observed post yet for the planned `jeepfact`
+# slot." 10 min later the packet refreshed and the same slot
+# showed recommended_lane_executed. False positive in operator
+# inbox.
+#
+# Fix shape: at change-emit time, re-read social_performance_posts
+# directly and verify the missed-slot claim against the live data.
+# If a matching post exists, suppress. If the live posts file is
+# itself stale (so we can't verify), emit a different change kind
+# (`weekly_strategy_feed_stale`) instead — operator gets told the
+# observability layer is broken, not that a lane was skipped.
+
+_LIVE_POSTS_STALE_HOURS = 24
+
+
+def _live_post_matches_slot(
+    *,
+    posts_payload: dict[str, Any],
+    target_date: str,
+    suggested_lane: str,
+) -> dict[str, Any] | None:
+    """Returns the first live post that matches target_date + lane
+    (case-insensitive on workflow), or None. Excludes future-dated
+    posts; we want posts the system has actually observed going
+    live, not scheduled-but-pending entries."""
+    if not target_date or not suggested_lane:
+        return None
+    posts = posts_payload.get("posts") if isinstance(posts_payload, dict) else None
+    if not isinstance(posts, list):
+        return None
+    suggested_norm = _compact_text(suggested_lane).lower()
+    target_norm = _compact_text(target_date)
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        if bool(post.get("is_future_post")):
+            continue
+        if _compact_text(post.get("published_date")) != target_norm:
+            continue
+        if _compact_text(post.get("workflow")).lower() == suggested_norm:
+            return post
+    return None
+
+
+def _live_posts_feed_is_stale(
+    posts_payload: dict[str, Any],
+    *,
+    stale_after_hours: float = _LIVE_POSTS_STALE_HOURS,
+) -> bool:
+    """The live posts file's generated_at is the authoritative
+    freshness signal. If it hasn't been refreshed recently we can't
+    trust 'no live post matches this slot' as proof the slot was
+    actually missed."""
+    if not isinstance(posts_payload, dict):
+        return True
+    generated_at = _compact_text(posts_payload.get("generated_at"))
+    if not generated_at:
+        return True
+    hours = age_hours(generated_at)
+    if hours is None:
+        return True
+    return hours > stale_after_hours
+
+
 def _weekly_strategy_changes(
     feedback_payload: dict[str, Any],
     previous_current_learnings_payload: dict[str, Any],
+    *,
+    live_posts_payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     previous_feedback = (
         previous_current_learnings_payload.get("weekly_strategy_feedback")
@@ -518,12 +607,56 @@ def _weekly_strategy_changes(
                 )
         elif status == "no_post_observed":
             if previous_status != status:
-                changes.append(
-                    {
-                        "kind": "weekly_strategy_slot_missed",
-                        "headline": f"{slot} has no observed post yet for the planned `{suggested}` slot.",
-                    }
-                )
+                # 2026-06-04: verify against the live posts file
+                # before emitting. The cached packet's
+                # tracking_status often lags the live posts file by
+                # 10-20 minutes in the morning, producing false
+                # positives. See _live_post_matches_slot above for
+                # the incident record.
+                calendar_date = _compact_text(item.get("calendar_date"))
+                live_payload = live_posts_payload if isinstance(live_posts_payload, dict) else None
+                matched_live = None
+                feed_is_stale = False
+                if live_payload is not None:
+                    feed_is_stale = _live_posts_feed_is_stale(live_payload)
+                    if not feed_is_stale:
+                        matched_live = _live_post_matches_slot(
+                            posts_payload=live_payload,
+                            target_date=calendar_date,
+                            suggested_lane=suggested,
+                        )
+                if matched_live is not None:
+                    # Live posts file has a matching post — cached
+                    # slot_outcomes was stale. Suppress the false
+                    # positive entirely. Do NOT emit anything; the
+                    # cache will catch up on the next refresh.
+                    continue
+                if feed_is_stale:
+                    # We can't verify either way — tell the
+                    # operator the observability feed is the
+                    # problem, not the lane. Different change kind
+                    # so it doesn't trip the "slot missed"
+                    # operator-action playbook.
+                    changes.append(
+                        {
+                            "kind": "weekly_strategy_feed_stale",
+                            "headline": (
+                                f"{slot} can't be verified — "
+                                "social_performance_posts.json is "
+                                "stale, so the cached "
+                                "no_post_observed reading is "
+                                "untrusted. Refresh the feed before "
+                                "concluding the slot was missed."
+                            ),
+                        }
+                    )
+                else:
+                    changes.append(
+                        {
+                            "kind": "weekly_strategy_slot_missed",
+                            "headline": f"{slot} has no observed post yet for the planned `{suggested}` slot.",
+                        }
+                    )
 
     previous_execution_truth = (
         previous_feedback.get("execution_truth") if isinstance(previous_feedback.get("execution_truth"), dict) else {}
@@ -695,6 +828,11 @@ def build_current_learnings_payload() -> dict[str, Any]:
     competitor_social_payload = load_json(COMPETITOR_SOCIAL_BENCHMARK_PATH, {})
     competitor_social_snapshots_payload = load_json(COMPETITOR_SOCIAL_SNAPSHOTS_PATH, {})
     weekly_strategy_packet_payload = load_json(WEEKLY_STRATEGY_PACKET_PATH, {})
+    # 2026-06-04: live posts file consulted at emit time to verify
+    # weekly_strategy_slot_missed claims against actual observed
+    # posts. Suppresses false positives caused by stale packet
+    # snapshots.
+    live_posts_payload = load_json(SOCIAL_POSTS_PATH, {})
     previous_current_learnings_payload = load_json(CURRENT_LEARNINGS_STATE_PATH, {})
     if not isinstance(social_payload, dict):
         social_payload = {}
@@ -706,6 +844,8 @@ def build_current_learnings_payload() -> dict[str, Any]:
         competitor_social_snapshots_payload = {}
     if not isinstance(weekly_strategy_packet_payload, dict):
         weekly_strategy_packet_payload = {}
+    if not isinstance(live_posts_payload, dict):
+        live_posts_payload = {}
     if not isinstance(previous_current_learnings_payload, dict):
         previous_current_learnings_payload = {}
 
@@ -718,6 +858,7 @@ def build_current_learnings_payload() -> dict[str, Any]:
         competitor_market_payload,
         competitor_social_payload,
         competitor_social_freshness,
+        live_posts_payload=live_posts_payload,
     )
 
     payload = {
@@ -755,6 +896,7 @@ def build_current_learnings_payload() -> dict[str, Any]:
         )[:6],
         "paths": {
             "social_rollups": str(SOCIAL_ROLLUPS_PATH),
+            "social_posts": str(SOCIAL_POSTS_PATH),
             "competitor_benchmark": str(COMPETITOR_BENCHMARK_PATH),
             "competitor_social_benchmark": str(COMPETITOR_SOCIAL_BENCHMARK_PATH),
             "competitor_social_snapshots": str(COMPETITOR_SOCIAL_SNAPSHOTS_PATH),

@@ -724,5 +724,287 @@ class CurrentLearningsTests(unittest.TestCase):
             self.assertIn("pull_back", markdown)
 
 
+class WeeklyStrategySlotMissedFalsePositiveTests(unittest.TestCase):
+    """Pins the 2026-06-04 false-positive incident as a regression
+    test.
+
+    Root cause: the weekly_strategy_recommendation_packet's
+    `slot_outcomes` lags the live posts file by 10-20 min in the
+    morning. current_learnings ran at 07:10 against a packet
+    generated before social_performance_posts had been refreshed,
+    saw Slot 2 (Wednesday) as `no_post_observed` even though
+    yesterday's jeepfact post was sitting in the live posts file,
+    and emitted a `weekly_strategy_slot_missed` change.
+
+    Fix: at change-emit time, verify against the live posts file
+    directly. If a matching post exists, suppress. If the live
+    posts file is itself stale, emit `weekly_strategy_feed_stale`
+    (different operator playbook) instead.
+    """
+
+    @staticmethod
+    def _feedback_slot(*, slot: str, lane: str, status: str, date: str) -> dict:
+        return {
+            "slot": slot,
+            "suggested_lane": lane,
+            "tracking_status": status,
+            "calendar_date": date,
+            "performance_label": None,
+            "actual_lane": None,
+        }
+
+    @staticmethod
+    def _live_post(*, workflow: str, date: str, platform: str = "instagram",
+                   is_future: bool = False) -> dict:
+        return {
+            "workflow": workflow,
+            "platform": platform,
+            "published_date": date,
+            "published_at": f"{date}T18:00:00-04:00",
+            "is_future_post": is_future,
+        }
+
+    def _previous_payload_for(self, slot: str, prior_status: str = "awaiting_slot") -> dict:
+        return {
+            "weekly_strategy_feedback": {
+                "slot_outcomes": [
+                    {"slot": slot, "tracking_status": prior_status}
+                ],
+            }
+        }
+
+    def test_live_post_matching_slot_suppresses_false_positive(self) -> None:
+        """The 2026-06-04 incident shape: cached slot_outcomes says
+        no_post_observed but the live posts file has a matching
+        post. The slot_missed change MUST be suppressed."""
+        feedback = {
+            "slot_outcomes": [
+                self._feedback_slot(
+                    slot="Slot 2", lane="jeepfact",
+                    status="no_post_observed", date="2026-06-03",
+                ),
+            ],
+            "execution_truth": {},
+        }
+        from datetime import datetime
+        live_posts = {
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "posts": [self._live_post(workflow="jeepfact", date="2026-06-03")],
+        }
+        changes = current_learnings._weekly_strategy_changes(
+            feedback,
+            self._previous_payload_for("Slot 2"),
+            live_posts_payload=live_posts,
+        )
+        kinds = [c.get("kind") for c in changes]
+        self.assertNotIn(
+            "weekly_strategy_slot_missed", kinds,
+            "Live posts file has matching jeepfact post for Slot 2 — "
+            "the cached slot_outcomes was stale and the emitter must "
+            "suppress the false positive (the 2026-06-04 incident).",
+        )
+        self.assertNotIn(
+            "weekly_strategy_feed_stale", kinds,
+            "Feed is fresh, so feed_stale must NOT be emitted either.",
+        )
+
+    def test_truly_missed_slot_still_emits(self) -> None:
+        """Don't over-suppress: when the live posts file has no
+        matching post for the slot, the change still fires."""
+        feedback = {
+            "slot_outcomes": [
+                self._feedback_slot(
+                    slot="Slot 1", lane="jeepfact",
+                    status="no_post_observed", date="2026-06-01",
+                ),
+            ],
+            "execution_truth": {},
+        }
+        from datetime import datetime
+        # Live posts file has plenty of posts but NONE for Slot 1's date+lane.
+        live_posts = {
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "posts": [
+                self._live_post(workflow="meme", date="2026-06-01"),
+                self._live_post(workflow="jeepfact", date="2026-06-03"),
+            ],
+        }
+        changes = current_learnings._weekly_strategy_changes(
+            feedback,
+            self._previous_payload_for("Slot 1"),
+            live_posts_payload=live_posts,
+        )
+        kinds = [c.get("kind") for c in changes]
+        self.assertIn(
+            "weekly_strategy_slot_missed", kinds,
+            "When live posts truly have no matching post, the slot-"
+            "missed change must still fire — don't over-suppress.",
+        )
+
+    def test_future_dated_post_does_not_count_as_observed(self) -> None:
+        """A scheduled-but-not-yet-published post in the queue (e.g.
+        from the IG local-queue sidecar) must NOT count as an
+        observed post — otherwise a queued-for-later entry would
+        silently suppress a real missed-slot signal."""
+        feedback = {
+            "slot_outcomes": [
+                self._feedback_slot(
+                    slot="Slot 2", lane="jeepfact",
+                    status="no_post_observed", date="2026-06-03",
+                ),
+            ],
+            "execution_truth": {},
+        }
+        from datetime import datetime
+        live_posts = {
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "posts": [
+                # Same date + lane as the slot, but is_future_post=True.
+                self._live_post(
+                    workflow="jeepfact", date="2026-06-03", is_future=True,
+                ),
+            ],
+        }
+        changes = current_learnings._weekly_strategy_changes(
+            feedback,
+            self._previous_payload_for("Slot 2"),
+            live_posts_payload=live_posts,
+        )
+        kinds = [c.get("kind") for c in changes]
+        self.assertIn(
+            "weekly_strategy_slot_missed", kinds,
+            "Future-dated posts don't prove the slot was filled — they "
+            "could be scheduled-but-not-yet-fired entries.",
+        )
+
+    def test_stale_live_posts_file_emits_feed_stale_not_slot_missed(self) -> None:
+        """If we can't trust the live posts file (older than 24h),
+        emitting slot_missed would be guessing. Tell the operator
+        the observability feed needs refreshing instead — different
+        playbook, no operator panic about a missed lane."""
+        feedback = {
+            "slot_outcomes": [
+                self._feedback_slot(
+                    slot="Slot 2", lane="jeepfact",
+                    status="no_post_observed", date="2026-06-03",
+                ),
+            ],
+            "execution_truth": {},
+        }
+        from datetime import datetime, timedelta
+        stale = (datetime.now().astimezone() - timedelta(hours=48)).isoformat()
+        live_posts = {
+            "generated_at": stale,
+            "posts": [],
+        }
+        changes = current_learnings._weekly_strategy_changes(
+            feedback,
+            self._previous_payload_for("Slot 2"),
+            live_posts_payload=live_posts,
+        )
+        kinds = [c.get("kind") for c in changes]
+        self.assertNotIn(
+            "weekly_strategy_slot_missed", kinds,
+            "Stale feed can't prove no post — don't claim a missed slot.",
+        )
+        self.assertIn(
+            "weekly_strategy_feed_stale", kinds,
+            "Operator must be told the feed is stale (so they refresh "
+            "it) rather than misled into thinking a lane was missed.",
+        )
+
+    def test_missing_live_posts_payload_falls_through_to_old_behavior(self) -> None:
+        """Callers that don't pass live_posts_payload (e.g. legacy
+        tests, ad-hoc invocations) keep the previous behavior — emit
+        the slot_missed change. Backward compat."""
+        feedback = {
+            "slot_outcomes": [
+                self._feedback_slot(
+                    slot="Slot 2", lane="jeepfact",
+                    status="no_post_observed", date="2026-06-03",
+                ),
+            ],
+            "execution_truth": {},
+        }
+        changes = current_learnings._weekly_strategy_changes(
+            feedback,
+            self._previous_payload_for("Slot 2"),
+        )
+        kinds = [c.get("kind") for c in changes]
+        self.assertIn(
+            "weekly_strategy_slot_missed", kinds,
+            "Without live_posts_payload, verification can't run — "
+            "preserve the previous behavior so tests + ad-hoc callers "
+            "don't silently change.",
+        )
+
+    def test_workflow_match_is_case_insensitive(self) -> None:
+        """Live posts file uses lower-case workflow strings; packet
+        slot_outcomes also lowercase. Edge case: a future schema
+        drift could mix case. Match case-insensitively to be safe."""
+        feedback = {
+            "slot_outcomes": [
+                self._feedback_slot(
+                    slot="Slot 2", lane="JEEPFACT",  # upper-case
+                    status="no_post_observed", date="2026-06-03",
+                ),
+            ],
+            "execution_truth": {},
+        }
+        from datetime import datetime
+        live_posts = {
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "posts": [self._live_post(workflow="jeepfact", date="2026-06-03")],
+        }
+        changes = current_learnings._weekly_strategy_changes(
+            feedback,
+            self._previous_payload_for("Slot 2"),
+            live_posts_payload=live_posts,
+        )
+        kinds = [c.get("kind") for c in changes]
+        self.assertNotIn("weekly_strategy_slot_missed", kinds)
+
+    def test_only_relevant_slot_suppressed_not_others(self) -> None:
+        """When the live posts file matches Slot 2 but not Slot 1,
+        only Slot 2's slot_missed is suppressed; Slot 1's still fires.
+        This is the actual production case from 2026-06-04."""
+        feedback = {
+            "slot_outcomes": [
+                self._feedback_slot(
+                    slot="Slot 1", lane="jeepfact",
+                    status="no_post_observed", date="2026-06-01",
+                ),
+                self._feedback_slot(
+                    slot="Slot 2", lane="jeepfact",
+                    status="no_post_observed", date="2026-06-03",
+                ),
+            ],
+            "execution_truth": {},
+        }
+        from datetime import datetime
+        live_posts = {
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "posts": [self._live_post(workflow="jeepfact", date="2026-06-03")],
+        }
+        # Previous payload says both slots were previously awaiting.
+        prev = {"weekly_strategy_feedback": {"slot_outcomes": [
+            {"slot": "Slot 1", "tracking_status": "awaiting_slot"},
+            {"slot": "Slot 2", "tracking_status": "awaiting_slot"},
+        ]}}
+        changes = current_learnings._weekly_strategy_changes(
+            feedback, prev, live_posts_payload=live_posts,
+        )
+        slot_missed_headlines = [
+            c.get("headline") for c in changes
+            if c.get("kind") == "weekly_strategy_slot_missed"
+        ]
+        self.assertEqual(
+            len(slot_missed_headlines), 1,
+            f"Exactly one Slot 1 missed-slot should fire; got: {slot_missed_headlines}",
+        )
+        self.assertIn("Slot 1", slot_missed_headlines[0])
+        self.assertNotIn("Slot 2", slot_missed_headlines[0])
+
+
 if __name__ == "__main__":
     unittest.main()
