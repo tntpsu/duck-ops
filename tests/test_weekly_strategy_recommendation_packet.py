@@ -205,17 +205,26 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertEqual(payload["social_plan"]["readiness_counts"]["ready_with_approval"], 3)
                 self.assertEqual(payload["social_plan"]["readiness_counts"]["manual_experiment"], 1)
                 self.assertEqual(payload["social_plan"]["readiness_counts"]["ready_now"], 1)
-                self.assertEqual(payload["social_plan"]["execution_feedback"]["recommended_lane_executed"], 1)
-                self.assertEqual(payload["social_plan"]["execution_feedback"]["alternate_lane_executed"], 1)
+                # 2026-06-04: day-locked lanes (Mon=meme, Wed=jeepfact,
+                # Thu=thursday, Sun=gtdf_winner) override signal-driven
+                # suggestions for those days. Wednesday's jeepfact post
+                # now matches Slot 2's locked lane → recommended instead
+                # of alternate. See _apply_day_locked_lane.
+                self.assertEqual(payload["social_plan"]["execution_feedback"]["recommended_lane_executed"], 2)
+                self.assertEqual(payload["social_plan"]["execution_feedback"]["alternate_lane_executed"], 0)
                 self.assertEqual(payload["social_plan"]["execution_feedback"]["awaiting_slot"], 1)
                 self.assertEqual(payload["social_plan"]["execution_feedback"]["no_post_observed"], 1)
                 self.assertEqual(payload["social_plan"]["execution_feedback"]["review_slot"], 1)
                 self.assertEqual(payload["social_plan"]["execution_truth"]["label"], "mixed")
                 self.assertIn("mixed execution truth", payload["social_plan"]["execution_truth"]["headline"].lower())
                 self.assertTrue(payload["social_plan"]["lane_guidance"])
-                self.assertEqual(payload["social_plan"]["lane_guidance_summary"]["keep_anchor"], 1)
-                self.assertEqual(payload["social_plan"]["lane_guidance_summary"]["fallback_only"], 1)
-                self.assertEqual(payload["social_plan"]["lane_guidance_summary"]["experiment_only"], 1)
+                # 2026-06-04: with Slot 2 day-locked to jeepfact, the
+                # Wednesday jeepfact post counts as a recommended-lane
+                # execution → keep_anchor for jeepfact too. Both
+                # meme (Slot 1) and jeepfact (Slot 2) score keep_anchor.
+                self.assertEqual(payload["social_plan"]["lane_guidance_summary"]["keep_anchor"], 2)
+                self.assertEqual(payload["social_plan"]["lane_guidance_summary"]["fallback_only"], 0)
+                self.assertEqual(payload["social_plan"]["lane_guidance_summary"]["experiment_only"], 2)
                 self.assertTrue(payload["social_plan"]["current_focus"])
                 self.assertEqual(payload["social_plan"]["current_focus"]["label"], "today")
                 self.assertIn("Today", payload["social_plan"]["current_focus"]["headline"])
@@ -242,7 +251,10 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertEqual(payload["social_plan"]["slots"][0]["tracking_status"], "recommended_lane_executed")
                 self.assertEqual(payload["social_plan"]["slots"][0]["actual_lane"], "meme")
                 self.assertEqual(payload["social_plan"]["slots"][0]["performance_label"], "strong")
-                self.assertEqual(payload["social_plan"]["slots"][1]["tracking_status"], "alternate_lane_executed")
+                # 2026-06-04: Slot 2 is Wednesday, now locked to
+                # `jeepfact`. The fixture's Wednesday jeepfact post
+                # matches the locked lane → recommended_lane_executed.
+                self.assertEqual(payload["social_plan"]["slots"][1]["tracking_status"], "recommended_lane_executed")
                 self.assertEqual(payload["social_plan"]["slots"][1]["actual_lane"], "jeepfact")
                 self.assertEqual(payload["social_plan"]["slots"][1]["performance_label"], "watch")
                 self.assertEqual(payload["social_plan"]["slots"][2]["tracking_status"], "no_post_observed")
@@ -255,8 +267,10 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertEqual(meme_guidance["decision"], "keep_anchor")
                 self.assertIn("stay in the weekly anchor mix", meme_guidance["summary"])
                 jeepfact_guidance = next(item for item in payload["social_plan"]["lane_guidance"] if item["lane"] == "jeepfact")
-                self.assertEqual(jeepfact_guidance["decision"], "fallback_only")
-                self.assertIn("fallback", jeepfact_guidance["summary"])
+                # 2026-06-04: jeepfact is now Slot 2's recommended
+                # lane (day-locked to Wednesday) and executed cleanly
+                # → keep_anchor not fallback_only.
+                self.assertEqual(jeepfact_guidance["decision"], "keep_anchor")
                 self.assertTrue(any(item["category"] == "stable_pattern" for item in payload["stable_patterns"]))
                 self.assertTrue(any(item["category"] == "experimental_idea" for item in payload["experimental_ideas"]))
                 self.assertTrue(any(item["category"] == "data_quality" for item in payload["recommendations"]))
@@ -287,9 +301,13 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertIn("Fit: `manual`", markdown)
                 self.assertIn("Alternate: `meme`", markdown)
                 self.assertIn("Lane reason:", markdown)
-                self.assertIn("Execution feedback: `recommended=1`, `alternate=1`", markdown)
-                self.assertIn("Keep this lane available as a fallback", markdown)
-                self.assertIn("Outcome: `alternate_lane_executed`", markdown)
+                self.assertIn("Execution feedback: `recommended=2`, `alternate=0`", markdown)
+                self.assertIn("Outcome: `recommended_lane_executed`", markdown)
+                # 2026-06-04: jeepfact now scores keep_anchor (its
+                # Wednesday post matches the day-locked slot), so the
+                # fallback_only copy is gone; the keep_anchor copy
+                # replaces it.
+                self.assertIn("Keep `jeepfact` in the weekly plan", markdown)
                 self.assertIn("Performance: `strong`", markdown)
 
 

@@ -406,6 +406,56 @@ def _pick_workflow(
     return next((label for label in workflow_pool if label not in excluded), None)
 
 
+# 2026-06-04: Day-locked weekly lanes.
+#
+# The signal-driven _preferred_slot_lane assigns workflows based on
+# anchor strength + competitor signals. It has no knowledge of the
+# real weekly cron schedule (meme.monday, jeepfact.wednesday,
+# thursday.thursday_morning, gtdf_winner.sunday plists in
+# duckAgent_runtime). Result: Slot 1 (Monday) gets assigned
+# "jeepfact" because jeepfact is the anchor workflow — but jeepfact
+# is hard-locked to JEEPFACT_DOW=WED. No Monday post can ever fill
+# that slot. The learnings emitter then flags "Slot 1 missed
+# jeepfact" forever.
+#
+# Verified incident 2026-06-04: 06-01 Monday assigned jeepfact
+# even though meme-2026-06-01.json exists with state=proposed
+# (the operator just never replied publish). Email reported the
+# wrong lane was missing.
+#
+# Fix: post-process every slot. If target_day is in this map,
+# force suggested_lane to the actual cron-scheduled lane. Signal-
+# driven planning still applies for unlocked days (Tuesday is
+# review_carousel but operator can override; Saturday is unlocked
+# for experiments).
+_DAY_LOCKED_LANES: dict[str, str] = {
+    "Monday": "meme",
+    "Wednesday": "jeepfact",
+    "Thursday": "thursday",
+    "Sunday": "gtdf_winner",
+}
+
+
+def _apply_day_locked_lane(slot: dict[str, Any]) -> dict[str, Any]:
+    """If the slot's target_day has a hard-locked cron lane, override
+    suggested_lane / workflow to match. Annotates the slot with
+    `day_locked_lane` + `day_locked_override_from` for downstream
+    transparency (so the learnings emitter + operator can see the
+    planner's original suggestion AND the lane the day actually
+    supports)."""
+    target_day = _compact_text(slot.get("target_day"))
+    locked = _DAY_LOCKED_LANES.get(target_day)
+    if not locked:
+        return slot
+    previous_lane = _compact_text(slot.get("suggested_lane"))
+    slot["day_locked_lane"] = locked
+    if previous_lane and previous_lane != locked:
+        slot["day_locked_override_from"] = previous_lane
+    slot["suggested_lane"] = locked
+    slot["workflow"] = locked
+    return slot
+
+
 def _preferred_slot_lane(
     *,
     signal_type: str,
@@ -1517,6 +1567,13 @@ def _social_plan_slots(
         deduped.append(item)
         seen_slots.add(slot_label)
     deduped = deduped[:5]
+    # 2026-06-04: lock day-of-week lanes BEFORE the execution feedback
+    # pass so tracking_status checks against the actual cron lane
+    # (meme on Monday, jeepfact on Wednesday, etc.). Without this,
+    # Slot 1 would still check against the signal-driven lane (e.g.
+    # jeepfact) and report missed even when meme posted Monday.
+    for item in deduped:
+        _apply_day_locked_lane(item)
     for item in deduped:
         item.update(_slot_execution_feedback(item, social_posts_payload=social_posts_payload, packet_now=packet_now))
     return deduped
