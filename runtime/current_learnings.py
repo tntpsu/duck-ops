@@ -822,12 +822,101 @@ def _change_notifier(changes: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _packet_is_stale_vs_posts(
+    *,
+    packet_payload: dict[str, Any],
+    posts_payload: dict[str, Any],
+) -> bool:
+    """Returns True when the weekly_strategy_packet was generated
+    BEFORE the live social posts file — meaning slot_outcomes
+    reflects pre-refresh state and will read 'no_post_observed' for
+    posts that the live file already has. This is the root-cause
+    timing race the 2026-06-04 false positive surfaced."""
+    from datetime import datetime as _dt
+    packet_at = _compact_text(packet_payload.get("generated_at"))
+    posts_at = _compact_text(posts_payload.get("generated_at"))
+    if not packet_at or not posts_at:
+        # If either timestamp is missing we can't compare; skip the
+        # auto-refresh. The verify-at-emit defense-in-depth still
+        # runs and will suppress any false positives.
+        return False
+    try:
+        packet_dt = _dt.fromisoformat(packet_at)
+        posts_dt = _dt.fromisoformat(posts_at)
+    except ValueError:
+        return False
+    return packet_dt < posts_dt
+
+
+def _refresh_weekly_strategy_packet_if_stale() -> dict[str, Any]:
+    """Root-cause fix for the morning ordering race: if the
+    weekly_strategy_packet on disk pre-dates the live social posts
+    file, regenerate it inline before current_learnings reads
+    slot_outcomes. Returns the (possibly re-loaded) packet payload.
+
+    The verify-at-emit path in _weekly_strategy_changes is kept as
+    defense-in-depth — both layers together mean a false positive
+    requires (a) the packet to be stale AND (b) the live-posts
+    verification to fail to find a matching post AND (c) the live-
+    posts file to be itself fresh enough to trust. Three independent
+    checks; ~impossible for the 2026-06-04 incident shape to recur."""
+    packet_payload = load_json(WEEKLY_STRATEGY_PACKET_PATH, {})
+    posts_payload = load_json(SOCIAL_POSTS_PATH, {})
+    if not isinstance(packet_payload, dict):
+        packet_payload = {}
+    if not isinstance(posts_payload, dict):
+        posts_payload = {}
+    if not _packet_is_stale_vs_posts(
+        packet_payload=packet_payload, posts_payload=posts_payload,
+    ):
+        return packet_payload
+
+    # Stale. Regenerate inline. Import here to avoid any module-load
+    # circularity (the packet builder reads CURRENT_LEARNINGS_PATH as
+    # data, not as a Python import, but defer just in case).
+    try:
+        from weekly_strategy_recommendation_packet import (
+            build_weekly_strategy_recommendation_packet,
+        )
+    except ImportError:
+        # Best-effort: if the builder isn't on path (e.g. running
+        # current_learnings in isolation), skip the auto-refresh and
+        # let the verify-at-emit layer handle the rest.
+        return packet_payload
+    try:
+        build_weekly_strategy_recommendation_packet()
+    except Exception as exc:
+        # Don't let a packet-build error block current_learnings —
+        # the existing (stale) packet + verify-at-emit is still safer
+        # than no emit at all. Surface the failure loudly per
+        # [[feedback-swallowed-errors-lie]].
+        print(
+            f"[current_learnings] WARNING auto-refresh of "
+            f"weekly_strategy_packet failed: {exc}. Continuing with "
+            "stale packet; verify-at-emit will suppress false "
+            "positives."
+        )
+        return packet_payload
+
+    # Re-read the freshly-written packet.
+    refreshed = load_json(WEEKLY_STRATEGY_PACKET_PATH, {})
+    return refreshed if isinstance(refreshed, dict) else packet_payload
+
+
 def build_current_learnings_payload() -> dict[str, Any]:
     social_payload = load_json(SOCIAL_ROLLUPS_PATH, {})
     competitor_market_payload = load_json(COMPETITOR_BENCHMARK_PATH, {})
     competitor_social_payload = load_json(COMPETITOR_SOCIAL_BENCHMARK_PATH, {})
     competitor_social_snapshots_payload = load_json(COMPETITOR_SOCIAL_SNAPSHOTS_PATH, {})
-    weekly_strategy_packet_payload = load_json(WEEKLY_STRATEGY_PACKET_PATH, {})
+    # 2026-06-05: root-cause fix for the morning ordering race.
+    # current_learnings runs at ~07:10; weekly_strategy_packet
+    # refresh ran at ~07:20. The 10-min lag meant slot_outcomes
+    # reflected pre-refresh state. If we detect that the packet is
+    # older than the live social posts file, regenerate it inline
+    # so slot_outcomes is consistent with the live posts before we
+    # read it. Verify-at-emit (2026-06-04) is kept as defense-in-
+    # depth.
+    weekly_strategy_packet_payload = _refresh_weekly_strategy_packet_if_stale()
     # 2026-06-04: live posts file consulted at emit time to verify
     # weekly_strategy_slot_missed claims against actual observed
     # posts. Suppresses false positives caused by stale packet

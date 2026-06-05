@@ -1006,5 +1006,122 @@ class WeeklyStrategySlotMissedFalsePositiveTests(unittest.TestCase):
         self.assertNotIn("Slot 2", slot_missed_headlines[0])
 
 
+class PacketRefreshOrderingTests(unittest.TestCase):
+    """Pins the root-cause fix for the 2026-06-04 timing race.
+
+    Verify-at-emit (the false-positive suppression layer) is the
+    defense-in-depth. This class tests the layer underneath: when
+    current_learnings starts and detects the packet on disk is
+    older than the live social_performance_posts file, it
+    auto-refreshes the packet inline before reading slot_outcomes.
+
+    Three independent checks now stand between a stale packet and
+    a false-positive operator email:
+      1. packet auto-refresh if older than posts (this layer)
+      2. verify against live posts at emit time
+      3. feed_stale change kind if live posts is itself stale
+    """
+
+    def test_packet_older_than_posts_is_flagged_stale(self) -> None:
+        from current_learnings import _packet_is_stale_vs_posts
+        result = _packet_is_stale_vs_posts(
+            packet_payload={"generated_at": "2026-06-05T07:00:00-04:00"},
+            posts_payload={"generated_at": "2026-06-05T07:30:00-04:00"},
+        )
+        self.assertTrue(result, "2026-06-04 incident shape: packet pre-dates posts by 30 min.")
+
+    def test_packet_newer_than_posts_is_not_stale(self) -> None:
+        from current_learnings import _packet_is_stale_vs_posts
+        result = _packet_is_stale_vs_posts(
+            packet_payload={"generated_at": "2026-06-05T08:00:00-04:00"},
+            posts_payload={"generated_at": "2026-06-05T07:30:00-04:00"},
+        )
+        self.assertFalse(result)
+
+    def test_packet_equal_to_posts_is_not_stale(self) -> None:
+        from current_learnings import _packet_is_stale_vs_posts
+        ts = "2026-06-05T07:30:00-04:00"
+        result = _packet_is_stale_vs_posts(
+            packet_payload={"generated_at": ts},
+            posts_payload={"generated_at": ts},
+        )
+        self.assertFalse(result)
+
+    def test_missing_packet_timestamp_skips_refresh(self) -> None:
+        """If we can't compare timestamps, don't auto-refresh —
+        the verify-at-emit layer will still catch any false
+        positive. Better than thrashing builds on missing data."""
+        from current_learnings import _packet_is_stale_vs_posts
+        result = _packet_is_stale_vs_posts(
+            packet_payload={},
+            posts_payload={"generated_at": "2026-06-05T07:30:00-04:00"},
+        )
+        self.assertFalse(result)
+
+    def test_missing_posts_timestamp_skips_refresh(self) -> None:
+        from current_learnings import _packet_is_stale_vs_posts
+        result = _packet_is_stale_vs_posts(
+            packet_payload={"generated_at": "2026-06-05T07:30:00-04:00"},
+            posts_payload={},
+        )
+        self.assertFalse(result)
+
+    def test_malformed_timestamps_skip_refresh(self) -> None:
+        """Belt-and-braces: garbled iso strings shouldn't crash."""
+        from current_learnings import _packet_is_stale_vs_posts
+        result = _packet_is_stale_vs_posts(
+            packet_payload={"generated_at": "not-a-date"},
+            posts_payload={"generated_at": "2026-06-05T07:30:00-04:00"},
+        )
+        self.assertFalse(result)
+
+    def test_refresh_helper_calls_builder_when_stale(self) -> None:
+        """When the packet is detected stale, the helper must
+        invoke build_weekly_strategy_recommendation_packet() —
+        not just shrug and return the stale payload."""
+        from unittest.mock import patch
+        import current_learnings as cl
+        stale_packet = {"generated_at": "2026-06-05T07:00:00-04:00"}
+        fresh_posts = {"generated_at": "2026-06-05T07:30:00-04:00"}
+        fresh_packet = {"generated_at": "2026-06-05T07:35:00-04:00"}
+        with patch.object(cl, "load_json", side_effect=[
+            stale_packet, fresh_posts, fresh_packet,
+        ]):
+            # Patch the packet builder to a recorded call.
+            called: dict = {}
+            def _fake_builder():
+                called["yes"] = True
+                return {}
+            with patch.dict(sys.modules, {
+                "weekly_strategy_recommendation_packet": type(
+                    "M", (), {"build_weekly_strategy_recommendation_packet": _fake_builder}
+                ),
+            }):
+                result = cl._refresh_weekly_strategy_packet_if_stale()
+        self.assertTrue(called.get("yes"), "Builder must be called when packet is stale.")
+        self.assertEqual(result, fresh_packet, "Helper must return the re-loaded fresh packet.")
+
+    def test_refresh_helper_does_not_call_builder_when_fresh(self) -> None:
+        """When the packet is already newer than posts, no
+        regeneration. Don't waste cycles."""
+        from unittest.mock import patch
+        import current_learnings as cl
+        fresh_packet = {"generated_at": "2026-06-05T08:00:00-04:00"}
+        older_posts = {"generated_at": "2026-06-05T07:30:00-04:00"}
+        with patch.object(cl, "load_json", side_effect=[fresh_packet, older_posts]):
+            called: dict = {}
+            def _fake_builder():
+                called["yes"] = True
+                return {}
+            with patch.dict(sys.modules, {
+                "weekly_strategy_recommendation_packet": type(
+                    "M", (), {"build_weekly_strategy_recommendation_packet": _fake_builder}
+                ),
+            }):
+                result = cl._refresh_weekly_strategy_packet_if_stale()
+        self.assertNotIn("yes", called, "Builder must NOT be called when packet is fresh.")
+        self.assertEqual(result, fresh_packet)
+
+
 if __name__ == "__main__":
     unittest.main()
