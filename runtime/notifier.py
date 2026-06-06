@@ -351,13 +351,28 @@ def _notifier_shell(label: str, subject: str, subtitle: str, stats_html: str, bo
         if stats_html
         else ""
     )
+    # 2026-05-31: dark-mode email rendering fix. iOS Mail and others
+    # auto-invert dark bg → light, leaving white text invisible
+    # against the now-light bg. Two-pronged fix:
+    #   1. color-scheme meta tags tell well-behaved clients we've
+    #      authored for both modes (opt out of auto-inversion).
+    #   2. Replace the dark gradient hero (#111827→#1f2937) with a
+    #      solid teal that contrasts white text in BOTH modes —
+    #      colored bgs don't get auto-flipped the way pure-dark bgs
+    #      do. The teal also doubles as a visible accent so the
+    #      header reads as "branded heading" not "missing header."
     return (
-        "<html><body style=\"margin:0;padding:0;background:#f3f4f6;color:#111827;\">"
+        "<!DOCTYPE html><html><head>"
+        "<meta charset=\"utf-8\">"
+        "<meta name=\"color-scheme\" content=\"light dark\">"
+        "<meta name=\"supported-color-schemes\" content=\"light dark\">"
+        "</head>"
+        "<body style=\"margin:0;padding:0;background:#f3f4f6;color:#111827;\">"
         "<div style=\"max-width:860px;margin:0 auto;padding:24px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;line-height:1.5;\">"
-        "<div style=\"background:linear-gradient(135deg,#111827,#1f2937);color:#fff;border-radius:18px;padding:24px;margin-bottom:18px;\">"
-        f"<div style=\"font-size:13px;letter-spacing:.05em;text-transform:uppercase;color:#d1d5db;\">{_html_text(label)}</div>"
-        f"<div style=\"font-size:26px;font-weight:800;margin-top:6px;\">{_html_text(subject)}</div>"
-        f"<div style=\"font-size:14px;color:#d1d5db;margin-top:8px;\">{_html_text(subtitle)}</div>"
+        "<div style=\"background:#0d4f4a;color:#ffffff;border-radius:18px;padding:24px;margin-bottom:18px;\">"
+        f"<div style=\"font-size:13px;letter-spacing:.05em;text-transform:uppercase;color:#e0f2f1;\">{_html_text(label)}</div>"
+        f"<div style=\"font-size:26px;font-weight:800;margin-top:6px;color:#ffffff;\">{_html_text(subject)}</div>"
+        f"<div style=\"font-size:14px;color:#e0f2f1;margin-top:8px;\">{_html_text(subtitle)}</div>"
         "</div>"
         f"{stats_block}"
         f"{body_html}"
@@ -538,6 +553,18 @@ def _render_phase_readiness_html(subject: str, payload: dict[str, Any]) -> str:
 
 
 def _render_promotion_readiness_html(subject: str, payload: dict[str, Any]) -> str:
+    """Render the promotion-readiness email with an action-first
+    hierarchy. 2026-05-31 redesign: prior version had 7 labeled
+    sections + 4 evidence bullets per card, all of equal visual
+    weight. Operator quote: "Things seem a little wordy? I don't
+    [understand] what the message is for."
+
+    New shape per card:
+      [STATE PILL] Title
+      Big highlighted action box   ← what to do, the CTA
+      One-line "Why now"           ← short justification
+      Small "Boundary" line        ← safety reminder
+      [collapsed footer: mode + source + evidence]"""
     items = list(payload.get("items") or [])
     stats = "".join(
         [
@@ -549,37 +576,100 @@ def _render_promotion_readiness_html(subject: str, payload: dict[str, Any]) -> s
     )
     sections: list[str] = []
     for item in items[:6]:
-        evidence_html = "".join(
-            f"<li style=\"margin-bottom:6px;\">{_html_text(entry)}</li>"
-            for entry in list(item.get("evidence") or [])[:4]
-        ) or "<li>No evidence captured.</li>"
-        summary_html = ""
-        if item.get("summary"):
-            summary_html += f"<div style=\"margin-bottom:8px;\"><strong>Why now:</strong> {_html_text(item.get('summary'))}</div>"
-        if item.get("recommended_action"):
-            summary_html += f"<div style=\"margin-bottom:8px;\"><strong>Promote with:</strong> {_html_text(item.get('recommended_action'))}</div>"
-        if item.get("control_summary"):
-            summary_html += f"<div style=\"margin-bottom:8px;\"><strong>Control:</strong> {_html_text(item.get('control_summary'))}</div>"
-        if item.get("approval_boundary"):
-            summary_html += f"<div style=\"margin-bottom:8px;\"><strong>Boundary:</strong> {_html_text(item.get('approval_boundary'))}</div>"
+        state = str(item.get("promotion_state") or "ready").lower()
+        # State-driven pill color so operator can scan-read state in
+        # one glance. Green=ready/active (positive), amber=observing,
+        # red=blocked.
+        pill_bg = {
+            "ready": "#dcfce7",
+            "active": "#dcfce7",
+            "observing": "#fef3c7",
+            "blocked": "#fee2e2",
+        }.get(state, "#e5e7eb")
+        pill_color = {
+            "ready": "#166534",
+            "active": "#166534",
+            "observing": "#92400e",
+            "blocked": "#991b1b",
+        }.get(state, "#374151")
+        title_html = (
+            f"<div style=\"display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px;\">"
+            f"<span style=\"background:{pill_bg};color:{pill_color};border-radius:999px;padding:4px 10px;"
+            f"font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;\">"
+            f"{_html_text(state)}</span>"
+            f"<span style=\"font-size:13px;color:#6b7280;\">{_html_text(item.get('progress_label') or '')}</span>"
+            f"</div>"
+        )
+
+        # PRIMARY CTA — what does the operator need to DO?
+        action_text = str(item.get("recommended_action") or "").strip()
+        cta_html = ""
+        if action_text:
+            cta_html = (
+                f"<div style=\"background:#f0f9ff;border-left:4px solid #0369a1;"
+                f"border-radius:8px;padding:12px 14px;margin:10px 0 12px 0;\">"
+                f"<div style=\"font-size:11px;font-weight:700;color:#0369a1;"
+                f"letter-spacing:.05em;text-transform:uppercase;margin-bottom:4px;\">What to do</div>"
+                f"<div style=\"font-size:15px;color:#0c4a6e;line-height:1.45;\">{_html_text(action_text)}</div>"
+                f"</div>"
+            )
+
+        # SECONDARY: one-line "why now" — the headline summary
+        why_html = ""
+        summary_text = str(item.get("summary") or "").strip()
+        if summary_text:
+            why_html = (
+                f"<div style=\"font-size:14px;color:#374151;margin-bottom:8px;\">"
+                f"<strong style=\"color:#111827;\">Why:</strong> {_html_text(summary_text)}"
+                f"</div>"
+            )
+
+        # SECONDARY: boundary as a small safety line
+        boundary_text = str(item.get("approval_boundary") or "").strip()
+        boundary_html = ""
+        if boundary_text:
+            boundary_html = (
+                f"<div style=\"font-size:13px;color:#6b7280;margin-bottom:10px;\">"
+                f"<strong style=\"color:#4b5563;\">Boundary:</strong> {_html_text(boundary_text)}"
+                f"</div>"
+            )
+
+        # FOOTER: details (mode + source + evidence) in smaller gray
+        # text so they're available but not competing with the CTA.
         owner_bits = [
-            f"owner={item.get('promotion_owner')}" if item.get("promotion_owner") else "",
             f"current={item.get('current_mode')}" if item.get("current_mode") else "",
             f"target={item.get('target_mode')}" if item.get("target_mode") else "",
         ]
         owner_text = " | ".join(bit for bit in owner_bits if bit)
+        evidence_lines = [str(e).strip() for e in list(item.get("evidence") or [])[:4] if str(e).strip()]
+        footer_parts: list[str] = []
         if owner_text:
-            summary_html += f"<div style=\"margin-bottom:8px;color:#4b5563;\"><strong>Mode:</strong> {_html_text(owner_text)}</div>"
+            footer_parts.append(
+                f"<div style=\"margin-bottom:4px;\"><strong>Mode:</strong> {_html_text(owner_text)}</div>"
+            )
         if item.get("source_path"):
-            summary_html += f"<div><strong>Source:</strong> {_html_text(item.get('source_path'))}</div>"
+            footer_parts.append(
+                f"<div style=\"margin-bottom:4px;word-break:break-all;\">"
+                f"<strong>Source:</strong> {_html_text(item.get('source_path'))}</div>"
+            )
+        if evidence_lines:
+            evidence_text = " · ".join(evidence_lines)
+            footer_parts.append(
+                f"<div><strong>Evidence:</strong> {_html_text(evidence_text)}</div>"
+            )
+        footer_html = ""
+        if footer_parts:
+            footer_html = (
+                f"<div style=\"font-size:12px;color:#6b7280;line-height:1.55;"
+                f"border-top:1px solid #e5e7eb;padding-top:10px;margin-top:6px;\">"
+                f"{''.join(footer_parts)}"
+                f"</div>"
+            )
+
         sections.append(
             _notifier_card(
                 str(item.get("title") or item.get("promotion_id") or "Promotion candidate"),
-                f"<div style=\"font-size:13px;color:#6b7280;margin-bottom:8px;\">"
-                f"{_html_text(item.get('promotion_state') or 'ready')} | {_html_text(item.get('progress_label') or '')}"
-                "</div>"
-                f"{summary_html}"
-                f"<ul style=\"margin:0;padding-left:18px;color:#111827;\">{evidence_html}</ul>",
+                title_html + cta_html + why_html + boundary_html + footer_html,
             )
         )
     if not sections:

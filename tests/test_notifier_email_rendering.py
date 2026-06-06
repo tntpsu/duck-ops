@@ -162,13 +162,22 @@ class NotifierEmailRenderingTests(unittest.TestCase):
             },
         )
 
+        # 2026-05-31 redesign: action-first hierarchy.
+        # The CTA (recommended_action), title, progress, boundary,
+        # and the mode delta MUST be present — they're what the
+        # operator scan-reads to decide. control_summary and owner=
+        # metadata were dropped intentionally as noise.
         self.assertIn("Weekly sale auto-apply", html)
         self.assertIn("3/3 clean gated run(s)", html)
         self.assertIn("Flip the mode to auto_apply_shopify", html)
-        self.assertIn("Tier 3 after explicit operator promotion", html)
         self.assertIn("Duck Ops may recommend promotion", html)
-        self.assertIn("owner=duckAgent", html)
+        # Mode delta is current=/target= only — owner= was redundant
+        # (operator already knows duckAgent owns these lanes).
+        self.assertIn("current=approval_gated", html)
         self.assertIn("target=auto_apply_shopify", html)
+        # New: state pill should carry the promotion_state for
+        # at-a-glance scanning.
+        self.assertIn("ready", html.lower())
         self.assertNotIn("<pre", html)
 
     def test_learning_change_html_uses_change_cards(self) -> None:
