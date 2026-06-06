@@ -39,6 +39,23 @@ from review_reply_rewriter_sanity import (
     _non_stopword_tokens,
     evaluate_sanity,
 )
+# 2026-06-06: have the rewriter check its OWN output against the
+# same deterministic contract that runs downstream in
+# quality_gate_pilot.build_review_reply_contract. Previously a
+# generic-positive reply on a complaint-adjacent review would
+# pass the rewriter's sanity gate (echo + length + no-emoji),
+# get returned as "ok", and only be flagged needs_revision when
+# the quality gate evaluated the artifact later. The operator
+# would still see a bad draft. Now the rewriter catches contract
+# failures at generation time and returns None → callers fall
+# back to the rule-based public_issue_reply_lines that handles
+# issue-acknowledgment correctly. Phase 4C of
+# CREATIVE_QUALITY_LOOP_V2_PLAN.md + Phase 1 of
+# PROMPT_CONTRACT_AUDIT_PLAN.md.
+from review_reply_contract import (
+    build_review_reply_contract,
+    contract_failure_messages,
+)
 
 
 DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
@@ -390,14 +407,33 @@ def generate_rewrite_via_llm(
     text = _clean_output(reply_from_json)
     sanity = evaluate_sanity(text, review_text=review_text)
 
+    # 2026-06-06: deterministic contract check on the rewriter's
+    # own output. Catches the generic-positive-on-complaint
+    # failure mode at generation time instead of downstream. The
+    # downstream gate in quality_gate_pilot still runs — this is
+    # an EARLIER guard, not a replacement.
+    contract_outcome: dict[str, Any] | None = None
+    contract_failure_list: list[str] = []
+    if sanity["passed"]:
+        contract_outcome = build_review_reply_contract(
+            review_text, text, private_mode=False,
+        )
+        contract_failure_list = contract_failure_messages(contract_outcome)
+
+    contract_failed = bool(contract_failure_list)
+
     log_entry: dict[str, Any] = {
         "at": _now_iso(),
         "artifact_id": item.get("artifact_id"),
         "kind": "review_reply_rewrite",
         "provider": provider,
         "model": model,
-        "outcome": "ok" if sanity["passed"] else "sanity_failed",
+        "outcome": (
+            "contract_failed" if contract_failed
+            else ("ok" if sanity["passed"] else "sanity_failed")
+        ),
         "sanity_failures": sanity["failures"],
+        "contract_failures": contract_failure_list,
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
         "elapsed_seconds": api_response.get("elapsed_seconds"),
@@ -407,14 +443,16 @@ def generate_rewrite_via_llm(
         "specific_detail_echoed": (parsed or {}).get("specific_detail_echoed"),
         "prompt": prompt,
     }
-    if sanity["passed"]:
+    if contract_outcome is not None:
+        log_entry["contract_classification"] = contract_outcome.get("classification")
+    if sanity["passed"] and not contract_failed:
         log_entry["output_text"] = text
     else:
-        # Capture failed output too so we can audit why sanity rejected it.
+        # Capture failed output too so we can audit why a gate rejected it.
         log_entry["rejected_output_text"] = text
     _log_llm_call(log_entry)
 
-    if not sanity["passed"]:
+    if not sanity["passed"] or contract_failed:
         return None
 
     return {
@@ -427,4 +465,7 @@ def generate_rewrite_via_llm(
         "sanity": sanity,
         "usage": usage,
         "specific_detail_echoed": (parsed or {}).get("specific_detail_echoed"),
+        "contract_classification": (
+            (contract_outcome or {}).get("classification")
+        ),
     }

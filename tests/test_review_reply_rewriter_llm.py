@@ -376,5 +376,158 @@ class FewShotAnchoringTests(unittest.TestCase):
         self.assertIn("little guy made you smile", prompt)
 
 
+# 2026-06-06: Phase 4C closure tests — pin the exit criteria of
+# PROMPT_CONTRACT_AUDIT_PLAN.md Phase 1. The deterministic contract
+# in review_reply_contract.py is already in place and tested at
+# the quality_gate layer; these tests pin that the rewriter ITSELF
+# now refuses to return generic-positive replies for complaint-
+# adjacent reviews (rather than letting them through to be caught
+# downstream).
+
+PLASTIC_REVIEW = (
+    "I love that the duck looks like my husband, but I thought they were "
+    "plastic which would have been better."
+)
+PLASTIC_DRAFT = "Thank you for the kind review!"
+
+
+class ContractGuardTests(unittest.TestCase):
+    """The rewriter must call build_review_reply_contract on its own
+    output and return None when the contract would flag it. Callers
+    fall back to rule-based public_issue_reply_lines which handles
+    issue-acknowledgment correctly."""
+
+    def setUp(self) -> None:
+        self.env_patches = [
+            patch.dict("os.environ", {"OPENAI_API_KEY": "test-key-for-mocks"}),
+        ]
+        for p in self.env_patches:
+            p.start()
+        # Disable real .env loading.
+        self.try_load_patch = patch.object(llm, "_try_load_env")
+        self.try_load_patch.start()
+        # Empty the feedback log so few-shot block doesn't add noise.
+        self.feedback_patch = patch.object(llm, "_load_approved_examples", return_value=[])
+        self.feedback_patch.start()
+        # Don't write to the production llm call log during the test.
+        self.log_patch = patch.object(llm, "_log_llm_call")
+        self.log_patch.start()
+
+    def tearDown(self) -> None:
+        self.log_patch.stop()
+        self.feedback_patch.stop()
+        self.try_load_patch.stop()
+        for p in self.env_patches:
+            p.stop()
+
+    def test_generic_positive_on_complaint_adjacent_returns_none(self) -> None:
+        """The Phase 1 exit criterion: 'plastic would have been
+        better' review with a generic-positive reply MUST be
+        refused so the caller falls back to the rule-based path
+        that acknowledges the material_expectation issue."""
+        # The LLM produces a generic-positive reply that passes the
+        # echo check (because "plastic" appears in both review and
+        # reply) but should fail the deterministic contract.
+        bad_reply = (
+            "Thanks so much for the kind review about the plastic feel! "
+            "Means so much to hear that you love the duck and your husband "
+            "lookalike. Truly amazing to hear."
+        )
+        with patch.object(llm, "_call_openai", return_value=_success_json_response(
+            specific_detail_echoed="plastic",
+            reply_text=bad_reply,
+        )):
+            result = llm.generate_rewrite_via_llm(_item(PLASTIC_REVIEW, PLASTIC_DRAFT))
+        self.assertIsNone(
+            result,
+            "Rewriter must refuse a generic-positive reply on a "
+            "complaint-adjacent review so the caller falls back to "
+            "the rule-based issue-acknowledgment path.",
+        )
+
+    def test_empathetic_reply_for_complaint_adjacent_passes(self) -> None:
+        """Don't over-block: an empathetic reply that acknowledges
+        the issue and avoids generic-positive phrases must still
+        be returned."""
+        good_reply = (
+            "I'm glad the resemblance to your husband landed, and I "
+            "understand the material wasn't what you expected — "
+            "resin gives the figure its weight and detail, but I "
+            "hear you that plastic might have felt closer to "
+            "expectation. Thanks for sharing that."
+        )
+        with patch.object(llm, "_call_openai", return_value=_success_json_response(
+            specific_detail_echoed="husband",
+            reply_text=good_reply,
+        )):
+            result = llm.generate_rewrite_via_llm(_item(PLASTIC_REVIEW, PLASTIC_DRAFT))
+        self.assertIsNotNone(
+            result,
+            "Empathetic + specific reply on a complaint-adjacent "
+            "review must still pass.",
+        )
+        # Classification should be exposed so callers (and audit
+        # logs) can see what the rewriter decided.
+        self.assertEqual(
+            result["contract_classification"]["sentiment"],
+            "mixed_positive",
+        )
+        self.assertEqual(
+            result["contract_classification"]["issue_type"],
+            "material_expectation",
+        )
+
+    def test_clean_positive_reply_passes_contract(self) -> None:
+        """Don't over-block: a clean-positive review (no complaint)
+        gets a warm specific reply, contract returns sentiment=
+        positive, rewriter returns the reply."""
+        good_reply = (
+            "So glad the ducks captured your nephew down to the "
+            "dimples — that's exactly what I was hoping for when you "
+            "ordered them. Means a lot to hear."
+        )
+        with patch.object(llm, "_call_openai", return_value=_success_json_response(
+            specific_detail_echoed="dimples",
+            reply_text=good_reply,
+        )):
+            result = llm.generate_rewrite_via_llm(_item(NEPHEW_REVIEW, NEPHEW_DRAFT))
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            result["contract_classification"]["sentiment"],
+            "positive",
+        )
+        self.assertEqual(
+            result["contract_classification"]["issue_type"],
+            "none",
+        )
+
+    def test_outcome_field_records_contract_failure(self) -> None:
+        """Log entry's `outcome` must distinguish contract_failed
+        from sanity_failed so the OS health card classifier and
+        prompt-tuning audits can tell the gates apart."""
+        captured: dict = {}
+        def _capture(entry):
+            captured.update(entry)
+
+        bad_reply = (
+            "Thanks so much for the kind review about plastic! "
+            "Means so much to hear that you love the duck."
+        )
+        with patch.object(llm, "_log_llm_call", side_effect=_capture):
+            with patch.object(llm, "_call_openai", return_value=_success_json_response(
+                specific_detail_echoed="plastic",
+                reply_text=bad_reply,
+            )):
+                llm.generate_rewrite_via_llm(_item(PLASTIC_REVIEW, PLASTIC_DRAFT))
+
+        self.assertEqual(captured.get("outcome"), "contract_failed")
+        self.assertTrue(
+            captured.get("contract_failures"),
+            "contract_failures must be populated when the gate fires.",
+        )
+        # rejected_output_text captures the bad text for audit.
+        self.assertIn("kind review", str(captured.get("rejected_output_text") or ""))
+
+
 if __name__ == "__main__":
     unittest.main()
