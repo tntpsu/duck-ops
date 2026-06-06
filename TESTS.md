@@ -1,6 +1,6 @@
 # TESTS — Coverage Matrix (Duck Ops + DuckAgent)
 
-Last updated: 2026-06-02 (post OS observability two-card bracket)
+Last updated: 2026-06-06 (post Learning inspector page)
 
 Built by running `/coverage-matrix` against the 2026-05-25 → 2026-05-26 shipped work after the operator surfaced that some integration-boundary tests had been skipped. This matrix lives next to [master_roadmap.md](output/operator/master_roadmap.md) per the skill's convention.
 
@@ -229,6 +229,26 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 - No OS observability card yet for "sidecar stopped firing" or "queue has overdue entries." Per the two-card-bracket memory, both should be added before relying on the sidecar long-term. Followup #99 in the task list.
 - Sidecar's actual Meta publish path is not mocked end-to-end; the `bypass_queue=True` branch is covered by the existing helper tests for jeepfact/etc., but there's no test asserting "queue entry → sidecar runs → Meta called with bypass=True → mark_posted fires." Followup integration test.
 - review_carousel runs Tuesdays — first live verification will be 2026-06-09.
+
+---
+
+## Surface 8 — Learning inspector page + /api/learning (2026-06-06)
+
+**Background:** operator question "what is the system learning + what is it trying to learn — without reading the Tuesday email." Existing `/portal/intel/learnings` page covered current beliefs / top posts / windows but didn't surface *which competitor accounts are watched* or *which experiments are queued*. Now extended with three new sections sourced from a single assembler that joins five state files (current_learnings, weekly_strategy_packet, competitor_social_snapshots, competitor_social_benchmark, social_performance_posts).
+
+| Use case | Happy path | Missing state | Malformed JSON | Empty inspector | Join correctness | Signal-gap derivation |
+|---|---|---|---|---|---|---|
+| `build_learning_inspector_payload` assembler | ✅ `HappyPathAssemblyTests::test_counts_match_underlying_state`, `test_current_beliefs_passed_through`, `test_queued_experiments_carry_priority_and_watch_account` | ✅ `MissingAndMalformedStateTests::test_no_state_dir_returns_unavailable_but_safe_shape` | ✅ `test_malformed_json_does_not_crash`, `test_non_dict_payloads_treated_as_empty` | ✅ same (returns `available=False`) | ✅ `test_tracking_targets_join_benchmark_scores` (profiles ⨝ benchmark on account_handle, sorted by avg_engagement_score) | ✅ `test_signal_gaps_fire_for_small_sample`, `test_signal_gaps_fire_for_n_equals_one_window`, `test_signal_gaps_fire_for_low_packet_confidence`, `test_signal_gaps_fire_for_queued_without_executed` |
+| `/portal/intel/learnings` page renders 3 new sections | ✅ `InspectorSectionsTests::test_tracking_targets_section_renders`, `test_queued_experiments_section_renders`, `test_signal_gaps_section_renders` | ✅ `test_inspector_sections_absent_when_empty` (graceful degrade) | n/a (loader returns `{}` on read error) | ✅ same | n/a | n/a |
+| Desk "Learnings" tile copy includes counts | ⚠️ manual:js-not-unit-tested — the JS reads `health.learnings_intel.inspector_counts` which the server-side `_load_learnings_intel` test would need a JS test runner to assert end-to-end; the server enrichment is covered by `test_counts_match_underlying_state` | ⚠️ same | ⚠️ same | ⚠️ same | n/a | n/a |
+| `/api/learning` HTTP endpoint | ⚠️ manual:smoke-curl — `curl /api/learning` verified returns `available=True` + non-empty `tracking_targets` + `queued_experiments` against live state on 2026-06-06 | n/a (assembler tested) | n/a (assembler tested) | n/a | n/a | n/a |
+
+**Coverage:** 11 assembler tests (`test_learning_inspector_payload.py`) + 4 page-section tests (`test_learnings_intel_page.py::InspectorSectionsTests`) = 15 new tests covering the load-bearing logic. Tile JS + HTTP endpoint are smoke-verified, not unit-tested — same gap pattern as the rest of the intel-page surfaces (`profit`, `competitors`, `reviews`).
+
+**Known gaps (acceptable for ship):**
+- `executed_experiments_last_14d` is hard-coded to 0 because no operator write-back exists yet (Phase 4.5 of `CREATIVE_QUALITY_LOOP_V2_PLAN.md`). The signal gap "N experiments queued, 0 executed receipts" surfaces this honestly. When write-back lands, that field becomes real and the gap text needs an update.
+- Tracking-targets section sorts by `avg_engagement_score` desc with nulls last. If a profile is observed but the benchmark hasn't scored it yet (edge case during first-run), it sorts to the bottom — acceptable.
+- No test for the cache-invalidation path: `_load_learnings_intel` now calls `build_learning_inspector_payload` per system-health refresh (every 5 min via launchd). The compute is ~5 file reads + dict assembly (~10ms measured) so the additional cost is negligible.
 
 ---
 
