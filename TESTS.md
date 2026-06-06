@@ -1,6 +1,6 @@
 # TESTS — Coverage Matrix (Duck Ops + DuckAgent)
 
-Last updated: 2026-06-06 (post Phase 5 ship + LLM spend observability scoping)
+Last updated: 2026-06-06 (post Phase 5 + Surface 10 + Surface 11 ship)
 
 Built by running `/coverage-matrix` against the 2026-05-25 → 2026-05-26 shipped work after the operator surfaced that some integration-boundary tests had been skipped. This matrix lives next to [master_roadmap.md](output/operator/master_roadmap.md) per the skill's convention.
 
@@ -310,6 +310,34 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 | `openai_dalle_generate_image` + `openai_edit_image` | ⚠️ manual:cannot-mock-openai-sdk-client-easily — signature + wrapper structure verified by `test_wrapper_functions_have_artifact_id_kwarg` ; behavior validated by first live run | n/a | n/a | n/a | ✅ wrapper-function-signature smoke test |
 
 **Coverage transparency now:** Scope B is rollout-complete on the shared entry points. Direct-import-and-call sites that bypass these wrappers (e.g., a file that instantiates its own `openai.OpenAI()` client) still wouldn't be logged — `helpers/twilio_helper.py`, some `flows/competitor` paths. Those are a smaller followup pass (scope B.5).
+
+---
+
+## Surface 11 — Per-product profit drill-down on /portal/intel/profit (2026-06-06)
+
+**Background:** operator question "which ducks make money, which lose money?" — the existing `/portal/intel/profit` page surfaced aggregate trend + channel mix + email status but never broke down by product. Operator couldn't act on "retire this duck" / "promote this duck" decisions from the portal.
+
+**Architecture:** producer-on-schedule + cheap-reader (matches Surfaces 8/10 + system_health/current_learnings/weekly_strategy). `runtime/profit_per_product.py` scans `duckAgent/cache/profit/orders/*.json` (line-item-level raw data with `revenue_ex_tax` + `cogs_unit` + `net_profit` already computed by the order collector), groups by `product_title` so SKU variants roll up under one duck, and writes `state/profit_per_product.json`. The page reads the cache; never reopens the 200+ raw order files per request.
+
+**Honest framing:** the gross margin in this view excludes labor + packaging + ads + shipping. Section header says so. The aggregate `/portal/intel/profit` numbers from `profit_intel.json` are the full-P&L truth; this drill-down is product-level signal at gross-margin resolution. A row tagged `is_confident_margin=False` (< 3 units sold) gets a "low-n" pill so the operator doesn't retire a duck on n=1 noise.
+
+| Use case | Happy | Empty cache | Missing cache dir | Malformed file | Window filter | Low-n confidence | SKU variant rollup |
+|---|---|---|---|---|---|---|---|
+| `aggregate_per_product` producer | ✅ `test_profit_per_product.py::HappyPathAggregationTests::test_two_orders_same_product_aggregate` (units, revenue, COGS, net, margin arithmetic), `::test_sort_by_net_profit_descending`, `::test_loss_makers_isolated` | ✅ `WindowAndMalformedTests::test_empty_cache_returns_zero_totals` | ✅ `::test_missing_cache_dir_returns_zero_totals` | ✅ `::test_malformed_file_counted_not_crashed`, `::test_unparseable_filename_skipped` | ✅ `::test_window_excludes_old_files` | ✅ `HappyPathAggregationTests::test_low_n_products_flagged_not_confident`, `::test_low_margin_excludes_low_n` | ✅ `::test_different_skus_same_title_roll_up` |
+| Cache file format tolerance | ✅ `::test_orders_dict_wrapper_format` (handles `[...]` or `{"orders": [...]}`), `::test_fallback_label_when_no_product_title` (handle → sku → unknown) | n/a | n/a | n/a | n/a | n/a | n/a |
+| Data quality flags | ✅ `WindowAndMalformedTests::test_data_quality_flags_missing_revenue_and_cogs` | n/a | n/a | n/a | n/a | n/a | n/a |
+| `/portal/intel/profit` per-product section render | ✅ `test_profit_per_product_section.py::RenderPerProductSectionTests` (6 tests: three sub-tables, placeholder when empty, low-n pill, clean-when-no-losers, confidence note surfaced) | ✅ `::test_returns_empty_when_payload_missing`, `::test_placeholder_when_no_orders_in_window` | n/a | n/a | n/a | n/a | n/a |
+| Full profit page with per-product section | ✅ `RenderFullPageWithPerProductTests::test_full_page_includes_per_product_when_both_files_present` | n/a | n/a | n/a | n/a | n/a | n/a |
+| Backward compat (per-product file missing) | ✅ `::test_full_page_works_without_per_product_file` | n/a | n/a | n/a | n/a | n/a | n/a |
+| `_fmt_money` formatting | ✅ `FmtMoneyTests` (4 tests: positive, negative-with-minus-prefix, comma-thousands, invalid-input em-dash) | n/a | n/a | n/a | n/a | n/a | n/a |
+
+**Coverage:** 14 producer tests + 12 page-section tests = 26 new tests. Producer ran against live 30-day cache: 174 distinct products, 418 units, $3,974.86 revenue, $3,661.36 net (92.1% gross margin — material-only), 6 loss-makers, 0 confident-sample low-margin entries.
+
+**Known scope cuts (acceptable):**
+- No labor / packaging / ads / shipping in the per-product COGS — gross margin only. Page section header says so explicitly. Aggregate `profit_intel.json` view is the full-P&L source of truth.
+- No launchd plist for `profit_per_product.py` yet. Operator runs it manually for now; a daily plist alongside `profit_intel` would be a small Tier 3 followup.
+- No per-channel breakdown within a product (e.g., "Michigan Wolverines sells better on Shopify than Etsy"). Surface 12 if useful.
+- No customer-segment slicing.
 
 ---
 
