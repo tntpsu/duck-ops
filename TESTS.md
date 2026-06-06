@@ -296,9 +296,20 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 
 **Known scope cuts (Scope A, intentional):**
 - No hard ceiling / auto-stop. Operator chose observability-first (`continue` on 2026-06-06 after the un-bundling question).
-- No instrumentation of duckAgent flows (`flows/meme`, `flows/jeepfact`, etc. — direct OpenAI calls via `openai_helper.py` that don't go through `llm_call_helpers.log_llm_call`). Listed as Followup task — scope B.
 - No spend-by-customer / spend-by-product breakdown. Spend is by flow/model only.
 - No multi-month historical archive — the log itself is the archive, summary aggregates last N days.
+
+**Scope B (2026-06-06, shipped same day):** duckAgent's `helpers/openai_helper.py` entry points now log to the same `state/llm_call_log.jsonl`. `openai_chat` (covers `openai_json` + `openai_json_with_debug` automatically since they call it internally), `openai_dalle_generate_image`, and `openai_edit_image` all emit one log line per call with prompt_tokens / completion_tokens (text) or image_count (image). New `helpers/llm_log.py` module is the shared writer; never raises. Optional `artifact_id` + `flow` kwargs let callers attribute spend to specific flows; default falls back to `call::unknown::<timestamp>` which the producer rolls up under `unknown` flow (still useful while individual callers migrate).
+
+| Use case | Happy | Caller-supplied artifact_id | Caller without kwargs | Logging never raises | Wrapper imports cleanly |
+|---|---|---|---|---|---|
+| `helpers/llm_log.log_llm_call` | ✅ `test_llm_log.py::LogLlmCallTests::test_happy_path_writes_one_jsonl_line` + 5 supporting tests (timestamp, source_repo, multi-line append, dir-creation) | n/a | n/a | ✅ `::test_never_raises_on_unwritable_path`, `::test_never_raises_on_unserializable_payload` | n/a |
+| `derive_artifact_id_from_payload` | ✅ `DeriveArtifactIdTests` (3 tests: with flow, without flow, without extra) | n/a | n/a | n/a | n/a |
+| `openai_chat` wrapper | ✅ `test_openai_helper_logging.py::OpenAIChatLoggingTests::test_openai_chat_success_logs_ok_outcome_with_tokens` | ✅ `::test_openai_chat_explicit_artifact_id_passes_through` | ✅ `::test_no_attribution_kwargs_still_logs` | ✅ http_error path logged too: `::test_openai_chat_http_error_logs_outcome` | ✅ `OpenAIHelperImportSmokeTests` (2 tests) |
+| `openai_json` + `openai_json_with_debug` (call openai_chat internally) | ✅ `OpenAIChatPropagatesThroughJsonHelpersTests::test_openai_json_logs_via_openai_chat`, `::test_openai_json_with_debug_logs_via_openai_chat` | n/a | n/a | n/a | n/a |
+| `openai_dalle_generate_image` + `openai_edit_image` | ⚠️ manual:cannot-mock-openai-sdk-client-easily — signature + wrapper structure verified by `test_wrapper_functions_have_artifact_id_kwarg` ; behavior validated by first live run | n/a | n/a | n/a | ✅ wrapper-function-signature smoke test |
+
+**Coverage transparency now:** Scope B is rollout-complete on the shared entry points. Direct-import-and-call sites that bypass these wrappers (e.g., a file that instantiates its own `openai.OpenAI()` client) still wouldn't be logged — `helpers/twilio_helper.py`, some `flows/competitor` paths. Those are a smaller followup pass (scope B.5).
 
 ---
 
