@@ -33,14 +33,35 @@ LLM_CALL_LOG_PATH = DUCK_OPS_ROOT / "state" / "llm_call_log.jsonl"
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_TIMEOUT_SECONDS = 12.0
 
-# OpenAI gpt-4o-mini pricing as of 2026 (USD per 1M tokens). Bullet 4
-# (cost computation) reads these to estimate weekly spend without hitting
-# the OpenAI billing API. Update when pricing or model defaults change.
+# LLM pricing as of 2026 (USD per 1M tokens). Surface 10's cost
+# observability page reads these to estimate weekly spend without
+# hitting OpenAI / Anthropic billing APIs. Update when pricing or
+# model defaults change.
 MODEL_PRICING_USD_PER_1M_TOKENS = {
+    # OpenAI
     "gpt-4o-mini": {"prompt": 0.150, "completion": 0.600},
     "gpt-4o": {"prompt": 2.500, "completion": 10.000},
     "gpt-4.1-mini": {"prompt": 0.400, "completion": 1.600},
     "gpt-4.1": {"prompt": 2.000, "completion": 8.000},
+    # Anthropic — covers what duckAgent flows will surface once Scope B
+    # instrumentation lands (currently no Anthropic calls in the log).
+    "claude-opus-4-7": {"prompt": 15.000, "completion": 75.000},
+    "claude-sonnet-4-6": {"prompt": 3.000, "completion": 15.000},
+    "claude-haiku-4-5-20251001": {"prompt": 1.000, "completion": 5.000},
+    # Image models — these don't have token-based pricing, so the
+    # producer treats them as "fixed_cost_per_call" via a separate
+    # pathway (Phase B). Listed here for discoverability.
+    # "dall-e-3", "gpt-image-1" → see _PER_CALL_IMAGE_COST_USD below.
+}
+
+# Image-generation pricing per call. Operators care about images
+# specifically because a single 1024x1024 gpt-image-1 call ≈ $0.04
+# — comparable to ~30,000 gpt-4o-mini tokens. Without this, the cost
+# page would underestimate creative-flow spend by an order of magnitude.
+PER_CALL_IMAGE_COST_USD = {
+    "gpt-image-1": 0.040,           # ~$0.04 per 1024x1024 standard quality
+    "dall-e-3": 0.040,              # ~$0.04 per 1024x1024 standard
+    "dall-e-3-hd": 0.080,           # ~$0.08 per 1024x1024 HD
 }
 
 

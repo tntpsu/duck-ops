@@ -1,6 +1,6 @@
 # TESTS — Coverage Matrix (Duck Ops + DuckAgent)
 
-Last updated: 2026-06-06 (post Learning inspector + Phase 5 outcome write-back scoping)
+Last updated: 2026-06-06 (post Phase 5 ship + LLM spend observability scoping)
 
 Built by running `/coverage-matrix` against the 2026-05-25 → 2026-05-26 shipped work after the operator surfaced that some integration-boundary tests had been skipped. This matrix lives next to [master_roadmap.md](output/operator/master_roadmap.md) per the skill's convention.
 
@@ -271,6 +271,34 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 **Coverage target:** ~12 unit tests + 1 e2e manual. Cells flip from 🔴 to ✅ commit-by-commit.
 
 **Known gaps acceptable at ship:** no ranker retraining (Phase 6); no Etsy outcomes (different lane); no backfill of pre-fix posts (forward-looking only). All three are explicit Phase 5 scope cuts in `CREATIVE_QUALITY_LOOP_V2_PLAN.md`.
+
+---
+
+## Surface 10 — LLM spend observability page + soft alert (2026-06-06, in flight)
+
+**Scoped BEFORE implementation per `/coverage-matrix` discipline.** Cells will turn ✅ as commits land.
+
+**Background:** operator asked "what is LLM spend doing?" — answer today is "guess, then check the OpenAI / Anthropic billing dashboard." Scope A (observability only — no hard ceiling, no auto-stop) reads the existing `state/llm_call_log.jsonl` (4 runtime modules write to it via `log_llm_call`) and surfaces it on `/portal/intel/cost`. Scope B (instrument duckAgent flows so logs are comprehensive) is a separate followup — Scope A's page will display "% of total spend instrumented" so the operator knows the gap.
+
+**Architecture:** producer-on-schedule + cheap-reader pattern (matches Surface 8 learning inspector, Surface 7 IG queue, system_health, current_learnings). A `runtime/llm_cost_summary.py` script aggregates daily/weekly/per-flow spend from the raw log → writes `state/llm_cost_summary.json` → the page reads the cached JSON. Soft alert: when today's spend > threshold (configurable), write an OS-card signal file.
+
+| Use case | Happy | Empty log | Malformed line | Unknown model | Old log entries | Cost arithmetic |
+|---|---|---|---|---|---|---|
+| `llm_cost_summary` aggregator (producer) | ✅ `test_llm_cost_summary.py::AggregateHappyPathTests` (4 tests: by_day+flow rollups, cost arithmetic, unknown model handling, image per-call pricing) | ✅ `AggregateEmptyAndMalformedTests::test_empty_log_returns_zero_totals`, `::test_missing_log_returns_zero_totals` | ✅ `::test_skips_malformed_jsonl_lines`, `::test_entries_without_at_are_counted_in_data_quality` | ✅ `::test_unknown_model_skips_cost_but_counts_call` | ✅ `WindowFilterTests::test_filters_window_days` | ✅ `::test_cost_matches_pricing_table_for_gpt_4o_mini`, `::test_image_call_uses_per_call_pricing` |
+| Flow context derivation from `artifact_id` | ✅ `ArtifactIdParseTests::test_publish_lane_parses`, `::test_score_lane_parses`, `::test_uppercase_normalized` | ✅ `::test_unparseable_falls_through_to_unknown` | n/a | n/a | n/a | n/a |
+| `/portal/intel/cost` page | ✅ `test_cost_intel_page.py::CostIntelPageFullTests::test_full_summary_renders_all_sections` (all sections + coverage caveat), `::test_alert_banner_renders_when_signal_present`, `FmtHelpersTests` (4 fmt_usd edge cases) | ✅ `CostIntelPageEmptyTests::test_empty_state_when_no_summary`, `::test_chrome_scaffolding_present` | n/a | n/a | n/a | n/a |
+| `/api/cost-intel` endpoint | ✅ live-verified 2026-06-06: `curl /api/cost-intel` returns `totals.cost_usd=0.0028 / call_count=31` against real log | n/a | n/a | n/a | n/a | n/a |
+| Desk tile reads cost summary | ✅ live-verified 2026-06-06: system_health.cost_intel populated; Desk JS has `costIntelSummary` + `metricCard("Cost", ...)` wired | ⚠️ manual:js-not-unit-tested (matches Surfaces 4, 8 same gap) | n/a | n/a | n/a | n/a |
+| Soft alert signal file | ✅ `AlertEvaluationTests::test_writes_alert_when_today_over_threshold`, `::test_no_alert_when_under_threshold`, `::test_threshold_boundary_exactly_at_threshold_does_not_alert`, `::test_red_severity_when_double_threshold` | n/a | n/a | n/a | n/a | n/a |
+| Coverage transparency (% instrumented vs total) | ⚠️ manual:billing-dashboard-comparison — operator reconciles vs OpenAI dashboard once/week (page renders the instrumentation_note with reconciliation reminder) | n/a | n/a | n/a | n/a | n/a |
+
+**Coverage target:** ~10 unit tests + 2 manual smoke. Page banner explicitly says "instrumented spend — duckAgent creative flows not yet logged" so the operator never mistakes partial coverage for total coverage.
+
+**Known scope cuts (Scope A, intentional):**
+- No hard ceiling / auto-stop. Operator chose observability-first (`continue` on 2026-06-06 after the un-bundling question).
+- No instrumentation of duckAgent flows (`flows/meme`, `flows/jeepfact`, etc. — direct OpenAI calls via `openai_helper.py` that don't go through `llm_call_helpers.log_llm_call`). Listed as Followup task — scope B.
+- No spend-by-customer / spend-by-product breakdown. Spend is by flow/model only.
+- No multi-month historical archive — the log itself is the archive, summary aggregates last N days.
 
 ---
 
