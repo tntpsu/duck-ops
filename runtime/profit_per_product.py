@@ -64,6 +64,13 @@ class _ProductBucket:
     units_sold: int = 0
     order_count: int = 0
     distinct_skus: set[str] = field(default_factory=set)
+    # 2026-06-06 grouping fix: when the same product_id sells under
+    # multiple line-item titles (Shopify variant options like "Single
+    # Duck" vs "Maize and Blue"), we merge them all into one bucket
+    # and remember the title set for operator transparency. Without
+    # this, Michigan Wolverines Duck split into 3 rows when it's
+    # really 2 physical products.
+    title_variants: set[str] = field(default_factory=set)
     revenue_total: float = 0.0
     cogs_total: float = 0.0
     net_profit_total: float = 0.0
@@ -86,17 +93,39 @@ def _safe_int(value: Any) -> int:
 
 
 def _product_key(line_item: dict[str, Any]) -> tuple[str, str]:
-    """Return (group_key, display_label). Group by product_title when
-    available; fall back to product_handle, then sku, then 'unknown'."""
+    """Return (group_key, display_label).
+
+    Fallback chain (2026-06-06 fix — was title-first which split
+    variant-rich products into multiple rows):
+      1. product_id  — the most stable identifier; merges Shopify
+         variant options ("Single Duck", "Maize and Blue") under
+         one row since the operator manages one underlying product.
+      2. sku (case-folded) — second-most stable; survives title
+         edits and platform sync drift.
+      3. product_title (case-folded) — last resort when neither id
+         nor sku is present (very old cache files, manual orders).
+      4. product_handle — used for label-only fallback when title is
+         also missing.
+
+    Different `product_id`s stay separate by design — operator can
+    layer an alias file on top (future Surface 11.1) to merge an
+    Etsy listing with its Shopify twin if they want one P&L view."""
+    product_id = str(line_item.get("product_id") or "").strip()
     title = str(line_item.get("product_title") or "").strip()
-    if title:
-        return (title.lower(), title)
+    sku = str(line_item.get("sku") or "").strip()
     handle = str(line_item.get("product_handle") or "").strip()
+
+    if product_id:
+        # Display label prefers a real title; falls back to handle/sku.
+        label = title or handle or (f"<sku {sku}>" if sku else f"<product_id {product_id}>")
+        return (f"pid::{product_id}", label)
+    if sku:
+        label = title or handle or f"<sku {sku}>"
+        return (f"sku::{sku.lower()}", label)
+    if title:
+        return (f"title::{title.lower()}", title)
     if handle:
         return (f"handle::{handle.lower()}", f"({handle})")
-    sku = str(line_item.get("sku") or "").strip()
-    if sku:
-        return (f"sku::{sku.lower()}", f"<sku {sku}>")
     return ("__unknown__", "<no product label>")
 
 
@@ -104,6 +133,7 @@ def _bucket_to_row(bucket: _ProductBucket) -> dict[str, Any]:
     """Convert an internal bucket to the JSON shape the page consumes."""
     revenue = bucket.revenue_total
     margin_pct = (bucket.net_profit_total / revenue * 100) if revenue > 0 else 0.0
+    title_variants_sorted = sorted(bucket.title_variants)
     return {
         "label": bucket.label,
         "sample_sku": bucket.sample_sku,
@@ -113,6 +143,11 @@ def _bucket_to_row(bucket: _ProductBucket) -> dict[str, Any]:
         "order_count": bucket.order_count,
         "distinct_skus": sorted(bucket.distinct_skus),
         "distinct_sku_count": len(bucket.distinct_skus),
+        # Operator transparency: when product_id grouping merges
+        # multiple titles, surface them so the operator can verify
+        # the merge is correct (and spot data-entry typos).
+        "title_variants": title_variants_sorted,
+        "title_variant_count": len(title_variants_sorted),
         "revenue_total": round(revenue, 2),
         "cogs_total": round(bucket.cogs_total, 2),
         "discount_total": round(bucket.discount_total, 2),
@@ -233,6 +268,14 @@ def aggregate_per_product(
                     items_without_cogs += 1
                 bucket.units_sold += qty
                 bucket.order_count += 1
+                # Record this line item's title in the variant set.
+                # When product_id-grouping merges Shopify variants
+                # under one row, title_variants lets the operator
+                # confirm what got merged (and spot data-entry typos
+                # that should be cleaned up upstream).
+                li_title = str(li.get("product_title") or "").strip()
+                if li_title:
+                    bucket.title_variants.add(li_title)
                 sku = str(li.get("sku") or "").strip()
                 if sku:
                     bucket.distinct_skus.add(sku)

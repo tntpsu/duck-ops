@@ -120,11 +120,16 @@ class HappyPathAggregationTests(unittest.TestCase):
         self.assertIn("jw-large", p["distinct_skus"])
 
     def test_sort_by_net_profit_descending(self) -> None:
+        # Real data: each distinct product has its own product_id —
+        # so the fixture mirrors production shape.
         _write_cache(self.cache, "2026-06-05", [
             _order([
-                _line_item(product_title="Big Earner", revenue_ex_tax=100.0, cogs_unit=10.0),
-                _line_item(product_title="Small Earner", revenue_ex_tax=20.0, cogs_unit=2.0),
-                _line_item(product_title="Loss Maker", revenue_ex_tax=5.0, cogs_unit=10.0),
+                _line_item(product_title="Big Earner", product_id="p-big",
+                           revenue_ex_tax=100.0, cogs_unit=10.0),
+                _line_item(product_title="Small Earner", product_id="p-small",
+                           revenue_ex_tax=20.0, cogs_unit=2.0),
+                _line_item(product_title="Loss Maker", product_id="p-loss",
+                           revenue_ex_tax=5.0, cogs_unit=10.0),
             ]),
         ])
         s = aggregate_per_product(
@@ -137,8 +142,10 @@ class HappyPathAggregationTests(unittest.TestCase):
     def test_loss_makers_isolated(self) -> None:
         _write_cache(self.cache, "2026-06-05", [
             _order([
-                _line_item(product_title="Winner", revenue_ex_tax=100.0, cogs_unit=10.0),
-                _line_item(product_title="Loser", revenue_ex_tax=5.0, cogs_unit=10.0),
+                _line_item(product_title="Winner", product_id="p-win",
+                           revenue_ex_tax=100.0, cogs_unit=10.0),
+                _line_item(product_title="Loser", product_id="p-lose",
+                           revenue_ex_tax=5.0, cogs_unit=10.0),
             ]),
         ])
         s = aggregate_per_product(
@@ -194,11 +201,17 @@ class HappyPathAggregationTests(unittest.TestCase):
         )
         self.assertEqual(s["products"][0]["units_sold"], 2)
 
-    def test_fallback_label_when_no_product_title(self) -> None:
-        """Missing product_title falls through to handle, then sku."""
+    def test_fallback_label_when_no_product_id_or_title(self) -> None:
+        """When product_id AND title are both missing, group key falls
+        through to sku, label uses handle.
+
+        2026-06-06 update: with the product_id-first grouping fix,
+        we have to explicitly clear product_id to exercise the
+        fallback chain — real orders almost always have product_id."""
         _write_cache(self.cache, "2026-06-05", [
             _order([
-                _line_item(product_title=None, product_handle="jeep-wave-duck",
+                _line_item(product_title=None, product_id=None,
+                           product_handle="jeep-wave-duck",
                            sku="jw-1", qty=1, revenue_ex_tax=10.0, cogs_unit=1.0),
             ]),
         ])
@@ -206,8 +219,127 @@ class HappyPathAggregationTests(unittest.TestCase):
             cache_dir=self.cache,
             now_iso="2026-06-06T18:00:00-04:00",
         )
-        # Label uses handle form when title is missing.
-        self.assertEqual(s["products"][0]["label"], "(jeep-wave-duck)")
+        # No title, no product_id → falls through to sku group with
+        # handle as the display label.
+        self.assertEqual(s["products"][0]["label"], "jeep-wave-duck")
+
+
+class ProductIdGroupingTests(unittest.TestCase):
+    """The 2026-06-06 grouping fix. Operator spotted Michigan Wolverines
+    appearing as 3 rows because Shopify variant options carry different
+    line-item titles ("with Team Spirit" vs "in Maize and Blue") while
+    sharing the same product_id and sku. Grouping must merge them under
+    one bucket so the per-product page shows one Michigan Wolverines row
+    with the full revenue, not three fractional rows."""
+
+    def setUp(self) -> None:
+        self.tmp_ctx = TemporaryDirectory()
+        self.cache = Path(self.tmp_ctx.name)
+
+    def tearDown(self) -> None:
+        self.tmp_ctx.cleanup()
+
+    def test_same_product_id_different_titles_merge(self) -> None:
+        """The headline test: Michigan Wolverines scenario. Same
+        product_id, different titles → one merged row."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([
+                _line_item(product_title="Michigan Wolverines Duck — Team Spirit",
+                           product_id="8065962442935", sku="erimich",
+                           qty=1, revenue_ex_tax=9.0, cogs_unit=0.75),
+                _line_item(product_title="Michigan Wolverines Duck — Maize and Blue",
+                           product_id="8065962442935", sku="erimich",
+                           qty=1, revenue_ex_tax=9.0, cogs_unit=0.75),
+            ]),
+        ])
+        s = aggregate_per_product(
+            cache_dir=self.cache,
+            now_iso="2026-06-06T18:00:00-04:00",
+        )
+        self.assertEqual(len(s["products"]), 1,
+                         f"Expected one row; got {[p['label'] for p in s['products']]}")
+        p = s["products"][0]
+        self.assertEqual(p["units_sold"], 2)
+        self.assertEqual(p["sample_product_id"], "8065962442935")
+        # Both variant titles are preserved for operator transparency.
+        self.assertEqual(p["title_variant_count"], 2)
+        self.assertIn("Michigan Wolverines Duck — Team Spirit", p["title_variants"])
+        self.assertIn("Michigan Wolverines Duck — Maize and Blue", p["title_variants"])
+
+    def test_different_product_ids_stay_separate(self) -> None:
+        """Two distinct product_ids = two distinct rows, even if titles
+        are similar. Cross-platform alias merging is a separate (future)
+        Surface 11.1 feature."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([
+                _line_item(product_title="Michigan Wolverines Duck (Etsy)",
+                           product_id="1889876564", sku="ERIMI",
+                           qty=1, revenue_ex_tax=12.0, cogs_unit=0.75),
+                _line_item(product_title="Michigan Wolverines Duck (Shopify)",
+                           product_id="8065962442935", sku="erimich",
+                           qty=1, revenue_ex_tax=9.0, cogs_unit=0.75),
+            ]),
+        ])
+        s = aggregate_per_product(
+            cache_dir=self.cache,
+            now_iso="2026-06-06T18:00:00-04:00",
+        )
+        self.assertEqual(len(s["products"]), 2)
+
+    def test_same_sku_different_product_id_stay_separate(self) -> None:
+        """SKU-only collision (case-different, or platform-rebrand)
+        with different product_ids must NOT merge — product_id is the
+        load-bearing identifier."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([
+                _line_item(product_title="Etsy Listing", product_id="etsy-1",
+                           sku="ERIMI", qty=2, revenue_ex_tax=20.0, cogs_unit=1.0),
+                _line_item(product_title="Shopify Listing", product_id="shopify-1",
+                           sku="erimi", qty=3, revenue_ex_tax=30.0, cogs_unit=1.0),
+            ]),
+        ])
+        s = aggregate_per_product(
+            cache_dir=self.cache,
+            now_iso="2026-06-06T18:00:00-04:00",
+        )
+        self.assertEqual(len(s["products"]), 2)
+
+    def test_sku_grouping_when_product_id_missing(self) -> None:
+        """Fall-through: no product_id but same SKU → merge by SKU.
+        Survives platform sync drift where product_id wasn't populated."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([
+                _line_item(product_title="Title A", product_id=None,
+                           sku="JEEP-WAVE-1", qty=1, revenue_ex_tax=10.0, cogs_unit=1.0),
+                _line_item(product_title="Title B", product_id=None,
+                           sku="jeep-wave-1", qty=2, revenue_ex_tax=20.0, cogs_unit=1.0),
+            ]),
+        ])
+        s = aggregate_per_product(
+            cache_dir=self.cache,
+            now_iso="2026-06-06T18:00:00-04:00",
+        )
+        # Case-folded SKU collapses "JEEP-WAVE-1" + "jeep-wave-1".
+        self.assertEqual(len(s["products"]), 1)
+        self.assertEqual(s["products"][0]["units_sold"], 3)
+
+    def test_title_variants_empty_when_only_one_title_seen(self) -> None:
+        """No spurious empty title in the variant set when every line
+        item shares the same title."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([
+                _line_item(product_title="Single Title", product_id="p1",
+                           qty=2, revenue_ex_tax=20.0, cogs_unit=2.0),
+                _line_item(product_title="Single Title", product_id="p1",
+                           qty=1, revenue_ex_tax=10.0, cogs_unit=1.0),
+            ]),
+        ])
+        s = aggregate_per_product(
+            cache_dir=self.cache,
+            now_iso="2026-06-06T18:00:00-04:00",
+        )
+        self.assertEqual(s["products"][0]["title_variant_count"], 1)
+        self.assertEqual(s["products"][0]["title_variants"], ["Single Title"])
 
 
 class WindowAndMalformedTests(unittest.TestCase):
