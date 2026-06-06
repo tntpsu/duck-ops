@@ -17,6 +17,13 @@ CURRENT_LEARNINGS_STATE_PATH = DUCK_OPS_ROOT / "state" / "current_learnings.json
 CURRENT_LEARNINGS_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "current_learnings.json"
 CURRENT_LEARNINGS_MD_PATH = OUTPUT_OPERATOR_DIR / "current_learnings.md"
 
+# Phase 5 Step 5: read creative_quality_receipts that have outcomes
+# attached (Step 4 writeback) so the Learning Inspector's "executed
+# experiments" count + queued→executed promotion can light up. The
+# receipt directory lives in the duckAgent repo (sibling of duck-ops).
+DUCK_AGENT_ROOT = DUCK_OPS_ROOT.parent / "duckAgent"
+CREATIVE_QUALITY_RECEIPTS_DIR = DUCK_AGENT_ROOT / "data" / "creative_quality_receipts"
+
 MATERIAL_CHANGE_KINDS = {
     "weekly_strategy_planned_lane_validated",
     "weekly_strategy_alternate_lane_won",
@@ -903,6 +910,100 @@ def _refresh_weekly_strategy_packet_if_stale() -> dict[str, Any]:
     return refreshed if isinstance(refreshed, dict) else packet_payload
 
 
+def _executed_experiments_from_receipts(
+    *, window_days: int = 14,
+    receipts_dir: Path | None = None,
+    now_iso: str | None = None,
+) -> dict[str, Any]:
+    """Phase 5 Step 5: glob creative_quality_receipts/*.json, count
+    receipts whose outcome_status is partial_24h or final_7d and whose
+    publish.published_at falls within the last window_days, and return
+    a structured summary the viewer's build_learning_inspector_payload
+    can join against queued_experiments.
+
+    Returns:
+      {
+        "count": int,
+        "window_days": 14,
+        "receipts": [
+          {
+            "flow": "meme",
+            "run_id": "2026-06-08",
+            "published_at": "2026-06-08T18:00:14-04:00",
+            "post_id": "17912345",
+            "platform": "instagram",
+            "outcome_status": "partial_24h" | "final_7d",
+            "outcomes": [{"window": "24h", "engagement_score": 47.0, ...}, ...],
+            "theme": "<from receipt or post_meta>",
+            "title": "<from receipt or post_meta>",
+            "watch_account": None,  # never set by collector — viewer
+                                     # joins against queued_experiments
+                                     # by theme/title fuzz instead
+          }, ...
+        ],
+      }
+
+    Never raises — missing/malformed receipts are skipped silently."""
+    from datetime import datetime, timedelta
+    import json as _json
+
+    rdir = receipts_dir if receipts_dir is not None else CREATIVE_QUALITY_RECEIPTS_DIR
+    if not rdir.exists():
+        return {"count": 0, "window_days": window_days, "receipts": []}
+
+    if now_iso:
+        try:
+            now_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+            if now_dt.tzinfo is None:
+                now_dt = now_dt.astimezone()
+        except ValueError:
+            now_dt = datetime.now().astimezone()
+    else:
+        now_dt = datetime.now().astimezone()
+    cutoff = now_dt - timedelta(days=window_days)
+
+    executed: list[dict[str, Any]] = []
+    for path in sorted(rdir.glob("*.json")):
+        try:
+            payload = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        status = str(payload.get("outcome_status") or "").strip()
+        if status not in {"partial_24h", "final_7d"}:
+            continue
+        publish_block = payload.get("publish") if isinstance(payload.get("publish"), dict) else {}
+        published_at_raw = str(publish_block.get("published_at") or "").strip()
+        if not published_at_raw:
+            continue
+        try:
+            published_dt = datetime.fromisoformat(published_at_raw.replace("Z", "+00:00"))
+            if published_dt.tzinfo is None:
+                published_dt = published_dt.astimezone()
+        except ValueError:
+            continue
+        if published_dt < cutoff:
+            continue
+        outcomes = payload.get("outcomes") if isinstance(payload.get("outcomes"), list) else []
+        executed.append({
+            "flow": payload.get("flow") or path.stem.split("_")[0],
+            "run_id": payload.get("run_id"),
+            "receipt_path": str(path),
+            "published_at": published_at_raw,
+            "post_id": publish_block.get("post_id"),
+            "platform": publish_block.get("platform"),
+            "outcome_status": status,
+            "outcomes": list(outcomes),
+            # Theme + title may live on the underlying receipt or be
+            # implied from the flow. Inspector promotes queued→executed
+            # by fuzzy match, so we expose what's available verbatim.
+            "theme": payload.get("theme") or None,
+            "title": payload.get("title") or None,
+        })
+    return {"count": len(executed), "window_days": window_days, "receipts": executed}
+
+
 def build_current_learnings_payload() -> dict[str, Any]:
     social_payload = load_json(SOCIAL_ROLLUPS_PATH, {})
     competitor_market_payload = load_json(COMPETITOR_BENCHMARK_PATH, {})
@@ -983,6 +1084,11 @@ def build_current_learnings_payload() -> dict[str, Any]:
         "ideas_to_test": list(
             competitor_social_payload.get("ideas_to_test") or competitor_market_payload.get("ideas_to_test") or []
         )[:6],
+        # Phase 5 Step 5: executed-experiment summary the Inspector
+        # uses to (a) replace its hardcoded 0 in counts, (b) promote
+        # matching queued_experiments to "executed," (c) shrink the
+        # "0 executed" signal_gap as receipts land.
+        "executed_experiments_last_14d": _executed_experiments_from_receipts(window_days=14),
         "paths": {
             "social_rollups": str(SOCIAL_ROLLUPS_PATH),
             "social_posts": str(SOCIAL_POSTS_PATH),

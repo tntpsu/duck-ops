@@ -399,6 +399,139 @@ def fetch_post_metrics(post: dict[str, Any]) -> dict[str, Any]:
     return {"status": "unsupported_platform", "metrics": {}, "errors": [f"Unsupported platform: {platform}"]}
 
 
+# ─── Phase 5 Step 4: writeback to creative_quality_receipt ──────────
+#
+# After fetching engagement metrics for a post, look up the matching
+# creative_quality_receipt at <duckAgent>/data/creative_quality_receipts/
+# <workflow>_<run_id>.json and append an outcome at the right age
+# window. Idempotent on same-window writes (handled by the helper).
+#
+# This closes the Creative Quality Loop: every published post now
+# becomes a training signal for "did rank-1 actually outperform rank-3."
+
+CREATIVE_QUALITY_RECEIPTS_DIR = DUCK_AGENT_ROOT / "data" / "creative_quality_receipts"
+
+
+def _outcome_window_for_age(age_hours: float) -> str | None:
+    """Map age-since-publish to outcome window label.
+
+    Daily collector runs mean we have ~24h granularity. Generous
+    windows below ensure a post observed near midnight on day-N still
+    lands in the right bucket:
+
+      20-30h  → "24h"   (first-day engagement, primary signal)
+      144-192h (6-8d) → "7d"  (final tally; mark_outcome_final after)
+      else   → None   (too early, in between, or too old)
+    """
+    if 20 <= age_hours < 30:
+        return "24h"
+    if 144 <= age_hours < 192:
+        return "7d"
+    return None
+
+
+def writeback_outcome_to_creative_quality_receipt(
+    post: dict[str, Any], *, now: datetime,
+    receipts_dir: Path | None = None,
+) -> dict[str, Any]:
+    """If `post` has a matching creative_quality_receipt with a
+    publish.post_id == ours, append an outcome at the correct age
+    window. Returns a dict describing the action for observability:
+
+      {"action": "wrote_outcome", "window": "24h"}
+      {"action": "wrote_outcome_final", "window": "7d"}
+      {"action": "skipped", "reason": "too_early"}
+      {"action": "skipped", "reason": "out_of_window"}
+      {"action": "skipped", "reason": "metric_status=fetch_failed"}
+      {"action": "no_receipt"}
+      {"action": "post_id_mismatch"}
+
+    Never raises — failures (missing helper, missing receipt, bad
+    timestamps) return a skipped/no_receipt action so the collector
+    keeps processing the next post.
+    """
+    workflow = str(post.get("workflow") or "").strip()
+    run_id = str(post.get("run_id") or "").strip()
+    post_id = str(post.get("post_id") or "").strip()
+    if not (workflow and run_id and post_id):
+        return {"action": "skipped", "reason": "missing_join_keys"}
+
+    metric_status = str(post.get("metric_status") or "").strip().lower()
+    if metric_status not in {"ok", "partial"}:
+        # "missing_id", "fetch_failed", "scheduled_future", "empty",
+        # "skipped", "unsupported_platform" → no usable signal yet.
+        return {"action": "skipped", "reason": f"metric_status={metric_status or 'unknown'}"}
+
+    published_at = _parse_iso(post.get("published_at"))
+    if published_at is None:
+        return {"action": "skipped", "reason": "no_published_at"}
+    age_hours = (now - published_at).total_seconds() / 3600.0
+    if age_hours < 0:
+        return {"action": "skipped", "reason": "future_published_at"}
+    window = _outcome_window_for_age(age_hours)
+    if window is None:
+        return {
+            "action": "skipped",
+            "reason": ("too_early" if age_hours < 20 else "out_of_window"),
+            "age_hours": round(age_hours, 1),
+        }
+
+    # Now we want to writeback. Import lazily so a missing duckAgent
+    # path doesn't break the collector at startup — the import error
+    # surfaces here, where the writeback can be skipped cleanly.
+    try:
+        sys.path.insert(0, str(DUCK_AGENT_ROOT))
+        from helpers.creative_quality_loop import (  # type: ignore
+            load_creative_quality_receipt,
+            mark_outcome_final,
+            record_engagement_outcome,
+        )
+    except Exception as exc:
+        return {"action": "skipped", "reason": f"import_failed: {exc}"}
+
+    rdir = receipts_dir if receipts_dir is not None else CREATIVE_QUALITY_RECEIPTS_DIR
+    receipt = load_creative_quality_receipt(workflow, run_id, receipts_dir=rdir)
+    if receipt is None:
+        # Phase 4 didn't run for this post (e.g., a one-off publish or
+        # a lane not yet wired through the loop). Not an error — just
+        # no engagement signal attached.
+        return {"action": "no_receipt"}
+
+    # Sanity check: if the receipt already names a different post_id
+    # in its publish block, this isn't our post. Could happen if a
+    # delete-republish reused the same workflow+run_id slug.
+    publish_block = receipt.get("publish") or {}
+    publish_post_id = str(publish_block.get("post_id") or "").strip()
+    if publish_post_id and publish_post_id != post_id:
+        return {
+            "action": "post_id_mismatch",
+            "receipt_post_id": publish_post_id,
+            "observed_post_id": post_id,
+        }
+
+    metrics_payload = post.get("metrics") if isinstance(post.get("metrics"), dict) else {}
+    record_engagement_outcome(
+        workflow, run_id,
+        snapshot_at=now.isoformat(),
+        window=window,
+        engagement_score=_safe_float(post.get("engagement_score")),
+        engagement_rate=_safe_float(post.get("engagement_rate")),
+        metrics=dict(metrics_payload),
+        source="social_performance_collector",
+        receipts_dir=rdir,
+    )
+
+    if window == "7d":
+        mark_outcome_final(
+            workflow, run_id,
+            final_at=now.isoformat(),
+            reason="7d_window_reached",
+            receipts_dir=rdir,
+        )
+        return {"action": "wrote_outcome_final", "window": "7d", "age_hours": round(age_hours, 1)}
+    return {"action": "wrote_outcome", "window": window, "age_hours": round(age_hours, 1)}
+
+
 def _engagement_score(post: dict[str, Any]) -> float:
     metrics = post.get("metrics") if isinstance(post.get("metrics"), dict) else {}
     if str(post.get("platform") or "").lower() == "facebook":
@@ -606,6 +739,7 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
     posts, summary = _load_normalized_posts(window_days=window_days, now=now)
     statuses = Counter()
 
+    writeback_actions = Counter()
     for post in posts:
         fetch_result = fetch_post_metrics(post) if fetch_metrics else {"status": "skipped", "metrics": {}, "errors": []}
         post["metric_status"] = fetch_result.get("status")
@@ -614,6 +748,19 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
         post["engagement_score"] = round(_engagement_score(post), 2)
         post["engagement_rate"] = _engagement_rate(post)
         statuses[str(post.get("metric_status") or "unknown")] += 1
+
+        # Phase 5 Step 4: writeback engagement to the creative_quality_
+        # receipt so the Creative Quality Loop learns which ranked
+        # variant actually performed. No-op for posts without a
+        # matching Phase 4 receipt; idempotent on same-window replay.
+        try:
+            wb = writeback_outcome_to_creative_quality_receipt(post, now=now)
+            writeback_actions[str(wb.get("action") or "unknown")] += 1
+            post["creative_quality_writeback"] = wb
+        except Exception as exc:
+            # Never let a writeback failure break the collector.
+            writeback_actions["exception"] += 1
+            post["creative_quality_writeback"] = {"action": "skipped", "reason": f"exception: {exc}"}
 
     posts.sort(key=lambda item: (-float(item.get("engagement_score") or 0), str(item.get("published_at") or "")), reverse=False)
     posts = sorted(posts, key=lambda item: (-float(item.get("engagement_score") or 0), str(item.get("published_at") or "")))
@@ -625,6 +772,7 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
             "metric_status_counts": dict(statuses),
             "platform_counts": dict(Counter(str(item.get("platform") or "") for item in posts)),
             "workflow_counts": dict(Counter(str(item.get("workflow") or "") for item in posts)),
+            "creative_quality_writeback_counts": dict(writeback_actions),
         },
         "posts": posts,
     }
