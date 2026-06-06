@@ -1,6 +1,6 @@
 # TESTS — Coverage Matrix (Duck Ops + DuckAgent)
 
-Last updated: 2026-06-06 (post Learning inspector page)
+Last updated: 2026-06-06 (post Learning inspector + Phase 5 outcome write-back scoping)
 
 Built by running `/coverage-matrix` against the 2026-05-25 → 2026-05-26 shipped work after the operator surfaced that some integration-boundary tests had been skipped. This matrix lives next to [master_roadmap.md](output/operator/master_roadmap.md) per the skill's convention.
 
@@ -249,6 +249,28 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 - `executed_experiments_last_14d` is hard-coded to 0 because no operator write-back exists yet (Phase 4.5 of `CREATIVE_QUALITY_LOOP_V2_PLAN.md`). The signal gap "N experiments queued, 0 executed receipts" surfaces this honestly. When write-back lands, that field becomes real and the gap text needs an update.
 - Tracking-targets section sorts by `avg_engagement_score` desc with nulls last. If a profile is observed but the benchmark hasn't scored it yet (edge case during first-run), it sorts to the bottom — acceptable.
 - No test for the cache-invalidation path: `_load_learnings_intel` now calls `build_learning_inspector_payload` per system-health refresh (every 5 min via launchd). The compute is ~5 file reads + dict assembly (~10ms measured) so the additional cost is negligible.
+
+---
+
+## Surface 9 — Creative Quality Loop Phase 5: outcome write-back (2026-06-06, in flight)
+
+**Scoping authored BEFORE implementation per `/coverage-matrix` discipline.** Cells will be filled as commits land; matrix should not show ✅ until the test exists.
+
+**Background:** Phase 4 wired three flows through `rank_creative_candidates()` but engagement after publish is never measured. Phase 5 closes the loop: queued IG posts get receipts written by the sidecar, every published variant stamps post_id → run_id, the existing `social_performance_collector` writes outcomes back to `data/creative_quality_receipts/<flow>_<run_id>.json` at 24h + 7d windows, and `current_learnings` surfaces `executed_experiments_last_14d` so the Inspector's "0 executed" signal_gap shrinks.
+
+| Use case | Happy | Receipt missing | API down | Replayed event | Deleted post | Idempotency boundary |
+|---|---|---|---|---|---|---|
+| Sidecar writes `*_posts.json` after `mark_posted` (Step 1) | ✅ `test_social_publish_queue_receipt.py::test_sidecar_writes_post_receipt_after_mark_posted` (+ carousel/caption/enriched-meta — 7 tests) | ✅ `::test_no_metadata_still_writes_receipt` + `ReceiptWriteFailureModeTests` (2 tests for missing-lane/missing-run_id) | n/a | ✅ `::test_replayed_sidecar_does_not_duplicate_receipt`, `::test_different_post_id_appends_new_entry` | n/a | n/a |
+| `stamp_publish_link` + `record_engagement_outcome` + `mark_outcome_final` helpers (Step 2) | ✅ `test_creative_quality_outcome_schema.py::StampPublishLinkTests` (5), `RecordEngagementOutcomeTests` (5), `MarkOutcomeFinalTests` (3), `EndToEndFlowTests::test_full_lifecycle_pending_to_final` | ✅ `::test_returns_none_when_receipt_missing` (×3) | n/a | ✅ `::test_record_outcome_idempotent_on_same_window`, `::test_idempotent_on_already_final` | n/a | ✅ `::test_mismatched_post_id_overwrites_with_warning` |
+| Flow steps + sidecar call `stamp_publish_link` after `save_social_post_receipt` (Step 3) | ✅ `test_publish_link_stamp_wiring.py::SidecarStampsPublishLinkTests::test_sidecar_stamps_publish_link_on_existing_receipt` + 3 flow-import smoke tests (catches NameError / wire-up bugs) | ✅ `::test_sidecar_does_not_create_receipt_when_phase4_didnt` (graceful degrade when ranker never ran) | n/a | ✅ `::test_sidecar_idempotent_on_replay`, `::test_sidecar_stamp_failure_does_not_block_posted_action` | n/a | ⚠️ manual:publish-real-meme-wait-24h covers the live e2e path |
+| Collector writeback hook (Step 4) | 🔴 TODO `test_social_performance_collector_writeback.py::test_writes_24h_outcome_in_window` | 🔴 TODO `::test_skips_when_receipt_missing` | 🔴 TODO `::test_skips_on_fetch_failed_status` | 🔴 TODO `::test_skips_same_window_twice` | 🔴 TODO `::test_deleted_post_writes_synthetic_outcome_and_marks_final` | 🔴 TODO `::test_7d_outcome_only_at_correct_age_window` |
+| `current_learnings` consumes outcomes (Step 5) | 🔴 TODO `test_current_learnings_executed_experiments.py::test_counts_outcomes_in_14d_window` | n/a | n/a | n/a | n/a | n/a |
+| Inspector page: queued→executed promotion (Step 5) | 🔴 TODO `test_learning_inspector_payload.py::test_queued_experiment_promotes_to_executed_when_outcome_present` | 🟢 already covered by `test_signal_gaps_fire_for_queued_without_executed` (Surface 8) | n/a | n/a | n/a | n/a |
+| End-to-end (Step 6) | ⚠️ manual:publish-real-meme-wait-24h — confirms 24h outcome lands in `meme_<run_id>.json` after live publish | n/a | n/a | n/a | n/a | n/a |
+
+**Coverage target:** ~12 unit tests + 1 e2e manual. Cells flip from 🔴 to ✅ commit-by-commit.
+
+**Known gaps acceptable at ship:** no ranker retraining (Phase 6); no Etsy outcomes (different lane); no backfill of pre-fix posts (forward-looking only). All three are explicit Phase 5 scope cuts in `CREATIVE_QUALITY_LOOP_V2_PLAN.md`.
 
 ---
 

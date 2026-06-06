@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-05-26
+Last updated: 2026-06-06
 
 ## Document Ownership
 
@@ -185,6 +185,50 @@ Companion docs:
 - Quality suggestions are surfaced separately from blocking issues.
 
 ## Highest-Value Open Work
+
+### Priority 0: Creative Quality Loop Phase 4.5 — Engagement Write-Back (high-ROI #1, in flight 2026-06-06)
+Phase 4 of CREATIVE_QUALITY_LOOP_V2_PLAN.md shipped the canonical receipt directory and wired meme + jeepfact + thursday through `rank_creative_candidates()`. Phase 4.5 closes the loop by feeding real-world engagement back to the receipt so the system measurably gets better at picking creatives over time.
+
+Why this is high value:
+- The system already RANKS variants per flow but has NO IDEA which ranked variant actually performed. Every published post is currently a throwaway data point.
+- The Learning Inspector (`/portal/intel/learnings`) now surfaces a `signal_gap` saying "4 experiments queued, 0 executed receipts" — that gap stays open until Phase 4.5 lands.
+- Plan agent on 2026-06-06 discovered the foundational fix needed first: queued IG posts NEVER get `save_social_post_receipt` called because publish.id is None at queue-time. Fix that → existing engagement collector starts working for the full publish pipeline.
+
+What's planned (full details in CREATIVE_QUALITY_LOOP_V2_PLAN.md "Phase 5: Outcome Write-Back"):
+1. Close the IG-queue receipt gap (sidecar writes the receipt after `mark_posted`).
+2. Add additive `outcome` block to creative_quality_receipt schema (24h + 7d snapshots).
+3. Stamp post_id → run_id link on every published post in meme/jeepfact/thursday.
+4. Extend existing `social_performance_collector.py` to write outcomes back to receipts.
+5. Surface `executed_experiments_last_14d` in current_learnings + Inspector (currently hardcoded to 0).
+6. Tests-first per `/coverage-matrix` — add TESTS.md "Surface 9" row before code.
+
+Effort: ~1.5-2 days. Visible win (signal_gap shrinking on Inspector) ~24h post-deploy after the first publish lands an outcome.
+
+Explicit scope cuts: no ranker retraining yet (Phase 6 will do deterministic re-weighting after 30+ posts of clean data); no Etsy outcomes; no retro backfill of the 9 pre-fix posts.
+
+### Priority 0.5: LLM Cost Ceiling + Per-Flow Spend Dashboard (high-ROI #2, queued)
+Wrap every LLM call through a budget tracker. Daily cap, per-flow cap, automatic stop. Adds `/portal/intel/cost` surface showing spend by flow.
+
+Why this is high value:
+- Cheap to build (~4-6 hours).
+- Eliminates asymmetric downside: one misbehaving Creative Quality Loop run could quietly spend $100.
+- Produces the data needed to evaluate Phase 4.5 ROI: "is the loop worth its cost?"
+
+Pairs naturally with Priority 0 (Phase 4.5) — engagement data + cost data together answer "which flows are worth running."
+
+### Priority 0.6: Per-Product Profit Drill-Down (high-ROI #3, queued)
+Audit `/portal/intel/profit` to confirm it answers "which ducks make money, which lose money." If not, add per-SKU profit drill-down following the inspector-page recipe.
+
+Why this is high value:
+- Directly drives retire/promote/restock decisions.
+- ~4-6 hours if the underlying COGS data already exists; longer if joining Etsy + Shopify per-SKU history needs new collectors.
+
+### Priority 0.7: Repeat-Buyer Automation (high-ROI #4, queued)
+First-purchase thank-you + 30-day repurchase nudge email/DM. Known D2C revenue lever.
+
+Why this is high value:
+- Higher revenue upside than the other three but more moving parts (template design, deliverability, unsubscribe handling).
+- ~1-2 days. Recommended only after Priority 0.5 (cost ceiling) is live so the AI-generated nudge copy can't run away.
 
 ### Priority 1: Agent OS Promotion Readiness Operationalization
 The highest-ROI Agent OS work is now using the Business Desk promotion readiness gate as the explicit bridge between supervised approval lanes and controlled auto-action.
