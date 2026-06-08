@@ -84,4 +84,24 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         tmp_receipts = tmp_path / "workflow_receipts"
         tmp_receipts.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(_wc, "WORKFLOW_RECEIPT_STATE_DIR", tmp_receipts)
+
+    # 2026-06-08: review_reply_executor.EXECUTION_QUEUE_STATE_PATH
+    # was NOT isolated, so any test calling queue_review_reply or
+    # save_queue_state wrote to the production execution queue.
+    # Production-state pollution shape: 34 review-reply receipts
+    # had to be backfilled twice within 2 days because their queue
+    # items disappeared between drains. We don't have definitive
+    # proof tests were the cause (no code path deletes items, no
+    # current test omits patching) but the SAME failure mode as
+    # the LLM log pollution justifies the same fix.
+    try:
+        import review_reply_executor as _rre
+    except ImportError:
+        yield
+        return
+    tmp_queue = tmp_path / "review_reply_execution_queue.json"
+    monkeypatch.setattr(_rre, "EXECUTION_QUEUE_STATE_PATH", tmp_queue)
+    if hasattr(_rre, "WORKFLOW_CONTROL_DIR"):
+        # The self-heal path reads from this dir; redirect alongside.
+        monkeypatch.setattr(_rre, "WORKFLOW_CONTROL_DIR", tmp_wc)
     yield

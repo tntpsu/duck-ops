@@ -59,6 +59,11 @@ CONFIG_DIR = ROOT / "config"
 
 QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
 EXECUTION_QUEUE_STATE_PATH = STATE_DIR / "review_reply_execution_queue.json"
+# 2026-06-08 self-heal: workflow_control receipts are the durable
+# source of truth for "what's currently approved and queued." When
+# the queue file empties for reasons we can't trace, load_queue_state
+# rehydrates from this dir.
+WORKFLOW_CONTROL_DIR = STATE_DIR / "workflow_control"
 EXECUTION_SESSION_STATE_PATH = STATE_DIR / "review_reply_execution_sessions.json"
 EXECUTION_AUTH_STATE_PATH = STATE_DIR / "review_reply_execution_auth.json"
 AUTH_STORAGE_DIR = STATE_DIR / "review_reply_execution_auth_storage"
@@ -175,7 +180,99 @@ def save_quality_gate_state(payload: dict[str, Any]) -> None:
 
 
 def load_queue_state() -> dict[str, Any]:
-    return load_json(EXECUTION_QUEUE_STATE_PATH, {"generated_at": None, "items": {}})
+    """Load review_reply_execution_queue.json with self-healing.
+
+    Production observation 2026-06-08: the queue file empties between
+    drains for reasons we can't trace in code (no delete/clear paths,
+    no test pollution). receipt files in workflow_control persist
+    independently with state_reason="queued_for_execution" — that's
+    the durable source of truth. When the queue file is shorter than
+    truth, auto-rehydrate from receipts before returning.
+
+    Operator-observable effect: filter_sanity OS card stays green
+    instead of bouncing red every few days. Backfill is invisible /
+    automatic. Receipts that are genuinely done (state_reason like
+    reply_posted, already_replied, execution_failed) are NOT pulled
+    back in — only the still-in-flight "queued_for_execution" ones.
+    """
+    payload = load_json(EXECUTION_QUEUE_STATE_PATH, {"generated_at": None, "items": {}})
+    if not isinstance(payload, dict):
+        payload = {"generated_at": None, "items": {}}
+    items = payload.get("items")
+    if not isinstance(items, dict):
+        items = {}
+        payload["items"] = items
+    try:
+        _self_heal_queue_from_workflow_control(items)
+    except Exception:
+        # Defensive: don't let self-heal failures break callers. The
+        # OS card will catch persistent drift either way.
+        pass
+    return payload
+
+
+def _self_heal_queue_from_workflow_control(items: dict[str, Any]) -> None:
+    """Scan workflow_control for receipts that say state=approved +
+    state_reason=queued_for_execution but aren't in the queue items
+    map. Add a minimal queue_item for each so the drain can pick
+    them up on the next run.
+
+    The minimal item carries just enough for drain eligibility
+    (status=queued, queued_at) — execution_mode, packet_path, etc.
+    will be hydrated when queue_review_reply or run_dry_run_fill
+    next touches the artifact (both load_discovery_approvals +
+    validate_record_for_queue lazily).
+    """
+    if not WORKFLOW_CONTROL_DIR.exists():
+        return
+    queued_in_file = {
+        aid for aid, item in items.items()
+        if isinstance(item, dict) and str(item.get("status") or "") == "queued"
+    }
+    healed = 0
+    for path in WORKFLOW_CONTROL_DIR.glob("review-execution-publish-reviews-reply-*.json"):
+        if ".bak" in path.name:
+            continue
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("state") or "").lower() != "approved":
+            continue
+        if str(entry.get("state_reason") or "").lower() != "queued_for_execution":
+            continue
+        aid = (entry.get("metadata") or {}).get("artifact_id") or entry.get("entity_id")
+        if not aid:
+            continue
+        aid = str(aid)
+        if aid in queued_in_file:
+            continue
+        # Reconstruct queue item from receipt metadata.
+        receipt_payload = entry.get("last_side_effect") or {}
+        items[aid] = {
+            "artifact_id": aid,
+            "status": "queued",
+            "queued_at": str(receipt_payload.get("queued_at") or entry.get("updated_at") or now_iso()),
+            "queued_by": str(receipt_payload.get("queued_by") or "self_heal_from_workflow_control"),
+            "execution_mode": receipt_payload.get("execution_mode"),
+            "approval_scope": None,
+            "packet_path": None,
+            "attempts": [],
+            "last_preflight_status": None,
+        }
+        healed += 1
+    if healed:
+        # Loud log so the operator sees it in any stream that captures
+        # stdout (drain logs, OS card refresh, manual debug). Silent
+        # heal would be the same swallowed_errors_lie shape that hid
+        # this bug in the first place.
+        print(
+            f"[review_reply_executor] self_heal_queue: restored {healed} queue "
+            f"item(s) from workflow_control receipts (queue file was shorter "
+            f"than truth)."
+        )
 
 
 def save_queue_state(payload: dict[str, Any]) -> None:
