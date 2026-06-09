@@ -78,6 +78,15 @@ DEFAULT_EXECUTION_POLICY: dict[str, Any] = {
     "auto_queue_requires_browser_approval": True,
     "auto_drain_enabled": True,
     "auto_drain_max_submits_per_run": 3,
+    # 2026-06-09: receipts older than this many days get auto-dismissed
+    # at the start of every drain run. Etsy review-row transaction_ids
+    # drift over weeks; submitting a stale approval is likely to fail
+    # the pre-flight transaction_id check anyway, and chewing through
+    # those failures wastes drain budget (cap is 3/run). Set to 0 to
+    # disable. Operator-observable: each auto-dismiss writes a workflow
+    # _control transition with state_reason=stale_auto_dismiss and a
+    # loud stdout line so it's visible in drain logs.
+    "auto_dismiss_after_days": 14,
     "auto_drain_close_browser_after_run": True,
     "auto_drain_send_session_summary": True,
     "stop_after_first_failure": True,
@@ -278,6 +287,118 @@ def _self_heal_queue_from_workflow_control(items: dict[str, Any]) -> None:
 def save_queue_state(payload: dict[str, Any]) -> None:
     payload["generated_at"] = now_iso()
     write_json(EXECUTION_QUEUE_STATE_PATH, payload)
+
+
+def _artifact_review_date(artifact_id: str) -> datetime | None:
+    """Parse the review-date component from an artifact_id like
+    `publish::reviews_reply_positive::2026-04-12::review-1`.
+    Returns None when the shape doesn't match or the date doesn't parse —
+    callers should treat that as "don't dismiss, can't tell age."""
+    parts = str(artifact_id or "").split("::")
+    if len(parts) < 4:
+        return None
+    try:
+        return datetime.strptime(parts[2], "%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def auto_dismiss_stale_queued(
+    queue_items: dict[str, Any],
+    *,
+    policy: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> list[str]:
+    """Auto-dismiss queued receipts older than policy.auto_dismiss_after_days.
+
+    Why this exists (2026-06-09): the review-reply approval flow snapshots
+    a transaction_id at approval time, but Etsy's review-row metadata
+    drifts over weeks. After the 2026-06-08 backfill, 2 of 3 drain
+    attempts failed with `review_row_transaction_mismatch` — including a
+    fresh 6-day-old approval. Old receipts have an even worse hit rate.
+    Dismissing them up-front prevents the drain from wasting its per-run
+    cap (default 3) on receipts that won't post.
+
+    Returns the list of artifact_ids that got dismissed (so callers can
+    log + save). Mutates `queue_items` in place — item.status flips to
+    'dismissed'. Also writes the workflow_control transition for each so
+    [[swallowed-errors-lie]] doesn't apply (the operator can grep
+    workflow_control receipts to find any dismissal at any time).
+
+    Threshold policy.auto_dismiss_after_days <= 0 disables the feature.
+    Receipts where _artifact_review_date returns None (can't parse) are
+    NEVER dismissed — fail-closed on ambiguous data.
+    """
+    policy = policy or {}
+    try:
+        threshold_days = int(policy.get("auto_dismiss_after_days") or 0)
+    except (TypeError, ValueError):
+        threshold_days = 0
+    if threshold_days <= 0:
+        return []
+    now_dt = now or datetime.now()
+    cutoff = now_dt - timedelta(days=threshold_days)
+    dismissed_at = now_iso()
+    dismissed_ids: list[str] = []
+    for aid, item in queue_items.items():
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "") != "queued":
+            continue
+        review_date = _artifact_review_date(aid)
+        if review_date is None or review_date >= cutoff:
+            continue
+        age_days = (now_dt - review_date).days
+        # Write workflow_control transition. Decision dict is minimal —
+        # _record_review_execution_transition only needs artifact_id +
+        # run_id for the workflow_id derivation.
+        decision = {"artifact_id": aid, "run_id": aid}
+        try:
+            _record_review_execution_transition(
+                aid,
+                decision,
+                state="dismissed",
+                state_reason="stale_auto_dismiss",
+                requires_confirmation=False,
+                last_side_effect={
+                    "kind": "auto_dismiss_stale",
+                    "reason": (
+                        f"Receipt {age_days} days old > auto_dismiss_after_days "
+                        f"threshold {threshold_days}. Etsy transaction_id drift "
+                        f"makes safe execution unlikely."
+                    ),
+                    "dismissed_at": dismissed_at,
+                    "dismissed_by": "auto_dismiss_stale_queued",
+                    "threshold_days": threshold_days,
+                },
+                next_action=(
+                    "No action — auto-dismissed by drain pre-flight. Re-queue "
+                    "with runtime.review_reply_executor.queue_review_reply(aid) "
+                    "if the reply is still wanted."
+                ),
+                receipt_kind="auto_dismissal",
+                receipt_payload={"age_days": age_days, "threshold_days": threshold_days},
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[review_reply_executor] auto-dismiss workflow_control write "
+                f"failed for {aid}: {exc}. Skipping this artifact_id."
+            )
+            continue
+        item["status"] = "dismissed"
+        item["dismissed_at"] = dismissed_at
+        item["dismissed_reason"] = f"stale_auto_dismiss ({age_days}d > {threshold_days}d)"
+        dismissed_ids.append(aid)
+    if dismissed_ids:
+        # Loud log so operator sees the auto-dismiss in drain logs.
+        # Silent auto-action is the same swallowed_errors_lie pattern
+        # that hid the queue-empty bug for 2 days.
+        print(
+            f"[review_reply_executor] auto_dismiss_stale_queued: dismissed "
+            f"{len(dismissed_ids)} receipt(s) older than {threshold_days}d. "
+            f"Oldest: {dismissed_ids[0][:50]}"
+        )
+    return dismissed_ids
 
 
 def load_discovery_approvals() -> dict[str, Any]:
@@ -2842,6 +2963,25 @@ def drain_queue(
 
     queue_state = load_queue_state()
     queue_items = queue_state.get("items") or {}
+
+    # 2026-06-09: auto-dismiss stale receipts before computing eligible
+    # set. Prevents the drain from chewing through ancient approvals
+    # that will fail the pre-flight transaction_id check anyway, which
+    # wastes the per-run cap and looks like a system failure when it's
+    # actually expected stale-data behavior. Threshold configurable
+    # via policy.auto_dismiss_after_days (default 14).
+    try:
+        auto_dismissed = auto_dismiss_stale_queued(
+            queue_items,
+            policy=policy,
+        )
+        if auto_dismissed:
+            save_queue_state(queue_state)
+    except Exception as exc:  # noqa: BLE001
+        # Drain must not crash on auto-dismiss failure. Log + continue
+        # — operator can manually dismiss if needed via session script.
+        print(f"[review_reply_executor] auto-dismiss failed: {type(exc).__name__}: {exc}")
+
     eligible = sorted(
         [
             item
