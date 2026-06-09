@@ -27,12 +27,22 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import os
+
 import pytest
 
 
 RUNTIME_DIR = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
+
+
+# 2026-06-09: source-level guard. workflow_control.record_workflow_transition
+# raises TestModeRefusalError if DUCK_TEST_MODE=1. Belt-and-suspenders
+# with the workflow_control state_dir patches below — even if a test
+# bypasses the path patches via re-import, subprocess, or direct file
+# write, the function itself refuses.
+os.environ.setdefault("DUCK_TEST_MODE", "1")
 
 
 @pytest.fixture(autouse=True)

@@ -9,6 +9,7 @@ can read the same JSON state without creating tight Python package coupling.
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,63 @@ ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / "state"
 WORKFLOW_CONTROL_STATE_DIR = STATE_DIR / "workflow_control"
 WORKFLOW_RECEIPT_STATE_DIR = STATE_DIR / "workflow_receipts"
+
+
+# 2026-06-09 source-level guard against production-state pollution.
+# When DUCK_TEST_MODE=1, record_workflow_transition refuses to write
+# instead of silently dropping into the production state dir. Pytest
+# conftest.py files (both duck-ops and duckAgent) set this env var
+# automatically so individual tests don't need to remember. Tests
+# that legitimately want to observe the transition write should patch
+# the function with a Mock to capture calls.
+#
+# Defense-in-depth for the same failure mode that produced the
+# stranded meme-test-run.json receipt on 2026-06-06, which kept the
+# weekly_lane_approval OS card lying RED for 58h. Even if a future
+# conftest.py autouse fixture is bypassed (re-import, subprocess,
+# direct call from a script), this guard refuses the write.
+_TEST_MODE_REFUSAL_ENV = "DUCK_TEST_MODE"
+# Frozen at import — this is the FACTORY-DEFAULT production path,
+# never changed by monkeypatch. The guard compares the LIVE
+# WORKFLOW_CONTROL_STATE_DIR against this; if conftest patched
+# the live value to tmp, they differ and the write proceeds.
+_FROZEN_PRODUCTION_WORKFLOW_CONTROL_PATH = WORKFLOW_CONTROL_STATE_DIR.resolve()
+
+
+class TestModeRefusalError(RuntimeError):
+    """Raised when record_workflow_transition would write to the
+    factory-default PRODUCTION workflow_control directory while
+    DUCK_TEST_MODE=1.
+
+    Loud per [[feedback_swallowed_errors_lie]] — a silent no-op would
+    mask test failures that depend on the transition having happened.
+    Tests that legitimately patch WORKFLOW_CONTROL_STATE_DIR (or pass
+    state_dir=tmp_path) are NOT blocked — only writes that would
+    actually land in prod get refused."""
+
+    pass
+
+
+def _resolved_state_dir(state_dir: Path | None) -> Path:
+    """Return the absolute path the write WOULD land in. Reads the
+    LIVE module-level WORKFLOW_CONTROL_STATE_DIR (respects monkeypatch)
+    when state_dir is None, mirroring state_file_path's resolution."""
+    if state_dir is not None:
+        return Path(state_dir).resolve()
+    # IMPORTANT: read the module constant at call time so duck-ops's
+    # conftest monkeypatch (which swaps WORKFLOW_CONTROL_STATE_DIR
+    # for a tmp dir per test) takes effect here.
+    return WORKFLOW_CONTROL_STATE_DIR.resolve()
+
+
+def _refusing_test_mode_prod_write(state_dir: Path | None) -> bool:
+    """True if DUCK_TEST_MODE=1 AND the resolved write path is the
+    FROZEN factory-default production path. Path-patched tests
+    (duck-ops conftest pattern) sail through; tests that bypass
+    isolation get caught."""
+    if str(os.environ.get(_TEST_MODE_REFUSAL_ENV) or "").strip() not in {"1", "true", "TRUE", "yes"}:
+        return False
+    return _resolved_state_dir(state_dir) == _FROZEN_PRODUCTION_WORKFLOW_CONTROL_PATH
 
 
 def now_iso() -> str:
@@ -122,6 +180,19 @@ def record_workflow_transition(
     state_dir: Path | None = None,
     receipt_root: Path | None = None,
 ) -> dict[str, Any]:
+    # Source-level test pollution guard. Refuses writes that would
+    # land in the PRODUCTION workflow_control dir while
+    # DUCK_TEST_MODE=1. Path-patched tests (state_dir → tmp) sail
+    # through; tests that forgot to patch get caught loud.
+    if _refusing_test_mode_prod_write(state_dir):
+        raise TestModeRefusalError(
+            f"record_workflow_transition refused: DUCK_TEST_MODE=1 and "
+            f"the write would land in production workflow_control. "
+            f"workflow_id={workflow_id!r}. Either patch state_dir to a "
+            f"tmp path (see duck-ops conftest.py for the pattern) OR "
+            f"mock record_shared_workflow_transition (see duckAgent "
+            f"conftest.py). Do NOT write production state from tests."
+        )
     current = load_workflow_state(workflow_id, state_dir=state_dir)
     updated_at = now_iso()
 
