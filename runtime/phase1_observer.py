@@ -773,6 +773,7 @@ def load_products_index() -> dict[str, dict[str, Any]]:
             "tiktok_publishable": item.get("tiktok_publishable"),
             "category": item.get("category"),
             "ai_theme_category": item.get("ai_theme_category"),
+            "theme_classification": item.get("theme_classification"),
             "tags": tags_text,
             "core_terms": core_terms_text,
             "concept_variations": concept_variations_text,

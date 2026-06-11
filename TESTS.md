@@ -341,6 +341,46 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 
 ---
 
+## Surface 12 — Versioned multi-label theme classifier (2026-06-11)
+
+**Background:** occasion-engine input audit found `ai_theme_category` ~50% accurate (awareness ducks filed under "Animals & Pets"/"Holiday & Christmas", patriotic ducks under "Military & Tactical", meme ducks under "Cozy Cabin Vibes"). Root causes: single forced label, taxonomy gaps (no Awareness/Patriotic/Pop-Culture buckets), prompt referenced categories absent from its own list, off-taxonomy error fallback stored silently, cache never invalidated. Rebuilt as `helpers/theme_classifier.py` + `config/theme_taxonomy.json` (v2, versioned) emitting primary + secondaries + occasions + recipients + confidence, with needs_review instead of silent fallback.
+
+**Quality gates (promotion criteria for any prompt/taxonomy/model change):** primary accuracy ≥90%, occasion recall ≥95% on the golden set. Current: **100% / 100%** (50 hand-labeled ducks, gpt-4o-mini).
+
+| Use case | Happy | Off-taxonomy LLM reply | Low/garbage confidence | Confidently-wrong primary | Taxonomy bump | Input (title/tags) change | Real-model accuracy drift |
+|---|---|---|---|---|---|---|---|
+| Classify one product (multi-label) | ✅ `duckAgent/tests/test_theme_classifier.py::TestClassifyHappyPath` | ✅ `TestOffTaxonomyRejection` (retry w/ correction; None+needs_review after 2 fails; no silent fallback label) | ✅ `TestNeedsReview`, `TestValidation::test_garbage_confidence_clamped` | ✅ `TestKeywordEvidence` (deterministic keyword-evidence cross-check flags `keyword_evidence_favors:`; pins the historical Breast-Cancer→Christmas misfile) | ✅ `TestStaleness::test_old_taxonomy_version_is_stale` | ✅ `TestStaleness::test_changed_input_is_stale` | ✅ `scripts/eval_theme_classifier.py` golden-set gate (manual trigger, real API; exits 1 below gates) |
+| Vocab filtering (occasions/recipients/secondaries) | ✅ `TestValidation` (invalid ids dropped, secondary==primary dropped, capped at 2) | n/a | n/a | n/a | n/a | n/a | n/a |
+| Sweep functions (`categorize_new_ducks` / `categorize_all_existing_ducks`) | ⚠️ manual:CLI-run-observed (per-product failures logged + skipped, checkpoint save every batch_size) | n/a:handled-in-helper | n/a | n/a | ✅ staleness check drives re-sweep | ✅ same | n/a |
+| Coverage card (input) | ✅ `creative_agent/runtime/tests/test_theme_classification_cards.py::CoverageCardTests` (missing state, green, taxonomy-bump yellow, stale yellow/red, ancient red) | n/a | n/a | n/a | ✅ `test_taxonomy_bump_without_sweep_yellow` | n/a | n/a |
+| needs_review backlog card (output) | ✅ `BacklogCardTests` (0 green / 1-9 yellow w/ titles / 10+ red) | n/a | n/a | n/a | n/a | n/a | n/a |
+| catalog_index passthrough (duck-ops) | ⚠️ manual:verify-after-next-phase1_observer-run (`theme_classification` field added at writer; per passthrough-chain-audit memory) | n/a | n/a | n/a | n/a | n/a | n/a |
+
+**Regression rule:** every field misclassification gets appended to `duckAgent/tests/fixtures/theme_classifier_golden.json` before the fix (same discipline as regression tests).
+
+---
+
+## Surface 13 — Occasion Engine Phase 1 (2026-06-11, matrix written BEFORE code per /coverage-matrix)
+
+**Background:** Father's Day (2026-06-21) push, built as data-driven occasion infrastructure (NOT hardcoded "dad"). Occasions are config (`config/occasion_calendar.json` with recurrence rules + lead windows + messaging phases). Daily producer `runtime/occasion_engine.py` resolves active occasions, selects products from `catalog_index` using Surface 12's `theme_classification.occasions/recipients` + occasion keywords, writes `state/occasion_intel.json`. duckAgent consumes via `helpers/occasion_context.py`: occasion line into meme/jeepfact prompts, occasion tag candidates into `_build_candidates`.
+
+| Use case | Happy | Bad/missing config | Recurrence edge (year rollover, nth-weekday) | No products match | catalog_index missing/stale | State file missing (reader) | Occasion active but selection empty |
+|---|---|---|---|---|---|---|---|
+| Resolve next occurrence per rule | ✅ planned: test_occasion_engine.py (fathers_day=2026-06-21, july_4 fixed, christmas, mothers_day rolls to 2027) | ✅ planned: malformed rule skipped + counted, never crashes producer | ✅ planned: peak passed → next year; nth=3 sunday June | n/a | n/a | n/a | n/a |
+| Active-window + messaging phase | ✅ planned: inside lead_days active w/ correct phase; outside inactive | ✅ planned | ✅ planned: peak day itself active, day after inactive | n/a | n/a | n/a | n/a |
+| Product selector scoring | ✅ planned: classifier-occasion hit > recipient hit > keyword hit ordering; top-N cap; reasons attached | n/a | n/a | ✅ planned: returns [] (never invents) | ✅ planned: empty intel + flag, no crash | n/a | covered by output card |
+| Atomic state write | ✅ planned: tempfile+os.replace | n/a | n/a | n/a | n/a | n/a | n/a |
+| duckAgent reader (occasion_context) | ✅ planned: returns active occasions | n/a | n/a | n/a | n/a | ✅ planned: fail-soft {} — flows never crash | n/a |
+| Prompt injection (meme/jeepfact) | ✅ planned: occasion line present when active, absent when not | n/a | n/a | n/a | n/a | ✅ planned: no line, no crash | n/a |
+| Etsy tag candidates | ✅ planned: candidates valid per 6-20 char tag rules, category="occasion" | n/a | n/a | ✅ planned: no candidates injected | n/a | ✅ same | n/a |
+| Input OS card (producer freshness/config sanity) | ✅ planned: card tests | ✅ planned: red on unparseable calendar | n/a | n/a | n/a | ✅ planned: yellow w/ bootstrap action | n/a |
+| Output OS card (selection sanity) | ✅ planned | n/a | n/a | ✅ planned: RED when occasion active & 0 products (broken-selector catch) | n/a | n/a | ✅ planned |
+| 07:25 launchd producer cadence | ⚠️ manual:launchd-install-is-Tier-3-operator-approved; freshness card watches it | n/a | n/a | n/a | n/a | n/a | n/a |
+
+**Scope cuts (deliberate, Phase 1):** no review-mining tier (Surface-12 audit showed review corpus too thin — ~5/day, zero recipient mentions); no auto tag-apply with expiry (Phase 2); no weekly-packet nominations (Phase 2); no IG auto-publish changes — occasion context only angles EXISTING approved lanes.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

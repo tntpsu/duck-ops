@@ -114,4 +114,15 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
     if hasattr(_rre, "WORKFLOW_CONTROL_DIR"):
         # The self-heal path reads from this dir; redirect alongside.
         monkeypatch.setattr(_rre, "WORKFLOW_CONTROL_DIR", tmp_wc)
+
+    # 2026-06-11: occasion_engine.OCCASION_INTEL_PATH (Surface 13) —
+    # new module-level prod-path constant, isolated on arrival per the
+    # three-layer policy (this fixture + the source-level DUCK_TEST_MODE
+    # guard in write_occasion_intel + tests/test_no_test_pollution_in_occasion_intel.py).
+    try:
+        import occasion_engine as _oe
+    except ImportError:
+        yield
+        return
+    monkeypatch.setattr(_oe, "OCCASION_INTEL_PATH", tmp_path / "occasion_intel.json")
     yield

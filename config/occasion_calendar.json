@@ -1,0 +1,49 @@
+{
+  "calendar_version": 1,
+  "notes": "Occasions as data — runtime/occasion_engine.py resolves these daily; nothing duck- or occasion-specific is hardcoded in flows. rule.type: 'fixed' (month/day) or 'nth_weekday' (month, weekday 0=Mon..6=Sun, nth). lead_days: how many days before the peak the occasion becomes active. keywords: lowercase substrings matched against product tags (supporting signal — the primary signal is theme_classification.occasions from Surface 12). recipients: theme_classification recipient ids that boost a product. messaging_phases: first entry whose max_days_until_peak >= days_until_peak wins, ordered ascending.",
+  "occasions": [
+    {
+      "id": "fathers_day",
+      "name": "Father's Day",
+      "rule": {"type": "nth_weekday", "month": 6, "weekday": 6, "nth": 3},
+      "lead_days": 14,
+      "keywords": ["dad", "father", "for him", "for men", "man cave", "grill", "bbq", "fishing", "beer"],
+      "recipients": ["dad", "husband", "grandparent"],
+      "etsy_tag_candidates": ["fathers day gift", "gift for dad", "dad gift idea", "duck gift for dad"],
+      "messaging_phases": [
+        {"max_days_until_peak": 2, "angle": "Father's Day is here — celebrate dad; perfect last-minute desk or dashboard gift mention"},
+        {"max_days_until_peak": 7, "angle": "last call for Father's Day — order-by urgency so it arrives in time"},
+        {"max_days_until_peak": 14, "angle": "Father's Day gift guide — position this duck as the gift for dad/grandpa"}
+      ]
+    },
+    {
+      "id": "july_4",
+      "name": "Independence Day",
+      "rule": {"type": "fixed", "month": 7, "day": 4},
+      "lead_days": 14,
+      "keywords": ["patriot", "usa", "america", "flag", "eagle", "independence", "freedom", "stars and stripes"],
+      "recipients": ["veteran_military", "dad", "collector"],
+      "etsy_tag_candidates": ["july 4th decor", "patriotic gift", "usa duck gift", "independence day"],
+      "messaging_phases": [
+        {"max_days_until_peak": 2, "angle": "Happy 4th — flags, freedom, and patriotic ducks front and center"},
+        {"max_days_until_peak": 7, "angle": "July 4th is days away — patriotic party and gift angle with order-by urgency"},
+        {"max_days_until_peak": 14, "angle": "gearing up for July 4th — patriotic collection spotlight"}
+      ]
+    },
+    {
+      "id": "christmas",
+      "name": "Christmas",
+      "rule": {"type": "fixed", "month": 12, "day": 25},
+      "lead_days": 40,
+      "keywords": ["christmas", "stocking stuffer", "santa", "holiday gift", "ornament", "festive"],
+      "recipients": ["kids", "coworker", "collector", "dad", "mom"],
+      "etsy_tag_candidates": ["stocking stuffer", "christmas gift", "holiday duck gift", "secret santa gift"],
+      "messaging_phases": [
+        {"max_days_until_peak": 3, "angle": "Christmas is here — festive celebration content"},
+        {"max_days_until_peak": 10, "angle": "last shipping window before Christmas — order-by urgency"},
+        {"max_days_until_peak": 25, "angle": "stocking-stuffer season — gift guide and secret-santa angles"},
+        {"max_days_until_peak": 40, "angle": "early holiday shoppers — start seeding gift-guide content"}
+      ]
+    }
+  ]
+}
