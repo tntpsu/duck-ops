@@ -35,6 +35,7 @@ becomes a noisy crash, not a silent default.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -199,7 +200,21 @@ POLICIES: dict[str, CadencePolicy] = {
                       "scheduled for Monday. High-severity issues trigger a "
                       "same-day send.",
     ),
+    # The single Monday rollup that the folded surfaces compose into. Not in
+    # DIGEST_FOLDED_SURFACES, so it sends on Monday regardless of digest mode.
+    "business_digest": CadencePolicy(
+        surface_name="business_digest",
+        cadence="weekly_monday",
+        bypass_keys=(),
+        deferred_note="Monday business digest scheduled for Monday rollup day.",
+    ),
 }
+
+# Surfaces that fold into the Monday business_digest when DUCK_EMAIL_DIGEST_MODE=1.
+DIGEST_FOLDED_SURFACES: frozenset[str] = frozenset({
+    "profit", "recommendations", "reviews", "learnings", "competitors",
+    "business_intelligence", "engineering_governance", "shopify_seo",
+})
 
 
 def known_surfaces() -> tuple[str, ...]:
@@ -248,6 +263,23 @@ def should_send_email(
     now = now or datetime.now().astimezone()
     next_monday = _next_weekly_monday(now)
     bypass_active, bypass_matched = _bypass_check(policy, payload or {})
+
+    # 2026-06-12 (Surface 15.5): digest mode. When DUCK_EMAIL_DIGEST_MODE=1,
+    # the routine weekly info-surfaces fold into a single Monday
+    # business_digest email instead of sending ~8 separate Monday emails.
+    # The anomaly BYPASS still fires (a ≤2★ review / profit anomaly / new
+    # build candidate still breaks through same-day) — only the routine
+    # Monday send is suppressed.
+    if (os.getenv("DUCK_EMAIL_DIGEST_MODE") == "1"
+            and surface_name in DIGEST_FOLDED_SURFACES
+            and not bypass_active):
+        return CadenceDecision(
+            surface_name=policy.surface_name,
+            should_send=False,
+            reason="folded_into_monday_business_digest",
+            cadence=policy.cadence,
+            next_send_iso=next_monday,
+        )
 
     if policy.cadence == "daily":
         return CadenceDecision(

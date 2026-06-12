@@ -451,12 +451,16 @@ ops+weekly each define get_static_theme_categories; taxonomy is a 3rd. Migrate m
 |---|---|---|---|---|---|
 | theme_vocab helper | ✅ planned: 20 cats legacy shape | ✅ planned: name/keywords/ai_background present | ✅ planned: classifier `keywords` pinned unchanged (Surface 12 safe) | ✅ planned: ops+weekly 5 sites | ✅ planned: grep-guard no get_static_theme_categories |
 
-### 15.5 Business daily digest + email consolidation
-Thursday's 2 extra emails are legacy (dead). Real volume: daily profit+reviews info emails. Fold into one morning digest; profit/reviews→anomaly-only.
+### 15.5 Monday business digest + email consolidation (REFRAMED)
+Premise corrected on inspection: profit/reviews/etc. were ALREADY weekly_monday-gated (not daily) — the daily flood was solved in a prior session. Real opportunity: ~8 separate Monday info-emails → ONE Monday digest. Fold via DUCK_EMAIL_DIGEST_MODE=1; the anomaly bypass still fires same-day.
 
-| Use case | Happy | Partial/missing source | Cadence daily+bypass | Profit/reviews gated | Legacy thursday emails removed |
-|---|---|---|---|---|---|
-| business_daily_digest | ✅ planned: composed email | ✅ planned: fail-soft per section + _status | ✅ planned: daily policy + bypass | ✅ planned: extend existing cadence tests | ✅ planned: grep-guard legacy steps deleted |
+| Use case | Happy | Partial/missing source | Folded surface defers | Anomaly bypass still fires | Digest surface itself sends | Digest mode off = normal |
+|---|---|---|---|---|---|---|
+| Fold-mode cadence gate | ✅ test_business_monday_digest::TestFoldMode | n/a | ✅ folded_into_monday_business_digest | ✅ low_rating breaks through | ✅ business_digest never folded | ✅ off → normal Monday send |
+| Digest builder | ✅ TestDigestBuilder (profit section from state) | ✅ fail-soft per section, status surfaced | n/a | n/a | n/a | n/a |
+| Registry | ✅ test_email_cadence_gate (9 surfaces incl business_digest) | n/a | n/a | n/a | n/a | n/a |
+
+Runtime: DUCK_EMAIL_DIGEST_MODE=1 in duckAgent/.env (Tier 3); com.philtullai.duckops.business-digest.monday plist (Mon 08:00, Tier 3 installed).
 
 ---
 

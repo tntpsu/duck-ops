@@ -26,6 +26,7 @@ DEFAULT_GRACE_SECONDS = 1800
 JOB_TIMEOUT_SECONDS = {
     "competitor_daily": 1800,   # 2026-06-12: snapshot-only now, no LLM — faster
     "competitor_weekly": 5400,  # the full LLM analysis moved here
+    "business_digest_monday": 900,
     "weekly_sunday": 5400,
 }
 ATTENTION_STATUSES = {

@@ -39,10 +39,13 @@ def _at(date_iso: str) -> datetime:
 
 
 class PolicyRegistryTests(unittest.TestCase):
-    def test_all_eight_surfaces_registered(self) -> None:
+    def test_all_surfaces_registered(self) -> None:
+        # business_digest added 2026-06-12 (Surface 15.5) — the Monday rollup
+        # the other eight fold into when DUCK_EMAIL_DIGEST_MODE=1.
         self.assertEqual(
             known_surfaces(),
             (
+                "business_digest",
                 "business_intelligence",
                 "competitors",
                 "engineering_governance",
