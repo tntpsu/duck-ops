@@ -397,6 +397,24 @@ Occasion Etsy tag apply with expiry-revert (approval-gated, NEVER silent auto-ac
 
 ---
 
+## Surface 14 — This-or-That Thursday funnel fixes (2026-06-12)
+
+**Background:** operator reported "same pairs every week, none usable, ducks standing on legs." Root causes: (1) top-6 slice of 1,048 trending candidates = already-cloned bestsellers, rejected by the qualifier, NO backfill from the remaining pool → 6-item static fallback (Cowgirl/Chef) won weekly; (2) history written only on publish, so unapproved weeks left no anti-repeat record; (3) limb-wear words ("boots") in image phrases + style contract's "unless explicitly requested" escape → leg-standing ducks; (4) semantic QA emits boolean 0/1 score, min(100,1)=1 reported as "pass".
+
+| Use case | Happy | All-wave rejection (bestseller dupes) | Cross-wave duplicate | True exhaustion | Unapproved week | Limb-wear in phrase | Boolean QA score | Funnel starved |
+|---|---|---|---|---|---|---|---|---|
+| Deep wave qualification | ✅ test_thursday_funnel_fixes.py::TestDeepQualification | ✅ same (descends to wave 2) | ✅ dedupe test | ✅ fallback only after exhaustion | n/a | n/a | n/a | n/a |
+| [:24] pool + deep call wiring | ✅ source-guard test | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| History on batch email | ✅ source-guard + concepts-filter test | n/a | n/a | n/a | ✅ every emailed name recorded incl. fallback | n/a | n/a | n/a |
+| Image phrase scrub | ✅ TestLimbWearScrub (7 words + clean-phrase untouched) | n/a | n/a | n/a | n/a | ✅ boots removed; fallback pool clean; contract escape clause removed | n/a | n/a |
+| combine_style_qa | ✅ TestQaScoreNormalization | n/a | n/a | n/a | n/a | n/a | ✅ 0/1 scaled; pass+floor-score → warn | n/a |
+| Warning dedupe | ✅ TestWarningDedup (source guard) | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| Funnel input-sanity card | ✅ test_thursday_funnel_card.py + registration test | n/a | n/a | n/a | n/a | n/a | n/a | ✅ red fallback-only / yellow 1-real / green |
+
+**Field verification pending:** next Thursday run (2026-06-18) is the real test — expect 6 novel competitor concepts instead of Cowgirl/Chef, no leg-standing ducks.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
