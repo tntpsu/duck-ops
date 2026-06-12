@@ -415,6 +415,51 @@ Occasion Etsy tag apply with expiry-revert (approval-gated, NEVER silent auto-ac
 
 ---
 
+## Surface 15 — Workflow efficiency program (2026-06-12, matrix before code)
+
+Five fixes from a system-wide overlap/inefficiency audit. Sequence 2→1→5→3→4 (monitored rails first).
+
+### 15.1 duck-ops producer receipts + scheduler_health coverage
+Root cause: run_duck_ops_observe_review.sh writes no receipts; scheduler_health.py only discovers com.philtullai.duckagent.* plists → 17 duck-ops jobs unmonitored.
+
+| Use case | Happy | Missing receipt dir | Malformed receipt | Job has schedule but stale receipt | Both wrapper names |
+|---|---|---|---|---|---|
+| Wrapper writes receipt+history | ✅ planned: test via direct invocation | ✅ planned: mkdir -p | n/a | n/a | n/a |
+| scheduler_health parses duck-ops receipt | ✅ planned: test_scheduler_health_duckops_receipt | n/a | ✅ planned: skipped not crash | ✅ planned: missed-run fires | ✅ planned: matcher accepts duckops.*+wrapper |
+
+### 15.2 Revive Etsy tracker / remove Reddit / kill google_trends
+Root cause (logged): etsy_token_manager sends `x-api-key: <key>` not `<key>:<secret>` → 403 all searches → empty intel, swallowed, job exits 0.
+
+| Use case | Happy | 403/empty fetch | Reddit removed | Dead module removed | Stale intel |
+|---|---|---|---|---|---|
+| Etsy header format | ✅ planned: header regression (`:` present) | ✅ planned: empty→_status=empty not bare {} | n/a | n/a | n/a |
+| Reddit removal | n/a | n/a | ✅ planned: grep-guard no reddit_weekly_tracker import/merge | n/a | n/a |
+| google_trends removal | n/a | n/a | n/a | ✅ planned: grep-guard no GoogleTrends export/import | n/a |
+| trend_intel_freshness card | ✅ planned: green populated | ✅ planned: red >2 empty runs | n/a | n/a | ✅ planned + registration test |
+
+### 15.3 Competitor cadence split (daily snapshot / weekly analysis)
+Coupling: velocity/temporal deltas need daily dated files with listing_snapshots (_load_previous_snapshot skips files lacking them).
+
+| Use case | Happy | Snapshot-only shape | Velocity across mixed files | Trending unchanged | Scheduler timeout entry |
+|---|---|---|---|---|---|
+| save_snapshot_only | ✅ planned: passes _load_previous_snapshot filter | ✅ planned: has shop+listing_snapshots | ✅ planned: mixed snapshot/full | ✅ planned: same snapshots→same trending | ✅ planned: new job timeouts added |
+
+### 15.4 Single theme vocabulary
+ops+weekly each define get_static_theme_categories; taxonomy is a 3rd. Migrate match_keywords + ai_background into taxonomy (presentation fields, NO version bump).
+
+| Use case | Happy | Legacy shape preserved | Classifier keywords untouched | All call sites repointed | Static copies gone |
+|---|---|---|---|---|---|
+| theme_vocab helper | ✅ planned: 20 cats legacy shape | ✅ planned: name/keywords/ai_background present | ✅ planned: classifier `keywords` pinned unchanged (Surface 12 safe) | ✅ planned: ops+weekly 5 sites | ✅ planned: grep-guard no get_static_theme_categories |
+
+### 15.5 Business daily digest + email consolidation
+Thursday's 2 extra emails are legacy (dead). Real volume: daily profit+reviews info emails. Fold into one morning digest; profit/reviews→anomaly-only.
+
+| Use case | Happy | Partial/missing source | Cadence daily+bypass | Profit/reviews gated | Legacy thursday emails removed |
+|---|---|---|---|---|---|
+| business_daily_digest | ✅ planned: composed email | ✅ planned: fail-soft per section + _status | ✅ planned: daily policy + bypass | ✅ planned: extend existing cadence tests | ✅ planned: grep-guard legacy steps deleted |
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

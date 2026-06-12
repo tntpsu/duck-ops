@@ -161,7 +161,14 @@ def _load_scheduled_jobs(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> dict[st
     jobs: dict[str, dict[str, Any]] = {}
     if not launch_agents_dir.exists():
         return jobs
-    for path in sorted(launch_agents_dir.glob("com.philtullai.duckagent.*.plist")):
+    # 2026-06-12: discover BOTH duckAgent and duck-ops scheduled jobs. The
+    # duck-ops jobs run via run_duck_ops_observe_review.sh (which now writes
+    # receipts into the same scheduler_receipts dir); before this they were
+    # invisible to the scheduler_health card — 17 producers unmonitored.
+    plist_paths = sorted(launch_agents_dir.glob("com.philtullai.duckagent.*.plist")) + \
+        sorted(launch_agents_dir.glob("com.philtullai.duckops.*.plist"))
+    accepted_runners = ("run_scheduled_flow.sh", "run_duck_ops_observe_review.sh")
+    for path in plist_paths:
         try:
             payload = plistlib.loads(path.read_bytes())
         except Exception:
@@ -170,7 +177,7 @@ def _load_scheduled_jobs(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> dict[st
         if not isinstance(args, list) or len(args) < 2:
             continue
         runner = str(args[0])
-        if not runner.endswith("run_scheduled_flow.sh"):
+        if not runner.endswith(accepted_runners):
             continue
         job_name = str(args[1]).strip()
         if not job_name:

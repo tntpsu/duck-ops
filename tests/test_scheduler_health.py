@@ -139,6 +139,51 @@ class SchedulerHealthTests(unittest.TestCase):
             self.assertEqual(payload["summary"]["hung_count"], 1)
             self.assertEqual(payload["items"][0]["status"], "hung")
 
+    def test_duckops_plist_and_receipt_are_discovered(self) -> None:
+        """2026-06-12 (Surface 15.1): duck-ops jobs run via
+        run_duck_ops_observe_review.sh under com.philtullai.duckops.*
+        plists. They were invisible to scheduler_health before the
+        discovery widening — 17 producers unmonitored."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            receipt_dir = root / "receipts"
+            launch_agents.mkdir()
+            receipt_dir.mkdir()
+            (launch_agents / "com.philtullai.duckops.occasion-engine.daily.plist").write_bytes(
+                plistlib.dumps({
+                    "Label": "com.philtullai.duckops.occasion-engine.daily",
+                    "ProgramArguments": [
+                        "/Users/philtullai/ai-agents/duckAgent_runtime/run_duck_ops_observe_review.sh",
+                        "occasion_engine_daily",
+                        "/Users/philtullai/ai-agents/duck-ops/runtime/occasion_engine.py",
+                    ],
+                    "StartCalendarInterval": {"Hour": 7, "Minute": 25},
+                }, sort_keys=False)
+            )
+            (receipt_dir / "occasion_engine_daily.json").write_text(
+                json.dumps({
+                    "job_name": "occasion_engine_daily",
+                    "run_id": "occasion_engine_daily_20260612_072500_99",
+                    "status": "succeeded", "exit_code": 0,
+                    "started_at": "2026-06-12T07:25:00-0400",
+                    "updated_at": "2026-06-12T07:25:08-0400",
+                    "finished_at": "2026-06-12T07:25:08-0400",
+                    "timeout_seconds": 900, "pid": 99,
+                }), encoding="utf-8")
+
+            payload = scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat("2026-06-12T08:00:00-04:00"),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=root / "empty.log",
+                receipt_dir=receipt_dir,
+                write_outputs=False,
+            )
+            names = {item["job_name"] for item in payload["items"]}
+            self.assertIn("occasion_engine_daily", names)
+            occ = next(i for i in payload["items"] if i["job_name"] == "occasion_engine_daily")
+            self.assertEqual(occ["status"], "healthy")
+
     def test_photoroom_quota_failure_is_dependency_warning_not_scheduler_failure(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
