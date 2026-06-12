@@ -16,6 +16,7 @@ COMPETITOR_SOCIAL_SNAPSHOTS_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_
 COMPETITOR_SOCIAL_SNAPSHOT_HISTORY_PATH = DUCK_OPS_ROOT / "state" / "competitor_social_snapshot_history.json"
 CURRENT_LEARNINGS_PATH = DUCK_OPS_ROOT / "state" / "current_learnings.json"
 PACKET_STATE_PATH = DUCK_OPS_ROOT / "state" / "weekly_strategy_recommendation_packet.json"
+OCCASION_INTEL_PATH = DUCK_OPS_ROOT / "state" / "occasion_intel.json"
 PACKET_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "weekly_strategy_recommendation_packet.json"
 PACKET_MD_PATH = OUTPUT_OPERATOR_DIR / "weekly_strategy_recommendation_packet.md"
 
@@ -1724,6 +1725,34 @@ def _change_focus(current_learnings_payload: dict[str, Any]) -> list[dict[str, A
     return items
 
 
+def _build_occasion_nominations(occasion_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Surface 13 Phase 2: nominate the occasion engine's selected
+    products into the weekly packet so the operator plans the week
+    around live promotion windows. Reads occasion_intel.json (cheap
+    reader); empty list when no occasion is active or intel missing."""
+    if not isinstance(occasion_payload, dict):
+        return []
+    nominations: list[dict[str, Any]] = []
+    for occ in occasion_payload.get("active_occasions") or []:
+        if not isinstance(occ, dict):
+            continue
+        picks = [p for p in occ.get("products") or [] if isinstance(p, dict)]
+        nominations.append({
+            "occasion_id": occ.get("id"),
+            "occasion": occ.get("name"),
+            "peak_date": occ.get("peak_date"),
+            "days_until_peak": occ.get("days_until_peak"),
+            "messaging_angle": occ.get("messaging_angle"),
+            "pick_count": len(picks),
+            "top_products": [
+                {"title": p.get("title"), "score": p.get("score"),
+                 "reasons": p.get("reasons") or []}
+                for p in picks[:6]
+            ],
+        })
+    return nominations
+
+
 def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
     packet_now = _now_local()
     generated_at = packet_now.isoformat()
@@ -1811,6 +1840,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
             current_learnings_payload,
         ),
         "watchouts": _watchouts(snapshot_payload, social_payload),
+        "occasion_nominations": _build_occasion_nominations(load_json(OCCASION_INTEL_PATH, {})),
         "source_paths": {
             "social_posts": str(SOCIAL_POSTS_PATH),
             "social_rollups": str(SOCIAL_ROLLUPS_PATH),
@@ -1818,11 +1848,13 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
             "competitor_social_snapshots": str(COMPETITOR_SOCIAL_SNAPSHOTS_PATH),
             "competitor_social_snapshot_history": str(COMPETITOR_SOCIAL_SNAPSHOT_HISTORY_PATH),
             "current_learnings": str(CURRENT_LEARNINGS_PATH),
+            "occasion_intel": str(OCCASION_INTEL_PATH),
         },
     }
     payload["summary"]["recommendation_count"] = len(payload["recommendations"])
     payload["summary"]["watchout_count"] = len(payload["watchouts"])
     payload["summary"]["change_focus_count"] = len(payload.get("change_focus") or [])
+    payload["summary"]["occasion_nomination_count"] = len(payload.get("occasion_nominations") or [])
     write_json(PACKET_STATE_PATH, payload)
     write_json(PACKET_OPERATOR_JSON_PATH, payload)
     write_markdown(PACKET_MD_PATH, render_weekly_strategy_recommendation_packet_markdown(payload))
@@ -1860,6 +1892,18 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
             lines.append(f"- `{item.get('urgency') or 'opportunity'}` · {item.get('headline')}")
             if item.get("detail"):
                 lines.append(f"  Detail: {item.get('detail')}")
+        lines.append("")
+
+    occasion_nominations = payload.get("occasion_nominations") or []
+    if occasion_nominations:
+        lines.extend(["## Live Occasion Windows", ""])
+        for nom in occasion_nominations:
+            lines.append(
+                f"- **{nom.get('occasion')}** — peak `{nom.get('peak_date')}` "
+                f"(in {nom.get('days_until_peak')}d), {nom.get('pick_count')} picks. "
+                f"Angle: {nom.get('messaging_angle')}")
+            for product in (nom.get("top_products") or [])[:4]:
+                lines.append(f"  - {product.get('title')} (score {product.get('score')})")
         lines.append("")
 
     lines.extend([

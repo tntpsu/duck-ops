@@ -379,6 +379,22 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 
 **Scope cuts (deliberate, Phase 1):** no review-mining tier (Surface-12 audit showed review corpus too thin — ~5/day, zero recipient mentions); no auto tag-apply with expiry (Phase 2); no weekly-packet nominations (Phase 2); no IG auto-publish changes — occasion context only angles EXISTING approved lanes.
 
+### Surface 13 Phase 2 (2026-06-12, matrix before code)
+
+Occasion Etsy tag apply with expiry-revert (approval-gated, NEVER silent auto-action), newduck publish hook, weekly-packet nominations. Listing mapping is the known scope risk: catalog_index has no Etsy listing_id — a mapper joins live Etsy listings by normalized title + newduck receipts as exact overrides; low-confidence matches excluded (fail closed).
+
+| Use case | Happy | 13-tag/6-20-char invariant | Unknown/uncertain approval state | Apply fails mid-batch | Revert at window close | Mapping low-confidence | Re-run idempotency | Test-mode prod-write |
+|---|---|---|---|---|---|---|---|---|
+| Listing map builder | ✅ planned: title joins + receipt overrides | n/a | n/a | n/a | n/a | ✅ planned: excluded below threshold, counted | ✅ planned | ✅ planned (3-layer) |
+| Tag swap plan | ✅ planned: occasion tags in, weakest out, originals preserved | ✅ planned: exactly 13 post-swap, all 6-20, deduped | n/a | n/a | n/a | n/a | ✅ planned: same plan twice | n/a |
+| propose | ✅ planned: proposals + `occasion-tag-proposed` transitions | ✅ same | n/a | n/a | n/a | ✅ skipped + reason | ✅ no duplicate proposals | ✅ planned |
+| approve (operator CLI — the Tier 3 gate) | ⚠️ manual:operator-runs-it | n/a | ✅ planned: refuses unknown workflow_id | n/a | n/a | n/a | ✅ approve twice = no-op | n/a |
+| apply | ✅ planned: snapshot BEFORE patch, receipt per attempt | ✅ payload validated pre-PATCH | ✅ planned: refuses non-approved state (fail closed) | ✅ planned: failure receipt, batch continues, item → failed | n/a | n/a | ✅ applied item not re-applied | ✅ planned |
+| revert | ✅ planned: exact originals restored + receipt | n/a | n/a | ✅ revert_pending resurfaces | ✅ planned: fires only when window inactive | n/a | ✅ reverted item not re-reverted | ✅ planned |
+| newduck publish hook | ✅ planned: producer kicked on success path only | n/a | n/a | ✅ subprocess failure never fails publish; bounded timeout | n/a | n/a | n/a | n/a |
+| weekly packet nominations | ✅ planned: section from occasion_intel | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| recommendations page render | ✅ planned: section renderer added (markdown≠portal-HTML) | n/a | n/a | n/a | ✅ omitted when no active occasion | n/a | n/a | n/a |
+
 ---
 
 ## Process note (this is the first matrix; previous work shipped without one)
