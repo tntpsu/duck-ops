@@ -1,7 +1,75 @@
 {
-  "calendar_version": 1,
-  "notes": "Occasions as data — runtime/occasion_engine.py resolves these daily; nothing duck- or occasion-specific is hardcoded in flows. rule.type: 'fixed' (month/day) or 'nth_weekday' (month, weekday 0=Mon..6=Sun, nth). lead_days: how many days before the peak the occasion becomes active. keywords: lowercase substrings matched against product tags (supporting signal — the primary signal is theme_classification.occasions from Surface 12). recipients: theme_classification recipient ids that boost a product. messaging_phases: first entry whose max_days_until_peak >= days_until_peak wins, ordered ascending.",
+  "calendar_version": 2,
+  "notes": "Occasions as data — runtime/occasion_engine.py resolves these daily; nothing duck- or occasion-specific is hardcoded in flows. rule.type: 'fixed' (month/day), 'nth_weekday' (month, weekday 0=Mon..6=Sun, nth), or 'fixed_dates' (explicit ISO date list for holidays with no simple rule, e.g. Easter — extend the list before it runs out). lead_days: how many days before the peak the occasion becomes active. keywords: lowercase substrings matched against product tags (supporting signal; the primary signal is theme_classification.occasions from the classifier — keep occasion id in sync with theme_taxonomy.json occasions for occasions that should get the strong classifier signal). etsy_tag_candidates: each MUST be 6-20 chars (Etsy tag rule; enforced by test). messaging_phases: first entry whose max_days_until_peak >= days_until_peak wins, ordered ascending.",
   "occasions": [
+    {
+      "id": "new_year",
+      "name": "New Year",
+      "rule": {"type": "fixed", "month": 1, "day": 1},
+      "lead_days": 10,
+      "keywords": ["new year", "celebration", "party", "resolution", "champagne"],
+      "recipients": ["coworker", "collector", "husband", "wife"],
+      "etsy_tag_candidates": ["new year gift", "party decor", "new years duck"],
+      "messaging_phases": [
+        {"max_days_until_peak": 2, "angle": "Happy New Year — celebration and fresh-start energy"},
+        {"max_days_until_peak": 10, "angle": "New Year countdown — party and resolution angle"}
+      ]
+    },
+    {
+      "id": "valentines_day",
+      "name": "Valentine's Day",
+      "rule": {"type": "fixed", "month": 2, "day": 14},
+      "lead_days": 18,
+      "keywords": ["valentine", "love", "heart", "romance", "couple", "for her", "for him"],
+      "recipients": ["husband", "wife"],
+      "etsy_tag_candidates": ["valentine gift", "gift for her", "gift for him", "romantic gift"],
+      "messaging_phases": [
+        {"max_days_until_peak": 2, "angle": "Valentine's Day is here — last-minute love gift mention"},
+        {"max_days_until_peak": 7, "angle": "Valentine countdown — order-by urgency for the romantic gift"},
+        {"max_days_until_peak": 18, "angle": "Valentine's gift guide — position as the cute couples gift"}
+      ]
+    },
+    {
+      "id": "st_patricks",
+      "name": "St. Patrick's Day",
+      "rule": {"type": "fixed", "month": 3, "day": 17},
+      "lead_days": 12,
+      "keywords": ["irish", "leprechaun", "shamrock", "lucky", "green", "clover"],
+      "recipients": ["coworker", "collector"],
+      "etsy_tag_candidates": ["st patricks day", "lucky duck gift", "irish gift"],
+      "messaging_phases": [
+        {"max_days_until_peak": 2, "angle": "Happy St. Patrick's Day — luck-of-the-Irish fun"},
+        {"max_days_until_peak": 12, "angle": "St. Patrick's Day is coming — green and lucky-charm angle"}
+      ]
+    },
+    {
+      "id": "easter",
+      "name": "Easter",
+      "rule": {"type": "fixed_dates", "dates": ["2026-04-05", "2027-03-28", "2028-04-16", "2029-04-01", "2030-04-21"]},
+      "lead_days": 18,
+      "keywords": ["easter", "bunny", "spring", "egg", "chick", "pastel"],
+      "recipients": ["kids", "grandparent"],
+      "etsy_tag_candidates": ["easter basket", "easter gift", "easter duck", "spring gift"],
+      "messaging_phases": [
+        {"max_days_until_peak": 2, "angle": "Happy Easter — spring and basket-filler fun"},
+        {"max_days_until_peak": 7, "angle": "Easter is days away — basket-stuffer order-by urgency"},
+        {"max_days_until_peak": 18, "angle": "Easter basket season — spring gift guide angle"}
+      ]
+    },
+    {
+      "id": "mothers_day",
+      "name": "Mother's Day",
+      "rule": {"type": "nth_weekday", "month": 5, "weekday": 6, "nth": 2},
+      "lead_days": 16,
+      "keywords": ["mom", "mother", "for her", "best mom", "grandma"],
+      "recipients": ["mom", "wife", "grandparent"],
+      "etsy_tag_candidates": ["mothers day gift", "gift for mom", "best mom gift", "duck gift for mom"],
+      "messaging_phases": [
+        {"max_days_until_peak": 2, "angle": "Mother's Day is here — celebrate mom; last-minute gift mention"},
+        {"max_days_until_peak": 7, "angle": "last call for Mother's Day — order-by urgency so it arrives in time"},
+        {"max_days_until_peak": 16, "angle": "Mother's Day gift guide — position this duck as the gift for mom/grandma"}
+      ]
+    },
     {
       "id": "fathers_day",
       "name": "Father's Day",
@@ -28,6 +96,34 @@
         {"max_days_until_peak": 2, "angle": "Happy 4th — flags, freedom, and patriotic ducks front and center"},
         {"max_days_until_peak": 7, "angle": "July 4th is days away — patriotic party and gift angle with order-by urgency"},
         {"max_days_until_peak": 14, "angle": "gearing up for July 4th — patriotic collection spotlight"}
+      ]
+    },
+    {
+      "id": "halloween",
+      "name": "Halloween",
+      "rule": {"type": "fixed", "month": 10, "day": 31},
+      "lead_days": 25,
+      "keywords": ["halloween", "spooky", "ghost", "skeleton", "pumpkin", "witch", "zombie", "creepy"],
+      "recipients": ["kids", "collector"],
+      "etsy_tag_candidates": ["halloween gift", "halloween decor", "spooky duck", "spooky decor"],
+      "messaging_phases": [
+        {"max_days_until_peak": 2, "angle": "Happy Halloween — spooky-cute celebration content"},
+        {"max_days_until_peak": 10, "angle": "Halloween is days away — costume-party and decor angle with order-by urgency"},
+        {"max_days_until_peak": 25, "angle": "Halloween season — spooky collection and decor spotlight"}
+      ]
+    },
+    {
+      "id": "thanksgiving",
+      "name": "Thanksgiving",
+      "rule": {"type": "nth_weekday", "month": 11, "weekday": 3, "nth": 4},
+      "lead_days": 18,
+      "keywords": ["thanksgiving", "turkey", "fall", "autumn", "grateful", "harvest"],
+      "recipients": ["grandparent", "mom", "dad", "coworker"],
+      "etsy_tag_candidates": ["thanksgiving", "fall decor", "host gift", "autumn decor"],
+      "messaging_phases": [
+        {"max_days_until_peak": 2, "angle": "Happy Thanksgiving — gratitude and gathering content"},
+        {"max_days_until_peak": 8, "angle": "Thanksgiving is days away — host-gift and fall-decor angle"},
+        {"max_days_until_peak": 18, "angle": "Thanksgiving season — fall and host-gift spotlight"}
       ]
     },
     {

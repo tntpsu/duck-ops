@@ -71,6 +71,17 @@ def resolve_next_occurrence(rule: dict[str, Any], today: date) -> date:
         if peak < today:
             peak = _nth_weekday(today.year + 1)
         return peak
+    if rtype == "fixed_dates":
+        # Explicit per-year dates for holidays with no simple recurrence
+        # rule (e.g. Easter / computus). Pick the next listed date on or
+        # after today. Maintainer must extend the list before it runs out.
+        dates = sorted(date.fromisoformat(d) for d in rule.get("dates") or [])
+        upcoming = [d for d in dates if d >= today]
+        if upcoming:
+            return upcoming[0]
+        if dates:
+            raise ValueError(f"fixed_dates exhausted (last {dates[-1].isoformat()}); add more dates")
+        raise ValueError("fixed_dates rule has no dates")
     raise ValueError(f"unknown rule type: {rtype!r}")
 
 

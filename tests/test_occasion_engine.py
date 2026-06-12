@@ -71,6 +71,21 @@ class TestRecurrence:
         with pytest.raises(ValueError):
             oe.resolve_next_occurrence({"type": "lunar_phase"}, date(2026, 6, 11))
 
+    def test_fixed_dates_picks_next_upcoming(self):
+        rule = {"type": "fixed_dates", "dates": ["2026-04-05", "2027-03-28", "2028-04-16"]}
+        assert oe.resolve_next_occurrence(rule, date(2026, 1, 1)) == date(2026, 4, 5)
+        assert oe.resolve_next_occurrence(rule, date(2026, 4, 5)) == date(2026, 4, 5)
+        assert oe.resolve_next_occurrence(rule, date(2026, 4, 6)) == date(2027, 3, 28)
+
+    def test_fixed_dates_exhausted_raises(self):
+        rule = {"type": "fixed_dates", "dates": ["2020-04-12"]}
+        with pytest.raises(ValueError):
+            oe.resolve_next_occurrence(rule, date(2026, 1, 1))
+
+    def test_thanksgiving_4th_thursday(self):
+        rule = {"type": "nth_weekday", "month": 11, "weekday": 3, "nth": 4}
+        assert oe.resolve_next_occurrence(rule, date(2026, 1, 1)) == date(2026, 11, 26)
+
 
 class TestActiveWindow:
     def test_inside_lead_window_active_with_phase(self):
