@@ -73,7 +73,7 @@ def _seed_receipt(receipts_dir: Path, *, flow: str, run_id: str,
 
 
 def _post(*, workflow: str = "meme", run_id: str = "2026-06-08",
-          post_id: str = "17912345", metric_status: str = "ok",
+          post_id: str = "17854192837465021", metric_status: str = "ok",
           published_at: str | None = None,
           metrics: dict | None = None,
           engagement_score: float = 47.0,
@@ -94,37 +94,33 @@ def _post(*, workflow: str = "meme", run_id: str = "2026-06-08",
 
 
 class WindowSelectionTests(unittest.TestCase):
-    """Unit-test the age → window mapping in isolation. Edge cases
-    matter because the daily collector hits this function once per
-    post per day; the wrong window means duplicate or missing
-    outcomes."""
+    """Unit-test the age → window mapping. CATCH-UP semantics: a once-
+    daily collector must never skip a window just because its run time
+    doesn't land inside a narrow band. The old narrow-band version
+    ([20,30) and [144,192)) produced ZERO outcomes in prod for evening
+    posts — these tests pin the fix."""
 
     def test_too_early_returns_none(self) -> None:
         self.assertIsNone(social_performance_collector._outcome_window_for_age(0))
         self.assertIsNone(social_performance_collector._outcome_window_for_age(10))
         self.assertIsNone(social_performance_collector._outcome_window_for_age(19.9))
 
-    def test_24h_window_inclusive_lower_exclusive_upper(self) -> None:
-        self.assertEqual(social_performance_collector._outcome_window_for_age(20), "24h")
-        self.assertEqual(social_performance_collector._outcome_window_for_age(24), "24h")
-        self.assertEqual(social_performance_collector._outcome_window_for_age(29.99), "24h")
-        self.assertIsNone(social_performance_collector._outcome_window_for_age(30))
+    def test_24h_window_spans_20h_to_6d(self) -> None:
+        # The old version returned None for 30, 48, 100, 143.9 — that was
+        # the bug. Catch-up: anything in [20, 144) is the "24h" snapshot.
+        for age in (20, 24, 29.99, 30, 48, 100, 143.9):
+            self.assertEqual(
+                social_performance_collector._outcome_window_for_age(age), "24h",
+                msg=f"age={age} should map to 24h under catch-up semantics")
 
-    def test_between_windows_returns_none(self) -> None:
-        self.assertIsNone(social_performance_collector._outcome_window_for_age(48))
-        self.assertIsNone(social_performance_collector._outcome_window_for_age(100))
-        self.assertIsNone(social_performance_collector._outcome_window_for_age(143.9))
-
-    def test_7d_window(self) -> None:
-        self.assertEqual(social_performance_collector._outcome_window_for_age(144), "7d")
-        self.assertEqual(social_performance_collector._outcome_window_for_age(168), "7d")
-        self.assertEqual(social_performance_collector._outcome_window_for_age(191.9), "7d")
-
-    def test_after_7d_returns_none(self) -> None:
-        """Posts older than 8d are out of scope — Phase 6 might do
-        long-tail tracking later but Phase 5 stops at the 7d final."""
-        self.assertIsNone(social_performance_collector._outcome_window_for_age(192))
-        self.assertIsNone(social_performance_collector._outcome_window_for_age(720))
+    def test_7d_window_has_no_upper_bound(self) -> None:
+        # The old version returned None for 192 and 720 — posts first
+        # seen after day 8 silently never finalized. Catch-up: any
+        # age >= 144h is the final "7d" snapshot.
+        for age in (144, 168, 191.9, 192, 720, 10000):
+            self.assertEqual(
+                social_performance_collector._outcome_window_for_age(age), "7d",
+                msg=f"age={age} should map to 7d under catch-up semantics")
 
 
 class WritebackHappyPathTests(unittest.TestCase):
@@ -140,7 +136,7 @@ class WritebackHappyPathTests(unittest.TestCase):
         stamp_publish_link + collector's writeback → receipt now
         knows engagement_score for the published variant."""
         _seed_receipt(self.receipts_dir, flow="meme", run_id="2026-06-08",
-                      publish_post_id="17912345")
+                      publish_post_id="17854192837465021")
         published_at = datetime(2026, 6, 8, 18, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
         now = published_at + timedelta(hours=24)
         post = _post(published_at=published_at.isoformat())
@@ -158,7 +154,7 @@ class WritebackHappyPathTests(unittest.TestCase):
 
     def test_writes_7d_outcome_and_marks_final(self) -> None:
         _seed_receipt(self.receipts_dir, flow="meme", run_id="2026-06-08",
-                      publish_post_id="17912345")
+                      publish_post_id="17854192837465021")
         published_at = datetime(2026, 6, 8, 18, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
         now = published_at + timedelta(days=7)
         post = _post(published_at=published_at.isoformat(), engagement_score=120.0)
@@ -175,7 +171,7 @@ class WritebackHappyPathTests(unittest.TestCase):
 
     def test_skips_too_early(self) -> None:
         _seed_receipt(self.receipts_dir, flow="meme", run_id="2026-06-08",
-                      publish_post_id="17912345")
+                      publish_post_id="17854192837465021")
         published_at = datetime(2026, 6, 8, 18, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
         # Collector firing 12h after publish — too early for the 24h window.
         now = published_at + timedelta(hours=12)
@@ -189,17 +185,44 @@ class WritebackHappyPathTests(unittest.TestCase):
                                                receipts_dir=self.receipts_dir)
         self.assertNotIn("outcomes", loaded)
 
-    def test_skips_between_windows(self) -> None:
+    def test_day3_post_still_writes_24h_outcome(self) -> None:
+        """Regression for the 2026-06-13 zero-outcomes incident. The old
+        narrow [20,30) band skipped a 72h-old post ('out_of_window') and,
+        because the daily 06:35 collector never observes an 18:00 post at
+        20-30h, evening posts NEVER got a 24h outcome. Catch-up writes it."""
         _seed_receipt(self.receipts_dir, flow="meme", run_id="2026-06-08",
-                      publish_post_id="17912345")
+                      publish_post_id="17854192837465021")
         published_at = datetime(2026, 6, 8, 18, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
-        now = published_at + timedelta(hours=72)  # 3 days — between 24h and 7d
+        now = published_at + timedelta(hours=72)  # 3 days old
         post = _post(published_at=published_at.isoformat())
         result = social_performance_collector.writeback_outcome_to_creative_quality_receipt(
             post, now=now, receipts_dir=self.receipts_dir
         )
-        self.assertEqual(result["action"], "skipped")
-        self.assertEqual(result["reason"], "out_of_window")
+        self.assertEqual(result["action"], "wrote_outcome")
+        self.assertEqual(result["window"], "24h")
+
+    def test_evening_publish_daily_cadence_lands_on_day2(self) -> None:
+        """The exact prod scenario: 18:03 publish, collector fires 06:35
+        daily. Day-1 run (~12.5h) is too early; day-2 run (~36.5h) must
+        write the 24h outcome — the old band returned None on BOTH."""
+        _seed_receipt(self.receipts_dir, flow="jeepfact", run_id="2026-06-10",
+                      publish_post_id="18087014633102657")
+        published_at = datetime(2026, 6, 10, 18, 3, 0, tzinfo=timezone(timedelta(hours=-4)))
+        run_day1 = published_at.replace(hour=6, minute=35) + timedelta(days=1)  # ~12.5h
+        run_day2 = published_at.replace(hour=6, minute=35) + timedelta(days=2)  # ~36.5h
+        post = _post(workflow="jeepfact", run_id="2026-06-10",
+                     post_id="18087014633102657", published_at=published_at.isoformat())
+        r1 = social_performance_collector.writeback_outcome_to_creative_quality_receipt(
+            post, now=run_day1, receipts_dir=self.receipts_dir)
+        self.assertEqual(r1["action"], "skipped")
+        self.assertEqual(r1["reason"], "too_early")
+        r2 = social_performance_collector.writeback_outcome_to_creative_quality_receipt(
+            post, now=run_day2, receipts_dir=self.receipts_dir)
+        self.assertEqual(r2["action"], "wrote_outcome")
+        self.assertEqual(r2["window"], "24h")
+        loaded = load_creative_quality_receipt("jeepfact", "2026-06-10",
+                                               receipts_dir=self.receipts_dir)
+        self.assertEqual(loaded["outcome_status"], "partial_24h")
 
 
 class WritebackFailureModesTests(unittest.TestCase):
@@ -281,7 +304,7 @@ class WritebackFailureModesTests(unittest.TestCase):
         a duplicate outcome. The record_engagement_outcome helper
         handles this; smoke-check it from the writeback side too."""
         _seed_receipt(self.receipts_dir, flow="meme", run_id="2026-06-08",
-                      publish_post_id="17912345")
+                      publish_post_id="17854192837465021")
         published_at = datetime(2026, 6, 8, 18, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
         now_first = published_at + timedelta(hours=24)
         now_second = published_at + timedelta(hours=27)  # Also in 24h window.

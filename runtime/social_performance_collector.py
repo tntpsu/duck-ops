@@ -413,21 +413,31 @@ CREATIVE_QUALITY_RECEIPTS_DIR = DUCK_AGENT_ROOT / "data" / "creative_quality_rec
 
 
 def _outcome_window_for_age(age_hours: float) -> str | None:
-    """Map age-since-publish to outcome window label.
+    """Map age-since-publish to an outcome window using CATCH-UP
+    thresholds (NOT narrow bands).
 
-    Daily collector runs mean we have ~24h granularity. Generous
-    windows below ensure a post observed near midnight on day-N still
-    lands in the right bucket:
+    The collector runs once daily (06:35). Narrow bands silently
+    dropped almost everything: an 18:00 publish is observed at ~12h
+    then ~36h, missing a [20,30) band every single day, so evening
+    posts got ZERO 24h outcomes; and any post first seen after day 8
+    missed the old [144,192) 7d band too. Result in prod (2026-06-13):
+    0 outcomes ever written despite working metrics. Monotonic
+    thresholds + record_engagement_outcome's per-window idempotency
+    (first write per window wins) fix it:
 
-      20-30h  → "24h"   (first-day engagement, primary signal)
-      144-192h (6-8d) → "7d"  (final tally; mark_outcome_final after)
-      else   → None   (too early, in between, or too old)
-    """
-    if 20 <= age_hours < 30:
+      age < 20h          → None   (too early; day-0 engagement is noisy)
+      20h <= age < 144h  → "24h"  (first-window snapshot; written on the
+                                   first daily run at/after 20h)
+      age >= 144h (6d)   → "7d"   (final tally; caller marks final)
+
+    A post first observed already older than 6d gets only "7d" — the
+    day-1 snapshot can't be reconstructed and the metric is cumulative
+    engagement anyway."""
+    if age_hours < 20:
+        return None
+    if age_hours < 144:
         return "24h"
-    if 144 <= age_hours < 192:
-        return "7d"
-    return None
+    return "7d"
 
 
 def writeback_outcome_to_creative_quality_receipt(
@@ -470,9 +480,10 @@ def writeback_outcome_to_creative_quality_receipt(
         return {"action": "skipped", "reason": "future_published_at"}
     window = _outcome_window_for_age(age_hours)
     if window is None:
+        # With catch-up thresholds the only None case is age < 20h.
         return {
             "action": "skipped",
-            "reason": ("too_early" if age_hours < 20 else "out_of_window"),
+            "reason": "too_early",
             "age_hours": round(age_hours, 1),
         }
 
