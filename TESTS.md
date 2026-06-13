@@ -522,6 +522,26 @@ One weekly answer to "what duck should we build next?": deterministic score = de
 
 Runtime (Tier 3, NOT auto-installed — operator approval each): com.philtullai.duckops.build-next.weekly plist (Sun 07:00, after competitor weekly 06:30); product_concept_queue scheduled run ingests promotions.
 
+## Surface 17 — Portal readability + ducks_to_build dedupe hardening (2026-06-13)
+
+Operator-reported from phone screenshots: (1) `/portal/intel/reviews` table shattered one char per line; (2) Desk was a flat 15-tile wall with no action/info separation; (3) all `table.grid` intel pages share the same mobile-overflow bug; (4) a competitor "Couple Ducks - Car Dashboard Decor - Cruise Accessory - 3D Printed..." leaked into the Competitors page's ducks_to_build despite an active "Couples Duck" in catalog.
+
+Root cause (4) + sweep finding: dedupe DID exist (`helpers/fuzzy_matching_helper.is_duck_already_made`) but is broadly weak — over the 2026-06-12 `ducks_to_build` (15 items) it suppressed **0**, while we demonstrably already sell several (Couples, Police ×2, Monkey). The keyword-stuffed Etsy titles dilute the holistic fuzz ratio below 0.80, and the catalog's auto-generated `concept_variations`/`core_terms` are noisy theme-phrases, not subject tokens.
+
+A token-overlap "concept identity" patch was tried and **REVERTED**: it caught couples but produced ~9 FALSE POSITIVES (Highland Cow→Bride via noise fragment "adventures -", Police→Blue Jay via "buddy and", Female Golfer→Golf Cart, Tuxedo Cat→Golf Cart via "jeep ducking"). False positives are worse than misses — they stop us building good products. Lesson: lexical/token methods are the wrong tool against keyword-stuffed titles + noisy variation data.
+
+**Shipped fix: semantic embeddings** (`helpers/semantic_dedupe.py`, `config/semantic_dedupe.json` v1, OpenAI text-embedding-3-small). Critical empirical insight: embed the **cleaned subject** (strip "3D Printed / Car Dashboard / Cruise Accessory" boilerplate), NOT the raw title — raw full titles share so much boilerplate that an unrelated duck scored cosine 0.66 vs ours while a true dupe scored 0.62; after cleaning, true dupes land ~0.84 and unrelated ~0.15. Three bands: ≥0.72 hard-suppress (moved to report `ducks_already_made`, transparent), ≥0.43 soft-flag (KEPT + `possible_dupe` badge on Competitors page — never a silent drop), else distinct. Catalog vectors cached (`cache/catalog_subject_embeddings.json`), only new/changed subjects hit the API; weekly run cost ~fractions of a cent. Fails OPEN: embedding outage → lexical fallback + `dedupe_degraded` flag shown on the page. Takes effect next competitor weekly analysis (cached snapshots, no new scraping).
+
+| Use case | already_made (hard) | possible_dupe (soft, kept) | distinct (no false suppress) | Cache | Degrade |
+|---|---|---|---|---|---|
+| semantic dedupe | ✅ test_semantic_dedupe partitions; eval 2/2 couples+police @0.84 | ✅ monkey 0.44 / golfer 0.54 flagged not dropped | ✅ eval 0 false suppressions; Highland Cow/Vols/cat distinct | ✅ only-new-subjects-hit-API + version-bump invalidation | ✅ fail-open lexical + dedupe_degraded surfaced |
+
+**Gated eval** `scripts/eval_dedupe.py` (real API, manual, NOT in pytest) vs `tests/fixtures/dedupe_golden.json`: SAFETY gate = 0 distinct→already_made; already_made recall ≥80%. Current: **0 false suppressions, 100% already-made recall, 100% dupe recall (≥soft)**. Unit tests `tests/test_semantic_dedupe.py` (mocked embeddings, deterministic). Lexical regression guard retained in `tests/test_fuzzy_matching_dedupe.py` (the reverted over-match must not return). Dead `competitor_semantic_matcher.py` (unused, uncached) deleted in consolidation.
+
+| Surface | Reviews readable | Desk action/info split | All intel tables no-shatter | UI verification |
+|---|---|---|---|---|
+| Portal readability | ✅ stacked-card layout ≤640px, listing demoted to Etsy link (reviews_intel_page) | ✅ renderDeskGroup two sections, severity-sorted (test_viewer) | ✅ shared portal_shell rule: break-word + horizontal-scroll ≤640px; per-page anywhere→break-word | manual: rendered via live viewer :8765, HTTP 200 all pages; **pixel check on real phone pending** |
+
 ---
 
 ## Process note (this is the first matrix; previous work shipped without one)
