@@ -278,6 +278,21 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 
 **Known gaps acceptable at ship:** no ranker retraining (Phase 6); no Etsy outcomes (different lane); no backfill of pre-fix posts (forward-looking only). All three are explicit Phase 5 scope cuts in `CREATIVE_QUALITY_LOOP_V2_PLAN.md`.
 
+### 9.1 — "Did it produce?" producer watchdogs (2026-06-13)
+
+The creative-loop incident exposed a class gap: `scheduler_health` answers "did the job RUN" comprehensively (auto-discovers all launchd plists, flags missed_run/timeout) but several producers had no "did it PRODUCE output" card — so a job could run green for weeks while emitting nothing. Audited all 41 scheduled jobs; added OS watchdog cards for the producers that fed downstream surfaces with no output check. Each card: red on empty/zero output or staleness, yellow on near-stale, green on fresh+non-empty; reads the producer's state file directly (cheap reader, no new prod-state path to isolate).
+
+| Producer (job) | Empty/zero output → RED | Stale → RED | Fresh+non-empty → green | Registered (incl. empty payload) |
+|---|---|---|---|---|
+| competitor-social snapshot (daily input) | ✅ `test_competitor_social_watchdog.py::SnapshotSanityReaderTests::test_empty_scrape_is_red` / `::test_profiles_but_no_posts_is_red` | ✅ `::test_stale_is_red` | ✅ `::test_fresh_nonempty_is_green` | ✅ `CardRegistrationTests` (both bracket cards, incl. empty) |
+| competitor-social benchmark (daily output) | ✅ `BenchmarkFreshnessReaderTests::test_zero_posts_is_red` | ✅ `::test_stale_is_red` | ✅ `::test_fresh_is_green` | ✅ same |
+| profit-per-product (daily) | ✅ `test_producer_freshness_watchdogs.py::ProfitPerProductReaderTests::test_zero_products_or_orders_is_red` | ✅ `::test_stale_is_red` | ✅ `::test_fresh_nonempty_is_green` | ✅ `CardRegistrationTests` (incl. empty) |
+| review carousel (weekly Tuesday) | ✅ `ReviewCarouselReaderTests::test_dismissed_runs_do_not_count_as_published` (no real publish = not fresh) | ✅ `::test_stalled_lane_is_red` (>17d) | ✅ `::test_recent_scheduled_is_green`, `::test_picks_newest_scheduled_across_many` | ✅ same |
+
+**Live verification (2026-06-13):** all 5 new cards render in `/api/system-health` (36 total). creative_quality_outcome=red (correct — 0 outcomes until the next collector run lands jeepfact's), the 4 freshness cards green on real data. Note: `/api/system-health` serves a producer/reader cache (`system_health_refresh.py`, ~5 min) — a new card lags one refresh cycle until the producer regenerates.
+
+**Still uncarded (lower priority):** Shopify SEO apply / draft-activation (partially covered by writeback-verification receipts + Business Desk chain status); GTDF and jeepfact/meme content generation beyond the creative-outcome card.
+
 ---
 
 ## Surface 10 — LLM spend observability page + soft alert (2026-06-06, in flight)
