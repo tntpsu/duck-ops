@@ -291,7 +291,17 @@ The creative-loop incident exposed a class gap: `scheduler_health` answers "did 
 
 **Live verification (2026-06-13):** all 5 new cards render in `/api/system-health` (36 total). creative_quality_outcome=red (correct — 0 outcomes until the next collector run lands jeepfact's), the 4 freshness cards green on real data. Note: `/api/system-health` serves a producer/reader cache (`system_health_refresh.py`, ~5 min) — a new card lags one refresh cycle until the producer regenerates.
 
-**Still uncarded (lower priority):** Shopify SEO apply / draft-activation (partially covered by writeback-verification receipts + Business Desk chain status); GTDF and jeepfact/meme content generation beyond the creative-outcome card.
+**Second pass (2026-06-13) — listing + content lanes.** Carded the remaining producers. The Shopify SEO card immediately went RED on a real 37d-stale audit/outcomes surface (the daily kickoff had silently stopped refreshing it) — exactly the find this exercise was for.
+
+| Producer (job) | Empty/stale → RED | Fresh → green | Registered (incl. empty payload) |
+|---|---|---|---|
+| Shopify SEO surface (daily kickoff) | ✅ `test_listing_content_watchdogs.py::ShopifySeoReaderTests::test_37d_stale_is_red` (+ uses-newest-of-audit/outcomes) | ✅ `::test_fresh_is_green` | ✅ `CardRegistrationTests` (3 cards, incl. empty) |
+| Shopify draft-activation (weekly) | ✅ `DraftActivationReaderTests::test_stale_is_red` | ✅ `::test_fresh_is_green` | ✅ same |
+| Content publish cadence — meme/jeepfact/GTDF | ✅ `ContentPublishReaderTests::test_one_stale_lane_is_red` (>17d), `::test_missing_lane_is_yellow` | ✅ `::test_all_fresh_is_green` (per-lane from posts.json + GTDF receipt dates) | ✅ same |
+
+**Live (2026-06-13):** 39 OS cards total. `shopify_seo_freshness`=RED (37d stale — real find), `shopify_draft_activation_freshness`=green (5.4d), `content_publish_cadence`=green (meme 5d / jeepfact 3d / GTDF 2.8d).
+
+**Now uncarded (accepted):** only fine-grained per-flow content QA beyond publish-cadence + outcomes; covered enough by the existing Thursday-funnel, meme-recently-used, and creative-outcome cards.
 
 ---
 
