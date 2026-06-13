@@ -37,6 +37,11 @@ PRODUCT_CONCEPT_QUEUE_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "product_concep
 PRODUCT_CONCEPT_QUEUE_MD_PATH = OUTPUT_OPERATOR_DIR / "product_concept_queue.md"
 PRODUCT_CONCEPT_DESIGN_BRIEF_INPUT_PATH = STATE_DIR / "product_concept_queue_design_brief_input.json"
 PRODUCT_CONCEPT_FEEDBACK_PATH = STATE_DIR / "product_concept_feedback.json"
+# Surface 16: operator "build this next" promotions from the Build-Next
+# portal page. The viewer appends here; this queue ingests them so a
+# promoted concept becomes a design brief for review — credits are still
+# spent only when the operator approves the brief in DuckAgent's Studio.
+BUILD_NEXT_PROMOTIONS_PATH = STATE_DIR / "build_next_promotions.json"
 
 SURFACE_VERSION = 1
 DEFAULT_MAX_ITEMS = 12
@@ -262,6 +267,83 @@ def _trend_candidate_to_queue_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_next_promotion_items(payload: Any = None) -> list[dict[str, Any]]:
+    """Surface 16: turn operator Build-Next promotions into queue items.
+
+    Reuses the same brief + name/trend quality machinery as trend
+    candidates (so an off-policy or unprintable name still fails closed),
+    but defaults to ready_for_brief_review because the operator already
+    vetted demand/margin/gap on the Build-Next page. brief_source is
+    'build_next' so the lineage is visible downstream."""
+    data = payload if payload is not None else load_json(BUILD_NEXT_PROMOTIONS_PATH, {"promotions": []})
+    promotions = data.get("promotions") if isinstance(data, dict) else data
+    items: list[dict[str, Any]] = []
+    for promo in list(promotions or []):
+        if not isinstance(promo, dict):
+            continue
+        raw_theme = str(promo.get("title") or "").strip()
+        if not raw_theme:
+            continue
+        name_quality = concept_name_quality(raw_theme)
+        trend_quality_gate = evaluate_trend_quality(
+            raw_theme=raw_theme,
+            signal_summary={},
+            source_refs=[],
+            catalog_status="gap",
+            latest_observed_at=promo.get("promoted_at"),
+        )
+        concept_design_brief = build_concept_design_brief(
+            raw_theme=raw_theme,
+            signal_summary={},
+            source_refs=[],
+            catalog_status="gap",
+            latest_observed_at=promo.get("promoted_at"),
+            review_status="operator_promoted",
+            confidence=0.7,
+            trend_quality_gate=trend_quality_gate,
+            brief_source="build_next",
+        )
+        theme = _clean_theme(concept_design_brief.get("concept_title") or raw_theme)
+        # Fail closed: an off-policy or non-product-ready name drops to the
+        # guardrail lane even though the operator promoted it.
+        if trend_quality_gate.get("status") == "blocked_by_policy" or name_quality.get("status") != "product_ready":
+            queue_state = "blocked_by_guardrail"
+            next_step = "Reframe this promoted concept into a product-ready, public-safe duck before briefing."
+        else:
+            queue_state = "ready_for_brief_review"
+            next_step = "Operator promoted this from Build-Next; send to DuckAgent design_brief_queue for brief approval."
+        guardrails = [
+            "public_concept_allowed",
+            "Do not copy competitor artwork, wording, photos, tags, or listing structure.",
+            "Keep this duck-first; avoid readable logos, team marks, brand names, copyrighted characters.",
+        ]
+        guardrails.extend(str(i) for i in name_quality.get("issues") or [])
+        guardrails.extend(str(i) for i in trend_quality_gate.get("issues") or [])
+        items.append({
+            "concept_id": _stable_id("buildnext", theme, str(promo.get("concept_key") or raw_theme)),
+            "source_type": "build_next_promotion",
+            "source_artifact_id": promo.get("concept_key"),
+            "theme": theme,
+            "raw_theme": raw_theme,
+            "catalog_status": "gap",
+            "queue_state": queue_state,
+            "score": 0.8,
+            "confidence": 0.7,
+            "name_quality": name_quality,
+            "trend_quality_gate": trend_quality_gate,
+            "concept_design_brief": concept_design_brief,
+            "evidence": [
+                f"Operator promoted `{raw_theme}` from the Build-Next ranking.",
+                f"Competitor listing: {promo.get('listing_id') or 'n/a'}",
+            ],
+            "guardrails": guardrails,
+            "recommended_next_step": next_step,
+            "duckagent_task": "design_brief_queue",
+            "source_refs": [],
+        })
+    return items
+
+
 def _learning_motif_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     motifs = payload.get("competitor_motifs") if isinstance(payload, dict) else []
     items: list[dict[str, Any]] = []
@@ -422,6 +504,7 @@ def build_product_concept_queue(
     )
 
     items = [_trend_candidate_to_queue_item(item) for item in _candidate_items(trend_payload)]
+    items.extend(_build_next_promotion_items())
     if isinstance(learning_payload, dict):
         items.extend(_learning_motif_items(learning_payload))
     if isinstance(learning_payload, dict) and isinstance(benchmark_payload, dict):

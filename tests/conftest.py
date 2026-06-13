@@ -125,4 +125,28 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         yield
         return
     monkeypatch.setattr(_oe, "OCCASION_INTEL_PATH", tmp_path / "occasion_intel.json")
+
+    # 2026-06-12: build_next_engine.BUILD_NEXT_QUEUE_PATH (Surface 16) —
+    # new module-level prod-path constant, isolated on arrival per the
+    # three-layer policy (this fixture + the source-level DUCK_TEST_MODE
+    # guard in write_build_next_queue + tests/test_no_test_pollution_in_build_next.py).
+    try:
+        import build_next_engine as _bne
+    except ImportError:
+        yield
+        return
+    monkeypatch.setattr(_bne, "BUILD_NEXT_QUEUE_PATH", tmp_path / "build_next_queue.json")
+
+    # 2026-06-12: product_concept_queue.BUILD_NEXT_PROMOTIONS_PATH (Surface 16
+    # ingestion). build_product_concept_queue() reads this file by default;
+    # without isolation a real operator promotion would leak into every
+    # concept-queue test. Redirect to an absent tmp path (load_json returns
+    # the empty default), so promotion ingestion is a no-op unless a test
+    # writes the file itself.
+    try:
+        import product_concept_queue as _pcq
+    except ImportError:
+        yield
+        return
+    monkeypatch.setattr(_pcq, "BUILD_NEXT_PROMOTIONS_PATH", tmp_path / "build_next_promotions.json")
     yield

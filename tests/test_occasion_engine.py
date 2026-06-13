@@ -187,6 +187,27 @@ class TestBuildAndWrite:
         assert intel["active_occasions"][0]["product_count"] == 1
         assert intel["errors"] == []
 
+    def test_classifier_coverage_counts_classified_products(self):
+        """2026-06-12 strip-regression tripwire: when the 04:00 sync
+        nulled theme_classification on every product, the selector ran
+        keywords-only with no signal anywhere. Intel must report how
+        many catalog products actually carry the payload."""
+        cal = {"calendar_version": 1, "occasions": [_occasion()]}
+        classified = _product("1", occasions=["test_fathers_day"])
+        stripped = dict(_product("2", "Stripped Duck"), theme_classification=None)
+        catalog = {"items": {"1": classified, "2": stripped}}
+        intel = oe.build_occasion_intel(cal, catalog, date(2026, 6, 11))
+        assert intel["classifier_coverage"] == 1
+
+    def test_classifier_coverage_zero_on_fully_stripped_catalog(self):
+        cal = {"calendar_version": 1, "occasions": [_occasion()]}
+        catalog = {"items": {
+            "1": dict(_product("1"), theme_classification=None),
+            "2": dict(_product("2"), theme_classification=None),
+        }}
+        intel = oe.build_occasion_intel(cal, catalog, date(2026, 6, 11))
+        assert intel["classifier_coverage"] == 0
+
     def test_missing_catalog_yields_empty_selection_not_crash(self):
         cal = {"occasions": [_occasion()]}
         intel = oe.build_occasion_intel(cal, {}, date(2026, 6, 11))

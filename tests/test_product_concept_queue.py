@@ -219,5 +219,39 @@ class ProductConceptQueueTests(unittest.TestCase):
             self.assertEqual(design_input["candidate_signals"][0]["concept_design_brief"]["concept_title"], "Orange Cat Duck")
 
 
+class BuildNextPromotionIngestionTests(unittest.TestCase):
+    """Surface 16 Phase C: operator promotions from the Build-Next page
+    flow into the concept queue as design briefs (brief_source=build_next),
+    but off-policy names still fail closed."""
+
+    def test_promoted_concept_becomes_ready_brief(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            promo_path = Path(tmp) / "build_next_promotions.json"
+            promo_path.write_text(json.dumps({"promotions": [
+                {"concept_key": "medieval-knight", "title": "Medieval Knight Duck",
+                 "listing_id": "9"}]}), encoding="utf-8")
+            with mock.patch.object(product_concept_queue,
+                                   "BUILD_NEXT_PROMOTIONS_PATH", promo_path):
+                payload = product_concept_queue.build_product_concept_queue(
+                    trend_candidates={"items": []}, current_learnings={},
+                    competitor_social_benchmark={}, write_outputs=False)
+        items = [i for i in payload["items"] if i.get("source_type") == "build_next_promotion"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["queue_state"], "ready_for_brief_review")
+        self.assertEqual(
+            items[0]["concept_design_brief"].get("brief_source"), "build_next")
+
+    def test_off_policy_promoted_name_fails_closed(self) -> None:
+        items = product_concept_queue._build_next_promotion_items(
+            {"promotions": [{"concept_key": "tennessee-vols",
+                             "title": "Tennessee Vols Duck", "listing_id": "1"}]})
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["queue_state"], "blocked_by_guardrail")
+
+    def test_empty_promotions_is_noop(self) -> None:
+        self.assertEqual(product_concept_queue._build_next_promotion_items({"promotions": []}), [])
+        self.assertEqual(product_concept_queue._build_next_promotion_items({}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

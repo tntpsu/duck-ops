@@ -17,6 +17,7 @@ COMPETITOR_SOCIAL_SNAPSHOT_HISTORY_PATH = DUCK_OPS_ROOT / "state" / "competitor_
 CURRENT_LEARNINGS_PATH = DUCK_OPS_ROOT / "state" / "current_learnings.json"
 PACKET_STATE_PATH = DUCK_OPS_ROOT / "state" / "weekly_strategy_recommendation_packet.json"
 OCCASION_INTEL_PATH = DUCK_OPS_ROOT / "state" / "occasion_intel.json"
+BUILD_NEXT_QUEUE_PATH = DUCK_OPS_ROOT / "state" / "build_next_queue.json"
 PACKET_OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "weekly_strategy_recommendation_packet.json"
 PACKET_MD_PATH = OUTPUT_OPERATOR_DIR / "weekly_strategy_recommendation_packet.md"
 
@@ -1753,6 +1754,28 @@ def _build_occasion_nominations(occasion_payload: dict[str, Any]) -> list[dict[s
     return nominations
 
 
+def _build_build_next_nominations(build_next_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Surface 16: nominate the top Build-Next concepts into the weekly
+    packet so the operator's planning email points at the one ranked
+    production decision. Reads build_next_queue.json (cheap reader);
+    empty list when the producer hasn't run. Mirrors the occasion
+    nomination shape so the markdown renderer stays uniform."""
+    if not isinstance(build_next_payload, dict):
+        return []
+    nominations: list[dict[str, Any]] = []
+    for entry in (build_next_payload.get("queue") or [])[:3]:
+        if not isinstance(entry, dict):
+            continue
+        nominations.append({
+            "title": entry.get("title"),
+            "score": entry.get("score"),
+            "factors": entry.get("factors") or {},
+            "why": (entry.get("reasons") or [])[:1],
+            "listing_id": entry.get("listing_id"),
+        })
+    return nominations
+
+
 def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
     packet_now = _now_local()
     generated_at = packet_now.isoformat()
@@ -1841,6 +1864,7 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
         ),
         "watchouts": _watchouts(snapshot_payload, social_payload),
         "occasion_nominations": _build_occasion_nominations(load_json(OCCASION_INTEL_PATH, {})),
+        "build_next_nominations": _build_build_next_nominations(load_json(BUILD_NEXT_QUEUE_PATH, {})),
         "source_paths": {
             "social_posts": str(SOCIAL_POSTS_PATH),
             "social_rollups": str(SOCIAL_ROLLUPS_PATH),
@@ -1849,12 +1873,14 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
             "competitor_social_snapshot_history": str(COMPETITOR_SOCIAL_SNAPSHOT_HISTORY_PATH),
             "current_learnings": str(CURRENT_LEARNINGS_PATH),
             "occasion_intel": str(OCCASION_INTEL_PATH),
+            "build_next_queue": str(BUILD_NEXT_QUEUE_PATH),
         },
     }
     payload["summary"]["recommendation_count"] = len(payload["recommendations"])
     payload["summary"]["watchout_count"] = len(payload["watchouts"])
     payload["summary"]["change_focus_count"] = len(payload.get("change_focus") or [])
     payload["summary"]["occasion_nomination_count"] = len(payload.get("occasion_nominations") or [])
+    payload["summary"]["build_next_nomination_count"] = len(payload.get("build_next_nominations") or [])
     write_json(PACKET_STATE_PATH, payload)
     write_json(PACKET_OPERATOR_JSON_PATH, payload)
     write_markdown(PACKET_MD_PATH, render_weekly_strategy_recommendation_packet_markdown(payload))
@@ -1904,6 +1930,16 @@ def render_weekly_strategy_recommendation_packet_markdown(payload: dict[str, Any
                 f"Angle: {nom.get('messaging_angle')}")
             for product in (nom.get("top_products") or [])[:4]:
                 lines.append(f"  - {product.get('title')} (score {product.get('score')})")
+        lines.append("")
+
+    build_next_nominations = payload.get("build_next_nominations") or []
+    if build_next_nominations:
+        lines.extend(["## Build Next — Top Production Candidates", ""])
+        for nom in build_next_nominations:
+            why = (nom.get("why") or [""])[0]
+            lines.append(
+                f"- **{nom.get('title')}** (score {nom.get('score')}) — {why}")
+        lines.append("See /portal/intel/build-next for the full ranking and to promote.")
         lines.append("")
 
     lines.extend([

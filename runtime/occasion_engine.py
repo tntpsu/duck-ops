@@ -172,12 +172,22 @@ def build_occasion_intel(calendar: dict[str, Any], catalog: dict[str, Any], toda
     for occ in active:
         occ["products"] = select_products_for_occasion(occ, items)
         occ["product_count"] = len(occ["products"])
+    # 2026-06-12: classifier-coverage tripwire. The 04:00 sync once stripped
+    # theme_classification from every product — the selector silently
+    # degraded to keywords-only while the selection card stayed green
+    # (plausible output masked the dead primary signal). Expose coverage so
+    # the card can flag the degradation.
+    classified = sum(
+        1 for p in items.values()
+        if isinstance(p, dict) and isinstance(p.get("theme_classification"), dict)
+    )
     return {
         "generated_at": now_local_iso(),
         "today": today.isoformat(),
         "calendar_version": calendar.get("calendar_version"),
         "catalog_generated_at": catalog.get("generated_at"),
         "catalog_products_seen": len(items),
+        "classifier_coverage": classified,
         "active_occasions": active,
         "errors": errors,
     }

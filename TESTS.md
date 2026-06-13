@@ -464,6 +464,66 @@ Runtime: DUCK_EMAIL_DIGEST_MODE=1 in duckAgent/.env (Tier 3); com.philtullai.duc
 
 ---
 
+## Surface 0 (fix) — theme_classification strip regression (2026-06-12)
+
+Root cause: `flows/ops/steps.py` 04:00 sync rebuilt products_cache from Shopify and preserved only `theme_tags`+`ai_theme_category`, STRIPPING `theme_classification` every run (258 nulls in catalog_index). Compounded by post-categorize saves (`:1610`, `:1894`) overwriting freshly-written classifications with stale in-memory `products_out`. Effect: occasion selector silently ran keywords-only (classifier signal weight 3.0 dead) AND a full 258-product LLM re-classification fired daily (266 calls today, 1213 on Jun 11), discarded immediately.
+
+| Use case | Field preserved across rebuild | Falsy/null not copied | Merge-back after categorize | Non-dict tolerated | Tripwire surfaces |
+|---|---|---|---|---|---|
+| Sync preservation | ✅ test_sync_preserves_classification (theme_classification in PRESERVED list) | ✅ falsy existing not copied | ✅ _merge_cache_enrichment_into pulls disk→memory | ✅ None existing tolerated | n/a |
+| occasion_intel coverage | n/a | n/a | n/a | n/a | ✅ classifier_coverage counts classified; 0 on stripped catalog |
+| occasion selection card (duckAgent) | n/a | n/a | n/a | n/a | ✅ coverage==0+active→yellow "keywords-only"; absent key not flagged |
+| Cost attribution | n/a | n/a | n/a | n/a | ✅ classifier calls log flow=theme_classifier (was "unknown") |
+
+Manual (Tier 2, offered): one-time backfill `python src/main_agent.py --recategorize` (~$0.09, 258 calls) to repopulate the cache the strip emptied; fix makes it persist thereafter.
+
+## Surface 16 — Build-Next ranked queue (2026-06-12, matrix before code)
+
+One weekly answer to "what duck should we build next?": deterministic score = demand × margin × catalog-gap × occasion-fit over EXISTING state (competitor report, profit_per_product, catalog_index, occasion_intel). No new collection, no LLM in scorer. Promote routes into product_concept_queue; credits spent only on operator brief approval. Reuse-first (no duplication): competitor `ducks_to_build`/`trending_products`, profit title-join, occasion_intel direct read, product_concept feedback suppression contract, brief/quality-gate machinery, /inspector-page recipe, weekly-packet nomination slot.
+
+### 16.1 Scoring producer (build_next_engine.py)
+
+| Factor / path | Happy | Missing input degrades | Empty → [] not invented | Suppression | Isolation |
+|---|---|---|---|---|---|
+| Candidate assembly | ✅ union dedupe by listing_id | n/a | ✅ empty report → [] | n/a | n/a |
+| Demand | ✅ pool max-normalize | ✅ views+favorites fallback / zero pool | n/a | n/a | n/a |
+| Margin | ✅ confident title match→real % | ✅ no match→flagged median est / no data→neutral flagged | n/a | n/a | n/a |
+| Catalog gap | ✅ no overlap=full gap | n/a | n/a | ✅ high overlap→already-made suppressed | n/a |
+| Occasion fit | ✅ active kw hit→1.0 | ✅ no match→neutral evergreen | n/a | n/a | n/a |
+| build (all) | ✅ ranks, factors, reasons | ✅ missing profit+occasion degrade not crash | ✅ empty report→empty queue | ✅ already-made + operator-rejected | n/a |
+| Write | ✅ atomic | n/a | n/a | n/a | ✅ conftest redirect + DUCK_TEST_MODE guard + pollution audit |
+
+### 16.2 Portal page + loader (build_next_intel_page.py, _load_build_next_intel)
+
+| Use case | Happy | Missing state | Empty payload (registration) | Coverage-0 warning |
+|---|---|---|---|---|
+| Loader | ✅ surfaces top+coverage | ✅ available:false not crash | ✅ empty written file→queue_count 0 | n/a |
+| Page render | ✅ ranked queue+suppressed+Promote | ✅ "hasn't written" empty state | n/a | ✅ "classifier coverage 0" banner |
+
+### 16.3 Promote action (governance)
+
+| Use case | Records intent | Never spends credits | Idempotent | Off-policy fails closed | Requires title |
+|---|---|---|---|---|---|
+| _record_build_next_promotion | ✅ appends brief_source=build_next, status=pending | ✅ file-write only, no builder call (test) | ✅ dedupe per concept_key | n/a | ✅ ValueError on blank |
+| product_concept_queue ingest | ✅ promoted→ready_for_brief_review | ✅ approval still gates _run_duck_concept_builder | n/a | ✅ Tennessee Vols→blocked_by_guardrail | n/a |
+
+### 16.4 Two-card OS bracket (duckAgent viewer)
+
+| Card | Green | Yellow | Red | Registered (incl empty payload) |
+|---|---|---|---|---|
+| build_next_producer (input) | ✅ fresh+coverage ok | ✅ no state / coverage 0 / >9d | ✅ >16d | ✅ test_build_next_cards_registered + empty |
+| build_next_promotion_throughput (output) | ✅ converting | ✅ 5+ pending unconverted | n/a | ✅ same |
+
+### 16.5 Weekly packet nomination (Phase E)
+
+| Use case | Top-3 ranked | Empty queue | Malformed entries |
+|---|---|---|---|
+| _build_build_next_nominations | ✅ top 3 in rank order + why | ✅ {} / None / empty → [] | ✅ non-dict skipped |
+
+Runtime (Tier 3, NOT auto-installed — operator approval each): com.philtullai.duckops.build-next.weekly plist (Sun 07:00, after competitor weekly 06:30); product_concept_queue scheduled run ingests promotions.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
