@@ -295,11 +295,13 @@ The creative-loop incident exposed a class gap: `scheduler_health` answers "did 
 
 | Producer (job) | Empty/stale → RED | Fresh → green | Registered (incl. empty payload) |
 |---|---|---|---|
-| Shopify SEO surface (daily kickoff) | ✅ `test_listing_content_watchdogs.py::ShopifySeoReaderTests::test_37d_stale_is_red` (+ uses-newest-of-audit/outcomes) | ✅ `::test_fresh_is_green` | ✅ `CardRegistrationTests` (3 cards, incl. empty) |
+| Shopify SEO lane (parked-approval + staleness) | ✅ `test_listing_content_watchdogs.py::ShopifySeoReaderTests::test_parked_review_is_red_with_actionable_reason`, `::test_37d_stale_is_red` | ✅ `::test_fresh_is_green`, `::test_recent_pending_review_is_yellow` | ✅ `CardRegistrationTests` (3 cards, incl. empty) |
 | Shopify draft-activation (weekly) | ✅ `DraftActivationReaderTests::test_stale_is_red` | ✅ `::test_fresh_is_green` | ✅ same |
 | Content publish cadence — meme/jeepfact/GTDF | ✅ `ContentPublishReaderTests::test_one_stale_lane_is_red` (>17d), `::test_missing_lane_is_yellow` | ✅ `::test_all_fresh_is_green` (per-lane from posts.json + GTDF receipt dates) | ✅ same |
 
-**Live (2026-06-13):** 39 OS cards total. `shopify_seo_freshness`=RED (37d stale — real find), `shopify_draft_activation_freshness`=green (5.4d), `content_publish_cadence`=green (meme 5d / jeepfact 3d / GTDF 2.8d).
+**Root cause of the SEO red (diagnosed 2026-06-13):** NOT a broken job. `shopify_seo_kickoff.py` runs green daily but has a guard (`if latest_status == "awaiting_review": return skipped_open_review`) — it won't send a new category review while one is pending. A **May 8 "near-duplicate SEO titles" review (2 items) has sat `awaiting_review` for 37 days**, parking the whole lane. The SEO card now reads `shopify_seo_review/latest.json` status+age and gives an actionable "reply to unblock" message for a parked approval, falling back to audit/outcomes staleness only when none is pending. **Operator action:** action/dismiss that May 8 SEO email to resume the lane.
+
+**Live (2026-06-13):** 39 OS cards total. `shopify_seo_freshness`=RED (parked May-8 review, 37d), `shopify_draft_activation_freshness`=green (5.4d), `content_publish_cadence`=green (meme 5d / jeepfact 3d / GTDF 2.8d).
 
 **Now uncarded (accepted):** only fine-grained per-flow content QA beyond publish-cadence + outcomes; covered enough by the existing Thursday-funnel, meme-recently-used, and creative-outcome cards.
 
