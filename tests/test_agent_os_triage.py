@@ -220,3 +220,74 @@ class TriageAndRenderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GenericDrilldownTests(unittest.TestCase):
+    """2026-06-14: the tool used to only see top-level `_status` blocks and
+    only deep-dive the few cards with a bespoke JSONL analyzer. Now it reads
+    os_health.functions (the real card set) and every non-bespoke card gets a
+    generic drill-down from its evidence/state file or inline records."""
+
+    def test_select_reads_os_health_functions(self) -> None:
+        health = {"os_health": {"functions": [
+            {"id": "alpha_freshness", "status": "red", "status_reason": "boom"},
+            {"id": "beta_ok", "status": "green", "status_reason": "fine"},
+        ]}}
+        sel = dict(triage.select_areas(health, all_red=True))
+        self.assertIn("alpha_freshness", sel)
+        self.assertNotIn("beta_ok", sel)
+        self.assertEqual(sel["alpha_freshness"]["_status"], "red")
+
+    def test_select_dedups_card_and_legacy_block_and_merges_lists(self) -> None:
+        health = {
+            "os_health": {"functions": [
+                {"id": "scheduler_health", "status": "red", "status_reason": "6 bad"},
+            ]},
+            "scheduler_health": {"_status": "red", "items": [
+                {"job_name": "a", "status": "missed_run"},
+                {"job_name": "b", "status": "healthy"},
+            ]},
+        }
+        sel = dict(triage.select_areas(health, all_red=True))
+        # one entry, not two; the legacy items[] merged onto the card
+        self.assertEqual(sum(1 for k in sel if "scheduler" in k), 1)
+        self.assertIn("items", sel["scheduler_health"])
+
+    def test_inline_list_drilldown(self) -> None:
+        block = {"_status": "red", "items": [
+            {"status": "missed_run", "reason": "window passed"},
+            {"status": "missed_run", "reason": "window passed"},
+            {"status": "healthy"},
+        ]}
+        gd = triage._generic_drilldown(block)
+        self.assertTrue(gd["available"])
+        self.assertEqual(gd["kind"], "inline")
+        self.assertEqual(gd["statuses"]["status=missed_run"], 2)
+
+    def test_jsonl_evidence_drilldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "log.jsonl"
+            p.write_text("\n".join(json.dumps(r) for r in [
+                {"execution_state": "failed", "error": "row not found"},
+                {"execution_state": "failed", "error": "row not found"},
+                {"execution_state": "posted"},
+            ]), encoding="utf-8")
+            gd = triage._generic_drilldown({"_status": "red", "_state_path": str(p)})
+            self.assertTrue(gd["available"])
+            self.assertEqual(gd["kind"], "jsonl")
+            self.assertEqual(gd["errors"]["row not found"], 2)
+
+    def test_no_path_no_inline_is_unavailable(self) -> None:
+        gd = triage._generic_drilldown({"_status": "red", "_status_reason": "x"})
+        self.assertFalse(gd["available"])
+
+    def test_triage_area_attaches_generic_drilldown_for_nonbespoke(self) -> None:
+        block = {"_status": "red", "_status_reason": "boom",
+                 "items": [{"status": "missed_run"}]}
+        out = triage.triage_area("scheduler_health", block)
+        self.assertIn("generic_drilldown", out)
+        self.assertTrue(out["generic_drilldown"]["available"])
+
+
+if __name__ == "__main__":
+    unittest.main()

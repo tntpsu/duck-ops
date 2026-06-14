@@ -75,6 +75,34 @@ def _is_area(entry: Any) -> bool:
     return isinstance(entry, dict) and "_status" in entry
 
 
+def _candidate_blocks(health: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Every triageable card as (key → block): the os_health.functions cards
+    (the /portal/os set, keyed by id — the authoritative surface) PLUS any
+    legacy top-level `*_health` block not already covered. This is what fixes
+    the old gap where the tool only saw `_status`-stamped top-level blocks
+    and missed the 39 rendered cards."""
+    out: dict[str, dict[str, Any]] = {}
+    for card in (health.get("os_health") or {}).get("functions") or []:
+        if isinstance(card, dict) and card.get("id"):
+            out[str(card["id"])] = _normalize_card_to_block(card)
+    for key, block in health.items():
+        if not _is_area(block):
+            continue
+        # A legacy `*_health` block that matches a card (same key, e.g.
+        # scheduler_health, or `<id>_health`) is the card's richer payload —
+        # merge its list/dict fields (e.g. scheduler_health.items[] = the 6
+        # bad jobs) INTO the card block so the inline drill-down can use them,
+        # rather than listing it as a near-duplicate.
+        target = key if key in out else (key[:-7] if key.endswith("_health") and key[:-7] in out else None)
+        if target is not None:
+            for k, v in block.items():
+                if isinstance(v, (list, dict)) and k not in out[target]:
+                    out[target][k] = v
+            continue
+        out[key] = block
+    return out
+
+
 def select_areas(
     health: dict[str, Any],
     *,
@@ -82,23 +110,24 @@ def select_areas(
     all_red: bool = False,
     include_warn: bool = False,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Pick which areas to triage.
+    """Pick which cards to triage.
 
-    --area: a specific key, returned as-is even if green.
-    --all-red: every area with _status in {red, bad}.
-    --include-warn: also include _status in {warn, watch}.
+    --area: a specific card id / area key, returned as-is even if green.
+    --all-red: every card with status in {red, bad}.
+    --include-warn: also include {warn, watch, stale, yellow}.
     """
+    candidates = _candidate_blocks(health)
     if area:
-        block = health.get(area)
-        if not _is_area(block):
-            raise KeyError(f"No area named {area!r} in system_health.json")
+        block = candidates.get(area)
+        if block is None and _is_area(health.get(area)):
+            block = health[area]
+        if block is None:
+            raise KeyError(f"No card or area named {area!r} in system_health.json")
         return [(area, block)]
     red_statuses = {"red", "bad"}
-    warn_statuses = {"warn", "watch", "stale"}
+    warn_statuses = {"warn", "watch", "stale", "yellow"}
     selected: list[tuple[str, dict[str, Any]]] = []
-    for key, block in health.items():
-        if not _is_area(block):
-            continue
+    for key, block in candidates.items():
         status = str(block.get("_status") or "").lower()
         if all_red and status in red_statuses:
             selected.append((key, block))
@@ -169,6 +198,130 @@ def _classify_failure_mode(name: str) -> str:
     return "unknown"
 
 
+def _normalize_card_to_block(card: dict[str, Any]) -> dict[str, Any]:
+    """Normalize an os_health.functions card (status/status_reason/evidence)
+    into the legacy `_status`-keyed block shape triage_area expects, so the
+    same machinery handles both surfaces."""
+    block: dict[str, Any] = {
+        "_status": card.get("status"),
+        "_status_reason": card.get("status_reason"),
+        "_attention_subtype": card.get("attention_subtype"),
+        "_state_path": card.get("evidence"),
+    }
+    metrics = card.get("metrics")
+    if isinstance(metrics, dict):
+        for k, v in metrics.items():
+            if isinstance(v, (int, float, str, bool)):
+                block[k] = v
+    return block
+
+
+def _state_path_from_block(block: dict[str, Any]) -> Path | None:
+    """Find the evidence/state file a card points at — first an explicit
+    `_state_path`/`evidence`, then any path-looking string value."""
+    for field in ("_state_path", "evidence", "_receipts_dir", "_paths"):
+        val = block.get(field)
+        if isinstance(val, str) and val.strip():
+            return Path(val)
+    for val in block.values():
+        if isinstance(val, str) and ("/" in val) and (val.endswith(".json") or val.endswith(".jsonl")):
+            return Path(val)
+    return None
+
+
+_DRILLDOWN_STATUS_FIELDS = ("status", "execution_state", "outcome", "decision", "state")
+_DRILLDOWN_ERROR_FIELDS = ("error", "failure_reason", "error_message", "reason", "detail", "summary")
+_DRILLDOWN_LIST_FIELDS = ("items", "failures", "errors", "records", "jobs", "products", "results")
+
+
+def _record_breakdown(records: Iterable[Any], *, max_samples: int = 4) -> dict[str, Any]:
+    """Tally a list of record dicts by status-ish field, with error samples."""
+    statuses: Counter[str] = Counter()
+    errors: Counter[str] = Counter()
+    samples: list[str] = []
+    n = 0
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        n += 1
+        for sf in _DRILLDOWN_STATUS_FIELDS:
+            if rec.get(sf):
+                statuses[f"{sf}={str(rec[sf])[:40]}"] += 1
+                break
+        err = None
+        attempt = rec.get("attempt") if isinstance(rec.get("attempt"), dict) else {}
+        for ef in _DRILLDOWN_ERROR_FIELDS:
+            err = err or rec.get(ef) or attempt.get(ef)
+        if err:
+            errors[str(err)[:60]] += 1
+            if len(samples) < max_samples and str(err) not in samples:
+                samples.append(str(err)[:160])
+    return {"records": n, "statuses": dict(statuses.most_common(8)),
+            "errors": dict(errors.most_common(8)), "samples": samples}
+
+
+def _generic_drilldown(block: dict[str, Any], *, max_samples: int = 4) -> dict[str, Any]:
+    """Produce a failure-mode breakdown for ANY card (not just the few with a
+    bespoke analyzer):
+      - an INLINE list on the block (e.g. scheduler_health.items[]) → tally it
+      - the card's evidence .jsonl → tally recent records
+      - the card's evidence .json → tally an items[]-style list / error fields
+      - the card's evidence dir → list most recent files
+    Never raises."""
+    # 1. Inline records carried on the block itself (scheduler_health.items[]).
+    for cand in _DRILLDOWN_LIST_FIELDS:
+        recs = block.get(cand)
+        if isinstance(recs, list) and any(isinstance(r, dict) for r in recs):
+            bd = _record_breakdown(recs, max_samples=max_samples)
+            bd["list_field"] = cand
+            return {"available": True, "kind": "inline", "source": f"(inline {cand})", **bd}
+
+    path = _state_path_from_block(block)
+    if path is None:
+        return {"available": False, "reason": "card has no inline records or evidence/state path"}
+    try:
+        if not path.exists():
+            return {"available": False, "reason": f"state path not found: {path}"}
+        if path.is_dir():
+            files = sorted(path.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+            return {"available": True, "kind": "dir", "source": str(path),
+                    "file_count": len(files), "recent_files": [f.name for f in files[:max_samples]]}
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"available": False, "reason": f"could not read {path}: {exc}"}
+
+    if path.suffix == ".jsonl":
+        recs = []
+        for line in text.splitlines()[-400:]:
+            line = line.strip()
+            if line:
+                try:
+                    recs.append(json.loads(line))
+                except ValueError:
+                    continue
+        bd = _record_breakdown(recs, max_samples=max_samples)
+        return {"available": True, "kind": "jsonl", "source": str(path), **bd}
+
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        return {"available": False, "reason": f"unparseable json: {exc}", "source": str(path)}
+    list_field, records = None, []
+    if isinstance(data, dict):
+        for cand in _DRILLDOWN_LIST_FIELDS:
+            if isinstance(data.get(cand), list) and data[cand]:
+                list_field, records = cand, data[cand]
+                break
+    if records:
+        bd = _record_breakdown(records, max_samples=max_samples)
+        bd["list_field"] = list_field
+        return {"available": True, "kind": "json", "source": str(path), **bd}
+    top_errs = {k: str(v)[:160] for k, v in (data.items() if isinstance(data, dict) else [])
+                if any(w in k.lower() for w in ("error", "fail", "blocker", "reason")) and v}
+    return {"available": True, "kind": "json", "source": str(path),
+            "records": 0, "statuses": {}, "errors": top_errs, "samples": []}
+
+
 def triage_area(key: str, block: dict[str, Any]) -> dict[str, Any]:
     """Produce a structured triage dict for one area. The dict gets
     rendered to markdown by render_brief; keeping the structured form
@@ -205,6 +358,10 @@ def triage_area(key: str, block: dict[str, Any]) -> dict[str, Any]:
                     if cat not in cats:
                         cats.append(cat)
                 out["fix_categories"] = cats
+    # Generic fallback: any card without a bespoke analyzer still gets a
+    # real drill-down from its evidence/state file.
+    if not (out["jsonl_tally"] and out["jsonl_tally"].get("available")):
+        out["generic_drilldown"] = _generic_drilldown(block)
     return out
 
 
@@ -254,6 +411,29 @@ def render_brief(triage: dict[str, Any]) -> str:
             lines.append("")
     elif tally:
         lines.append(f"_Evidence log: {tally.get('reason')}_")
+        lines.append("")
+    gd = triage.get("generic_drilldown")
+    if gd and gd.get("available"):
+        lines.append(f"### Evidence drill-down — `{gd.get('source')}`")
+        if gd.get("kind") == "dir":
+            lines.append(f"- {gd.get('file_count')} file(s); most recent: {', '.join(gd.get('recent_files') or []) or '(none)'}")
+        else:
+            if gd.get("records"):
+                lines.append(f"_Broke down {gd['records']} record(s)" + (f" from `{gd['list_field']}`" if gd.get("list_field") else "") + "._")
+            if gd.get("statuses"):
+                lines.append("**By status:**")
+                for name, count in gd["statuses"].items():
+                    lines.append(f"- `{name}` × {count}")
+            if gd.get("errors"):
+                lines.append("**By error:**")
+                for name, count in gd["errors"].items():
+                    suffix = f" × {count}" if isinstance(count, int) else f" = {count}"
+                    lines.append(f"- `{name}`{suffix}")
+            for s in gd.get("samples") or []:
+                lines.append(f"  - sample: `{s}`")
+        lines.append("")
+    elif gd and not gd.get("available"):
+        lines.append(f"_Evidence drill-down unavailable: {gd.get('reason')}_")
         lines.append("")
     if triage.get("fix_categories"):
         lines.append(f"**Fix categories:** {', '.join(triage['fix_categories'])}")
