@@ -305,6 +305,12 @@ The creative-loop incident exposed a class gap: `scheduler_health` answers "did 
 
 **Now uncarded (accepted):** only fine-grained per-flow content QA beyond publish-cadence + outcomes; covered enough by the existing Thursday-funnel, meme-recently-used, and creative-outcome cards.
 
+### 9.2 — Email-gated approvals strand silently (2026-06-13 operator finding)
+
+The operator deletes most email; deleting an approval email does NOT change the workflow state, so any lane whose only resolution is an email reply parks forever. Confirmed via the Shopify SEO incident (May-8 review deleted → lane parked 37d) and a full audit of approval lanes. **HIGH-risk (email-only) lanes:** Shopify SEO, Shopify draft-activation, GTDF/Thursday, New Duck activation; occasion tags are CLI-only (also portal-invisible). **LOW-risk (already portal-actionable on `/portal/decisions`):** meme, jeepfact, weekly_sale, reviews, review replies, operator/trend reviews, Build-Next promote (the gateway flows). See memory `[[email-to-portal-inversion]]`.
+
+**Shipped (Slice 1 — visibility):** `viewer_data._parked_approval_decision_items` surfaces stale (>10d) pending Shopify SEO + draft-activation reviews in the Decision Inbox as read-only items, so a stranded approval is no longer invisible. Tests: `test_parked_approval_inbox.py` (stale surfaces / fresh doesn't / resolved doesn't / missing-file no-raise / inbox integration). **Deferred (Slice 2 — task 222, browser-tested):** one-click portal Dismiss/Apply buttons — the Decision Inbox detail flow is coupled to creative runs (`/api/runs/<id>`), so the button needs new detail-routing JS + click-testing; Apply reuses the email executors (Tier 3).
+
 ---
 
 ## Surface 10 — LLM spend observability page + soft alert (2026-06-06, in flight)
