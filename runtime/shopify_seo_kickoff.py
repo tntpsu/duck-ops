@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,29 @@ from shopify_seo_review import (
 
 SEO_AUDIT_PATH = DUCK_OPS_ROOT / "state" / "shopify_seo_audit.json"
 SEO_REVIEW_LATEST_PATH = DUCK_OPS_ROOT / "state" / "shopify_seo_review" / "latest.json"
+
+# The daily kickoff reuses a CACHED audit and only rebuilds it when forced,
+# so without a cadence the snapshot silently drifts (it hit 37 days). Refresh
+# weekly: fresh enough to reflect recent listing edits, infrequent enough to
+# not hit the Shopify API for a near-identical analysis every day.
+SEO_AUDIT_MAX_AGE_DAYS = 7.0
+
+
+def _audit_age_days() -> float | None:
+    payload = _load_json(SEO_AUDIT_PATH, {})
+    if not isinstance(payload, dict) or not payload:
+        return None
+    raw = payload.get("generated_at")
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return (datetime.now(dt.tzinfo) - dt).total_seconds() / 86400.0
+
+
+def _audit_is_stale(max_age_days: float = SEO_AUDIT_MAX_AGE_DAYS) -> bool:
+    age = _audit_age_days()
+    return age is None or age > max_age_days
 
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -39,6 +63,16 @@ def _load_audit_payload(*, force_audit: bool) -> dict[str, Any]:
 
 
 def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
+    # Keep the audit fresh on a weekly cadence regardless of review state.
+    # Done at the top (before the parked-review early returns) so a
+    # long-parked review can't let the snapshot drift either. build_*
+    # persists shopify_seo_audit.json, which is what the freshness card
+    # reads, so this also clears the "audit N days stale" yellow.
+    audit_refreshed = False
+    if force_audit or _audit_is_stale():
+        build_shopify_seo_audit()
+        audit_refreshed = True
+
     latest_review = _load_latest_review()
     latest_status = str(latest_review.get("status") or "").strip().lower()
     latest_run_id = str(latest_review.get("run_id") or "").strip() or None
@@ -60,7 +94,8 @@ def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
             "category_label": latest_label,
         }
 
-    audit_payload = _load_audit_payload(force_audit=force_audit)
+    # Audit already (re)built above when forced/stale, so read the cache.
+    audit_payload = _load_audit_payload(force_audit=False)
     next_category = _next_issue_category(None, audit_payload)
     if not next_category:
         return {

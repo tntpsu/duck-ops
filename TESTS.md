@@ -614,6 +614,8 @@ Operator asked "anything still red in OS?" — five fixes from the sweep:
 | etsy trend cause | ✅ auth_error/rate_limited red + named | n/a | ✅ clean empty ≠ auth red | n/a |
 | thursday strand | ✅ workflow_decision item built | ✅ dismiss → transition dismissed | ✅ fresh/resolved/lane excluded; bad action/lane rejected | ✅ item+button @390px |
 
+**SEO audit cadence (2026-06-14, follow-up):** operator asked "when does SEO run?" — the daily 07:35 kickoff reused a CACHED audit and only rebuilt on `--force-audit`, so the snapshot drifted to 37d (the real reason for the persistent SEO-freshness yellow). `shopify_seo_kickoff.kickoff_shopify_seo_review` now rebuilds the audit when it's older than `SEO_AUDIT_MAX_AGE_DAYS` (7d), at the top of the function so even a long-parked review can't let it drift. Card-messaging cards (sale-monitor threshold, SEO action text) were the symptom; this is the root cause. One-off `build_shopify_seo_audit()` run refreshed it now (107 actionable resources → card green). Tests: `test_shopify_seo_kickoff.py::AuditFreshnessGateTests` (stale rebuilds even with review open; fresh doesn't; 7d boundary). Review-flow tests patched to default the gate off.
+
 ---
 
 ## Process note (this is the first matrix; previous work shipped without one)
