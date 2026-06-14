@@ -31,9 +31,16 @@ def now_local_iso() -> str:
 
 
 def load_json(path: Path, default: Any) -> Any:
+    # Treat an unreadable/malformed file the same as a missing one. A
+    # producer writing a sibling state file can be observed mid-write as
+    # empty/partial; a governance review that only reads these to report
+    # freshness must not crash the whole run on that transient race.
     if not path.exists():
         return default
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError, OSError):
+        return default
 
 
 def write_json(path: Path, payload: Any) -> None:

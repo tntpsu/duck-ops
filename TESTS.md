@@ -597,6 +597,25 @@ Card registration: test_card_registered_red + test_card_registered_on_empty_payl
 
 ---
 
+## Surface 19 — OS red/yellow sweep fixes (2026-06-14)
+
+Operator asked "anything still red in OS?" — five fixes from the sweep:
+
+1. **llm_cost_dashboard pricing (duckAgent)** — the viewer-side `_LLM_MODEL_PRICING_USD_PER_1M` had no image models, so 12 image calls (gpt-image-2/dall-e-3) were unpriced → card yellow. Added `_LLM_IMAGE_COST_USD` + `_llm_entry_cost_usd` per-call image handling (parallel to the duck-ops `PER_CALL_IMAGE_COST_USD` fix in Surface 10). Tests: `test_llm_cost_dashboard_pricing.py` (gpt-image-2 / dall-e-3 priced; text still token-priced; genuinely-unknown model still None).
+2. **scheduler_health false alarms** — 4 weekly governance jobs (competitor_benchmark, data_model/documentation governance, reliability_review) + business_digest_monday showed "missed" because they last ran before the 2026-06-12 receipt mechanism (or hadn't hit their day). Generated first receipts via the wrapper → 0 bad. business_digest_monday: runs=0 was just "hasn't hit a Monday since install" (next fire Mon), not broken.
+3. **load_json crash on write-race (duck-ops)** — `governance_review_common.load_json` defaulted on a missing file but crashed (`JSONDecodeError`) on an empty/partial sibling file observed mid-write by another producer; `data_model_governance_weekly` died this way. Now treats unreadable/malformed as absent. Tests: `test_governance_review_common.py` (empty/partial/valid).
+4. **Etsy trend failure cause (duckAgent)** — `trend_intel_freshness` only GUESSED "credential failure" on 0 signals. The tracker now records classified `api_errors` (auth/rate_limit/timeout/api_error) and exposes `api_error_summary()`; `flows/ops/steps.py` writes the real `_status` (auth_error names a key to renew vs a clean `empty`); the card flags any non-ok status red. Tests in `test_trend_intel_card.py::FailureCauseTests`.
+5. **Thursday/weekly choose-final on /portal/decisions (duckAgent)** — stranded `workflow_control` awaiting_review records (choose-final emailed, email deleted) now surface as `workflow_decision` Decision-Inbox items with a Dismiss action (dismiss → duck-ops `record_workflow_transition(state="dismissed")` un-parks the lane; no Etsy/Shopify mutation). email-to-portal inversion. Tests: `test_workflow_decision_inbox.py` (item builder stale/fresh/resolved/lane filters; dismiss handler calls transition with dismissed state; rejects bad action/lane). Browser-verified: item + Dismiss button render on /portal/decisions @390px.
+
+| Use case | Detect/Surface | Action | Negative/guard | UI verified |
+|---|---|---|---|---|
+| cost image pricing | ✅ gpt-image-2/dall-e-3 priced | n/a | ✅ unknown model still None | n/a |
+| governance load_json | ✅ empty/partial → default | n/a | ✅ valid JSON still loads | n/a |
+| etsy trend cause | ✅ auth_error/rate_limited red + named | n/a | ✅ clean empty ≠ auth red | n/a |
+| thursday strand | ✅ workflow_decision item built | ✅ dismiss → transition dismissed | ✅ fresh/resolved/lane excluded; bad action/lane rejected | ✅ item+button @390px |
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
