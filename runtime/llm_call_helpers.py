@@ -60,6 +60,7 @@ MODEL_PRICING_USD_PER_1M_TOKENS = {
 # page would underestimate creative-flow spend by an order of magnitude.
 PER_CALL_IMAGE_COST_USD = {
     "gpt-image-1": 0.040,           # ~$0.04 per 1024x1024 standard quality
+    "gpt-image-2": 0.040,           # next-gen gpt-image; same flat estimate until OpenAI publishes rates
     "dall-e-3": 0.040,              # ~$0.04 per 1024x1024 standard
     "dall-e-3-hd": 0.080,           # ~$0.08 per 1024x1024 HD
 }

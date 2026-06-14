@@ -333,6 +333,8 @@ The operator deletes most email; deleting an approval email does NOT change the 
 
 **Coverage target:** ~10 unit tests + 2 manual smoke. Page banner explicitly says "instrumented spend — duckAgent creative flows not yet logged" so the operator never mistakes partial coverage for total coverage.
 
+**Pricing-gap regression (2026-06-14):** operator flagged the Cost card "looked wrong" ($1.05/30d). Two findings: (1) **real bug** — the prod log uses model `gpt-image-2` but `PER_CALL_IMAGE_COST_USD` only listed `gpt-image-1`, so 6 real image calls fell through to `unknown_model` = $0 (the `unknown_model_count: 6`); added `gpt-image-2` to the table → total $1.05 → $1.29, uncosted 6 → 0. Regression test `test_llm_cost_summary.py::AggregateHappyPathTests::test_gpt_image_2_is_priced_not_uncosted`. (2) **misleading headline** — the OS Desk tile (`costIntelSummary` in duckAgent viewer.py) read like a full provider bill; reworded to "Partial floor — duck-ops text + logged images only, not your full provider bill" and now surfaces the uncosted-call count when `unknown_model_count`+`no_pricing_count` > 0.
+
 **Known scope cuts (Scope A, intentional):**
 - No hard ceiling / auto-stop. Operator chose observability-first (`continue` on 2026-06-06 after the un-bundling question).
 - No spend-by-customer / spend-by-product breakdown. Spend is by flow/model only.

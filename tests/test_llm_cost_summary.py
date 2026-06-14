@@ -153,6 +153,21 @@ class AggregateHappyPathTests(unittest.TestCase):
         # 3 images × $0.04 = $0.12
         self.assertAlmostEqual(summary["totals"]["cost_usd"], 0.12, places=4)
 
+    def test_gpt_image_2_is_priced_not_uncosted(self) -> None:
+        """Regression (2026-06-14): the prod log uses model 'gpt-image-2'
+        but the price table only had 'gpt-image-1', so 6 real image calls
+        were counted as $0 (unknown_model). gpt-image-2 must be priced."""
+        _write_log(self.log, [
+            {"at": "2026-06-06T10:00:00-04:00",
+             "artifact_id": "publish::meme::2026-06-06::m1",
+             "provider": "openai", "model": "gpt-image-2",
+             "kind": "image", "image_count": 1},
+        ])
+        summary = aggregate_llm_costs(log_path=self.log,
+                                      now_iso="2026-06-06T18:00:00-04:00")
+        self.assertAlmostEqual(summary["totals"]["cost_usd"], 0.04, places=4)
+        self.assertEqual(summary["totals"]["unknown_model_count"], 0)
+
 
 class AggregateEmptyAndMalformedTests(unittest.TestCase):
     def setUp(self) -> None:
