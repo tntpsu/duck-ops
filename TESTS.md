@@ -583,6 +583,18 @@ A token-overlap "concept identity" patch was tried and **REVERTED**: it caught c
 
 ---
 
+## Surface 18 — Etsy review-reply auth detection card + one-button re-auth (2026-06-14)
+
+Operator-recurring: the review-reply Playwright login (`esd` storage-state) expires / gets rate-limit-blocked periodically (memory `etsy-review-reply-reauth`). The dead-login signal used to live only in an email alert the operator deletes, so the lane silently stalled (the 7-week Etsy review-reply outage was this, not the selectors). Card `etsy_review_auth` (duckAgent `viewer.py::_load_etsy_review_auth_health`) reads `state/review_reply_execution_auth.json` and goes RED on `auth_status` blocked/errored or `last_error`, YELLOW when the saved login is >21d old, GREEN otherwise. When non-green it carries an `action_button` descriptor; the `/portal/os` page renders a **Re-authenticate Etsy** button (`wireCardActionButtons`) that POSTs `/api/etsy-review-auth/reauth`. The handler (`_handle_etsy_review_reauth`) spawns `duck-ops/runtime/reauth_etsy_review.py` detached: it opens the headed `esd` window at the public shop reviews URL, polls ≤5min for login, then `state-save`s `esd.json` + flips the auth metadata healthy. Read-only w.r.t. reviews (opens a login window only; never clicks reply/submit). Tier-3 browser action whose authorization IS the operator's per-press click.
+
+| Use case | RED detect | YELLOW nudge | GREEN | Button present | Launch handler | Metadata flip |
+|---|---|---|---|---|---|---|
+| review-reply auth | ✅ test_blocked_is_red / test_last_error_is_red | ✅ test_stale_login_is_yellow (>21d) + test_missing_is_yellow | ✅ test_fresh_healthy_is_green | ✅ test_red_card_carries_reauth_button (endpoint `/api/etsy-review-auth/reauth`) / test_green_card_has_no_button | ✅ test_launch_spawns_and_seeds_status (Popen mocked — no browser in CI), test_missing_script_raises | ✅ mark_auth_healthy smoke: blocked+last_error → healthy/None, storage saved |
+
+Card registration: test_card_registered_red + test_card_registered_on_empty_payload (empty-payload registration per memory `loader-and-registration-both-need-tests`). All in duckAgent `tests/test_etsy_review_auth_card.py` (11 tests). **Not browser-tested:** the red-state button's live visual (forcing red would pollute prod state / burn an Etsy window) — covered by the unit path instead.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
