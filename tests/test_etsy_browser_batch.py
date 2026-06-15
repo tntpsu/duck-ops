@@ -246,6 +246,52 @@ class EtsyBrowserBatchTests(unittest.TestCase):
         self.assertEqual(result["status"], "paced_out")
         self.assertEqual(result["failed"], 0)
 
+    def test_per_thread_pacing_deferrals_reclassified_as_paced_out(self) -> None:
+        # run_refresh swallows the deferral per-thread and returns status=failed
+        # with pacing reasons. Those must NOT redden the slot.
+        run_refresh_result = {
+            "status": "failed", "attempted": 2, "refreshed": 0, "failed": 2,
+            "failed_items": [
+                {"reason": "Etsy read command deferred: 14/18 pacing slots used; reserving the last 4 for review-reply posts."},
+                {"reason": "Etsy read command deferred: 14/18 pacing slots used; reserving the last 4 for review-reply posts."},
+            ],
+        }
+        with mock.patch.object(etsy_browser_batch.customer_inbox_refresh, "run_refresh", return_value=run_refresh_result):
+            result = etsy_browser_batch._run_customer_read_batch(
+                {"customer_read": {"enabled": True}}, {"window_start": None, "window_end": None},
+            )
+        self.assertEqual(result["status"], "paced_out")
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["paced_out_count"], 2)
+
+    def test_hard_cooldown_runtimeerror_is_paced_out_not_raised(self) -> None:
+        with mock.patch.object(
+            etsy_browser_batch.customer_inbox_refresh, "run_refresh",
+            side_effect=RuntimeError("Etsy automation is cooling down until 2026-06-15T10:11:51 because: rate_limit_preemptive_cooldown"),
+        ):
+            result = etsy_browser_batch._run_customer_read_batch(
+                {"customer_read": {"enabled": True}}, {"window_start": None, "window_end": None},
+            )
+        self.assertEqual(result["status"], "paced_out")
+
+    def test_genuine_read_failure_stays_failed(self) -> None:
+        run_refresh_result = {
+            "status": "failed", "attempted": 1, "refreshed": 0, "failed": 1,
+            "failed_items": [{"reason": "Selector #thread not found on page"}],
+        }
+        with mock.patch.object(etsy_browser_batch.customer_inbox_refresh, "run_refresh", return_value=run_refresh_result):
+            result = etsy_browser_batch._run_customer_read_batch(
+                {"customer_read": {"enabled": True}}, {"window_start": None, "window_end": None},
+            )
+        self.assertEqual(result["status"], "failed")
+
+    def test_overall_status_treats_paced_out_as_non_failing(self) -> None:
+        status = etsy_browser_batch._overall_status(
+            {"status": "paced_out"}, {"status": "completed"}, {"status": "idle"},
+        )
+        self.assertNotEqual(status, "failed")
+        self.assertEqual(status, "completed")
+
     def test_run_slot_records_failed_receipt_when_customer_read_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

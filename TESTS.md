@@ -683,6 +683,14 @@ Decision-type semantics: **approve** = adopt the keyword-suggested category; **k
 
 **Observability:** the existing `review_reply_throughput` OS card (Surface 5, duckAgent) already goes RED on "N approved / 0 posted" over 14d and a cooldown-blocked drain writes no per-item receipt → the stall stays visible. No card schema change; verify it still fires post-fix. **Tier:** code is Tier-2 (queue logic + ordering); the actual drain/post run is Tier-3 (operator-triggered, unchanged). One-shot backlog recovery of the ~3 fresh June-9 `failed` items happens organically on the next drain under the same gates.
 
+**Live-run follow-up (2026-06-15 15:27 afternoon window).** All three fixes fired in prod: no cooldown, drain-first, and `requeue_recoverable_failed` recovered 3 in-window items (June-2 + two June-8). The drain then **attempted a post** (first real attempt since the outage) — it failed with `review_row_transaction_mismatch` (genuine Etsy transaction_id drift on the 13-day item), correctly excluded from re-recovery so no loop. One side effect surfaced: the budget reservation deferred the customer-inbox reads, but `run_refresh` swallows the `PacingReservationError` per-thread (marks threads `failed`), so the slot went RED on an *intentional* throttle. Fix: `_run_customer_read_batch` now reclassifies a result whose failures are ALL pacing/cooldown throttles to `status="paced_out"` (non-failing in `_overall_status`); also catches a propagating cooldown `RuntimeError`.
+
+| Use case | Happy | Throttle (deferral) | Throttle (cooldown) | Genuine failure |
+|---|---|---|---|---|
+| Customer-read pacing reclassification | ✅ `test_etsy_browser_batch.py::test_overall_status_treats_paced_out_as_non_failing` | ✅ `::test_per_thread_pacing_deferrals_reclassified_as_paced_out` + `::test_customer_read_pacing_refusal_is_not_a_slot_failure` (propagating) | ✅ `::test_hard_cooldown_runtimeerror_is_paced_out_not_raised` | ✅ `::test_genuine_read_failure_stays_failed` (non-pacing reason still RED) |
+
+Open question pending the 20:11 evening window: whether the two 7-day June-8 items post or also drift. If they drift, tighten the recovery freshness window (~7d) since old-review recovery is futile against Etsy ID drift — the durable win is prompt posting of *new* reviews (now unblocked).
+
 ---
 
 ## Process note (this is the first matrix; previous work shipped without one)

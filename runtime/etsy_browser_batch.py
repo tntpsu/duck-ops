@@ -460,6 +460,22 @@ def _review_reply_policy_override(config: dict[str, Any]) -> dict[str, Any]:
     return policy
 
 
+_PACING_THROTTLE_MARKERS = (
+    "pacing slots used",
+    "reserving the last",
+    "read command deferred",
+    "cooling down",
+    "rate_limit",
+)
+
+
+def _is_pacing_throttle(text: str) -> bool:
+    """True when an error/reason string is an intentional pacing throttle
+    (reservation deferral or preemptive cooldown), not a real sync fault."""
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in _PACING_THROTTLE_MARKERS)
+
+
 def _run_customer_read_batch(config: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
     customer_cfg = config.get("customer_read") or {}
     if not bool(customer_cfg.get("enabled", True)):
@@ -472,8 +488,9 @@ def _run_customer_read_batch(config: dict[str, Any], target: dict[str, Any]) -> 
     end_hour = int(window_end.hour if window_end is not None else 23)
     end_minute = int(window_end.minute if window_end is not None else 59)
 
+    paced_message = "Customer-inbox reads paced out to reserve Etsy budget for review-reply posts."
     try:
-        return customer_inbox_refresh.run_refresh(
+        result = customer_inbox_refresh.run_refresh(
             limit=int(customer_cfg.get("max_threads_per_session") or 2),
             include_waiting=bool(customer_cfg.get("include_waiting", False)),
             skip_outside_hours=False,
@@ -483,9 +500,32 @@ def _run_customer_read_batch(config: dict[str, Any], target: dict[str, Any]) -> 
             end_minute=end_minute,
         )
     except PacingReservationError as exc:
-        # Reads were paced out so posting budget stayed reserved. Not a slot
+        # Reservation deferred reads to preserve posting budget. Not a slot
         # failure — the drain (which runs first) already had its budget.
         return {"status": "paced_out", "attempted": 0, "refreshed": 0, "failed": 0, "message": str(exc)}
+    except RuntimeError as exc:
+        # A hard preemptive cooldown is a throttle, not a sync fault.
+        if _is_pacing_throttle(str(exc)):
+            return {"status": "paced_out", "attempted": 0, "refreshed": 0, "failed": 0, "message": str(exc)}
+        raise
+
+    # run_refresh swallows per-thread pacing deferrals and marks the thread
+    # failed, so the deferral never reaches the except above. If EVERY failure
+    # is a pacing/cooldown throttle (reads deprioritized to protect posts) and
+    # nothing genuinely failed, report paced_out so an intentional throttle
+    # doesn't redden the slot.
+    if isinstance(result, dict) and str(result.get("status") or "") in {"failed", "error"}:
+        failed_items = result.get("failed_items") or []
+        reasons = [str((it or {}).get("reason") or (it or {}).get("error") or "") for it in failed_items]
+        if reasons and all(_is_pacing_throttle(r) for r in reasons):
+            paced = dict(result)
+            paced["status"] = "paced_out"
+            paced["paced_out"] = True
+            paced["paced_out_count"] = len(failed_items)
+            paced["failed"] = 0
+            paced["message"] = paced_message
+            return paced
+    return result
 
 
 def _run_review_reply_batch(config: dict[str, Any]) -> dict[str, Any]:
