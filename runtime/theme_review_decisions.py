@@ -114,6 +114,7 @@ def record_theme_review_decision(
     suggested_category: str | None = None,
     flag_reason: str = "",
     taxonomy_version_at_decision: int | None = None,
+    input_hash_at_decision: str | None = None,
     source_artifact_id: str = "",
     path: Path | None = None,
 ) -> dict[str, Any]:
@@ -150,6 +151,7 @@ def record_theme_review_decision(
         "suggested_category": (str(suggested_category).strip() if suggested_category else None),
         "flag_reason": str(flag_reason or "").strip(),
         "taxonomy_version_at_decision": taxonomy_version_at_decision,
+        "input_hash_at_decision": (str(input_hash_at_decision).strip() if input_hash_at_decision else None),
         "recorded_at": _now_iso(),
         "source_artifact_id": str(source_artifact_id or f"operator::theme-review::{handle}::{_now_iso()[:10]}"),
     }
