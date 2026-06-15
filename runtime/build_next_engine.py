@@ -70,11 +70,18 @@ NEUTRAL_MARGIN = 0.6
 NEUTRAL_OCCASION = 0.6
 
 # Tokens that carry no discriminating signal for duck concepts.
+# 2026-06-15: the car-accessory boilerplate (car/decor/decoration/vehicle/
+# accessory/cruise/holder/buddy/decal/dash) is just as generic in this niche
+# as "duck"/"dashboard" — leaving it in made our "Owl Duck" {owl,car,decor}
+# falsely match ANY competitor with car+decor at 67% (18/20 bogus
+# suppressions). Strip it so the token fallback isn't broken either.
 _STOPWORDS = {
     "duck", "ducks", "ducky", "3d", "3dprinted", "printed", "printing", "print",
-    "figure", "figurine", "toy", "gift", "gifts", "for", "the", "and", "with",
-    "a", "an", "of", "to", "dashboard", "ducking", "jeep", "rubber", "collectible",
-    "collectibles", "novelty", "custom", "personalized", "cute", "mini", "small",
+    "figure", "figurine", "figurines", "toy", "gift", "gifts", "for", "the", "and", "with",
+    "a", "an", "of", "to", "dashboard", "dash", "ducking", "jeep", "rubber", "collectible",
+    "collectibles", "collectable", "novelty", "custom", "personalized", "cute", "mini", "small",
+    "car", "cars", "vehicle", "decor", "decoration", "decorations", "accessory", "accessories",
+    "cruise", "holder", "buddy", "decal", "ornament", "lover", "fans", "fan", "collector", "collectors",
 }
 
 
@@ -287,6 +294,83 @@ def _feedback_suppressed_keys(feedback: dict[str, Any]) -> set[str]:
     return keys
 
 
+# --------------------------------------------------------------------------
+# Semantic catalog matching (2026-06-15) — primary "already made" + margin
+# signal, reusing duckAgent's semantic_dedupe embeddings. The token method
+# above is the deterministic fallback when embeddings are unavailable.
+# --------------------------------------------------------------------------
+
+_SEMANTIC_HARD_BAND = "already_made"
+_ON_BRAND_TOKENS = {"duck", "ducks", "ducky", "dashboard", "dash", "jeep"}
+
+
+def _is_on_brand(title: str) -> bool:
+    """A trending competitor product is on-brand only if it reads as a
+    duck/dashboard item. ducks_to_build candidates are pre-vetted; this gates
+    the unfiltered trending_products union so generic high-engagement junk
+    (a Pizza Fidget Toy) can't top the ranking."""
+    low = str(title or "").lower()
+    return any(tok in re.split(r"[^a-z0-9]+", low) for tok in _ON_BRAND_TOKENS)
+
+
+def _semantic_classify(candidate_titles: list[str], catalog_titles: list[str],
+                       *, embed_fn=None) -> dict[str, dict[str, Any]]:
+    """{title: {match, score, band}} via duckAgent semantic_dedupe, or {} on
+    any failure (graceful — caller degrades to the token method). One cached
+    embedding call. Self-loads duckAgent/.env so the OpenAI key is present
+    even when invoked from a duck-ops producer."""
+    if not candidate_titles or not catalog_titles:
+        return {}
+    import sys as _sys
+    helpers_dir = str(DUCK_AGENT_ROOT)
+    if helpers_dir not in _sys.path:
+        _sys.path.insert(0, helpers_dir)
+    try:
+        if embed_fn is None and not os.getenv("OPENAI_API_KEY"):
+            try:
+                from dotenv import load_dotenv  # type: ignore
+                load_dotenv(DUCK_AGENT_ROOT / ".env", override=False)
+            except Exception:
+                pass
+        from helpers import semantic_dedupe as _sd  # type: ignore
+        cfg = _sd.load_config()
+        kw = {"embed_fn": embed_fn} if embed_fn is not None else {}
+        catalog_vectors = _sd.build_catalog_vectors(catalog_titles, cfg, **kw)
+        return _sd.classify_competitors(candidate_titles, catalog_vectors, cfg, **kw)
+    except Exception:
+        return {}
+
+
+def _catalog_margin_map(catalog_items: dict[str, Any], profit: dict[str, Any]) -> dict[str, float]:
+    """{normalized catalog title -> margin_pct} for confident-margin products,
+    joining profit_per_product `title_variants` to catalog titles. Lets the
+    semantic catalog-match yield a real per-candidate margin instead of the
+    flat global-median fallback."""
+    cat_norm = {}
+    for v in catalog_items.values():
+        if isinstance(v, dict) and v.get("title"):
+            cat_norm[_norm_title(v["title"])] = v["title"]
+    # Keyed by NORMALIZED catalog title so the semantic match (which returns
+    # one exact title string) joins even across punctuation/variant differences.
+    out: dict[str, float] = {}
+    for p in profit.get("products") or []:
+        if not isinstance(p, dict) or not p.get("is_confident_margin"):
+            continue
+        margin = p.get("margin_pct")
+        if not isinstance(margin, (int, float)) or isinstance(margin, bool):
+            continue
+        for tv in (p.get("title_variants") or [p.get("label")]):
+            n = _norm_title(tv)
+            if n in cat_norm:
+                out[n] = float(margin)
+                break
+    return out
+
+
+def _norm_title(s: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()
+
+
 def build_build_next_queue(*,
                            report: dict[str, Any],
                            report_name: str | None,
@@ -294,15 +378,27 @@ def build_build_next_queue(*,
                            profit: dict[str, Any],
                            occasion_intel: dict[str, Any],
                            feedback: dict[str, Any],
-                           top_n: int = TOP_N) -> dict[str, Any]:
+                           top_n: int = TOP_N,
+                           semantic_map: dict[str, dict[str, Any]] | None = None,
+                           embed_fn=None) -> dict[str, Any]:
     catalog_items = catalog.get("items") if isinstance(catalog.get("items"), dict) else {}
     catalog_sets = _catalog_token_sets(catalog_items)
     margin_pairs, median_margin = _margin_index(profit)
+    catalog_margin = _catalog_margin_map(catalog_items, profit)
     active_occasions = [o for o in occasion_intel.get("active_occasions") or [] if isinstance(o, dict)]
     suppressed_keys = _feedback_suppressed_keys(feedback)
 
     candidates = assemble_candidates(report)
     pool_max = max((_demand_strength(c) for c in candidates), default=0.0)
+
+    # Semantic catalog match (primary). Computed once (one cached embedding
+    # call); {} when embeddings are unavailable, in which case every lookup
+    # below falls through to the deterministic token method.
+    if semantic_map is None:
+        catalog_titles = [v["title"] for v in catalog_items.values()
+                          if isinstance(v, dict) and v.get("title")]
+        cand_titles = [str(c.get("title") or "").strip() for c in candidates if c.get("title")]
+        semantic_map = _semantic_classify(cand_titles, catalog_titles, embed_fn=embed_fn)
     classifier_coverage = sum(
         1 for p in catalog_items.values()
         if isinstance(p, dict) and isinstance(p.get("theme_classification"), dict)
@@ -316,16 +412,38 @@ def build_build_next_queue(*,
         if not cand_tokens:
             continue
 
+        sem = semantic_map.get(title) if semantic_map else None
+        sources = cand.get("_sources") or []
+
         demand, demand_reason = score_demand(cand, pool_max)
-        margin, margin_reason, margin_estimated = score_margin(cand_tokens, margin_pairs, median_margin)
         gap, gap_reason, already_title = score_catalog_gap(cand_tokens, catalog_sets)
         occasion, occasion_reason = score_occasion_fit(cand_tokens, active_occasions)
+
+        # Margin: prefer the semantic catalog-match's real margin (joined by
+        # normalized title); otherwise the token method (now fixed) / median.
+        sem_match_norm = _norm_title(sem.get("match")) if sem else ""
+        if sem_match_norm and sem_match_norm in catalog_margin:
+            real = catalog_margin[sem_match_norm]
+            margin = max(0.0, min(1.0, real / 100.0))
+            margin_reason = f"margin {real:.0f}% from nearest catalog match '{sem.get('match')}'"
+            margin_estimated = True
+        else:
+            margin, margin_reason, margin_estimated = score_margin(cand_tokens, margin_pairs, median_margin)
+
+        # Suppression: semantic band is primary; token gap is the fallback.
+        if sem and str(sem.get("band")) == _SEMANTIC_HARD_BAND:
+            sem_suppressed, sem_reason = True, f"already made — semantic match '{sem.get('match')}' (cosine {sem.get('score')})"
+        elif sem:
+            sem_suppressed, sem_reason = False, ""
+            gap = max(gap, 1.0 - float(sem.get("score") or 0.0))  # semantic distance widens the gap
+        else:
+            sem_suppressed, sem_reason = (gap < (1.0 - ALREADY_MADE_OVERLAP)), f"already made — {gap_reason}"
 
         entry = {
             "title": title,
             "listing_id": cand.get("listing_id"),
             "shop_name": cand.get("shop_name"),
-            "sources": cand.get("_sources") or [],
+            "sources": sources,
             "priority": cand.get("priority"),
             "factors": {
                 "demand": round(demand, 3),
@@ -334,16 +452,24 @@ def build_build_next_queue(*,
                 "occasion_fit": round(occasion, 3),
             },
             "margin_estimated": margin_estimated,
+            "semantic_match": (sem or {}).get("match") if sem else None,
             "reasons": [demand_reason, margin_reason, gap_reason, occasion_reason],
         }
+
+        # Off-brand gate: a trending-only candidate must read as a duck/
+        # dashboard item (ducks_to_build candidates are always kept).
+        if sources == ["trending_products"] and not _is_on_brand(title):
+            entry["suppressed_reason"] = "off-brand — trending competitor product, not a duck/dashboard concept"
+            suppressed.append(entry)
+            continue
 
         fb_key = _concept_feedback_key(title)
         if fb_key in suppressed_keys:
             entry["suppressed_reason"] = "operator feedback already resolved/rejected this concept"
             suppressed.append(entry)
             continue
-        if gap < (1.0 - ALREADY_MADE_OVERLAP):
-            entry["suppressed_reason"] = f"already made — {gap_reason}"
+        if sem_suppressed:
+            entry["suppressed_reason"] = sem_reason
             suppressed.append(entry)
             continue
 
@@ -361,6 +487,8 @@ def build_build_next_queue(*,
             "catalog_products": len(catalog_items),
             "classifier_coverage": classifier_coverage,
             "confident_margin_products": len(margin_pairs),
+            "catalog_margin_joined": len(catalog_margin),
+            "semantic_classified": len(semantic_map or {}),
             "active_occasions": [o.get("id") for o in active_occasions],
         },
         "queue": queue[:top_n],

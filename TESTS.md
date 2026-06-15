@@ -637,6 +637,23 @@ Decision-type semantics: **approve** = adopt the keyword-suggested category; **k
 
 ---
 
+## Surface 21 — Build-Next algorithm fixes (2026-06-15, matrix before code)
+
+**Background:** after fixing the cadence-split regression that emptied Build-Next, the populated output exposed three algorithm flaws (operator: "is our algorithm good?"). (1) **Suppression false-positives:** the token-overlap "already made" check (`overlap = shared/smaller_set`, threshold 0.6) stripped duck-niche stopwords but not car-accessory boilerplate (car/decor/decoration/vehicle/accessory), so our "Owl Duck" `{owl,car,decor}` matched ANY competitor with car+decor at 67% — 18 of 20 suppressions were this false "Owl Duck" match, throwing away buildable products (Couple Ducks, Panda Bear, Beaver…). Same bug class fixed elsewhere with semantic embeddings. (2) **Margin dead:** every candidate got the flat global-median fallback (0.92) because competitor titles never token-matched our confident-margin products → margin contributed zero ranking signal. (3) **Off-brand leakage:** `trending_products` (unfiltered) put "Mini Pizza Fidget Toy" at rank #1.
+
+**Fixes:** (1) semantic suppression via the existing `semantic_dedupe` embeddings (band `already_made` ≥0.72), with a **fixed-stopword token method as graceful fallback** when embeddings are unavailable (no API in env) — the stopword list now strips the car-accessory boilerplate too, so even the fallback kills the Owl Duck match. (2) margin via the semantic catalog-match joined to `profit_per_product` margin (catalog_title→margin from profit `title_variants`), median only when no match. (3) on-brand gate: a `trending_products`-only candidate must contain duck/dashboard signal or it's suppressed as off-brand.
+
+| Use case | Happy | False-positive guard | Degrade (no API) | Off-brand |
+|---|---|---|---|---|
+| Suppression (already-made) | ✅ planned: semantic band already_made suppresses a true dup | ✅ planned: Owl Duck no longer matches Couple Ducks/Panda (semantic AND fixed-stopword token) | ✅ planned: empty semantic_map → fixed token method, still correct | n/a |
+| Margin factor | ✅ planned: semantic catalog-match → that product's margin (varies per candidate) | n/a | ✅ planned: no match → median fallback (documented proxy) | n/a |
+| Trending relevance | n/a | n/a | n/a | ✅ planned: trending-only off-brand (Pizza Fidget Toy) suppressed; ducks_to_build candidates always kept |
+| Stopword boilerplate | ✅ planned: car/decor/decoration/vehicle/accessory/cruise/holder/buddy stripped | ✅ planned: regression test pins Owl-Duck-style non-match | n/a | n/a |
+
+**Tier:** none (read-only producer). Semantic adds one cached embedding call per run; graceful-degrades to deterministic token method, so the producer never hard-depends on the API. Tests inject a fake semantic_map / embed_fn — no live API in pytest.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

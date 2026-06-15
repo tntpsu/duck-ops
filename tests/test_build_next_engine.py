@@ -240,6 +240,9 @@ class TestBuild:
                                   "margin_pct": 80.0, "is_confident_margin": True}]},
             occasion_intel={"active_occasions": []},
             feedback={"concepts": {}},
+            # Default to the deterministic token path — passing {} (not None)
+            # prevents build_build_next_queue from making a live embedding call.
+            semantic_map={},
         )
         base.update(over)
         return base
@@ -258,8 +261,49 @@ class TestBuild:
             catalog=_catalog([_cat_item("Medieval Knight Armor Sword Duck",
                                         core_terms="medieval, knight, armor, sword")])))
         assert payload["queue_count"] == 0
-        assert payload["suppressed_count"] == 1
-        assert "already made" in payload["suppressed"][0]["suppressed_reason"]
+
+    # ---- Surface 21 algorithm fixes -------------------------------------
+
+    def test_stopword_fix_no_false_already_made(self):
+        """Regression: 'Owl Duck' must NOT suppress 'Couple Ducks' just because
+        both are car/dashboard decor (the 2026-06-15 boilerplate-overlap bug)."""
+        payload = bne.build_build_next_queue(**self._kwargs(
+            report=_report(ducks=[_duck("1", "Couple Ducks Car Dashboard Decor Cruise Accessory", engagement=4000)]),
+            catalog=_catalog([_cat_item("Owl Duck Car Dashboard Decor")])))
+        assert payload["queue_count"] == 1  # NOT suppressed
+
+    def test_semantic_band_suppresses(self):
+        """An injected semantic 'already_made' band suppresses regardless of tokens."""
+        payload = bne.build_build_next_queue(**self._kwargs(
+            report=_report(ducks=[_duck("1", "Wiener Dog Figure", engagement=4000)]),
+            catalog=_catalog([_cat_item("Dachshund Duck")]),
+            semantic_map={"Wiener Dog Figure": {"match": "Dachshund Duck", "score": 0.81, "band": "already_made"}}))
+        assert payload["queue_count"] == 0
+        assert "semantic match" in payload["suppressed"][0]["suppressed_reason"]
+
+    def test_semantic_margin_from_catalog_match(self):
+        """A semantic match to a confident-margin catalog product uses its real margin."""
+        payload = bne.build_build_next_queue(**self._kwargs(
+            report=_report(ducks=[_duck("1", "Sausage Dog Buddy", engagement=4000)]),
+            catalog=_catalog([_cat_item("Dachshund Duck Long Loyal")]),
+            profit={"products": [{"title_variants": ["Dachshund Duck Long Loyal"],
+                                  "margin_pct": 60.0, "is_confident_margin": True}]},
+            semantic_map={"Sausage Dog Buddy": {"match": "Dachshund Duck Long Loyal", "score": 0.45, "band": "distinct"}}))
+        assert payload["queue_count"] == 1
+        assert payload["queue"][0]["factors"]["margin"] == 0.6  # 60% / 100, not the median
+
+    def test_off_brand_trending_suppressed(self):
+        """A trending-only candidate that isn't a duck/dashboard concept is dropped."""
+        report = {"ducks_to_build": [], "trending_products": [_duck("1", "Mini Pizza Fidget Toy", engagement=9000)]}
+        payload = bne.build_build_next_queue(**self._kwargs(report=report))
+        assert payload["queue_count"] == 0
+        assert "off-brand" in payload["suppressed"][0]["suppressed_reason"]
+
+    def test_on_brand_trending_kept(self):
+        report = {"ducks_to_build": [], "trending_products": [_duck("1", "Cowboy Duck Dashboard", engagement=9000)]}
+        payload = bne.build_build_next_queue(**self._kwargs(
+            report=report, catalog=_catalog([_cat_item("Astronaut Duck")])))
+        assert payload["queue_count"] == 1
 
     def test_operator_rejected_concept_is_suppressed(self):
         fb = {"concepts": {"medieval knight armor sword": {"latest_resolution": "rejected"}}}
