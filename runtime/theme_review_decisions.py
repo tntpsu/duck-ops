@@ -178,3 +178,64 @@ def load_theme_review_decisions(path: Path | None = None) -> dict[str, dict[str,
 
 def get_decision_for_handle(handle: str, path: Path | None = None) -> dict[str, Any] | None:
     return load_theme_review_decisions(path).get(str(handle or "").strip())
+
+
+# ─── Keyword false-flag feedback (Surface 20, Phase 4) ────────────────
+# When the operator clicks "Keep current" against a keyword_evidence flag,
+# the deterministic keyword cross-check over-fired (the safari/spatula bug).
+# Log it so the offending per-category `keywords` entries in
+# theme_taxonomy.json can be tuned. Upsert-by-handle (one record per
+# product). The LOGGING is automatic; the taxonomy edit stays gated.
+THEME_KEYWORD_FALSE_FLAGS_PATH = DUCK_OPS_ROOT / "state" / "theme_keyword_false_flags.json"
+_FROZEN_THEME_KEYWORD_FALSE_FLAGS_PATH = THEME_KEYWORD_FALSE_FLAGS_PATH.resolve()
+
+
+def record_keyword_false_flag(
+    *,
+    handle: str,
+    title: str = "",
+    kept_category: str = "",
+    evidence_category: str = "",
+    triggering_keywords: list[str] | None = None,
+    taxonomy_version: int | None = None,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Record that a keyword-evidence flag was rejected by the operator
+    (kept the existing category). Upsert-by-handle. Raises
+    TestModeRefusalError on a frozen-prod write under DUCK_TEST_MODE=1."""
+    handle = str(handle or "").strip()
+    if not handle:
+        raise ValueError("handle is required")
+    target_path = path or THEME_KEYWORD_FALSE_FLAGS_PATH
+    if str(os.environ.get(_TEST_MODE_ENV) or "").strip() in {"1", "true", "TRUE", "yes"} \
+            and target_path.resolve() == _FROZEN_THEME_KEYWORD_FALSE_FLAGS_PATH:
+        raise TestModeRefusalError(
+            "record_keyword_false_flag refused: DUCK_TEST_MODE=1 and the write "
+            "would land in production theme_keyword_false_flags.json. Patch the path."
+        )
+    flags = load_keyword_false_flags(target_path)
+    record = {
+        "handle": handle,
+        "title": str(title or "").strip(),
+        "kept_category": str(kept_category or "").strip(),
+        "evidence_category": str(evidence_category or "").strip(),
+        "triggering_keywords": [str(k).strip() for k in (triggering_keywords or []) if str(k).strip()],
+        "taxonomy_version": taxonomy_version,
+        "recorded_at": _now_iso(),
+    }
+    flags = [f for f in flags if isinstance(f, dict) and str(f.get("handle") or "").strip() != handle]
+    flags.append(record)
+    _atomic_write(target_path, {"false_flags": flags})
+    return record
+
+
+def load_keyword_false_flags(path: Path | None = None) -> list[dict[str, Any]]:
+    target_path = path or THEME_KEYWORD_FALSE_FLAGS_PATH
+    if not target_path.exists():
+        return []
+    try:
+        payload = json.loads(target_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    flags = payload.get("false_flags") if isinstance(payload, dict) else None
+    return [f for f in flags if isinstance(f, dict)] if isinstance(flags, list) else []

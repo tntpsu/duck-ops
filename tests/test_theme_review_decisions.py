@@ -82,6 +82,35 @@ class RecordAndLoadTests(unittest.TestCase):
         self.assertEqual(trd.load_theme_review_decisions(Path(self.ctx.name) / "nope.json"), {})
 
 
+class KeywordFalseFlagTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ctx = TemporaryDirectory()
+        self.path = Path(self.ctx.name) / "theme_keyword_false_flags.json"
+
+    def tearDown(self) -> None:
+        self.ctx.cleanup()
+
+    def test_record_and_load(self) -> None:
+        trd.record_keyword_false_flag(
+            handle="test-safari", title="Safari Duck", kept_category="Professions & Careers",
+            evidence_category="Animals & Pets", triggering_keywords=["safari"],
+            taxonomy_version=3, path=self.path)
+        flags = trd.load_keyword_false_flags(self.path)
+        self.assertEqual(len(flags), 1)
+        self.assertEqual(flags[0]["evidence_category"], "Animals & Pets")
+        self.assertEqual(flags[0]["triggering_keywords"], ["safari"])
+
+    def test_upsert_by_handle(self) -> None:
+        trd.record_keyword_false_flag(handle="test-x", evidence_category="A", path=self.path)
+        trd.record_keyword_false_flag(handle="test-x", evidence_category="B", path=self.path)
+        flags = trd.load_keyword_false_flags(self.path)
+        self.assertEqual(len(flags), 1)
+        self.assertEqual(flags[0]["evidence_category"], "B")
+
+    def test_load_missing_is_empty(self) -> None:
+        self.assertEqual(trd.load_keyword_false_flags(Path(self.ctx.name) / "nope.json"), [])
+
+
 class SourceGuardTests(unittest.TestCase):
     def test_refuses_frozen_prod_path_in_test_mode(self) -> None:
         import os

@@ -160,4 +160,5 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         yield
         return
     monkeypatch.setattr(_trd, "THEME_REVIEW_DECISIONS_PATH", tmp_path / "theme_review_decisions.json")
+    monkeypatch.setattr(_trd, "THEME_KEYWORD_FALSE_FLAGS_PATH", tmp_path / "theme_keyword_false_flags.json")
     yield
