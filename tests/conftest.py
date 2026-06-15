@@ -114,6 +114,12 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
     if hasattr(_rre, "WORKFLOW_CONTROL_DIR"):
         # The self-heal path reads from this dir; redirect alongside.
         monkeypatch.setattr(_rre, "WORKFLOW_CONTROL_DIR", tmp_wc)
+    # 2026-06-15: requeue_recoverable_failed (failed-recovery sweep) writes
+    # QUALITY_GATE_STATE_PATH via save_quality_gate_state. Isolate it too so
+    # the sweep's tests (or any drain test) never flip prod artifacts'
+    # execution_state. Same pollution shape as the queue-path fix above.
+    if hasattr(_rre, "QUALITY_GATE_STATE_PATH"):
+        monkeypatch.setattr(_rre, "QUALITY_GATE_STATE_PATH", tmp_path / "quality_gate_state.json")
 
     # 2026-06-11: occasion_engine.OCCASION_INTEL_PATH (Surface 13) —
     # new module-level prod-path constant, isolated on arrival per the

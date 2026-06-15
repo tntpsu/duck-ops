@@ -436,6 +436,19 @@ Occasion Etsy tag apply with expiry-revert (approval-gated, NEVER silent auto-ac
 | weekly packet nominations | ✅ planned: section from occasion_intel | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
 | recommendations page render | ✅ planned: section renderer added (markdown≠portal-HTML) | n/a | n/a | n/a | ✅ omitted when no active occasion | n/a | n/a | n/a |
 
+### Surface 13 Phase 3 — meme/social occasion bias (2026-06-15)
+
+**Background:** operator asked "should I see Father's Day in today's meme?" — no. Phase 1 only injected the occasion line when the meme's product was a *curated pick*, but `choose_product_for_meme` is occasion-blind, so memes rode the holiday only by luck (today landed on a non-pick Alabama duck → generic copy). Two fixes: (1) **copy + tags always nod** — `occasion_meme_prompt_line` gives a non-pick duck a soft "still a great <occasion> gift" nod (strong "lean in" angle only for curated picks), and `occasion_meme_hashtags` merges holiday tags (e.g. `FathersDayGift`) ahead of the 12-tag cap; (2) **picker steering** — an occasion-engine bonus (40 normal / 70 last-call ≤7d) biases `choose_product_for_meme` toward curated picks without overriding variety/randomness.
+
+| Use case | Happy | Non-pick product | No occasion active | Stale intel | Last-call (≤7d) weighting | List-position isolation |
+|---|---|---|---|---|---|---|
+| `occasion_meme_prompt_line` | ✅ `test_occasion_context.py::TestMemePromptLine::test_curated_pick_gets_strong_lean_in` | ✅ `::test_non_pick_product_still_gets_soft_nod` (the core ask) | ✅ `::test_no_occasion_returns_empty` | ✅ `::test_stale_intel_returns_empty` | n/a | n/a |
+| `occasion_meme_hashtags` | ✅ `TestMemeHashtags::test_active_occasion_yields_camelcase_tags` | n/a (product-agnostic by design) | ✅ `::test_no_occasion_yields_empty` | covered by reader staleness | ✅ `::test_respects_limit` | n/a |
+| Picker occasion bonus | ✅ `test_meme_occasion_bias.py::test_active_occasion_pick_wins_when_scores_otherwise_equal` (deterministic max-score) | n/a | ✅ `::test_no_active_occasion_no_bias` (pick placed 2nd → does NOT win) | n/a | ⚠️ bonus constant covered by code; last-call vs normal not separately asserted | ✅ negative control isolates bonus from list order |
+| Live-state spot check | ✅ manual 2026-06-15: Alabama (non-pick) → soft nod + `FathersDayGift/GiftForDad/DadGiftIdea`; Grill Master (pick) → strong lean-in | n/a | n/a | n/a | n/a | n/a |
+
+**Scope cut:** last-call (70) vs normal (40) bonus differentiation is not separately unit-tested (both proven to fire; the threshold is a tuning knob, not a correctness boundary). Jeepfacts already nodded (no-product path) — unchanged.
+
 ---
 
 ## Surface 14 — This-or-That Thursday funnel fixes (2026-06-12)
@@ -651,6 +664,24 @@ Decision-type semantics: **approve** = adopt the keyword-suggested category; **k
 | Stopword boilerplate | ✅ planned: car/decor/decoration/vehicle/accessory/cruise/holder/buddy stripped | ✅ planned: regression test pins Owl-Duck-style non-match | n/a | n/a |
 
 **Tier:** none (read-only producer). Semantic adds one cached embedding call per run; graceful-degrades to deterministic token method, so the producer never hard-depends on the API. Tests inject a fake semantic_map / embed_fn — no live API in pytest.
+
+---
+
+## Surface 22 — Review-reply drain starvation + failed-recovery (2026-06-15, matrix before code)
+
+**Background:** auth was restored 2026-06-14 but the drain still posted 0 replies. Two root causes. (1) **Sync starves drain:** `etsy_browser_batch.run_slot` ran the customer-read sync, then `auto_enqueue_publish_ready`, then `drain_queue` in one process sharing the `etsy_browser_guard` budget (`MAX_COMMANDS_PER_WINDOW`=18 visible cmds / 5 min). Reads exhausted the budget, so the drain hit `rate_limit_preemptive_cooldown` and posted nothing. (2) **`failed` items stranded:** `auto_enqueue_publish_ready` only picks `not_queued`; `drain_queue` only posts `queued`; nothing retries `execution_state=failed`. The freshest stranded replies (June 8 review, drafted June 9, ~6d old, inside the 14d window) had failed with the COOLDOWN error itself — recoverable once (1) is fixed.
+
+**Fixes:** (1) **drain-first reorder** (post before sync; drain reads only the queue + quality-gate state, never sync output → dependency-safe). (2) **budget reservation** (`RESERVED_FOR_MUTATING`=4): read-only commands soft-deferred via `PacingReservationError` once they'd eat the reserve — does NOT persist a cooldown, so posts stay free; the sync treats it as `paced_out`, not a slot failure. (3) **failed-recovery sweep** `requeue_recoverable_failed` runs in `drain_queue` after auto-dismiss: re-queues `failed`→`queued` only when within `auto_dismiss_after_days` (14d, fail-closed on unparseable date), under `failed_requeue_max_attempts` (2, independent of historical attempts so the outage backlog gets a fresh chance), and `failure_is_retryable` (conservative allowlist: cooldown/pacing, `auth_required`, `review_row_not_found`; EXCLUDES `*_mismatch` drift + generic `unexpected_executor_failure`).
+
+| Use case | Happy | Cooldown still trips (regression) | Stale / drift excluded | Cap / disabled | Fail-closed |
+|---|---|---|---|---|---|
+| Drain-first ordering | ✅ `test_etsy_browser_batch.py::test_run_slot_drains_replies_before_customer_read` | n/a | n/a | n/a | ✅ `test_customer_read_pacing_refusal_is_not_a_slot_failure` (paced_out, not failed) |
+| Budget reservation | ✅ `test_etsy_browser_guard.py::ReservationTests::test_post_allowed_when_reads_filled_reserve` + `test_read_allowed_below_reserve` | ✅ `::test_hard_cooldown_still_trips_at_max` (post at 18 → persistent cooldown) | n/a | n/a | ✅ `::test_read_deferred_when_reserve_reached` (no blocked_until persisted) |
+| `failure_is_retryable` allowlist | ✅ `test_review_reply_failed_recovery.py::test_retryable_cooldown` + `test_retryable_auth_and_row_not_found` | n/a | ✅ `test_not_retryable_drift_or_generic` (mismatch/unexpected/None → False) | n/a | ✅ same |
+| `requeue_recoverable_failed` | ✅ `test_recovers_fresh_cooldown_failed` + `test_recovers_fresh_auth_failed` | n/a | ✅ `test_skips_stale_failed` (45d), `test_skips_transaction_mismatch_even_if_fresh` | ✅ `test_respects_recovery_cap` (count≥2), `test_disabled_by_policy` | ✅ `test_unparseable_date_not_recovered`, `test_ignores_non_failed_and_other_flows` |
+| Test isolation | ✅ `conftest.py` now monkeypatches `QUALITY_GATE_STATE_PATH` (the sweep writes it) alongside the queue path | n/a | n/a | n/a | n/a |
+
+**Observability:** the existing `review_reply_throughput` OS card (Surface 5, duckAgent) already goes RED on "N approved / 0 posted" over 14d and a cooldown-blocked drain writes no per-item receipt → the stall stays visible. No card schema change; verify it still fires post-fix. **Tier:** code is Tier-2 (queue logic + ordering); the actual drain/post run is Tier-3 (operator-triggered, unchanged). One-shot backlog recovery of the ~3 fresh June-9 `failed` items happens organically on the next drain under the same gates.
 
 ---
 

@@ -242,5 +242,58 @@ class EtsyBrowserGuardTests(unittest.TestCase):
             self.assertEqual(session["cleanup_status"], "stale_process_cleaned")
 
 
+class ReservationTests(unittest.TestCase):
+    """Phase 2: read-only commands are soft-deferred to keep posting budget."""
+
+    def _visible_reads(self, n: int):
+        now = datetime.now().astimezone()
+        return [
+            {"at": (now - timedelta(seconds=10 + i)).isoformat(),
+             "session": "esd", "command": "goto", "mutating": False}
+            for i in range(n)
+        ]
+
+    def _run(self, events, args):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "guard.json"
+            with patch.object(etsy_browser_guard, "STATE_PATH", state_path):
+                etsy_browser_guard.save_state(
+                    {"blocked_until": None, "block_reason": None, "events": events}
+                )
+                with patch.object(etsy_browser_guard, "cleanup_stale_playwright_processes"):
+                    exc = None
+                    try:
+                        etsy_browser_guard.before_command("esd", args)
+                    except BaseException as e:  # noqa: BLE001
+                        exc = e
+                    return exc, etsy_browser_guard.load_state()
+
+    def test_read_deferred_when_reserve_reached(self) -> None:
+        # 14 visible reads = MAX(18) - RESERVED(4). A 15th read is deferred.
+        exc, state = self._run(self._visible_reads(14), ("goto", "https://etsy.com/x"))
+        self.assertIsInstance(exc, etsy_browser_guard.PacingReservationError)
+        # Soft: it must NOT persist a global cooldown (posts stay free).
+        self.assertIsNone(state.get("blocked_until"))
+
+    def test_post_allowed_when_reads_filled_reserve(self) -> None:
+        # Same 14 visible reads, but a mutating POST gets through (it's what
+        # the reserve is for).
+        exc, _ = self._run(self._visible_reads(14), ("click", "#reply-submit"))
+        self.assertIsNone(exc, f"post should not be blocked at the reserve line: {exc}")
+
+    def test_read_allowed_below_reserve(self) -> None:
+        exc, _ = self._run(self._visible_reads(13), ("goto", "https://etsy.com/x"))
+        self.assertIsNone(exc, f"read below reserve should pass: {exc}")
+
+    def test_hard_cooldown_still_trips_at_max(self) -> None:
+        # At the true ceiling (18) any command — including a post — trips the
+        # persistent cooldown. Regression guard: reservation didn't remove it.
+        exc, state = self._run(self._visible_reads(18), ("click", "#reply-submit"))
+        self.assertIsInstance(exc, RuntimeError)
+        self.assertNotIsInstance(exc, etsy_browser_guard.PacingReservationError)
+        self.assertEqual(state.get("block_reason"), "rate_limit_preemptive_cooldown")
+        self.assertTrue(state.get("blocked_until"))
+
+
 if __name__ == "__main__":
     unittest.main()

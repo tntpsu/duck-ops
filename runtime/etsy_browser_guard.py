@@ -25,8 +25,25 @@ BLOCK_WINDOW_MINUTES = 45
 RATE_WINDOW_SECONDS = 5 * 60
 MAX_COMMANDS_PER_WINDOW = 18
 MAX_MUTATING_COMMANDS_PER_WINDOW = 8
+# Of MAX_COMMANDS_PER_WINDOW, keep this many slots available for mutating
+# (review-reply post) commands. Read-only commands are soft-refused once they
+# would eat into the reserve, so a burst of reads can't starve the drain of
+# posting budget. This does NOT raise Etsy-visible post volume (posts keep
+# their own MAX_MUTATING cap + gap); it only paces reads earlier.
+RESERVED_FOR_MUTATING = 4
 MIN_GAP_SECONDS = 1.25
 MIN_MUTATING_GAP_SECONDS = 3.5
+
+
+class PacingReservationError(RuntimeError):
+    """A read-only command was deferred to preserve posting budget.
+
+    Distinct from the hard preemptive-cooldown RuntimeError: this does NOT
+    persist a global cooldown, so review-reply posts can still proceed. It
+    clears on its own as events age out of the rolling window. Callers that
+    only do reads (the customer-inbox sync) should treat it as 'paced out',
+    not a failure.
+    """
 
 # Local Playwright/disk operations Etsy literally can't see. They
 # don't trigger Etsy's bot heuristics, so they shouldn't count toward
@@ -452,6 +469,17 @@ def before_command(session: str, args: tuple[str, ...]) -> None:
         save_state(state)
         raise RuntimeError(
             f"Etsy automation hit the shared pacing budget and is cooling down until {cooldown_until.isoformat()}."
+        )
+
+    # Soft reservation: stop read-only commands before they consume the slots
+    # reserved for mutating (review-reply post) commands. Unlike the hard
+    # ceiling above, this does NOT persist a cooldown — it refuses only this
+    # one read, leaving posts free to proceed, and clears as events age out of
+    # the rolling window. Mutating commands are never blocked here.
+    if not mutating and visible_count >= MAX_COMMANDS_PER_WINDOW - RESERVED_FOR_MUTATING:
+        raise PacingReservationError(
+            f"Etsy read command deferred: {visible_count}/{MAX_COMMANDS_PER_WINDOW} pacing slots used; "
+            f"reserving the last {RESERVED_FOR_MUTATING} for review-reply posts."
         )
 
     if events:

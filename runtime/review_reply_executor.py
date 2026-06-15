@@ -94,6 +94,15 @@ DEFAULT_EXECUTION_POLICY: dict[str, Any] = {
     "retryable_row_not_found_enabled": True,
     "retryable_row_not_found_max_attempts": 3,
     "retryable_row_not_found_retry_delay_seconds": 3600,
+    # 2026-06-15: the drain re-queues items stuck in execution_state=failed
+    # when the failure was transient/now-fixed (cooldown/pacing, auth-era,
+    # or review-row-not-found) AND the review is still within the
+    # auto_dismiss_after_days freshness window. Bounded by its own counter
+    # (recovery_requeue_count) so a permafail can't loop. Independent of
+    # historical execution attempt_count so the outage-era backlog gets a
+    # fresh chance. Set failed_requeue_enabled=False to disable.
+    "failed_requeue_enabled": True,
+    "failed_requeue_max_attempts": 2,
     "auth_block_retry_delay_seconds": 1800,
     "auth_alert_cooldown_seconds": 21600,
     "auth_storage_state_enabled": True,
@@ -953,6 +962,38 @@ def is_cooldown_error(error: Exception | str | None) -> bool:
         "cooling down because",
     )
     return any(marker in text for marker in markers)
+
+
+# Conservative allowlist of failure_classes the recovery sweep may re-queue.
+# Deliberately EXCLUDES review_row_transaction_mismatch / *_listing_mismatch
+# (genuine Etsy-side data drift — retrying posts to the wrong row or fails
+# again; these are what auto_dismiss_stale_queued is for) and the generic
+# unexpected_executor_failure class (matched only via error-text below when
+# it is clearly a transient cooldown).
+RECOVERABLE_FAILURE_CLASSES = frozenset({"auth_required", "review_row_not_found"})
+
+
+def failure_is_retryable(attempt: dict[str, Any] | None) -> bool:
+    """True when a failed attempt's cause is transient or already fixed.
+
+    Conservative + fail-closed: only cooldown/pacing failures (which the
+    drain-first + budget-reservation fix removes), auth-era failures (auth is
+    restored), and review-row-not-found (the row just hadn't surfaced yet).
+    Anything else — including transaction/listing drift — stays failed."""
+    if not isinstance(attempt, dict):
+        return False
+    error = attempt.get("error")
+    # Cooldown/pacing-induced failures: transient, and the root cause is fixed.
+    if is_cooldown_error(error):
+        return True
+    failure = attempt.get("failure") if isinstance(attempt.get("failure"), dict) else {}
+    fclass = str(failure.get("failure_class") or "")
+    if fclass in RECOVERABLE_FAILURE_CLASSES:
+        return True
+    # Text fallback for attempts recorded before failure_class tagging.
+    if is_retryable_row_not_found(error):
+        return True
+    return False
 
 
 def is_signed_out_state(current_url: str | None, auth_probe: dict[str, Any] | None) -> bool:
@@ -2387,6 +2428,128 @@ def maybe_reschedule_retryable_failure(
     return queue_item
 
 
+def requeue_recoverable_failed(
+    queue_state: dict[str, Any],
+    *,
+    policy: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> list[str]:
+    """Re-queue review replies stuck in execution_state=failed when the
+    failure was transient/now-fixed AND the review is still fresh.
+
+    Counterpart to auto_dismiss_stale_queued: that drops STALE queued items;
+    this recovers FRESH failed ones. Gated by (1) the same
+    auto_dismiss_after_days freshness window — never resurrect a >threshold
+    review, fail-closed on unparseable dates; (2) failure_is_retryable
+    (conservative allowlist); (3) a bounded recovery_requeue_count so a
+    permanently-failing item can't loop. Mutates queue_state in place and the
+    quality-gate state on disk; writes a loud workflow_control transition per
+    requeue (no silent auto-action — [[swallowed-errors-lie]]).
+
+    Returns the artifact_ids it recovered.
+    """
+    policy = policy or {}
+    if not policy.get("failed_requeue_enabled", True):
+        return []
+    try:
+        threshold_days = int(policy.get("auto_dismiss_after_days") or 0)
+    except (TypeError, ValueError):
+        threshold_days = 0
+    max_recovery = max(1, int(policy.get("failed_requeue_max_attempts") or 2))
+    now_dt = now or datetime.now()
+    cutoff = (now_dt - timedelta(days=threshold_days)) if threshold_days > 0 else None
+
+    quality_state = load_quality_gate_state()
+    artifacts = quality_state.get("artifacts") or {}
+    items = queue_state.setdefault("items", {})
+    requeued: list[str] = []
+    requeued_at = now_iso()
+    for aid, record in artifacts.items():
+        if not isinstance(record, dict):
+            continue
+        decision = record.get("decision") or {}
+        if decision.get("flow") != "reviews_reply_positive":
+            continue
+        if str(decision.get("execution_state") or "") != "failed":
+            continue
+        # (1) Freshness — never resurrect stale; fail-closed on unparseable.
+        review_date = _artifact_review_date(aid)
+        if review_date is None:
+            continue
+        if cutoff is not None and review_date < cutoff:
+            continue
+        # (3) Bounded recovery count — independent of historical execution
+        # attempts so the one-shot backlog recovery isn't pre-exhausted.
+        existing_item = items.get(aid) or {}
+        recovery_count = int(existing_item.get("recovery_requeue_count") or 0)
+        if recovery_count >= max_recovery:
+            continue
+        # (2) Conservative retryable allowlist on the latest attempt.
+        attempts = decision.get("execution_attempts") or []
+        latest_attempt = attempts[-1] if attempts else {}
+        if not failure_is_retryable(latest_attempt):
+            continue
+
+        items[aid] = {
+            **existing_item,
+            "artifact_id": aid,
+            "flow": decision.get("flow"),
+            "decision": decision.get("decision"),
+            "status": "queued",
+            "queued_at": requeued_at,
+            "queued_by": "failed_recovery_sweep",
+            "execution_mode": decision.get("execution_mode") or "auto",
+            "approved_reply_text": decision.get("approved_reply_text"),
+            "review_target": decision.get("review_target"),
+            "recovery_requeue_count": recovery_count + 1,
+            "retry_reason": "recovered_failed",
+            "next_attempt_after": requeued_at,
+        }
+        decision["execution_state"] = "queued"
+        record["decision"] = decision
+
+        failure = latest_attempt.get("failure") if isinstance(latest_attempt.get("failure"), dict) else {}
+        try:
+            _record_review_execution_transition(
+                aid,
+                decision,
+                state="queued",
+                state_reason="recovered_failed",
+                requires_confirmation=False,
+                last_side_effect={
+                    "kind": "failed_recovery_requeue",
+                    "failure_class": failure.get("failure_class"),
+                    "error": str(latest_attempt.get("error") or "")[:200],
+                    "recovery_requeue_count": recovery_count + 1,
+                    "requeued_at": requeued_at,
+                },
+                next_action="Drain will attempt this recovered reply on the next run.",
+                receipt_kind="failed_recovery_requeue",
+                receipt_payload={
+                    "recovery_requeue_count": recovery_count + 1,
+                    "max_recovery": max_recovery,
+                    "review_date": review_date.date().isoformat(),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[review_reply_executor] failed-recovery transition write failed "
+                f"for {aid}: {exc}. Item is still re-queued; drain will attempt it."
+            )
+        requeued.append(aid)
+
+    if requeued:
+        save_quality_gate_state(quality_state)
+        save_queue_state(queue_state)
+        # Loud log — silent auto-action is the swallowed_errors_lie pattern.
+        print(
+            f"[review_reply_executor] requeue_recoverable_failed: recovered "
+            f"{len(requeued)} failed reply(ies) within {threshold_days}d window. "
+            f"e.g. {requeued[0][:50]}"
+        )
+    return requeued
+
+
 def run_dry_run_fill(
     artifact_id: str,
     *,
@@ -2981,6 +3144,16 @@ def drain_queue(
         # Drain must not crash on auto-dismiss failure. Log + continue
         # — operator can manually dismiss if needed via session script.
         print(f"[review_reply_executor] auto-dismiss failed: {type(exc).__name__}: {exc}")
+
+    # Recover fresh failed replies (transient/now-fixed cause) back into the
+    # queue so they become eligible in THIS run. Runs after auto-dismiss so a
+    # >threshold item is never recovered. Must not crash the drain.
+    try:
+        recovered = requeue_recoverable_failed(queue_state, policy=policy)
+        if recovered:
+            queue_items = queue_state.get("items") or {}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[review_reply_executor] failed-recovery sweep failed: {type(exc).__name__}: {exc}")
 
     eligible = sorted(
         [

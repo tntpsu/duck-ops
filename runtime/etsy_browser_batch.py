@@ -10,7 +10,10 @@ from typing import Any
 
 import customer_inbox_refresh
 import etsy_expired_relist
-from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
+from etsy_browser_guard import (
+    blocked_status as etsy_browser_blocked_status,
+    PacingReservationError,
+)
 from governance_review_common import OUTPUT_OPERATOR_DIR, STATE_DIR, now_local_iso, write_json, write_markdown
 from review_reply_executor import (
     auto_enqueue_publish_ready,
@@ -469,15 +472,20 @@ def _run_customer_read_batch(config: dict[str, Any], target: dict[str, Any]) -> 
     end_hour = int(window_end.hour if window_end is not None else 23)
     end_minute = int(window_end.minute if window_end is not None else 59)
 
-    return customer_inbox_refresh.run_refresh(
-        limit=int(customer_cfg.get("max_threads_per_session") or 2),
-        include_waiting=bool(customer_cfg.get("include_waiting", False)),
-        skip_outside_hours=False,
-        start_hour=start_hour,
-        start_minute=start_minute,
-        end_hour=end_hour,
-        end_minute=end_minute,
-    )
+    try:
+        return customer_inbox_refresh.run_refresh(
+            limit=int(customer_cfg.get("max_threads_per_session") or 2),
+            include_waiting=bool(customer_cfg.get("include_waiting", False)),
+            skip_outside_hours=False,
+            start_hour=start_hour,
+            start_minute=start_minute,
+            end_hour=end_hour,
+            end_minute=end_minute,
+        )
+    except PacingReservationError as exc:
+        # Reads were paced out so posting budget stayed reserved. Not a slot
+        # failure — the drain (which runs first) already had its budget.
+        return {"status": "paced_out", "attempted": 0, "refreshed": 0, "failed": 0, "message": str(exc)}
 
 
 def _run_review_reply_batch(config: dict[str, Any]) -> dict[str, Any]:
@@ -676,8 +684,13 @@ def run_slot(
     error_payload: dict[str, Any] | None = None
 
     try:
-        customer_result = _run_customer_read_batch(config, target)
+        # Drain-first: post review replies BEFORE the customer-read sync so the
+        # posting step gets the shared etsy_browser_guard pacing budget instead
+        # of being starved (and preemptively cooled down) by the read traffic.
+        # The drain reads only the execution queue + quality-gate state, never
+        # the customer-read output, so this reorder is dependency-safe.
         review_result = _run_review_reply_batch(config)
+        customer_result = _run_customer_read_batch(config, target)
         if str(target.get("slot_id") or "") == str(schedule.get("relist_slot_id") or ""):
             relist_result = _run_relist_batch(config)
         else:

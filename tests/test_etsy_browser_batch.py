@@ -175,6 +175,77 @@ class EtsyBrowserBatchTests(unittest.TestCase):
         relist_mock.assert_called_once()
         control_mock.assert_called_once()
 
+    def test_run_slot_drains_replies_before_customer_read(self) -> None:
+        # Phase 1 (2026-06-15): the review-reply drain must run BEFORE the
+        # customer-read sync so posting gets the shared pacing budget instead
+        # of being starved/cooled-down by read traffic.
+        order: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            schedule_path = root / "etsy_browser_schedule.json"
+            schedule = {
+                "generated_at": "2026-04-23T00:10:00-04:00",
+                "date_local": "2026-04-23", "timezone": "EDT",
+                "checker_interval_minutes": 15, "due_grace_minutes": 20,
+                "relist_slot_id": "morning",
+                "slots": [{
+                    "slot_id": "morning", "label": "Morning",
+                    "window_start": "2026-04-23T09:00:00-04:00",
+                    "window_end": "2026-04-23T10:30:00-04:00",
+                    "scheduled_for": "2026-04-23T09:15:00-04:00",
+                    "status": "pending", "relist_slot": True,
+                }],
+            }
+            schedule_path.write_text(json.dumps(schedule), encoding="utf-8")
+
+            def _customer(*a, **k):
+                order.append("customer_read")
+                return {"status": "ok", "attempted": 2, "refreshed": 2, "failed": 0}
+
+            def _drain(*a, **k):
+                order.append("drain")
+                return {"ok": True, "status": "posted", "results": []}
+
+            with (
+                mock.patch.object(etsy_browser_batch, "SCHEDULE_STATE_PATH", schedule_path),
+                mock.patch.object(etsy_browser_batch, "LATEST_STATE_PATH", root / "latest.json"),
+                mock.patch.object(etsy_browser_batch, "SCHEDULE_OPERATOR_JSON_PATH", root / "op.json"),
+                mock.patch.object(etsy_browser_batch, "SCHEDULE_OPERATOR_MD_PATH", root / "op.md"),
+                mock.patch.object(etsy_browser_batch, "HISTORY_PATH", root / "hist.jsonl"),
+                mock.patch.object(etsy_browser_batch, "_recovery_pause", return_value={"blocked": False}),
+                mock.patch.object(etsy_browser_batch, "etsy_browser_blocked_status", return_value={"blocked": False}),
+                mock.patch.object(etsy_browser_batch.customer_inbox_refresh, "run_refresh", side_effect=_customer),
+                mock.patch.object(etsy_browser_batch, "auto_enqueue_publish_ready",
+                                  return_value={"ok": True, "status": "completed", "queued": []}),
+                mock.patch.object(etsy_browser_batch, "drain_queue", side_effect=_drain),
+                mock.patch.object(etsy_browser_batch, "_run_relist_batch",
+                                  return_value={"status": "idle", "results": []}),
+                mock.patch.object(etsy_browser_batch, "_close_primary_browser_session",
+                                  return_value={"session_name": "esd", "closed": True}),
+                mock.patch.object(etsy_browser_batch, "record_workflow_transition"),
+            ):
+                etsy_browser_batch.run_slot(
+                    slot_id="morning", now=datetime.fromisoformat("2026-04-23T09:20:00-04:00"),
+                )
+
+        self.assertIn("drain", order)
+        self.assertIn("customer_read", order)
+        self.assertLess(order.index("drain"), order.index("customer_read"),
+                        f"drain must run before customer read; got {order}")
+
+    def test_customer_read_pacing_refusal_is_not_a_slot_failure(self) -> None:
+        # A read soft-deferred by the reservation guard returns 'paced_out',
+        # not a raised exception that would fail the whole slot.
+        with mock.patch.object(
+            etsy_browser_batch.customer_inbox_refresh, "run_refresh",
+            side_effect=etsy_browser_batch.PacingReservationError("reserve hit"),
+        ):
+            result = etsy_browser_batch._run_customer_read_batch(
+                {"customer_read": {"enabled": True}}, {"window_start": None, "window_end": None},
+            )
+        self.assertEqual(result["status"], "paced_out")
+        self.assertEqual(result["failed"], 0)
+
     def test_run_slot_records_failed_receipt_when_customer_read_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
