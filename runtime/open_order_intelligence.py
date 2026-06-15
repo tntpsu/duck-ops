@@ -159,6 +159,20 @@ def _title_is_custom(title: str | None) -> bool:
     return any(keyword in lowered for keyword in CUSTOM_KEYWORDS)
 
 
+def _line_is_custom(title: str | None, custom_details: dict[str, Any] | None = None) -> bool:
+    """A line is a custom build if the title flags it (CUSTOM_KEYWORDS) OR it
+    carries a filled-in personalization field. The latter catches
+    made-to-order items like Teacher Ducks that are personalized per buyer
+    but whose product title doesn't contain 'custom'/'design your own'.
+    Personalization is an Etsy buyer-input field the seller has to enable,
+    so a non-empty value reliably means a personalized build."""
+    if _title_is_custom(title):
+        return True
+    if custom_details and str(custom_details.get("personalization") or "").strip():
+        return True
+    return False
+
+
 def _normalize_title(title: str | None) -> str:
     return " ".join(str(title or "").split()).strip()
 
@@ -562,7 +576,7 @@ def build_etsy_open_orders_snapshot() -> dict[str, Any]:
                     "product_id": str(transaction.get("listing_id") or ""),
                     "transaction_id": transaction_id,
                     "quantity": quantity,
-                    "is_custom": _title_is_custom(title),
+                    "is_custom": _line_is_custom(title, custom_details),
                     "variant_title": None,
                     "custom_type": custom_details.get("custom_type"),
                     "personalization": custom_details.get("personalization"),
@@ -661,7 +675,7 @@ def build_shopify_open_orders_snapshot() -> dict[str, Any]:
                     "product_title": title,
                     "product_id": str(line_item.get("product_id") or ""),
                     "quantity": quantity,
-                    "is_custom": _title_is_custom(title),
+                    "is_custom": _line_is_custom(title),
                     "variant_title": line_item.get("variant_title"),
                 }
             )

@@ -10,7 +10,24 @@ if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
 import open_order_intelligence as oo
-from open_order_intelligence import _shopify_buyer_name
+from open_order_intelligence import _shopify_buyer_name, _line_is_custom
+
+
+def test_line_is_custom_by_title_keyword():
+    assert _line_is_custom("Build Your Custom 3D Printed Duck!") is True
+    assert _line_is_custom("Design Your Own Duck") is True
+
+
+def test_line_is_custom_by_personalization_even_with_plain_title():
+    # Teacher Ducks: personalized per buyer, but the title says nothing custom.
+    assert _line_is_custom("Teacher Appreciation Duck",
+                           {"personalization": "Mrs. Smith, Room 12"}) is True
+
+
+def test_line_not_custom_without_keyword_or_personalization():
+    assert _line_is_custom("Highland Cow Duck") is False
+    assert _line_is_custom("Highland Cow Duck", {"personalization": None}) is False
+    assert _line_is_custom("Highland Cow Duck", {"personalization": "  "}) is False
 
 
 def test_shopify_buyer_name_prefers_customer_name():
