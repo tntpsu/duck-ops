@@ -87,6 +87,37 @@ class TestLatestCompetitorReport:
         _, picked = bne.latest_competitor_report(tmp_path / "nope")
         assert picked is None
 
+    def test_skips_daily_snapshot_for_weekly_analysis(self, tmp_path):
+        """Regression (2026-06-15): the 06-12 cadence split made daily runs
+        write snapshot-only reports (period=daily_snapshot, empty
+        ducks_to_build) to the same filename, silently emptying Build-Next.
+        Must walk past newer snapshots to the latest real analysis."""
+        import json as _json
+        (tmp_path / "2026-06-12_competitor_report.json").write_text(
+            _json.dumps({"period": "weekly", "ducks_to_build": [{"listing_id": "1", "title": "X"}]}),
+            encoding="utf-8")
+        (tmp_path / "2026-06-14_competitor_report.json").write_text(
+            _json.dumps({"period": "daily_snapshot", "ducks_to_build": []}), encoding="utf-8")
+        report, picked = bne.latest_competitor_report(tmp_path)
+        assert picked == "2026-06-12_competitor_report.json"
+        assert report["ducks_to_build"]
+
+    def test_snapshot_detected_via_ai_insights_flag(self, tmp_path):
+        import json as _json
+        (tmp_path / "2026-06-12_competitor_report.json").write_text(
+            _json.dumps({"ducks_to_build": [{"listing_id": "1"}]}), encoding="utf-8")
+        (tmp_path / "2026-06-14_competitor_report.json").write_text(
+            _json.dumps({"ai_insights": {"_snapshot_only": True}}), encoding="utf-8")
+        _, picked = bne.latest_competitor_report(tmp_path)
+        assert picked == "2026-06-12_competitor_report.json"
+
+    def test_all_snapshots_returns_none(self, tmp_path):
+        import json as _json
+        (tmp_path / "2026-06-14_competitor_report.json").write_text(
+            _json.dumps({"period": "daily_snapshot"}), encoding="utf-8")
+        _, picked = bne.latest_competitor_report(tmp_path)
+        assert picked is None
+
 
 # --------------------------------------------------------------------------
 # Factor: demand

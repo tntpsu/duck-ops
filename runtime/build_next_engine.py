@@ -98,22 +98,43 @@ def _overlap(a: set[str], b: set[str]) -> float:
 _REPORT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_competitor_report\.json$")
 
 
+def _is_snapshot_only_report(report: dict[str, Any]) -> bool:
+    """A daily snapshot (2026-06-12 cadence split) carries no LLM analysis —
+    period='daily_snapshot', empty ducks_to_build/trending_products. Only the
+    weekly analysis has build candidates; snapshot-only reports must be
+    skipped or Build-Next reads an empty file and produces 0."""
+    if str(report.get("period") or "").strip() == "daily_snapshot":
+        return True
+    ai = report.get("ai_insights")
+    if isinstance(ai, dict) and ai.get("_snapshot_only"):
+        return True
+    return False
+
+
 def latest_competitor_report(reports_dir: Path = COMPETITOR_REPORTS_DIR) -> tuple[dict[str, Any], str | None]:
-    """Newest dated <YYYY-MM-DD>_competitor_report.json. Returns ({}, None)
-    when the directory or files are absent — a missing demand source degrades
-    the surface, never crashes it. Only date-prefixed filenames qualify: a
-    dev/test report like test-foo_competitor_report.json must never be
-    chosen (it sorts after the dated files alphabetically)."""
+    """Newest dated <YYYY-MM-DD>_competitor_report.json that actually carries
+    build candidates (i.e. a WEEKLY analysis, not a daily snapshot). Returns
+    ({}, None) when none exist — a missing demand source degrades the surface,
+    never crashes it. Only date-prefixed filenames qualify (a dev/test report
+    like test-foo_competitor_report.json must never be chosen).
+
+    2026-06-15: the competitor cadence split (06-12) made daily runs write
+    snapshot-only reports with empty ducks_to_build to the SAME filename, so
+    the newest file is usually an empty snapshot. Walk newest-first and skip
+    snapshot-only reports so this reads the latest real analysis."""
     try:
-        files = sorted(p for p in Path(reports_dir).glob("*_competitor_report.json")
-                       if _REPORT_DATE_RE.match(p.name))
+        files = sorted((p for p in Path(reports_dir).glob("*_competitor_report.json")
+                        if _REPORT_DATE_RE.match(p.name)), reverse=True)
     except OSError:
         files = []
-    if not files:
-        return {}, None
-    latest = files[-1]
-    report = load_json(latest, {})
-    return (report if isinstance(report, dict) else {}), latest.name
+    for path in files:
+        report = load_json(path, {})
+        if not isinstance(report, dict):
+            continue
+        if _is_snapshot_only_report(report):
+            continue
+        return report, path.name
+    return {}, None
 
 
 def assemble_candidates(report: dict[str, Any]) -> list[dict[str, Any]]:
