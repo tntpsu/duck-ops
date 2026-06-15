@@ -10,7 +10,20 @@ if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
 import open_order_intelligence as oo
-from open_order_intelligence import _shopify_buyer_name, _line_is_custom
+from open_order_intelligence import _shopify_buyer_name, _line_is_custom, _is_open_receipt
+
+
+def test_open_receipt_excludes_canceled_and_refunded():
+    # Regression (2026-06-15): canceled orders stay is_paid=True / is_shipped=False,
+    # so they wrongly showed as open custom builds until status was checked.
+    assert _is_open_receipt({"is_paid": True, "is_shipped": False, "status": "Paid"}) is True
+    assert _is_open_receipt({"is_paid": True, "is_shipped": False, "status": "Canceled"}) is False
+    assert _is_open_receipt({"is_paid": True, "is_shipped": False, "status": "Fully Refunded"}) is False
+    # Partially refunded may still need making — kept.
+    assert _is_open_receipt({"is_paid": True, "is_shipped": False, "status": "Partially Refunded"}) is True
+    # Already shipped / unpaid are not open.
+    assert _is_open_receipt({"is_paid": True, "is_shipped": True, "status": "Paid"}) is False
+    assert _is_open_receipt({"is_paid": False, "is_shipped": False, "status": "Paid"}) is False
 
 
 def test_line_is_custom_by_title_keyword():

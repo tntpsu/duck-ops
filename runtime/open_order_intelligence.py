@@ -38,6 +38,14 @@ ORDER_REFRESH_SHOPIFY_TIMEOUT_SECONDS = 120
 ETSY_OPEN_ORDER_LOOKBACK_DAYS = 45
 ETSY_TRANSACTION_LOOKBACK_BUFFER_DAYS = 7
 
+# An Etsy order to fulfill is paid + not yet shipped. But a CANCELED or
+# fully-refunded receipt is still is_paid=True / is_shipped=False, so the
+# paid+unshipped filter alone wrongly surfaced them as open orders (2026-06-15:
+# two canceled custom-duck orders showed in the pack/custom list). Exclude
+# statuses that mean the order is no longer fulfillable. (Partially Refunded
+# is kept — the remainder may still need making.)
+ETSY_NON_OPEN_STATUSES = {"canceled", "cancelled", "fully refunded"}
+
 CUSTOM_KEYWORDS = ("custom", "build your custom", "design your own")
 
 
@@ -157,6 +165,15 @@ def _record_order_refresh_receipt(kind: str, payload: dict[str, Any]) -> None:
 def _title_is_custom(title: str | None) -> bool:
     lowered = str(title or "").lower()
     return any(keyword in lowered for keyword in CUSTOM_KEYWORDS)
+
+
+def _is_open_receipt(receipt: dict[str, Any]) -> bool:
+    """An Etsy order to fulfill: paid, not yet shipped, and NOT canceled or
+    fully refunded. A canceled receipt stays is_paid=True / is_shipped=False,
+    so the status check is what keeps it out of the open/pack/custom lists."""
+    if not receipt.get("is_paid") or receipt.get("is_shipped"):
+        return False
+    return str(receipt.get("status") or "").strip().lower() not in ETSY_NON_OPEN_STATUSES
 
 
 def _line_is_custom(title: str | None, custom_details: dict[str, Any] | None = None) -> bool:
@@ -539,11 +556,7 @@ def _format_option_summary(option_counts: dict[str, int]) -> str | None:
 
 def build_etsy_open_orders_snapshot() -> dict[str, Any]:
     receipts_payload = load_recent_etsy_receipts_snapshot(days_back=ETSY_OPEN_ORDER_LOOKBACK_DAYS, max_age_hours=0)
-    open_receipts = [
-        receipt
-        for receipt in (receipts_payload.get("items") or [])
-        if receipt.get("is_paid") and not receipt.get("is_shipped")
-    ]
+    open_receipts = [r for r in (receipts_payload.get("items") or []) if _is_open_receipt(r)]
     min_created, max_created = _etsy_timestamp_bounds(open_receipts)
     wanted_transaction_ids = [
         str(transaction.get("transaction_id") or "").strip()
