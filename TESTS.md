@@ -618,6 +618,25 @@ Operator asked "anything still red in OS?" — five fixes from the sweep:
 
 ---
 
+## Surface 20 — Theme Review Feedback Loop (2026-06-15, matrix before code)
+
+**Background:** the theme classifier flags products `needs_review` when its LLM pick disagrees with a deterministic keyword cross-check, but those flags only lived in `duckAgent/state/theme_classification_health.json` with no review surface (the OS card pointed at the raw JSON). Operators couldn't review/correct from the portal, corrections didn't persist (a taxonomy-version bump re-flagged them), and the keyword check over-fires on persona ducks (a "safari guide" flagged toward Animals & Pets because of the word "safari"; a "dad at the grill" toward Food & Beverages because of "spatula"). This loop adds: Decision-Inbox review (Approve / Keep current / Change to…), a persistent operator-override store the classifier respects, false-keyword-flag logging to tune the over-firing rules, and golden-fixture append for the gated eval. Built on two existing rails — the trend `mark_duplicate → catalog_aliases` decide-and-persist loop and the theme classifier's own LLM-surface recipe.
+
+Decision-type semantics: **approve** = adopt the keyword-suggested category; **keep_current** = reject the flag, keep existing (and log a false keyword flag); **change_to** = operator picks any taxonomy category (server-validated).
+
+| Use case | Happy | Bad input | Re-flag / drift | Isolation | Gated |
+|---|---|---|---|---|---|
+| Override store (duck-ops `theme_review_decisions.py`) | ✅ planned: upsert-by-handle, atomic, idempotent overwrite (`test_theme_review_decisions`) | n/a | n/a | ✅ planned: 3-layer — conftest both repos + `TestModeRefusalError` frozen-path guard + `test_no_test_pollution_in_theme_review_decisions` | n/a |
+| Classifier respects override | ✅ planned: override pins primary + clears needs_review (`test_override_suppresses_reflag`) | n/a | ✅ planned: survives taxonomy bump (`test_override_survives_taxonomy_bump`); input-hash drift → `override_stale_inputs` surfaced not silently pinned | ✅ planned: override loader mocked | n/a |
+| Inbox item source (`_theme_review_decision_items`) | ✅ planned: parses suggested from `keyword_evidence_favors:X`, includes `change_options` | ✅ planned: low_confidence/off_taxonomy reasons render Keep+Change only (no Approve) | ✅ planned: items already overridden are skipped | n/a | n/a |
+| Apply decision (handler + `apply_theme_review_decision`) | ✅ planned: approve/keep/change_to write override + products_cache (primary, needs_review, ai_theme_category) + re-run health | ✅ planned: `change_to` off-taxonomy rejected server-side (not just JS) | ✅ planned: never touches Shopify `category` field; drift alarm in health producer | ✅ planned: cache + store patched to tmp | n/a |
+| Keyword false-flag feedback | ✅ planned: keep_current on keyword flag logs matched over-firing keyword (`theme_keyword_false_flags.json`) | ✅ planned: non-keyword reasons don't log | n/a | ✅ planned: same store isolation | ⚠️ taxonomy `keywords` edit is gated (config change → eval gate), only logging is automatic |
+| Classifier learning | ✅ planned: correction appends to EXISTING `theme_classifier_golden.json` (idempotent by handle) | ✅ planned: keep_current does NOT append (no correction) | n/a | n/a | ⚠️ accuracy improvement rides existing `eval_theme_classifier.py` (≥90% gate) — append automatic, eval+model/prompt change manual |
+
+**No Tier-3 in the core loop** — all writes are internal fields (`theme_classification`/`ai_theme_category`); Shopify product taxonomy is deliberately untouched (pushing the corrected category to Shopify would be a separate Tier-3 enhancement, out of scope). Propagation to duck-ops `catalog_index` (→ occasion targeting) is free via the next `phase1_observer` run.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

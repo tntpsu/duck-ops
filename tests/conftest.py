@@ -149,4 +149,15 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         yield
         return
     monkeypatch.setattr(_pcq, "BUILD_NEXT_PROMOTIONS_PATH", tmp_path / "build_next_promotions.json")
+
+    # 2026-06-15: theme_review_decisions.THEME_REVIEW_DECISIONS_PATH (Surface 20) —
+    # new module-level prod-path constant, isolated on arrival per the
+    # three-layer policy (this fixture + the source-level DUCK_TEST_MODE guard
+    # in record_theme_review_decision + tests/test_no_test_pollution_in_theme_review_decisions.py).
+    try:
+        import theme_review_decisions as _trd
+    except ImportError:
+        yield
+        return
+    monkeypatch.setattr(_trd, "THEME_REVIEW_DECISIONS_PATH", tmp_path / "theme_review_decisions.json")
     yield
