@@ -2247,6 +2247,16 @@ def prepare_auth_for_drain(policy: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class AlreadyRespondedError(Exception):
+    """The located review row already carries a seller response. Not a failure
+    — the reply is live (possibly ours, recorded as failed). Callers should
+    resolve the item as already_replied, never retry."""
+
+    def __init__(self, existing_response_text: str = "") -> None:
+        super().__init__("Review already has a seller response.")
+        self.existing_response_text = existing_response_text
+
+
 def prepare_review_row_for_execution(
     session_name: str,
     decision: dict[str, Any],
@@ -2367,6 +2377,15 @@ def prepare_review_row_for_execution(
         raise RuntimeError("Matched Etsy review row did not keep the expected transaction_id.")
     if expected_listing_id and str(initial_block.get("matchedListingId") or "") != expected_listing_id:
         raise RuntimeError("Matched Etsy review row did not keep the expected listing_id.")
+
+    # The review already has a seller response (Etsy allows only one). There is
+    # no respond button to open, so trying to post would fail forever with
+    # reply_button_not_found. Signal already-replied so the caller resolves the
+    # item instead of retrying. 2026-06-16: the stranded backlog turned out to
+    # be reviews we'd ALREADY answered but recorded as failed.
+    if initial_block.get("alreadyResponded"):
+        attempt["existing_response"] = str(initial_block.get("existingResponseText") or "")
+        raise AlreadyRespondedError(str(initial_block.get("existingResponseText") or ""))
 
     if not initial_block.get("replyBoxVisible"):
         click_result = click_reply_button(session_name, expected_transaction_id or "")
@@ -2680,6 +2699,33 @@ def run_dry_run_fill(
             "artifact_id": artifact_id,
             "status": "queued",
             "message": "Dry-run fill completed. The reply text is in Etsy, but submit was not clicked.",
+            "queue_item": queue_item,
+            "attempt": attempt,
+        }
+    except AlreadyRespondedError as already_exc:
+        # Dry run discovered the review already has a seller reply — resolve it.
+        existing = str(getattr(already_exc, "existing_response_text", "") or "")[:400]
+        attempt["finished_at"] = now_iso()
+        attempt["outcome"] = "already_replied"
+        attempt["notes"].append("Etsy already shows a seller response; dry-run fill skipped.")
+        queue_item = record_attempt(
+            quality_state, queue_state, artifact_id, attempt,
+            final_queue_status="skipped", final_execution_state="skipped",
+            last_preflight_status="already_replied",
+        )
+        _record_review_execution_transition(
+            artifact_id, decision, state="resolved", state_reason="already_replied",
+            requires_confirmation=False,
+            last_side_effect={"kind": "already_responded_detected", "attempt_id": attempt.get("attempt_id"), "existing_response": existing},
+            next_action="No execution needed; Etsy already shows a public reply on this review.",
+            receipt_kind="already_replied",
+            receipt_payload={"attempt_id": attempt.get("attempt_id"), "existing_response": existing},
+        )
+        return {
+            "ok": True,
+            "artifact_id": artifact_id,
+            "status": "skipped",
+            "message": "The review already has a public seller reply, so the dry-run did not fill.",
             "queue_item": queue_item,
             "attempt": attempt,
         }
@@ -3000,6 +3046,62 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = False) -> dic
             "artifact_id": artifact_id,
             "status": "posted",
             "message": "Live submit completed and the reply should now be posted on Etsy.",
+            "queue_item": queue_item,
+            "attempt": attempt,
+            "session": {
+                "session_id": session.get("session_id"),
+                "counts": _session_counts(session),
+            },
+        }
+    except AlreadyRespondedError as already_exc:
+        # The located review already has a seller response (often ours, recorded
+        # as failed during the outage). Resolve as already_replied — never
+        # retry; trying again just hits reply_button_not_found forever.
+        existing = str(getattr(already_exc, "existing_response_text", "") or "")[:400]
+        attempt["finished_at"] = now_iso()
+        attempt["outcome"] = "already_replied"
+        attempt["notes"].append("Etsy already shows a seller response on the matched review row; submit skipped.")
+        queue_item = record_attempt(
+            quality_state,
+            queue_state,
+            artifact_id,
+            attempt,
+            final_queue_status="skipped",
+            final_execution_state="skipped",
+            last_preflight_status="already_replied",
+        )
+        session = record_session_event(
+            session_state,
+            decision,
+            attempt,
+            status="skipped",
+            artifact_paths=attempt.get("artifact_paths"),
+        )
+        save_session_state(session_state)
+        _record_review_execution_transition(
+            artifact_id,
+            decision,
+            state="resolved",
+            state_reason="already_replied",
+            requires_confirmation=False,
+            last_side_effect={
+                "kind": "already_responded_detected",
+                "attempt_id": attempt.get("attempt_id"),
+                "existing_response": existing,
+            },
+            next_action="No execution needed because Etsy already shows a public reply on this review.",
+            receipt_kind="already_replied",
+            receipt_payload={
+                "attempt_id": attempt.get("attempt_id"),
+                "queue_status": queue_item.get("status"),
+                "existing_response": existing,
+            },
+        )
+        return {
+            "ok": True,
+            "artifact_id": artifact_id,
+            "status": "skipped",
+            "message": "The review already has a public seller reply, so nothing was submitted.",
             "queue_item": queue_item,
             "attempt": attempt,
             "session": {

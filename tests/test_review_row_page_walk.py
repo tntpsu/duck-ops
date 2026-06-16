@@ -88,3 +88,28 @@ def test_not_found_anywhere_raises_row_not_found(monkeypatch):
     attempt: dict = {}
     with pytest.raises(RuntimeError, match="could not be found"):
         rre.prepare_review_row_for_execution("esd", DECISION, attempt, {})
+
+
+def test_already_responded_raises_before_trying_to_open_reply_box(monkeypatch):
+    # The exact row is on page 1 but already has a seller response -> signal
+    # already-replied (don't try to open a respond button that isn't there).
+    answered = {"found": True, "matchedTransactionId": "TARGET", "matchedListingId": "L1",
+                "replyBoxVisible": False, "alreadyResponded": True,
+                "existingResponseText": "Philip responded on Jun 11, 2026 Thank you!"}
+    _wire(monkeypatch, [answered])
+    attempt: dict = {}
+    with pytest.raises(rre.AlreadyRespondedError) as ei:
+        rre.prepare_review_row_for_execution("esd", DECISION, attempt, {})
+    assert "Philip responded" in ei.value.existing_response_text
+
+
+def test_already_responded_detected_after_pagination(monkeypatch):
+    # Page 1 is a wrong neighbor; page 2 is the exact row but already answered.
+    wrong = {"found": True, "matchedTransactionId": "WRONG", "matchedListingId": "L1", "replyBoxVisible": True}
+    answered = {"found": True, "matchedTransactionId": "TARGET", "matchedListingId": "L1",
+                "replyBoxVisible": False, "alreadyResponded": True, "existingResponseText": "responded on ..."}
+    visited = _wire(monkeypatch, [wrong, answered])
+    attempt: dict = {}
+    with pytest.raises(rre.AlreadyRespondedError):
+        rre.prepare_review_row_for_execution("esd", DECISION, attempt, {})
+    assert any("page=2" in u for u in visited)  # it did paginate to find it

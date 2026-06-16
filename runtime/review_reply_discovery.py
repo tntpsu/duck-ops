@@ -550,7 +550,9 @@ def locate_review_block(
             "replyTextareaPlaceholder: (fields.find(field => field.tag === 'TEXTAREA') || {}).placeholder || null,"
             "submitVisible: controls.some(control => /post a public response/i.test(control.text || control.ariaLabel || '')),"
             "cancelVisible: controls.some(control => /cancel/i.test(control.text || control.ariaLabel || '')),"
-            "contactBuyerVisible: controls.some(control => /contact buyer/i.test(control.text || control.ariaLabel || ''))"
+            "contactBuyerVisible: controls.some(control => /contact buyer/i.test(control.text || control.ariaLabel || '')),"
+            "alreadyResponded: controls.some(control => /remove response|edit response/i.test(control.text || control.ariaLabel || '')) || /responded on/i.test(scope.innerText || ''),"
+            "existingResponseText: (() => { const t = (scope.innerText || ''); const i = t.toLowerCase().indexOf('responded on'); return i >= 0 ? t.slice(i, i + 400).trim() : null; })()"
             "}; "
             "})()"
         ),
