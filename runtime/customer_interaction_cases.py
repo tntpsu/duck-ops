@@ -202,6 +202,19 @@ def _looks_like_custom_design_request(subject: str, body_text: str, from_line: s
     if any(term in sender for term in ("fedex", "etsy transactions", "etsy sellers")):
         return False
 
+    # The system's OWN operator emails are not customer custom-design requests.
+    # They carry the "MJD:" subject prefix + structured FLOW:/ACTION:/RUN:
+    # metadata; replies quote them ("Re: MJD: ..."), and that quoting makes the
+    # body match content terms like "custom duck" — which is how 32 self-
+    # generated emails (newduck/shopify_seo reviews + replies) were mis-flagged
+    # as customer requests in the nightly digest. Etsy "unread messages" mails
+    # are notifications pointing AT a message, not the request itself.
+    subject_lower = str(subject or "").lower()
+    if any(marker in subject_lower for marker in ("mjd:", "flow:", "action:", "run:")):
+        return False
+    if "you have unread messages" in subject_lower:
+        return False
+
     strong_terms = [
         "custom duck",
         "personalized duck",
