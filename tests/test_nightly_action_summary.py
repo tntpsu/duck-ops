@@ -17,6 +17,34 @@ from nightly_action_summary import (
 
 
 class NightlyActionSummaryTests(unittest.TestCase):
+    def test_issues_split_reply_vs_decision_not_duplicated(self) -> None:
+        # Regression (2026-06-16): both sections used to render the SAME merged
+        # attention list. They must split by status: reply_needed -> "needs
+        # reply", everything else -> "needs decision".
+        packet_payload = {"items": [
+            {"packet_type": "reply", "status": "reply_needed", "packet_id": "p1",
+             "conversation_thread_key": "t1", "priority": "medium", "title": "Reply A"},
+            {"packet_type": "reply", "status": "reply_needed", "packet_id": "p2",
+             "conversation_thread_key": "t2", "priority": "medium", "title": "Reply B"},
+            {"packet_type": "refund", "status": "operator_confirmation_required", "packet_id": "p3",
+             "conversation_thread_key": "t3", "priority": "high", "title": "Refund decision"},
+        ]}
+        payload = build_nightly_action_summary(
+            packet_payload, [], {}, [], {}, {},
+        )
+        secs = payload["sections"]
+        reply = secs["customer_issues_needing_reply"]
+        attn = secs["customer_issues_needing_attention"]
+        self.assertEqual(len(reply), 2)
+        self.assertEqual(len(attn), 1)
+        self.assertEqual(payload["counts"]["customer_reply_items"], 2)
+        self.assertEqual(payload["counts"]["customer_attention_items"], 1)
+        # the two lists are disjoint (not the same merged list)
+        reply_ids = {p.get("packet_id") for p in reply}
+        attn_ids = {p.get("packet_id") for p in attn}
+        self.assertTrue(reply_ids.isdisjoint(attn_ids))
+        self.assertEqual(attn_ids, {"p3"})
+
     def test_orders_to_pack_is_mobile_friendly(self) -> None:
         payload = {
             "generated_at": "2026-04-11T20:51:47-04:00",

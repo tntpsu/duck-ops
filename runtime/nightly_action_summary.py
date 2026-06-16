@@ -653,6 +653,14 @@ def build_nightly_action_summary(
             watch_items.append(packet)
 
     attention_items = _merge_attention_packets(attention_items)
+    # Split the attention packets so the two email sections show DISTINCT work
+    # instead of the same merged list twice (2026-06-16 bug). "Needs reply" =
+    # a customer reply must be drafted/sent (status reply_needed); "Needs
+    # attention" = an operator decision is required (refund/replacement/
+    # confirmation — everything else). attention_items (full) still feeds the
+    # top-actions curation + the at-a-glance total below.
+    reply_needed_items = [p for p in attention_items if str(p.get("status") or "") == "reply_needed"]
+    needs_decision_items = [p for p in attention_items if str(p.get("status") or "") != "reply_needed"]
     replacement_label_items.sort(key=lambda item: (_priority_rank(item.get("priority")), str(item.get("title") or "").lower()))
     watch_items.sort(key=lambda item: (_priority_rank(item.get("priority")), str(item.get("title") or "").lower()))
 
@@ -695,8 +703,8 @@ def build_nightly_action_summary(
         "send_window_open": now_local >= send_after,
         "strategy_focus": load_master_roadmap_focus(),
         "counts": {
-            "customer_attention_items": len(attention_items),
-            "customer_reply_items": len(attention_items),
+            "customer_attention_items": len(needs_decision_items),
+            "customer_reply_items": len(reply_needed_items),
             "customer_new_thread_items": len(customer_new_threads),
             "customer_follow_up_items": len(customer_follow_up_items),
             "customer_follow_up_reply_drafts": sum(1 for item in customer_follow_up_items if str(item.get("follow_up_state") or "") == "reply_drafted"),
@@ -721,8 +729,8 @@ def build_nightly_action_summary(
             "customer_new_threads": customer_new_threads,
             "customer_followups_in_motion": customer_follow_up_items,
             "customer_waiting_on_customer": customer_waiting_items,
-            "customer_issues_needing_attention": attention_items,
-            "customer_issues_needing_reply": attention_items,
+            "customer_issues_needing_attention": needs_decision_items,
+            "customer_issues_needing_reply": reply_needed_items,
             "buy_replacement_labels_now": replacement_label_items,
             "orders_to_pack": orders_to_pack,
             "custom_novel_ducks_to_make": {
@@ -755,7 +763,8 @@ def render_nightly_action_summary_markdown(payload: dict[str, Any]) -> str:
         f"- New customer threads: {counts.get('customer_new_thread_items', 0)}",
         f"- Customer actions already in motion: {counts.get('customer_follow_up_items', 0)}",
         f"- Waiting on the customer (info only): {counts.get('customer_waiting_on_customer', 0)}",
-        f"- Customer issues still needing attention tonight: {counts.get('customer_attention_items', 0)}",
+        f"- Customer replies to send: {counts.get('customer_reply_items', 0)}",
+        f"- Customer issues needing an operator decision: {counts.get('customer_attention_items', 0)}",
         f"- Replacement labels to buy now: {counts.get('replacement_labels_now', 0)}",
         f"- Non-custom ducks to pack: {counts.get('orders_to_pack_units', 0)} units across {counts.get('orders_to_pack_titles', 0)} ducks",
         f"- Custom ducks to make: {counts.get('custom_order_lines', 0)} open custom order lines",
@@ -997,7 +1006,8 @@ def render_nightly_action_summary_html(payload: dict[str, Any]) -> str:
         [
             _nightly_stat("New threads", counts.get("customer_new_thread_items", 0)),
             _nightly_stat("Actions live", counts.get("customer_follow_up_items", 0)),
-            _nightly_stat("Needs attention", counts.get("customer_attention_items", 0)),
+            _nightly_stat("Replies to send", counts.get("customer_reply_items", 0)),
+            _nightly_stat("Needs decision", counts.get("customer_attention_items", 0)),
             _nightly_stat("Replacement labels", counts.get("replacement_labels_now", 0)),
             _nightly_stat("Pack tonight", f"{counts.get('orders_to_pack_units', 0)} units"),
             _nightly_stat("Custom ducks", counts.get("custom_order_lines", 0)),
