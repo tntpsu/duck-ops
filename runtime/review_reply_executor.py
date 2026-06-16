@@ -91,6 +91,13 @@ DEFAULT_EXECUTION_POLICY: dict[str, Any] = {
     "auto_drain_send_session_summary": True,
     "stop_after_first_failure": True,
     "review_page_max_probe": 10,
+    # 2026-06-16: bounded page-walk when locating the exact review row. The
+    # reviews page shows ~14 reviews/page; an older target review sits on a
+    # later page, so the locator paginates this many pages looking for the
+    # EXACT expected transaction id before failing closed. Kept small to stay
+    # bot-safe + within the etsy_browser_guard pacing budget (each page is one
+    # Etsy-visible navigation). ~3 pages ≈ the most recent ~42 reviews.
+    "review_page_walk_max_pages": 3,
     "retryable_row_not_found_enabled": True,
     "retryable_row_not_found_max_attempts": 3,
     "retryable_row_not_found_retry_delay_seconds": 3600,
@@ -2275,7 +2282,7 @@ def prepare_review_row_for_execution(
         policy = load_execution_policy()
         parsed = urlparse(current_reviews_url)
         current_page = int((parse_qs(parsed.query).get("page") or ["1"])[0] or "1")
-        max_pages = max(5, int(policy.get("review_page_max_probe") or 5))
+        max_pages = max(2, int(policy.get("review_page_walk_max_pages") or 3))
         candidates: list[str] = []
         for page in range(1, max_pages + 1):
             query = parse_qs(parsed.query)
@@ -2288,9 +2295,24 @@ def prepare_review_row_for_execution(
             candidates.append(url)
         return candidates
 
+    def is_exact_match(block: dict[str, Any]) -> bool:
+        # The right row is found AND (when known) carries the expected ids. A
+        # found-but-wrong-transaction row is a text neighbor on the WRONG page;
+        # treat it as not-the-row and keep paginating. 2026-06-16: the search
+        # used to accept ANY text match on the landing page (page 1) and never
+        # paginate, so an older target review one page over got mis-matched to
+        # a neighbor and the guard rejected it.
+        if not block.get("found"):
+            return False
+        if expected_transaction_id and str(block.get("matchedTransactionId") or "") != expected_transaction_id:
+            return False
+        if expected_listing_id and str(block.get("matchedListingId") or "") != expected_listing_id:
+            return False
+        return True
+
     initial_block = locate_current_page()
     attempt["initial_match"] = initial_block
-    if not initial_block.get("found"):
+    if not is_exact_match(initial_block):
         review_page_probes: list[dict[str, Any]] = []
         for candidate_url in review_page_candidates(str(navigation.get("landed_url") or "")):
             landed_url, landed_title = navigate_within_session(session_name, candidate_url, wait_seconds=1.5)
@@ -2301,11 +2323,12 @@ def prepare_review_row_for_execution(
                     "landed_url": landed_url,
                     "page_title": landed_title,
                     "found": bool(page_block.get("found")),
+                    "exact": is_exact_match(page_block),
                     "matched_transaction_id": page_block.get("matchedTransactionId"),
                     "matched_listing_id": page_block.get("matchedListingId"),
                 }
             )
-            if page_block.get("found"):
+            if is_exact_match(page_block):
                 initial_block = page_block
                 navigation["strategy"] = "review_page_probe_search"
                 navigation["landed_url"] = landed_url or candidate_url
@@ -2313,7 +2336,7 @@ def prepare_review_row_for_execution(
                 break
         if review_page_probes:
             attempt["review_page_probes"] = review_page_probes
-        if not initial_block.get("found"):
+        if not is_exact_match(initial_block):
             refresh_url = str(navigation.get("landed_url") or session_meta.get("current_url") or DEFAULT_ETSY_REVIEWS_URL)
             refresh_landed_url, refresh_title = navigate_within_session(session_name, refresh_url, wait_seconds=2.0)
             refreshed_block = locate_current_page()
@@ -2322,16 +2345,24 @@ def prepare_review_row_for_execution(
                 "landed_url": refresh_landed_url or refresh_url,
                 "page_title": refresh_title,
                 "found": bool(refreshed_block.get("found")),
+                "exact": is_exact_match(refreshed_block),
                 "matched_transaction_id": refreshed_block.get("matchedTransactionId"),
                 "matched_listing_id": refreshed_block.get("matchedListingId"),
             }
-            if refreshed_block.get("found"):
+            if is_exact_match(refreshed_block):
                 initial_block = refreshed_block
                 navigation["strategy"] = "review_page_surface_refresh"
                 navigation["landed_url"] = refresh_landed_url or refresh_url
                 navigation["page_title"] = refresh_title
-        if not initial_block.get("found"):
-            raise RuntimeError("Exact review row could not be found in the signed-in Etsy session.")
+        if not is_exact_match(initial_block):
+            # Exhausted the bounded page-walk without locating the exact row.
+            # Fail closed with the specific reason (preserves failure_class).
+            if not initial_block.get("found"):
+                raise RuntimeError("Exact review row could not be found in the signed-in Etsy session.")
+            if expected_transaction_id and str(initial_block.get("matchedTransactionId") or "") != expected_transaction_id:
+                raise RuntimeError("Matched Etsy review row did not keep the expected transaction_id.")
+            raise RuntimeError("Matched Etsy review row did not keep the expected listing_id.")
+    # Defensive double-check: initial_block is now the exact row (or we raised).
     if expected_transaction_id and str(initial_block.get("matchedTransactionId") or "") != expected_transaction_id:
         raise RuntimeError("Matched Etsy review row did not keep the expected transaction_id.")
     if expected_listing_id and str(initial_block.get("matchedListingId") or "") != expected_listing_id:
