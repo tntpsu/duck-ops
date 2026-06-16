@@ -179,10 +179,15 @@ POLICIES: dict[str, CadencePolicy] = {
     ),
     "business_intelligence": CadencePolicy(
         surface_name="business_intelligence",
-        cadence="weekly_monday",
-        bypass_keys=("action_items_count",),
-        deferred_note="Weekly insights refreshed in the portal; email "
-                      "scheduled for Monday. Action items trigger a same-day send.",
+        # 2026-06-16: turned OFF (operator preference). It was weekly_monday but
+        # bypass_keys=("action_items_count",) fired EVERY day because the weekly
+        # insights always produce action items — so a "weekly" email arrived
+        # daily. cadence=manual + no bypass = never auto-sends; the daily data
+        # sync still runs and insights stay on the portal (+ weekly Monday digest).
+        cadence="manual",
+        bypass_keys=(),
+        deferred_note="Business intelligence email is off (operator preference); "
+                      "insights live on the portal and the weekly Monday digest.",
     ),
     "engineering_governance": CadencePolicy(
         surface_name="engineering_governance",

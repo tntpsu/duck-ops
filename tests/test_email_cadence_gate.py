@@ -61,6 +61,19 @@ class PolicyRegistryTests(unittest.TestCase):
         with self.assertRaises(UnknownSurfaceError):
             require_policy("does-not-exist")
 
+    def test_business_intelligence_is_off(self) -> None:
+        # 2026-06-16: turned off. It was weekly_monday with a
+        # bypass_keys=("action_items_count",) that fired EVERY day (insights
+        # always have action items), so the "weekly" email arrived daily.
+        from datetime import datetime as _dt
+        # Action items present + a Monday: must still NOT send.
+        monday = _dt(2026, 6, 15, 8, 0).astimezone()
+        dec = should_send_email("business_intelligence", {"action_items_count": 9}, now=monday)
+        self.assertFalse(dec.should_send)
+        # A regular weekday: also off.
+        tuesday = _dt(2026, 6, 16, 4, 0).astimezone()
+        self.assertFalse(should_send_email("business_intelligence", {"action_items_count": 9}, now=tuesday).should_send)
+
     def test_require_policy_is_case_insensitive(self) -> None:
         self.assertIs(require_policy("Profit"), POLICIES["profit"])
 
