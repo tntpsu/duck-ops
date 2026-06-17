@@ -35,7 +35,9 @@ becomes a noisy crash, not a silent default.
 from __future__ import annotations
 
 import json
+import json
 import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +45,17 @@ from typing import Any, Literal
 
 DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
 DECISION_LOG_PATH = DUCK_OPS_ROOT / "state" / "email_cadence_decisions.jsonl"
+
+# 2026-06-17 (Surface 23): operator-writable cadence overrides. Each surface's
+# hardcoded POLICIES cadence is the default; an override here wins at runtime
+# (no code commit). Operator vocabulary is off/weekly/daily; "off" stops the
+# routine send but still honors a genuine anomaly bypass (operator choice).
+EMAIL_CADENCE_OVERRIDES_PATH = DUCK_OPS_ROOT / "state" / "email_cadence_overrides.json"
+_FROZEN_PRODUCTION_OVERRIDES_PATH = EMAIL_CADENCE_OVERRIDES_PATH.resolve()
+_TEST_MODE_REFUSAL_ENV = "DUCK_TEST_MODE"
+# operator label -> internal effective cadence ("off" is its own effective mode)
+_OPERATOR_CADENCES: dict[str, str] = {"off": "off", "weekly": "weekly_monday", "daily": "daily"}
+_OVERRIDE_HISTORY_CAP = 50
 
 # ISO weekday: Monday = 0
 _WEEKDAY_TO_INT: dict[str, int] = {
@@ -63,6 +76,12 @@ class UnknownSurfaceError(KeyError):
     missing registry entry surfaces as a noisy crash at the call site,
     not a silent "default to weekly" that drops emails the operator
     needed."""
+
+
+class TestModeRefusalError(RuntimeError):
+    """Raised when set_override would write to the factory-default PRODUCTION
+    overrides file while DUCK_TEST_MODE=1. Path-patched tests (conftest →
+    tmp path) sail through; a test that bypasses isolation gets caught."""
 
 
 @dataclass(frozen=True)
@@ -240,6 +259,109 @@ def require_policy(surface_name: str) -> CadencePolicy:
     return policy
 
 
+def load_overrides() -> dict[str, str]:
+    """Operator cadence overrides ({surface: "off"|"weekly"|"daily"}).
+
+    Fail-soft: a missing or corrupt file returns {} so the gate always falls
+    back to the hardcoded POLICIES defaults and NEVER crashes a send path."""
+    try:
+        raw = json.loads(EMAIL_CADENCE_OVERRIDES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    overrides = raw.get("overrides") if isinstance(raw.get("overrides"), dict) else raw
+    out: dict[str, str] = {}
+    for surface, label in (overrides or {}).items():
+        label = str(label or "").strip().lower()
+        if label in _OPERATOR_CADENCES and str(surface or "").strip().lower() in POLICIES:
+            out[str(surface).strip().lower()] = label
+    return out
+
+
+def _effective_cadence(surface_name: str, policy: CadencePolicy) -> str:
+    """The cadence in force for this surface: an operator override (mapped to
+    the internal vocabulary, with "off" as its own mode) if present and valid,
+    else the hardcoded policy default."""
+    label = load_overrides().get(str(surface_name or "").strip().lower())
+    if label in _OPERATOR_CADENCES:
+        return _OPERATOR_CADENCES[label]
+    return policy.cadence
+
+
+def set_override(surface_name: str, cadence: str) -> dict[str, str]:
+    """Set (or clear) an operator cadence override. `cadence` is off/weekly/
+    daily, or "default"/"" to remove the override. Validates the surface +
+    value, refuses prod writes under DUCK_TEST_MODE, writes atomically, and
+    records a capped history. Returns the updated overrides map."""
+    surface = str(surface_name or "").strip().lower()
+    if surface not in POLICIES:
+        raise UnknownSurfaceError(
+            f"Unknown surface {surface_name!r}; cannot set an email cadence override."
+        )
+    label = str(cadence or "").strip().lower()
+    clearing = label in {"", "default", "none"}
+    if not clearing and label not in _OPERATOR_CADENCES:
+        raise ValueError(f"Invalid cadence {cadence!r}; expected off / weekly / daily (or 'default' to clear).")
+    if (str(os.environ.get(_TEST_MODE_REFUSAL_ENV) or "").strip() in {"1", "true", "TRUE", "yes"}
+            and EMAIL_CADENCE_OVERRIDES_PATH.resolve() == _FROZEN_PRODUCTION_OVERRIDES_PATH):
+        raise TestModeRefusalError(
+            "Refusing to write the production email_cadence_overrides.json under "
+            "DUCK_TEST_MODE=1; the test isn't path-isolated (monkeypatch "
+            "EMAIL_CADENCE_OVERRIDES_PATH to a tmp file)."
+        )
+
+    # read current (raw, to preserve history), apply, write atomically
+    try:
+        current = json.loads(EMAIL_CADENCE_OVERRIDES_PATH.read_text(encoding="utf-8"))
+        if not isinstance(current, dict):
+            current = {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        current = {}
+    overrides = dict(current.get("overrides") or {}) if isinstance(current.get("overrides"), dict) else {}
+    history = list(current.get("override_history") or []) if isinstance(current.get("override_history"), list) else []
+    prev = overrides.get(surface)
+    if clearing:
+        overrides.pop(surface, None)
+    else:
+        overrides[surface] = label
+    history.append({"at": _now_iso(), "surface": surface, "from": prev, "to": (None if clearing else label)})
+    payload = {"overrides": overrides, "override_history": history[-_OVERRIDE_HISTORY_CAP:]}
+
+    EMAIL_CADENCE_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(EMAIL_CADENCE_OVERRIDES_PATH.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+        os.replace(tmp, EMAIL_CADENCE_OVERRIDES_PATH)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return overrides
+
+
+def list_effective_cadences() -> list[dict[str, Any]]:
+    """Portal-facing: every surface with its effective cadence, its source
+    (default vs operator override), and whether it folds into the Monday
+    digest. Read-only."""
+    overrides = load_overrides()
+    out: list[dict[str, Any]] = []
+    label_for = {v: k for k, v in _OPERATOR_CADENCES.items()}
+    for surface in known_surfaces():
+        policy = POLICIES[surface]
+        ov = overrides.get(surface)
+        effective = _OPERATOR_CADENCES[ov] if ov else policy.cadence
+        out.append({
+            "surface": surface,
+            "effective_cadence": label_for.get(effective, effective),
+            "default_cadence": label_for.get(policy.cadence, policy.cadence),
+            "source": "override" if ov else "default",
+            "folds_into_monday_digest": surface in DIGEST_FOLDED_SURFACES,
+            "has_anomaly_bypass": bool(policy.bypass_keys),
+        })
+    return out
+
+
 def _bypass_check(policy: CadencePolicy, payload: dict[str, Any]) -> tuple[bool, tuple[str, ...]]:
     """Return (bypass_active, keys_matched). Truthy = an explicit
     surface signal asked for a same-day send."""
@@ -268,6 +390,7 @@ def should_send_email(
     now = now or datetime.now().astimezone()
     next_monday = _next_weekly_monday(now)
     bypass_active, bypass_matched = _bypass_check(policy, payload or {})
+    effective = _effective_cadence(surface_name, policy)
 
     # 2026-06-12 (Surface 15.5): digest mode. When DUCK_EMAIL_DIGEST_MODE=1,
     # the routine weekly info-surfaces fold into a single Monday
@@ -286,21 +409,43 @@ def should_send_email(
             next_send_iso=next_monday,
         )
 
-    if policy.cadence == "daily":
+    # Operator "off" override: stop the routine send, but a genuine anomaly
+    # bypass still breaks through (2026-06-17 operator choice). A surface with
+    # no bypass_keys (e.g. business_intelligence) is therefore fully silent.
+    if effective == "off":
+        if bypass_active:
+            return CadenceDecision(
+                surface_name=policy.surface_name,
+                should_send=True,
+                reason=f"operator_off; anomaly bypass triggered by {', '.join(bypass_matched)}",
+                cadence="off",
+                next_send_iso=now.date().isoformat(),
+                bypass_active=True,
+                bypass_keys_matched=bypass_matched,
+            )
+        return CadenceDecision(
+            surface_name=policy.surface_name,
+            should_send=False,
+            reason="operator_off; email muted by operator (still on the portal / Monday digest)",
+            cadence="off",
+            next_send_iso=None,
+        )
+
+    if effective == "daily":
         return CadenceDecision(
             surface_name=policy.surface_name,
             should_send=True,
             reason="cadence=daily",
-            cadence=policy.cadence,
+            cadence=effective,
             next_send_iso=now.date().isoformat(),
         )
 
-    if policy.cadence == "manual":
+    if effective == "manual":
         return CadenceDecision(
             surface_name=policy.surface_name,
             should_send=False,
             reason="cadence=manual; explicit operator send required",
-            cadence=policy.cadence,
+            cadence=effective,
             next_send_iso=None,
         )
 

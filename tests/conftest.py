@@ -167,4 +167,15 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         return
     monkeypatch.setattr(_trd, "THEME_REVIEW_DECISIONS_PATH", tmp_path / "theme_review_decisions.json")
     monkeypatch.setattr(_trd, "THEME_KEYWORD_FALSE_FLAGS_PATH", tmp_path / "theme_keyword_false_flags.json")
+
+    # 2026-06-17: email_cadence_gate.EMAIL_CADENCE_OVERRIDES_PATH (Surface 23) —
+    # new module-level prod-path constant, isolated per the three-layer policy
+    # (this fixture + the source-level DUCK_TEST_MODE guard in set_override +
+    # tests/test_no_test_pollution_in_email_cadence_overrides.py). duckAgent's
+    # conftest patches it too, since duckAgent tests import this gate via the loader.
+    try:
+        import email_cadence_gate as _ecg
+        monkeypatch.setattr(_ecg, "EMAIL_CADENCE_OVERRIDES_PATH", tmp_path / "email_cadence_overrides.json")
+    except ImportError:
+        pass
     yield

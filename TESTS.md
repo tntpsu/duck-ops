@@ -693,6 +693,25 @@ Open question pending the 20:11 evening window: whether the two 7-day June-8 ite
 
 ---
 
+## Surface 23 — Operator-toggleable email cadences (2026-06-17, matrix before code)
+
+**Background:** the 9 email surfaces' cadences are hardcoded `CadencePolicy` constants in `email_cadence_gate.py`; changing one (e.g. muting `business_intelligence`) needed a code commit. This adds an operator-writable override store (`state/email_cadence_overrides.json`, `{surface: "off"|"weekly"|"daily"}`) that `should_send_email` overlays on the default, plus a portal "Email cadence" section (Phase 2). Operator decisions (2026-06-17): **off keeps urgent anomaly alerts** (off stops only the routine send; a `bypass_keys` anomaly still fires same-day) and **off stops the standalone email but the surface stays in the Monday digest** (don't touch `business_monday_digest.py`).
+
+| Use case | Happy | Override absent / bad file | "off" behavior | Unknown / digest |
+|---|---|---|---|---|
+| Override overlays default | ✅ `test_email_cadence_overrides.py::test_override_weekly_beats_daily_default` (+ daily-beats-weekly) | ✅ `::test_missing_file_uses_hardcoded_default`, `::test_corrupt_file_falls_back_to_default` (fail-soft, never crashes the send path) | n/a | n/a |
+| "off" suppresses routine | n/a | n/a | ✅ `::test_off_suppresses_routine_send` (no send Mon or weekday) | n/a |
+| "off" keeps anomaly bypass | n/a | n/a | ✅ `::test_off_still_fires_on_anomaly_bypass` (surface with a real bypass key still breaks through); `::test_off_with_no_bypass_keys_fully_silent` (business_intelligence) | n/a |
+| set_override validation | ✅ `::test_set_override_persists_and_reads_back` | n/a | n/a | ✅ `::test_set_override_unknown_surface_raises`, `::test_set_override_bad_cadence_raises` |
+| Test-mode write guard | n/a | n/a | n/a | ✅ `test_no_test_pollution_in_email_cadence_overrides.py` (audit) + `::test_set_override_refuses_frozen_prod_path_under_test_mode` |
+| Digest interaction | ✅ `::test_off_surface_still_eligible_for_monday_digest` (off doesn't remove it from DIGEST_FOLDED) | n/a | n/a | n/a |
+| Cross-repo read (Phase 2) | ✅ planned: duckAgent imports the duck-ops reader and sees an override written by `set_override` | n/a | n/a | n/a |
+| Portal action (Phase 2) | ✅ planned: POST `/api/email-cadence/<surface>` persists; GET `/api/email-cadence` lists effective cadence + source + folded flag; no Tier-3 gate | n/a | n/a | n/a |
+
+**Isolation:** `EMAIL_CADENCE_OVERRIDES_PATH` is a new module-level prod-path constant → 3-layer isolation in the same commit (autouse conftest monkeypatch in BOTH `duck-ops/tests/conftest.py` and `duckAgent/tests/conftest.py` since duckAgent tests import the gate via the loader; source-level `TestModeRefusalError` guard in `set_override`; post-suite pollution-audit test). **Tier:** Phase 1 is read/config (Tier-2); the email toggle is a low-risk notification preference (NO Tier-3 reason+confirm, unlike the Workflows off-switch).
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
