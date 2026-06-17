@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 
@@ -13,13 +14,20 @@ import trend_ranker
 
 
 def _aggregate(theme: str, *, sold_7d: int = 5, sold_30d: int = 10) -> dict:
-    run_ids = ["2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-17"]
+    # Dates are anchored to "today" rather than hard-coded so the gate's live
+    # staleness check (>21 days → needs_reframe) never trips as wall-clock time
+    # advances past the fixture. Keeps 5 distinct observed days over a 5-day span.
+    _today = date.today()
+    _days = [_today - timedelta(days=offset) for offset in (5, 4, 3, 2, 0)]
+    run_ids = [d.isoformat() for d in _days]
+    latest = run_ids[-1]
+    first = run_ids[0]
     return {
-        "artifact_id": f"trend::{theme.replace(' ', '-')}::2026-05-17",
+        "artifact_id": f"trend::{theme.replace(' ', '-')}::{latest}",
         "artifact_type": "trend",
         "theme": theme,
-        "first_seen_at": "2026-05-12T00:00:00-04:00",
-        "latest_observed_at": "2026-05-17T00:00:00-04:00",
+        "first_seen_at": f"{first}T00:00:00-04:00",
+        "latest_observed_at": f"{latest}T00:00:00-04:00",
         "source_refs": [
             {
                 "path": "/tmp/state_competitor.json",
