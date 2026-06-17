@@ -461,6 +461,19 @@ Occasion Etsy tag apply with expiry-revert (approval-gated, NEVER silent auto-ac
 
 **Not changed:** the cover hook (`generate_cover_hook`) and the facts prompt stay as-is — the hook is the trivia click-driver and the facts path already had its (correctly soft) line. The nod lives in the caption + tags, matching the meme decision.
 
+### Surface 13.5 — Consumer-side occasion-nod coverage card (2026-06-17)
+
+**Background:** the jeepfact Father's Day miss exposed a deeper gap — the two `occasion_engine_*` OS cards are PRODUCER-side ("is intel fresh? did selection pick products?") and both stayed green while the consumer silently dropped the nod. Nothing watched whether the surfaces that RAN actually tailored to the active occasion, so the operator only found out by reading the post. New card `occasion_nod_coverage` (in `viewer.py`, a cheap reader — no launchd producer): joins `get_active_occasions()` with the most recent meme + jeepfact runs in `runs/` (≤10d), and goes **red** if a surface ran during an active occasion but emitted no nod (occasion name/keyword in caption OR an occasion hashtag in tags — deterministic, `#`-asymmetry-normalized). Scope is meme + jeepfact only (their helpers force an always-nod); listing tags are relevance-gated and excluded to avoid guaranteed false reds. Closes the [[two_card_observability_bracket]] / [[alive_status_is_not_progress]] gap.
+
+| Use case | Ran + nod (happy) | Ran + NO nod (the bug) | No occasion active | Stale intel | No run in window | Detection paths | Card registration |
+|---|---|---|---|---|---|---|---|
+| `occasion_nod_present` matcher | ✅ `test_occasion_nod_coverage.py::TestOccasionNodPresent::test_caption_name_match` | ✅ `::test_no_nod` | n/a | n/a | n/a | ✅ `::test_caption_keyword_word_boundary` (no 'dad' in 'additional') + `::test_hashtag_match_with_and_without_pound` (# asymmetry) | n/a |
+| `read_surface_caption_hashtags` | ✅ `TestReadSurfaceCaptionHashtags::test_meme_keys` / `test_jeepfact_keys` | n/a | n/a | n/a | n/a | ✅ `::test_unknown_surface` → ("", []) | n/a |
+| Card loader verdict | ✅ `TestNodCoverageCard::test_ran_with_nod_is_green` | ✅ `::test_ran_without_nod_is_red` (repair_now, names surface+occasion) + `::test_one_surface_misses_one_nods_is_red` | ✅ `::test_no_occasion_active_is_green` (available False) | ✅ `::test_stale_intel_is_green_not_red` (no double-alarm) | ✅ `::test_active_but_no_run_in_window_is_yellow` + `::test_run_outside_lookback_window_ignored` | ✅ `::test_meme_hashtag_only_and_jeepfact_caption_only` | ✅ `test_os_card_registration.py::test_occasion_nod_coverage_card_registered` + `::test_occasion_nod_coverage_registered_on_empty_payload` |
+| Live spot check | ✅ 2026-06-17: card green — "All surfaces that ran (meme, jeepfact) nodded to Father's Day" | n/a | n/a | n/a | n/a | n/a | n/a |
+
+**Why no producer/launchd:** the inputs (`occasion_intel.json` 07:25 producer + the meme/jeepfact run states) are already produced; this card is a pure cheap reader joining them, like `_load_newduck_quality_gate_health`. No new cadence → no Tier-3 plist ask.
+
 ---
 
 ## Surface 14 — This-or-That Thursday funnel fixes (2026-06-12)
