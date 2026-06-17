@@ -447,7 +447,19 @@ Occasion Etsy tag apply with expiry-revert (approval-gated, NEVER silent auto-ac
 | Picker occasion bonus | ✅ `test_meme_occasion_bias.py::test_active_occasion_pick_wins_when_scores_otherwise_equal` (deterministic max-score) | n/a | ✅ `::test_no_active_occasion_no_bias` (pick placed 2nd → does NOT win) | n/a | ⚠️ bonus constant covered by code; last-call vs normal not separately asserted | ✅ negative control isolates bonus from list order |
 | Live-state spot check | ✅ manual 2026-06-15: Alabama (non-pick) → soft nod + `FathersDayGift/GiftForDad/DadGiftIdea`; Grill Master (pick) → strong lean-in | n/a | n/a | n/a | n/a | n/a |
 
-**Scope cut:** last-call (70) vs normal (40) bonus differentiation is not separately unit-tested (both proven to fire; the threshold is a tuning knob, not a correctness boundary). Jeepfacts already nodded (no-product path) — unchanged.
+**Scope cut:** last-call (70) vs normal (40) bonus differentiation is not separately unit-tested (both proven to fire; the threshold is a tuning knob, not a correctness boundary).
+
+### Surface 13 Phase 4 — jeepfact caption/tags occasion nod (2026-06-17)
+
+**Background:** operator asked "why didn't jeepfact Wednesday pick up any Father's Day stuff?" Phase 3's note "Jeepfacts already nodded (no-product path) — unchanged" was WRONG in a load-bearing way: the occasion line only reached the *facts* prompt (`generate_jeep_facts`), where factual Jeep trivia + an "only if natural" instruction means the model correctly never shoehorns a holiday into a fact. The **caption and hashtags** — where the nod belongs, per the same "text + tags must nod" policy as meme — are built from 100% static templates in `generate_jeep_fact_post_content` with zero occasion awareness. Fix: new `occasion_jeepfact_caption_line()` (finished customer copy, not a model instruction) injected into full + short caption, and `occasion_meme_hashtags()` merged just after the brand tag so the short caption's first-5 slice keeps the holiday tag. Same "wire it on every surface" lesson as [[markdown_vs_portal_html]] / [[passthrough_chain_audit]].
+
+| Use case | Happy | Phrasing edges | No occasion active | Stale intel | Short-caption survives slice |
+|---|---|---|---|---|---|
+| `occasion_jeepfact_caption_line` | ✅ `test_occasion_context.py::TestJeepfactCaptionLine::test_active_occasion_yields_ready_copy` (name + "10 days away", not a model instruction) | ✅ `::test_one_day_and_today_phrasing` (tomorrow / is here) | ✅ `::test_no_occasion_yields_empty` | ✅ `::test_stale_intel_yields_empty` | n/a |
+| Caption + tags wiring | ✅ `TestJeepfactPostContentOccasion::test_caption_and_tags_nod_when_occasion_active` (full+short caption + `#FathersDayGift` in tags) | n/a | ✅ `::test_no_nod_when_intel_missing` (no nod, base 10 tags unchanged) | covered by reader staleness | ✅ same happy test asserts `#FathersDayGift` in short_caption |
+| Live-state spot check | ✅ manual 2026-06-17: live render shows "🎁 Father's Day is just 4 days away…" in both captions + holiday tags ahead of the brand set | n/a | n/a | n/a | n/a |
+
+**Not changed:** the cover hook (`generate_cover_hook`) and the facts prompt stay as-is — the hook is the trivia click-driver and the facts path already had its (correctly soft) line. The nod lives in the caption + tags, matching the meme decision.
 
 ---
 
