@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime
 
 import email_cadence_gate as gate
@@ -70,3 +71,20 @@ class TestDigestBuilder:
         assert "Profit" in html and "Learnings" in html
         assert "🟢" in html and "🟡" in html
         assert "Monday Business Digest" in text
+
+
+class TestSendPathRegression:
+    """The send path called log_cadence_decision('business_digest', decision)
+    with 2 positional args against a 1-arg signature — crashing every Monday
+    so the digest never sent. main() --send-email must run the cadence-log +
+    send path with no TypeError. The builder tests above never reached it."""
+
+    def test_send_path_does_not_crash_on_cadence_log(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(digest, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(gate, "DECISION_LOG_PATH", tmp_path / "decisions.jsonl")
+        sent: dict = {}
+        monkeypatch.setattr(digest, "_ensure_send_email",
+                            lambda: (lambda subject, html, text: sent.update(subject=subject)))
+        monkeypatch.setattr(sys, "argv", ["business_monday_digest.py", "--send-email", "--force"])
+        assert digest.main() == 0
+        assert "subject" in sent  # reached send_email past the cadence-log line

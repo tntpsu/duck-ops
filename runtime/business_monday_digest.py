@@ -135,7 +135,10 @@ def main() -> int:
         return 0
 
     decision = should_send_email("business_digest", summary)
-    log_cadence_decision("business_digest", decision)
+    # decision already carries surface_name; log_cadence_decision takes the
+    # CadenceDecision as its only positional arg (passing a 2nd crashed the
+    # job every Monday — it never sent since Surface 15.5 shipped).
+    log_cadence_decision(decision)
     if not (decision.should_send or args.force):
         print(f"[digest] cadence gate deferred: {decision.reason}")
         return 0
