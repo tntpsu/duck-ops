@@ -1349,6 +1349,16 @@ def resolve_review_target(run_id: str, reply: dict[str, Any], artifact_slug: str
         "source_state_path": str(review_state_path(run_id)),
     }
 
+    # Surface 24 robust path: a handoff reply carries Etsy's own canonical
+    # identifiers, so target the exact review deterministically — no fuzzy
+    # text-match (the source of review_row_transaction_mismatch failures).
+    if str(reply.get("transaction_id") or "").strip() and str(reply.get("listing_id") or "").strip():
+        target["transaction_id"] = str(reply["transaction_id"]).strip()
+        target["listing_id"] = str(reply["listing_id"]).strip()
+        target["shop_id"] = str(reply.get("shop_id") or "").strip() or None
+        target["match_quality"] = "api_exact"
+        return target
+
     state = load_reviews_state(run_id)
     if not state:
         return target
@@ -1761,6 +1771,71 @@ def build_thursday_publish_candidates_from_state(
     return candidates
 
 
+def recent_reviews_reply_handoffs(max_age_days: int = 10):
+    """Yield (run_id, handoff) for recent duckAgent reviews runs carrying a
+    reviews_reply_handoff (Surface 24). The post-queue feed reads this
+    structured handoff directly instead of parsing the daily reviews email —
+    which folds into the Monday digest, silently starving the queue."""
+    if not DUCKAGENT_RUNS_DIR.exists():
+        return
+    today = datetime.now().date()
+    for child in sorted(DUCKAGENT_RUNS_DIR.iterdir(), reverse=True):
+        if not child.is_dir():
+            continue
+        try:
+            run_date = datetime.strptime(child.name, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if run_date > today or (today - run_date).days > max_age_days:
+            continue
+        state = load_reviews_state(child.name)
+        if not isinstance(state, dict):
+            continue
+        handoff = state.get("reviews_reply_handoff")
+        if isinstance(handoff, dict) and handoff.get("replies"):
+            yield child.name, handoff
+
+
+def _merge_review_reply_handoff_candidates(candidates: dict[str, dict[str, Any]]) -> None:
+    """Surface 24: build public review-reply candidates from the structured
+    handoff (canonical ids) — the robust feed that no longer depends on the
+    folded reviews email. merge_publish_candidate dedupes any email-parsed
+    candidate by artifact_id. Fail-closed: a reply without both canonical
+    identifiers (or no drafted reply) is skipped, never targeted by guess."""
+    for handoff_run_id, handoff in recent_reviews_reply_handoffs():
+        handoff_source = {
+            "registry_key": str(review_state_path(handoff_run_id)),
+            "folder": "reviews_reply_handoff",
+            "uid": None,
+            "message_id": None,
+            "subject": f"Reviews reply handoff {handoff_run_id}",
+            "body_text": "",
+        }
+        for reply in handoff.get("replies") or []:
+            if not isinstance(reply, dict):
+                continue
+            if str(reply.get("response_kind") or "") != "public_thank_you":
+                continue
+            transaction_id = str(reply.get("transaction_id") or "").strip()
+            if not transaction_id or not str(reply.get("listing_id") or "").strip():
+                continue
+            if not str(reply.get("generated_response") or "").strip():
+                continue
+            merge_publish_candidate(
+                candidates,
+                build_review_reply_candidate_from_email(
+                    email_item=handoff_source,
+                    run_id=handoff_run_id,
+                    reply=reply,
+                    flow="reviews_reply_positive",
+                    artifact_slug=f"tx-{transaction_id}",
+                    platform_target="etsy_public_review",
+                    response_kind="public_thank_you",
+                    confidence_cap=0.76,
+                ),
+            )
+
+
 def normalize_publish_candidates(
     mailbox_items: list[dict[str, Any]],
     trend_candidates: list[dict[str, Any]],
@@ -2100,6 +2175,8 @@ def normalize_publish_candidates(
                     confidence_cap=0.72,
                 ),
             )
+
+    _merge_review_reply_handoff_candidates(candidates)
 
     rows = sorted(candidates.values(), key=lambda item: (item["flow"], item["run_id"], item["artifact_id"]))
     write_json(NORMALIZED_DIR / "publish_candidates.json", {"generated_at": now_iso(), "items": rows})
