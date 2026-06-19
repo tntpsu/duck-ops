@@ -737,30 +737,6 @@ Open question pending the 20:11 evening window: whether the two 7-day June-8 ite
 
 ---
 
-## Surface 24 — API reviews → review-reply post-queue feed (2026-06-17, matrix before code)
-
-**Background:** the review-reply post-queue feed was a *manual* browser "discovery" scan that was never automated; it went dormant after the 2026-04-24 Etsy pause (last real run 2026-05-27), so replies stopped posting even though the posting machinery was re-enabled 2026-06-06 (`8ebce81`). Meanwhile the duckAgent `reviews.daily` flow already fetches every review via the Etsy API with canonical `transaction_id`/`listing_id` and drafts an AI reply — but those drafts only fed the email/carousel, never the post-queue. This wires the API output into the EXISTING approval+post chain: a new step routes drafts through duck-ops' `evaluate_quality_gate` (score ≥78 → `publish_ready`) and writes artifacts into `quality_gate_state.json` — the same artifacts `auto_enqueue_publish_ready → drain → browser-post` already consumes. Browser becomes post-only (no scraping to "discover" what the API already has). **This posts public replies to real customers — fail-closed everywhere.**
-
-**Operator decision (2026-06-17): HOLD the first batch.** A `api_ingest_hold_for_operator` policy flag (default **True** on reconnect) routes ingested artifacts to operator approval even at score ≥78; operator flips it off for steady-state auto-post once a batch is eyeballed. So the default reconnect behavior is propose-not-post.
-
-| Use case | Happy | Dedup / already-handled | Missing identifiers | Quality / rating gate | Cross-repo isolation |
-|---|---|---|---|---|---|
-| API review → quality-gate candidate → artifact | 🔴 planned: 5★ review w/ ids → `evaluate_quality_gate` → artifact in quality_gate_state w/ `flow=reviews_reply_positive`, `review_target.{transaction_id,listing_id}`, `match_quality="api_exact"` | n/a | n/a | n/a | n/a |
-| Dedup: same review re-ingested (daily `--force`) | n/a | 🔴 planned: deterministic `artifact_id=…::tx-{transaction_id}` → carry-forward, never overwrite a resolved/queued/posted decision | n/a | n/a | n/a |
-| Dedup: already queued/posted | n/a | 🔴 planned: execution-queue check (status in queued/running/posted/dismissed → skip) | n/a | n/a | n/a |
-| Already-replied on Etsy (API has NO signal) | n/a | 🔴 planned: TWO guards — ingest-time `review_reply_posted_transactions.json` ledger AND post-time `AlreadyRespondedError` DOM abort | n/a | n/a | n/a |
-| Missing transaction_id/listing_id | n/a | n/a | 🔴 planned: fail-closed — no publishable artifact; `auto_enqueue` rejects on identifier check; surfaced as skip, never posted | n/a | n/a |
-| Score <78 / non-5★ | n/a | n/a | n/a | 🔴 planned: <78 → `needs_revision` to operator (never auto-post); only rating==5 enters this lane | n/a |
-| HOLD-first-batch flag | 🔴 planned: flag True → artifact held for operator approval even at ≥78 (auto_enqueue skips until operator approves); flag False → auto-post ≥78 | n/a | n/a | n/a | n/a |
-| Browser-path-approval gate | 🔴 planned: API-sourced (`match_quality="api_exact"`) bypasses the stale browser-path approval; scraped-discovery items still require it; executor STILL re-verifies txn+listing vs live DOM before submit | n/a | n/a | n/a | n/a |
-| Feed-freshness SLO card | 🔴 planned: reviews arriving but 0 artifacts fed in window → red; ≤48h gap → yellow; caught-up/none-arrived → green; + empty-payload registration | n/a | n/a | n/a | n/a |
-| Ingest coverage card | 🔴 planned: ingest ran + counts (ingested/deduped/skipped) from receipt; two-card bracket w/ freshness | n/a | n/a | n/a | n/a |
-| Cross-repo write isolation | n/a | n/a | n/a | n/a | 🔴 planned: 3-layer — autouse conftest patches (BOTH repos) for `QUALITY_GATE_STATE_PATH` + posted-transactions path; `TestModeRefusalError` source guard on frozen prod path; post-suite pollution audit |
-
-**Architecture:** duckAgent `step_reviews_ingest_to_post_queue` (after `generate_responses`, fail-open) → `helpers/review_reply_ingest_loader.py` (sibling-path bridge, modeled on `cadence_gate_loader.py`) → duck-ops `runtime/review_reply_api_ingest.py` (owns the mapping, dedup, `evaluate_quality_gate` call, `save_quality_gate_state` write — duck-ops owns the schema). **Tier:** the ingest write is Tier-2; actual posting stays gated by the existing approval + drain chain (and HOLD mode keeps it propose-only on reconnect).
-
----
-
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
