@@ -737,6 +737,26 @@ Open question pending the 20:11 evening window: whether the two 7-day June-8 ite
 
 ---
 
+## Surface 24 — Restore review-reply post-queue feed via structured handoff (2026-06-19/20)
+
+**Background:** the review-reply post-queue's only feed was `phase1_observer` parsing the daily reviews EMAIL (`recent_review_summary_emails` → `parse_positive_review_replies` → `build_review_reply_candidate_from_email`). The Surface-15.5 email fold (reviews → Monday digest) meant the email stopped sending most days, so the observer harvested 0 `reviews_reply_positive` candidates and the queue silently starved (zero new replies posted since ~2026-05-27). Classic "a notification and a data pipeline must never be the same artifact."
+
+**Approach (operator chose ROBUST 2026-06-19):** decouple the data handoff from the foldable email. The duckAgent reviews flow (which already fetches reviews via the Etsy API with canonical `transaction_id`/`listing_id` and drafts replies) persists a structured `reviews_reply_handoff` into its run state; the duck-ops observer reads THAT directly and reuses the existing candidate builder + quality gate + `auto_enqueue` + drain. No new parallel ingest. *(An earlier parallel-ingest build — old Surface 24, commits 90ad453/0aeea25 — was reverted (aac00c8) after the operator caught it duplicating `build_review_reply_candidate_from_email` + `quality_gate_pilot.main`.)*
+
+Because the handoff carries Etsy's own ids, `resolve_review_target` short-circuits to `match_quality="api_exact"` — no fuzzy text-match, which also removes the `review_row_transaction_mismatch` failure class that stranded the prior backlog.
+
+| Use case | Happy | Missing identifiers | No draft / wrong kind | Staleness / non-date dirs | Email-fold regression |
+|---|---|---|---|---|---|
+| Handoff persisted (Phase A, duckAgent) | ✅ `duckAgent/tests/test_reviews_reply_handoff.py::test_handoff_pairs_ids_with_reply` + `::test_summary_thank_you_messages_carry_canonical_ids` (enrichment) | ✅ `::test_handoff_blank_ids_become_none` | n/a | n/a | n/a |
+| Deterministic targeting (Phase B) | ✅ `test_review_reply_handoff_observer.py::test_resolve_target_short_circuits_on_canonical_ids` (api_exact) | ✅ `::test_resolve_target_without_ids_does_not_claim_api_exact` | n/a | n/a | n/a |
+| Observer reads handoff → candidate | ✅ `::test_handoff_builds_candidate_with_api_exact_target` (artifact_id ::tx-, api_exact target, reuses build_review_reply_candidate_from_email) | ✅ `::test_reply_without_ids_is_skipped` (fail-closed, never guess) | ✅ `::test_reply_without_draft_is_skipped`, `::test_non_public_kind_is_skipped` | ✅ `::test_old_and_nondate_dirs_ignored` (10-day window; TEST-RUN skipped) | n/a |
+| Handoff enumeration | ✅ `::test_recent_handoffs_found` | n/a | n/a | ✅ same staleness test | n/a |
+| Feed-freshness SLO card | 🔴 planned (Phase C): reviews arriving (handoff present) but 0 candidates fed → red; ≤48h gap → yellow; caught-up/none → green; + empty-payload registration | n/a | n/a | n/a | 🔴 planned: a future email-fold or flow break that starves the feed goes RED instead of silent |
+
+**Why robust, not minimal:** the minimal option (always emit the parseable email even when the operator notification folds) keeps data riding on an email + regex round-trip. The structured handoff removes that coupling permanently and reuses every downstream stage. The email-parse path stays as a fallback. **Tier:** the handoff write + observer read are Tier-2; actual posting stays gated by the existing approval + drain chain.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
