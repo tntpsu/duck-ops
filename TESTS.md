@@ -757,6 +757,20 @@ Because the handoff carries Etsy's own ids, `resolve_review_target` short-circui
 
 ---
 
+## Surface 25 — Etsy image upload verify + repair (2026-06-20, field bug)
+
+**Background:** operator: "why did the newduck flow today only upload a couple photos?" Today's run uploaded **10 images to Etsy, all returned HTTP 201 with distinct `listing_image_id`s, zero failures** — yet the live listing kept only **2** (confirmed via read-only API GET). Etsy's image endpoint is **accept-synchronously, process-asynchronously**: the 201 means "queued," not "stuck," and Etsy silently dropped images 3–10 in post-upload processing (most likely near-duplicate rejection of similar product shots). The upload response is structurally incapable of reporting this, and we discarded the returned ids + never read back, so the loss was invisible (buried in the run log; no state, no card). Same "success ≠ verified result / alive ≠ progress" pattern as Surfaces 22/24. Operator chose **auto-retry-once-then-flag** + **add pacing now**.
+
+| Use case | Happy (all stick) | Throttle (partial then recover) | Dedup (persistent shortfall) | Upload error | Edge |
+|---|---|---|---|---|---|
+| `etsy_upload_images_verified` (Phase 1) | ✅ `duckAgent/tests/test_etsy_image_verify.py::test_all_stick_first_pass_no_retry` | ✅ `::test_throttle_first_pass_partial_then_retry_recovers` (re-upload recovers, complete) | ✅ `::test_dedup_persistent_shortfall_retries_once_then_stops` (retries the 8 EXACTLY once, then STOPS — never loops) | ✅ `::test_upload_exception_counts_as_missing_not_crash` | ✅ `::test_caps_at_ten_images`, `::test_pacing_sleep_called_between_uploads`, `::test_empty_images_is_not_complete` |
+| Publish records result + email surface (Phase 2) | ✅ `test_newduck_etsy_image_check.py::test_complete_upload_is_ok_check` | n/a | ✅ `::test_shortfall_is_not_ok_and_names_missing` | n/a | ✅ `::test_absent_upload_yields_no_check`, `::test_shortfall_check_is_not_in_blocking_set` (warns, never blocks Shopify activation) |
+| `etsy_image_completeness` OS card (Phase 3) | ✅ `test_etsy_image_completeness_card.py::test_complete_upload_is_green` | n/a | ✅ `::test_shortfall_is_red` (names listing + counts) + `test_os_card_registration.py::test_etsy_image_completeness_registered_on_empty_payload` | n/a | ✅ `::test_job_without_recorded_result_is_ignored`, `::test_sent_zero_is_ignored`, `::test_old_job_outside_window_ignored`, `::test_no_runs_dir_is_yellow` |
+
+**Critical design guard — never loop:** a paced single retry fixes the *throttle* cause; if it's *still* short, that's near-duplicate rejection (retrying is futile + spammy), so it STOPS and flags (state + email row + red OS card). Pacing (`ETSY_IMAGE_UPLOAD_PACING_SECONDS`, default 1.5s) between uploads is the cheap throttle mitigation on the very next run. **Tier:** the verify read-back is read-only; the single re-upload is within the publish operation's existing Tier-3 scope (no NEW approval). Etsy stays a fixable draft — a shortfall never blocks activation. Memory: [[etsy-image-upload-accept-then-async-drop]].
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
