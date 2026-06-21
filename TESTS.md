@@ -771,6 +771,21 @@ Because the handoff carries Etsy's own ids, `resolve_review_target` short-circui
 
 ---
 
+## Surface 26 — Competitor weekly-sales: fix inflation + my-shop row (2026-06-21, field bug)
+
+**Background:** operator read the competitor email, saw top shops with "~2,000 / ~500 sales this past week" and asked "is that real?" + "add my shop so I can compare." **It's NOT real.** Etsy's API exposes no per-shop weekly sales — only LIFETIME `transaction_sold_count`. The report infers weekly units from listing quantity drops, and the disappeared-listing path (`competitor_engine.py`) counted a listing's ENTIRE previous quantity as sold (a delisted made-to-order item, qty ~999, = +999 phantom sales → the ~2,000). Lives in duckAgent `flows/competitor/`.
+
+| Slice | Happy | Cap / edge | Building / fail-soft | Render |
+|---|---|---|---|---|
+| **1 — cap the estimate** (`_capped_sold`) | ✅ `tests/test_competitor_sold_units.py::test_normal_drop_within_cap_counts_fully` | ✅ `::test_huge_drop_is_clamped_to_cap` (999→5 ⇒ 25), `::test_restock_is_zero_never_negative`, `::test_none_quantities_are_zero` | n/a | ✅ `::test_report_labels_sold_columns_as_estimates` ("(est.)" + caption) |
+| cap config | ✅ `::test_config_default_is_25` | ✅ `::test_env_override_changes_cap`, `::test_config_env_override` (`COMPETITOR_MAX_WEEKLY_SOLD_PER_LISTING`) | n/a | n/a |
+| **2 — my actual 7d** (`_get_my_actual_sold_7d`, Etsy transactions sum-of-quantity) | ✅ `test_competitor_my_shop_row.py::test_estimate_from_prior_snapshot` (actual carried) | n/a | ✅ `::test_actual_none_is_carried_through`, `::test_html_row_actual_na` | ✅ `::test_html_row_estimate` (`9 actual`) |
+| **3 — my apples-to-apples estimate** (dedicated snapshot, same capped method; my shop NEVER enters competitor analysis) | ✅ `::test_estimate_from_prior_snapshot` (10+2 ⇒ 12) | ✅ `::test_estimate_is_capped` (999-drop ⇒ 25) | ✅ `::test_building_state_when_no_prior_snapshot` (status "building", not a fabricated 0) | ✅ `::test_html_row_building`, `::test_html_row_estimate`, `::test_text_report_has_my_shop_line` |
+
+**Design choices:** (1) cap default **25**/listing/week — a 3D-print listing selling >25/wk is exceptional (shop's own best ~6/wk), so 25 never clips a real seller but kills the phantom. (2) My shop is tracked in a DEDICATED snapshot file (`cache/competitor/snapshots/my_shop_*.json`), never mixed into competitor snapshots — so it can't pollute ducks-to-build / gaps / pricing (avoids the error-prone "exclude my_shop at 6 analyzer sites" approach). (3) My row shows BOTH a capped estimate (ranks fairly vs competitors) AND the real actual (truth) — the est-vs-actual gap also calibrates how off the competitor estimates are. **Anti-mislead:** the cap (Slice 1) ships first/with the actual number so a real `12 actual` is never compared against an uncapped `2,000`. **Tier:** read-only (report generation), no mutations.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
