@@ -1763,7 +1763,7 @@ def _load_roi_triage_surface() -> dict[str, Any]:
     try:
         payload = build_roi_triage(write_outputs=False)
     except Exception:
-        payload = _load_json(ROI_TRIAGE_PATH)
+        payload = load_json(ROI_TRIAGE_PATH, {})
 
     if not isinstance(payload, dict) or not payload:
         return {

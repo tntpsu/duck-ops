@@ -12,6 +12,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Static guard for undefined names (F821) — catches the NameError class
+      # that py_compile and the tests miss (an undefined name in an except/
+      # fallback branch that never executes in a test, e.g. the _load_json
+      # typo in the ROI-triage fallback).
+      - name: Lint for undefined names (F821)
+        run: |
+          pip install ruff
+          ruff check --select F821 runtime
       - name: Compile runtime python files
         run: |
           python - <<'PY'
