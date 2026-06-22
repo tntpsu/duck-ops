@@ -845,6 +845,19 @@ Separately, the gap the operator named — no dynamic loading/failure feedback �
 
 ---
 
+## Surface 30 — Two systemic regression guards (2026-06-22, operator: "are we missing tests?")
+
+**Background:** after several regressions surfaced in one session, the operator asked if coverage was thin. It wasn't *volume* (1,392 tests) — it was two specific SHAPES of test missing, and nearly every regression fell into one:
+
+| Guard | Catches | Found / would-have-caught | Where |
+|---|---|---|---|
+| **F821 undefined-name lint** (ruff `--select F821`) | NameError class — a name used in a branch (publish success path, except/fallback) that no test executes | the meme `successful_platforms` crash (false "publish failed"); **8 more latent bugs on arrival** incl. an outright SyntaxError in `competitor_image_analyzer.py`, missing `re`/`Path` imports, and the duck-ops `_load_json` ROI-triage fallback typo | CI (both repos) before tests + `duckAgent/scripts/check_undefined_names.sh` |
+| **Portal headless smoke** (`test_portal_smoke.py` + `portal_smoke_driver.mjs`) | runtime render crashes — a render fn that throws on real data, a wrong container leaving the page blank, a dangling ref hit at load | the dead Library/Decisions pages, the wfList-vs-businessWorkflows mixup, the dangling `load()` | local (loads all 17 portal pages in headless Chromium, asserts 0 pageerror + real content); **skips in CI** (no viewer/browser) where node-check + F821 cover it |
+
+These join the existing `test_page_inline_scripts_are_valid_js` (node `--check` every page's inline JS — the syntax-error layer). Together: **syntax (node-check) + undefined-names (F821) + runtime-render (browser smoke)** — the three classes that bit this session. The F821 gate runs first/fast in CI; the smoke is the dev-machine belt that no-ops in CI. Lesson: the suite was strong at the unit level but blind at the execution/integration boundary — see [[or_fallback_branches_hide_bitrot]] (the failing branch never runs in a test) and [[verify_external_behavior_before_root_cause]] (load it in a browser).
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
