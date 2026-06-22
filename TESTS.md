@@ -858,6 +858,19 @@ These join the existing `test_page_inline_scripts_are_valid_js` (node `--check` 
 
 ---
 
+## Surface 31 — Daily snapshot clobbered the weekly competitor analysis (2026-06-22, operator: "how is the report doing?")
+
+**Background:** operator asked how the competitor report + the new my-shop row were doing. Found the report had read **empty analysis for ~10 days**. Root cause: two crons write the SAME `{date}_competitor_report.json` — the **weekly analysis** (Sun 06:30, `--from collect_data`, full LLM analysis incl. trending/recommendations/my-shop row) and the **daily snapshot** (07:00, `--only competitor_snapshot`, empty `_snapshot_only`). The daily ran 30 min AFTER the weekly and overwrote it. Confirmed on 06-21: the 06:30 run logged "403 trending, 6 rising, 78 opportunities" but the saved file (mtime 07:00) was snapshot-only. Downstream (portal Competitors page, Build-Next) ran on the last un-clobbered report (June-12). Fix in duckAgent `competitor_engine.save_snapshot_only`: skip the report-file write when a full analysis already exists for that date (`_existing_report_is_full_analysis`); the full report already carries `listing_snapshots` so velocity lookback is unaffected.
+
+| Slice | Happy | Guard | Verify |
+|---|---|---|---|
+| no-clobber | ✅ `test_competitor_snapshot_split.py::test_snapshot_does_not_clobber_full_analysis` | ✅ `::test_existing_report_is_full_analysis_classifier` (full vs snapshot vs missing) | manual: regen wrote full analysis (50 trending / 7 rising / 20 ducks_to_build / my_shop_velocity `building · 65 actual`); Build-Next rebuilt off 06-22, all top-10 recs TRENDING |
+| still writes normally | ✅ `::test_snapshot_writes_when_no_report_exists` (Mon–Sat snapshot) | ✅ `::test_snapshot_refreshes_an_existing_snapshot` | n/a |
+
+**Tier:** read-only (report generation). Same "a 2-minute cron timing collision silently emptied a daily-read surface" family as the producer/reader cadence bugs; the daily snapshot's job is velocity lookback (snapshots dir), not owning the analysis report.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
