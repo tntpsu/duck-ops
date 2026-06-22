@@ -142,6 +142,10 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         yield
         return
     monkeypatch.setattr(_bne, "BUILD_NEXT_QUEUE_PATH", tmp_path / "build_next_queue.json")
+    # 2026-06-21: build_next_engine.BUILD_NEXT_DUPE_DECISIONS_PATH (Surface 28) —
+    # operator dupe rulings; same three-layer isolation (this redirect + the
+    # DUCK_TEST_MODE guard in record_dupe_decision + the no-pollution audit test).
+    monkeypatch.setattr(_bne, "BUILD_NEXT_DUPE_DECISIONS_PATH", tmp_path / "build_next_dupe_decisions.json")
 
     # 2026-06-12: product_concept_queue.BUILD_NEXT_PROMOTIONS_PATH (Surface 16
     # ingestion). build_product_concept_queue() reads this file by default;

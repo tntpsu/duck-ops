@@ -53,11 +53,18 @@ OCCASION_INTEL_PATH = DUCK_OPS_ROOT / "state" / "occasion_intel.json"
 PROFIT_PER_PRODUCT_PATH = DUCK_OPS_ROOT / "state" / "profit_per_product.json"
 COMPETITOR_REPORTS_DIR = DUCK_AGENT_ROOT / "cache" / "competitor" / "reports"
 BUILD_NEXT_QUEUE_PATH = DUCK_OPS_ROOT / "state" / "build_next_queue.json"
+# Operator one-click dupe rulings on the 0.43-0.72 soft-flag band:
+# {"decisions": {concept_key: {"decision": "duplicate"|"distinct", ...}}}.
+# "duplicate" -> suppress next build; "distinct" -> stop flagging. Kept separate
+# from the concept-feedback store so a candidate can be ruled on BEFORE promotion.
+BUILD_NEXT_DUPE_DECISIONS_PATH = DUCK_OPS_ROOT / "state" / "build_next_dupe_decisions.json"
+_VALID_DUPE_DECISIONS = {"duplicate", "distinct"}
 
 # Comparison anchor for the DUCK_TEST_MODE write guard (architectural
 # convention 4): captured at import, while the guard reads the LIVE module
 # constant at call time so test monkeypatching keeps working.
 _FROZEN_PRODUCTION_BUILD_NEXT_QUEUE_PATH = BUILD_NEXT_QUEUE_PATH.resolve()
+_FROZEN_PRODUCTION_BUILD_NEXT_DUPE_DECISIONS_PATH = BUILD_NEXT_DUPE_DECISIONS_PATH.resolve()
 
 SURFACE_VERSION = 1
 TOP_N = 12
@@ -301,6 +308,11 @@ def _feedback_suppressed_keys(feedback: dict[str, Any]) -> set[str]:
 # --------------------------------------------------------------------------
 
 _SEMANTIC_HARD_BAND = "already_made"
+# The 0.43-0.72 band: kept in the queue but flagged so a near-dup can't rank as
+# a clean top candidate (the Dachshund-ranked-#1 case). NOT auto-suppressed —
+# the band is fuzzy enough that hiding it drops distinct ducks (e.g. Labrador
+# vs Golden Retriever at 0.721). The operator confirms/dismisses per concept.
+_SEMANTIC_SOFT_BAND = "possible_dupe"
 _ON_BRAND_TOKENS = {"duck", "ducks", "ducky", "dashboard", "dash", "jeep"}
 
 
@@ -387,6 +399,7 @@ def build_build_next_queue(*,
     catalog_margin = _catalog_margin_map(catalog_items, profit)
     active_occasions = [o for o in occasion_intel.get("active_occasions") or [] if isinstance(o, dict)]
     suppressed_keys = _feedback_suppressed_keys(feedback)
+    dupe_decisions = _load_dupe_decisions()
 
     candidates = assemble_candidates(report)
     pool_max = max((_demand_strength(c) for c in candidates), default=0.0)
@@ -439,6 +452,11 @@ def build_build_next_queue(*,
         else:
             sem_suppressed, sem_reason = (gap < (1.0 - ALREADY_MADE_OVERLAP)), f"already made — {gap_reason}"
 
+        # Soft-flag (kept, not suppressed) unless the operator already ruled on it.
+        dupe_decision = _dupe_decision_for(dupe_decisions, title)
+        possible_dupe = bool(sem and str(sem.get("band")) == _SEMANTIC_SOFT_BAND
+                             and dupe_decision != "distinct")
+
         entry = {
             "title": title,
             "listing_id": cand.get("listing_id"),
@@ -453,8 +471,18 @@ def build_build_next_queue(*,
             },
             "margin_estimated": margin_estimated,
             "semantic_match": (sem or {}).get("match") if sem else None,
+            "possible_dupe": possible_dupe,
+            "dupe_score": float(sem.get("score")) if (possible_dupe and sem and sem.get("score") is not None) else None,
             "reasons": [demand_reason, margin_reason, gap_reason, occasion_reason],
         }
+
+        # Operator-confirmed duplicate → suppress (one-click "Confirm duplicate").
+        if dupe_decision == "duplicate":
+            entry["suppressed_reason"] = (
+                f"operator confirmed duplicate of '{(sem or {}).get('match') or 'existing duck'}'"
+            )
+            suppressed.append(entry)
+            continue
 
         # Off-brand gate: a trending-only candidate must read as a duck/
         # dashboard item (ducks_to_build candidates are always kept).
@@ -506,6 +534,59 @@ def _refusing_test_mode_prod_write() -> bool:
     if os.environ.get("DUCK_TEST_MODE") != "1":
         return False
     return Path(BUILD_NEXT_QUEUE_PATH).resolve() == _FROZEN_PRODUCTION_BUILD_NEXT_QUEUE_PATH
+
+
+# --- dupe decisions: read (in the scorer) + write (from the portal action) ----
+
+def _load_dupe_decisions() -> dict[str, Any]:
+    data = load_json(BUILD_NEXT_DUPE_DECISIONS_PATH, {})
+    decisions = data.get("decisions") if isinstance(data, dict) else None
+    return decisions if isinstance(decisions, dict) else {}
+
+
+def _dupe_decision_for(decisions: dict[str, Any], title: str) -> str | None:
+    """'duplicate' | 'distinct' | None for a candidate title (by concept key)."""
+    rec = decisions.get(_concept_feedback_key(title)) if decisions else None
+    if isinstance(rec, dict) and rec.get("decision") in _VALID_DUPE_DECISIONS:
+        return rec["decision"]
+    return None
+
+
+def record_dupe_decision(title: str, decision: str, *, matched: str | None = None) -> dict[str, Any]:
+    """Record a one-click dupe ruling. decision in {duplicate, distinct}.
+    duplicate -> suppressed next build; distinct -> stops the possible-dupe flag."""
+    if decision not in _VALID_DUPE_DECISIONS:
+        raise ValueError(f"decision must be one of {sorted(_VALID_DUPE_DECISIONS)}, got {decision!r}")
+    if not str(title or "").strip():
+        raise ValueError("title is required")
+    if os.environ.get("DUCK_TEST_MODE") == "1" and \
+            Path(BUILD_NEXT_DUPE_DECISIONS_PATH).resolve() == _FROZEN_PRODUCTION_BUILD_NEXT_DUPE_DECISIONS_PATH:
+        raise TestModeRefusalError(
+            "DUCK_TEST_MODE=1 but BUILD_NEXT_DUPE_DECISIONS_PATH still points at the "
+            "production state file. Monkeypatch it to a tmp path."
+        )
+    path = Path(BUILD_NEXT_DUPE_DECISIONS_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = load_json(path, {})
+    if not isinstance(data, dict):
+        data = {}
+    decisions = data.setdefault("decisions", {})
+    if not isinstance(decisions, dict):
+        decisions = data["decisions"] = {}
+    record = {"title": title, "decision": decision, "matched": matched, "at": now_local_iso()}
+    decisions[_concept_feedback_key(title)] = record
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return record
 
 
 def write_build_next_queue(payload: dict[str, Any]) -> Path:

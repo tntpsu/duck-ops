@@ -353,3 +353,71 @@ class TestWriteIsolation:
             assert False, "expected TestModeRefusalError"
         except bne.TestModeRefusalError:
             pass
+
+
+# --------------------------------------------------------------------------
+# Surface 28: possible-dupe soft-flag + one-click confirm (duplicate/distinct)
+# --------------------------------------------------------------------------
+
+class TestDupeFlag:
+    def _kwargs(self, **over):
+        base = dict(
+            report=_report(ducks=[_duck("1", "Wiener Dog Figure", engagement=4000)]),
+            report_name="2026-06-12_competitor_report.json",
+            catalog=_catalog([_cat_item("Dachshund Duck")]),
+            profit={"products": []},
+            occasion_intel={"active_occasions": []},
+            feedback={"concepts": {}},
+            semantic_map={"Wiener Dog Figure": {"match": "Dachshund Duck", "score": 0.55, "band": "possible_dupe"}},
+        )
+        base.update(over)
+        return base
+
+    def test_possible_dupe_kept_and_flagged(self):
+        payload = bne.build_build_next_queue(**self._kwargs())
+        assert payload["queue_count"] == 1          # KEPT, not suppressed
+        e = payload["queue"][0]
+        assert e["possible_dupe"] is True
+        assert e["dupe_score"] == 0.55
+        assert e["semantic_match"] == "Dachshund Duck"
+
+    def test_distinct_band_not_flagged(self):
+        payload = bne.build_build_next_queue(**self._kwargs(
+            semantic_map={"Wiener Dog Figure": {"match": "Dachshund Duck", "score": 0.20, "band": "distinct"}}))
+        assert payload["queue"][0]["possible_dupe"] is False
+        assert payload["queue"][0]["dupe_score"] is None
+
+    def test_operator_confirmed_duplicate_is_suppressed(self):
+        bne.record_dupe_decision("Wiener Dog Figure", "duplicate", matched="Dachshund Duck")
+        payload = bne.build_build_next_queue(**self._kwargs())
+        assert payload["queue_count"] == 0
+        assert "operator confirmed duplicate" in payload["suppressed"][0]["suppressed_reason"]
+
+    def test_operator_distinct_clears_the_flag(self):
+        bne.record_dupe_decision("Wiener Dog Figure", "distinct")
+        payload = bne.build_build_next_queue(**self._kwargs())
+        assert payload["queue_count"] == 1
+        assert payload["queue"][0]["possible_dupe"] is False   # ruling stops the flag
+
+    def test_record_rejects_bad_decision(self):
+        try:
+            bne.record_dupe_decision("X", "maybe")
+            assert False, "expected ValueError"
+        except ValueError:
+            pass
+
+    def test_record_round_trips_by_concept_key(self):
+        rec = bne.record_dupe_decision("Wiener Dog Figure", "duplicate", matched="Dachshund Duck")
+        assert rec["decision"] == "duplicate" and rec["matched"] == "Dachshund Duck"
+        loaded = bne._load_dupe_decisions()
+        assert bne._dupe_decision_for(loaded, "Wiener Dog Figure") == "duplicate"
+
+    def test_dupe_write_guard_refuses_prod_path_in_test_mode(self, monkeypatch):
+        monkeypatch.setattr(bne, "BUILD_NEXT_DUPE_DECISIONS_PATH",
+                            bne._FROZEN_PRODUCTION_BUILD_NEXT_DUPE_DECISIONS_PATH)
+        monkeypatch.setenv("DUCK_TEST_MODE", "1")
+        try:
+            bne.record_dupe_decision("X", "duplicate")
+            assert False, "expected TestModeRefusalError"
+        except bne.TestModeRefusalError:
+            pass
