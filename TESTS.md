@@ -830,6 +830,21 @@ Separately, the gap the operator named — no dynamic loading/failure feedback �
 
 ---
 
+## Surface 29 — Weekly sale-POSTS toggle: keep the sale, drop the posts (2026-06-22)
+
+**Background:** operator: "I don't do posts for sales. I just want to do the sales… can we make this toggleable on our workflow page? Just the part with the sales post?" The weekly flow auto-applies a Shopify sale AND generates promo posts (blog/social/SEO) + an approval email that parks a recurring "pick the final weekly sale post" decision. The existing whole-flow `mode:off` switch was too blunt — `step_weekly_sale_playbook` (the sale auto-apply) is bundled IN the scheduled flow (steps.py:3171 `auto_apply_allowed` branch), so turning the flow off would also stop the operator's sales. Needed a finer toggle. Lives in duckAgent.
+
+| Slice | Happy | Guard / edge | Safety invariant | Surface |
+|---|---|---|---|---|
+| **gate reader** (`weekly_sale_posts_enabled`) | ✅ `tests/test_weekly_sale_posts_toggle.py::test_posts_enabled_by_default`, `::test_posts_enabled_when_on` | ✅ `::test_posts_disabled_values` (off/false/0/disabled/no), `::test_reader_fails_open_on_missing_config` (fail-open = post) | n/a | `flows/weekly/steps.py` |
+| **step gate** (`_gate_weekly_post_step`) | ✅ `::test_gate_runs_underlying_when_on` | ✅ `::test_gate_skips_underlying_when_off` (post step NOT executed) | ✅ **`::test_sale_and_prepare_steps_are_never_gated`** (identity check: `weekly_sale_playbook`/`weekly_prepare` are the raw fns, never wrapped) + `::test_campaign_post_steps_are_gated` | flow list |
+| **portal writer** (`set_weekly_sale_posts`, Tier-3) | ✅ `creative_agent/runtime/tests/test_weekly_sale_posts_card.py::test_set_off_keeps_sale_mode_untouched` (mode stays `auto_apply_shopify`), `::test_set_on_round_trips` | ✅ `::test_requires_confirm`, `::test_requires_reason`, `::test_get_defaults_on_when_key_absent` | ✅ same (mode untouched) | `workflows_card.py` |
+| **portal toggle UI + routes** | manual: headless Chromium — weekly row shows "Turn sale posts off/back on" next to "Turn off"; GET `/api/workflows/weekly/sale-posts` `{enabled}`; POST round-trips on↔off with `mode` unchanged; no-confirm → 400 | n/a | n/a | `viewer.py` GET+POST + `/portal/workflows-status` JS |
+
+**Design + a fixed regression:** the sale (`mode`/auto-apply) and the promo POSTS are now independent controls — flipping posts off keeps the discount running and stops the recurring decision. `weekly_prepare` + `weekly_sale_playbook` are never wrapped; everything from `weekly_blog` onward is gated. ALSO fixed a latent bug found while wiring: the workflows-status confirm dialog called a dangling `load()` (removed when the page was wrapped for async-state in Surface 27) — the existing **mode** toggle would have posted then errored on refresh; re-added `load()`. Operator preference memorialized: [[operator_runs_sales_not_sale_posts]]. **Tier:** the toggle write is Tier-3 (operator confirm + reason); it changes a ranking/posting preference, never the sale.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
