@@ -871,6 +871,22 @@ These join the existing `test_page_inline_scripts_are_valid_js` (node `--check` 
 
 ---
 
+## Surface 32 — Review replies kept "failing": pacing self-throttle + stale failed receipts (2026-06-22, operator: "why do we continue to see failures on review replies?")
+
+**Background:** the live queue showed **11 failed** review-reply receipts. Live drain-log probe split them into two unrelated root causes (verify-external-behavior-before-root-cause):
+
+- **7 pacing self-throttle (ages 1–3d).** The soft reservation in `etsy_browser_guard.before_command` defers reads at `14/18` visible commands to keep 4 slots for review-reply POSTS. But a review-reply POST does its OWN setup/verify reads (navigate to row, auth probe, post-submit verify). Once the window hit 14/18 those reads were deferred too, leaving replies **filled-but-not-submitted** — the reservation meant to PROTECT posts was blocking the post's own reads. Fix: thread-local `review_reply_post_window()` context manager exempts reads issued during a post from the SOFT reservation only; the hard 18-ceiling + mutating cap still apply. `review_reply_executor` wraps both `run_live_submit` call sites.
+- **4 stale transaction_mismatch (ages 14/14/20/71d).** `auto_dismiss_stale_queued` only cleared `queued` receipts, so a FAILED `review_row_transaction_mismatch` older than the 14d freshness window (Etsy review-row metadata drift → will never post) sat in the queue forever as a permanent false "failure" — the recurring noise the operator saw. Fix: the status filter now includes `"failed"`. Ran against the live queue: dismissed all 4, failed dropped **11 → 7** (the 7 pacing ones stay; the pacing fix lets them post next drain).
+
+| Slice | Happy | Guard | Verify |
+|---|---|---|---|
+| pacing exemption | ✅ `test_review_reply_pacing_and_stale_dismiss.py::test_read_exempt_inside_review_reply_post_window` | ✅ `::test_read_deferred_at_reservation_threshold_outside_post_window` (still deferred outside the window), `::test_hard_ceiling_still_applies_inside_post_window` (exemption is soft-only) | live drain-log: `Etsy read command deferred: 14/18 … reserving the last 4 for review-reply posts` → CleanupFailure |
+| stale failed dismiss | ✅ `::test_dismisses_stale_failed_receipt`, `::test_dismisses_stale_queued_receipt` | ✅ `::test_keeps_fresh_failed_receipt` (recovery sweep owns fresh failures), `::test_ignores_terminal_statuses` (posted/dismissed/skipped never re-dismissed) | live `auto_dismiss_stale_queued` run dismissed 4, failed 11→7 |
+
+**Tier:** the guard/executor edits are local code (Tier 2). Running `auto_dismiss_stale_queued` against the live queue mutated production review-reply state (4 dismissals, each with a workflow_control transition receipt) — done via the real function, not a hand-edit, so every dismissal is greppable. Pairs with the two-card observability bracket already on this lane ([[feedback_two_card_observability_bracket]]); these were "alive but stuck" failures the throughput card eventually catches ([[feedback_alive_status_is_not_progress]]).
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

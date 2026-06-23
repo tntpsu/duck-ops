@@ -45,6 +45,37 @@ class PacingReservationError(RuntimeError):
     not a failure.
     """
 
+
+# A review-reply POST does a few setup reads (navigate to the review row, auth
+# probe, post-submit verify) before/around its mutating submit. Those reads are
+# part of the reserved post operation, so the soft read-reservation must NOT
+# defer them — otherwise the reservation that exists to PROTECT review-reply
+# posts ends up blocking the post's own reads, leaving replies filled-but-not-
+# submitted once the window hits 14/18 (the recurring "review reply failed" the
+# operator saw). Set via review_reply_post_window() around run_live_submit;
+# guard_before_command runs in-process (run_pw_command calls it synchronously),
+# so a thread-local reaches it. The HARD ceiling + mutating cap still apply.
+import contextlib as _contextlib
+import threading as _threading
+
+_posting_local = _threading.local()
+
+
+def _in_review_reply_post() -> bool:
+    return getattr(_posting_local, "depth", 0) > 0
+
+
+@_contextlib.contextmanager
+def review_reply_post_window():
+    """Exempt reads issued while a review-reply post is executing from the soft
+    pacing reservation (not the hard ceiling)."""
+    _posting_local.depth = getattr(_posting_local, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _posting_local.depth = max(0, getattr(_posting_local, "depth", 1) - 1)
+
+
 # Local Playwright/disk operations Etsy literally can't see. They
 # don't trigger Etsy's bot heuristics, so they shouldn't count toward
 # the shared burst budget. The April 24 → May 26 stuck-state and
@@ -476,7 +507,7 @@ def before_command(session: str, args: tuple[str, ...]) -> None:
     # ceiling above, this does NOT persist a cooldown — it refuses only this
     # one read, leaving posts free to proceed, and clears as events age out of
     # the rolling window. Mutating commands are never blocked here.
-    if not mutating and visible_count >= MAX_COMMANDS_PER_WINDOW - RESERVED_FOR_MUTATING:
+    if not mutating and not _in_review_reply_post() and visible_count >= MAX_COMMANDS_PER_WINDOW - RESERVED_FOR_MUTATING:
         raise PacingReservationError(
             f"Etsy read command deferred: {visible_count}/{MAX_COMMANDS_PER_WINDOW} pacing slots used; "
             f"reserving the last {RESERVED_FOR_MUTATING} for review-reply posts."

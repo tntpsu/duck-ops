@@ -43,6 +43,7 @@ from review_reply_discovery import (
 )
 from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
 from etsy_browser_guard import cleanup_stale_playwright_processes
+from etsy_browser_guard import review_reply_post_window
 from workflow_control import record_workflow_transition
 
 
@@ -359,7 +360,11 @@ def auto_dismiss_stale_queued(
     for aid, item in queue_items.items():
         if not isinstance(item, dict):
             continue
-        if str(item.get("status") or "") != "queued":
+        # Also clear stale FAILED receipts, not just queued ones. A failed
+        # transaction_mismatch older than the freshness window will never post
+        # (Etsy review-row metadata drift) and was sitting in the queue forever
+        # as a permanent false "failure" — the recurring noise the operator saw.
+        if str(item.get("status") or "") not in {"queued", "failed"}:
             continue
         review_date = _artifact_review_date(aid)
         if review_date is None or review_date >= cutoff:
@@ -3363,7 +3368,10 @@ def drain_queue(
                     break
                 continue
 
-        submit = run_live_submit(artifact_id, keep_browser_open=True)
+        # Exempt this post's own setup reads from the soft pacing reservation
+        # (the reservation protects review-reply posts; it must not throttle them).
+        with review_reply_post_window():
+            submit = run_live_submit(artifact_id, keep_browser_open=True)
         results.append(
             {
                 "artifact_id": artifact_id,
@@ -3479,7 +3487,8 @@ def main() -> int:
         result = run_dry_run_fill(args.artifact_id, keep_browser_open=keep_browser_open)
     elif args.command == "submit":
         keep_browser_open = bool(args.keep_browser_open and not args.close_browser)
-        result = run_live_submit(args.artifact_id, keep_browser_open=keep_browser_open)
+        with review_reply_post_window():
+            result = run_live_submit(args.artifact_id, keep_browser_open=keep_browser_open)
     elif args.command == "auto-queue-publish-ready":
         result = auto_enqueue_publish_ready(queued_by=args.queued_by)
     elif args.command == "drain-queue":
