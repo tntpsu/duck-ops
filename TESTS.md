@@ -887,6 +887,24 @@ These join the existing `test_page_inline_scripts_are_valid_js` (node `--check` 
 
 ---
 
+## Surface 33 — Occasion-nod card false RED across boundary + Thursday snapshot-only starvation (2026-06-22, operator: "feels like a non-robust design" / "investigate Thursday root cause")
+
+Two RED OS cards diagnosed by parallel read-only agents; both were detection/source bugs, not failures of the working flow. (duckAgent commit `3e2d262`.)
+
+**33a — occasion_nod_coverage false positive.** The card compared the newest run in a 10-day window against the occasion active *now*. Jeepfact is weekly, the window is 10 days, so at every occasion rollover the card grades a pre-rollover post against the post-rollover occasion. Concretely: a 06-17 jeepfact that correctly nodded to **Father's Day** was flagged RED once the occasion rolled to **Independence Day**. Structural, recurs every transition. Fix (correct-by-construction): each surface stamps `occasion_at_runtime` (the occasions active when it ran) into its run state at post time (`meme_helper`, `jeepfact_helper` via new `occasion_context.active_occasion_stamp`); the card grades each run against its OWN stamp, never against now. A run with no stamp predates the fix and is **skipped** (yellow "grading resumes on next run"), never graded vs now. Live card went from false RED → honest yellow.
+
+**33b — Thursday funnel snapshot-only starvation (the 06-18 RED).** `flows/thursday/steps.py::_load_latest_competitor_report` took newest-by-mtime and accepted a daily `_snapshot_only` stub (empty trending). On 06-18 the competitor engine was mid snapshot-only window (full analysis ran 06-12, recovered 06-22), so Thursday's only working candidate source (tier-2 competitor_trending) read 0, fell through to own-catalog bestsellers, and all 5 were correctly rejected (already-made / IP-risk) → fallback-only RED. The qualifier was fine; the **source was structurally empty**. Fix: walk newest-first, skip `_snapshot_only`/empty-trending, return the latest report with real `trending_products`. Cousin of Surface 31's clobber bug (same snapshot-vs-full confusion, different consumer). Tier-1 source (`etsy_intelligence.trending_products`) is separately dead-every-week — noted for follow-up, not fixed here.
+
+| Slice | Happy | Guard | Verify |
+|---|---|---|---|
+| nod graded vs run-time occasion | ✅ `test_occasion_nod_coverage.py::TestCrossOccasionBoundary::test_post_graded_against_runtime_occasion_not_active_now` | ✅ `::test_post_that_missed_its_runtime_occasion_is_still_red` (stamp doesn't whitewash a real miss), `::test_legacy_unstamped_run_is_yellow_not_red` (never grade vs now), `::test_stamped_empty_no_occasion_when_ran_is_green` | live card: false RED → yellow "predate stamping" |
+| stamp helpers | ✅ `::TestOccasionStampHelpers::test_active_occasion_stamp_carries_matcher_fields` | ✅ `::test_read_surface_occasion_stamp_none_for_legacy` (None≠[]), `::test_active_occasion_stamp_empty_when_no_occasion` | n/a |
+| Thursday skips snapshot-only | ✅ `test_thursday_competitor_report_loader.py::test_skips_snapshot_only_returns_full` | ✅ `::test_prefers_newest_full_when_several`, `::test_returns_empty_when_only_snapshots`, `::test_full_report_with_empty_trending_is_skipped` | 06-18 run proven: tier-2 read 0, fell to top_performer_7d, 0 real qualified |
+
+**Tier:** all local code (Tier 2). Existing 12 card tests updated to the new stamped-run contract (fixtures now write `occasion_at_runtime`); 215 related duckAgent tests pass. Same family as [[feedback_plausible_fallbacks_mask_failure]] (a green producer beside a red consumer) and the producer/reader cadence bugs. **Open follow-ups for the operator:** (1) email-reply approval (`operator_inbox_poller.py`) was built 2026-05-25 but never scheduled on launchd — Tier-3 decision pending: wire it vs portal-only; (2) Thursday tier-1 trending source empty every week.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
