@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# duck-bug-hunt: manual-entrypoint — one-time interactive Google Tasks OAuth
+# bootstrap (run by hand with --client-id to mint a refresh token). Intentionally
+# not scheduled; do not flag as an unwired runtime entrypoint.
 from __future__ import annotations
 
 import argparse
