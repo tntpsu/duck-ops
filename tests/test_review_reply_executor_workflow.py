@@ -452,6 +452,32 @@ class ReviewReplyExecutorWorkflowTests(unittest.TestCase):
         self.assertIn("reply_posted", states)
         self.assertNotIn("execution_failed", states)
 
+    def test_session_summary_counts_reconcile_against_live_queue(self) -> None:
+        """The session-summary tally must reflect CURRENT state, not the session's
+        frozen per-item snapshots. 2026-06-24: an item reconciled to posted after
+        its attempt was still counted 'failed' by the summary email, producing a
+        false '13 failed' alarm. An item still in the live queue takes the queue's
+        status; one that has aged out falls back to its snapshot."""
+        session = {"items": {
+            "a": {"artifact_id": "a", "status": "failed"},   # reconciled -> posted in queue
+            "b": {"artifact_id": "b", "status": "failed"},   # genuinely still failed
+            "c": {"artifact_id": "c", "status": "posted"},
+            "d": {"artifact_id": "d", "status": "failed"},   # aged out of queue -> snapshot stands
+            "e": {"artifact_id": "e", "status": "failed"},   # dismissed in queue -> not a failure
+        }}
+        queue_state = {"items": {
+            "a": {"status": "posted"},
+            "b": {"status": "failed"},
+            "c": {"status": "posted"},
+            "e": {"status": "dismissed"},
+        }}
+        counts = review_reply_executor._session_counts(session, queue_state)
+        self.assertEqual(counts["posted"], 2)   # a (reconciled) + c
+        self.assertEqual(counts["failed"], 2)   # b + d (d not in queue, snapshot failed)
+        self.assertEqual(counts["skipped"], 1)  # e dismissed -> folded into skipped
+        # Without the live queue, it falls back to the stale snapshot (4 failed).
+        self.assertEqual(review_reply_executor._session_counts(session)["failed"], 4)
+
     def test_classify_pacing_cooldown_is_retryable_not_unexpected(self) -> None:
         """A shared-pacing-budget error must classify as pacing_cooldown (retryable),
         not masquerade as unexpected_executor_failure."""

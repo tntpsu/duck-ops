@@ -543,13 +543,27 @@ def _new_session_id() -> str:
     return f"session-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
 
 
-def _session_counts(session: dict[str, Any]) -> dict[str, int]:
-    items = list((session.get("items") or {}).values())
+def _live_item_status(item: dict[str, Any], queue_items: dict[str, Any] | None) -> str:
+    """A session item's CURRENT status. When the live queue is available, its
+    status wins over the session's frozen snapshot — so a receipt reconciled to
+    posted/dismissed AFTER the attempt isn't reported with its stale snapshot.
+    This is what stops the summary email from re-counting an already-fixed item
+    as failed (the 2026-06-24 '13 failed' false alarm)."""
+    aid = str(item.get("artifact_id") or "")
+    live = (queue_items or {}).get(aid)
+    return str((live or {}).get("status") or item.get("status") or "")
+
+
+def _session_counts(session: dict[str, Any], queue_state: dict[str, Any] | None = None) -> dict[str, int]:
+    queue_items = (queue_state or {}).get("items") or {}
+    statuses = [_live_item_status(item, queue_items) for item in (session.get("items") or {}).values()]
     return {
-        "posted": sum(1 for item in items if str(item.get("status") or "") == "posted"),
-        "failed": sum(1 for item in items if str(item.get("status") or "") == "failed"),
-        "skipped": sum(1 for item in items if str(item.get("status") or "") == "skipped"),
-        "total": len(items),
+        "posted": sum(1 for s in statuses if s == "posted"),
+        "failed": sum(1 for s in statuses if s == "failed"),
+        # dismissed (e.g. stale auto-dismissed mismatch items) is "not a failure
+        # needing attention" — fold into skipped so it never inflates failed.
+        "skipped": sum(1 for s in statuses if s in {"skipped", "dismissed"}),
+        "total": len(statuses),
     }
 
 
@@ -1977,7 +1991,8 @@ def send_session_summary_email() -> dict[str, Any]:
     if not items:
         return {"ok": False, "status": "empty_session", "message": "The current session has no submitted review replies yet."}
 
-    counts = _session_counts(session)
+    queue_items = (queue_state or {}).get("items") or {}
+    counts = _session_counts(session, queue_state)
     subject = (
         "OpenClaw Review Reply Session Summary "
         f"({counts['posted']} posted"
@@ -2005,20 +2020,25 @@ def send_session_summary_email() -> dict[str, Any]:
         f"<strong>Skipped:</strong> {counts['skipped']}</p>",
     ]
     for item in items:
+        live = _live_item_status(item, queue_items)
+        # Stale error/failure detail belongs only to an item that is STILL failed.
+        # A reconciled item (posted/dismissed) must not carry its old error text,
+        # or the summary keeps reporting a failure that no longer exists.
+        show_failure = live == "failed"
         lines.extend(
             [
-                f"{item.get('artifact_id')} [{item.get('status')}]",
+                f"{item.get('artifact_id')} [{live}]",
                 f"- Transaction ID: {item.get('transaction_id') or 'n/a'}",
                 f"- Listing ID: {item.get('listing_id') or 'n/a'}",
                 f"- Customer review: {_reply_excerpt(item.get('customer_review'))}",
                 f"- Reply: {_reply_excerpt(item.get('approved_reply_text'))}",
             ]
         )
-        if item.get("error"):
+        if show_failure and item.get("error"):
             lines.append(f"- Error: {item.get('error')}")
-        if item.get("failure_class"):
+        if show_failure and item.get("failure_class"):
             lines.append(f"- Failure class: {item.get('failure_class')}")
-        if item.get("breadcrumb_summary"):
+        if show_failure and item.get("breadcrumb_summary"):
             lines.append(f"- Breadcrumbs: {item.get('breadcrumb_summary')}")
         if (item.get("attempt_paths") or {}).get("json_path"):
             lines.append(f"- Attempt JSON: {item.get('attempt_paths').get('json_path')}")
@@ -2026,18 +2046,18 @@ def send_session_summary_email() -> dict[str, Any]:
 
         html_parts.extend(
             [
-                f"<h3>{item.get('artifact_id')} <span style='font-weight:normal;'>[{item.get('status')}]</span></h3>",
+                f"<h3>{item.get('artifact_id')} <span style='font-weight:normal;'>[{live}]</span></h3>",
                 f"<p><strong>Transaction ID:</strong> {item.get('transaction_id') or 'n/a'}<br>"
                 f"<strong>Listing ID:</strong> {item.get('listing_id') or 'n/a'}<br>"
                 f"<strong>Customer review:</strong> {item.get('customer_review') or ''}<br>"
                 f"<strong>Reply:</strong> {item.get('approved_reply_text') or ''}</p>",
             ]
         )
-        if item.get("error"):
+        if show_failure and item.get("error"):
             html_parts.append(f"<p><strong>Error:</strong> {item.get('error')}</p>")
-        if item.get("failure_class"):
+        if show_failure and item.get("failure_class"):
             html_parts.append(f"<p><strong>Failure class:</strong> {item.get('failure_class')}</p>")
-        if item.get("breadcrumb_summary"):
+        if show_failure and item.get("breadcrumb_summary"):
             html_parts.append(f"<p><strong>Breadcrumbs:</strong> {item.get('breadcrumb_summary')}</p>")
     html_parts.append("</div>")
 

@@ -951,6 +951,20 @@ While reconciling the Surface-35 item we found its `transaction_id` stored inter
 
 ---
 
+## Surface 37 — "Review posts failed AGAIN" was a LYING summary email, not a failure (2026-06-24, operator: "why did our review posts fail again")
+
+The operator got a "Session Summary (1 posted, **13 failed**)" email and read it as a new regression. It wasn't. Investigation (verdict: **stale pre-fix drain + lying alert**): the only drain today ran ~10:42, BEFORE the Surface-35/36 fixes landed (13:48/15:58), and false-failed one item that was already reconciled to verified-live at 13:47. The **executor was fine**; the alarm came from `send_session_summary_email` tallying `_session_counts(session)` over the **session's frozen per-item snapshots** — a long-lived session (since June) whose 13 "failed" were the old backlog + 5 ancient auto-dismissed mismatch items + the already-reconciled item's stale 10:42 snapshot. Classic lying-status ([[feedback_alive_status_is_not_progress]], [[feedback_portal_action_vs_card_refresh]]): the alert read data already superseded by reconciliation.
+
+Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile each item's count against the LIVE queue status (reconciled-to-posted/dismissed wins over the snapshot; dismissed folds into skipped, never failed). The summary's per-item lines render the live status and suppress stale error/breadcrumb text for any item no longer failed. Items aged out of the queue fall back to the snapshot (honest limit; the genuine pile is handled by reconciliation below). Also reconciled the real backlog from on-disk evidence: `review-2` → posted (workflow_control `rowTextContainsReplySnippet=true`, reply live), `review-1` → skipped (workflow_control already `resolved`); the other 5 have no live-confirmation, so stay failed (a browser read-back is Tier-3, not ad-hoc). Genuine failed count: 7 → 5.
+
+| Slice | Happy | Guard | Verify |
+|---|---|---|---|
+| summary counts reflect live state | ✅ `test_review_reply_executor_workflow.py::test_session_summary_counts_reconcile_against_live_queue` (reconciled-in-queue item counted posted, dismissed→skipped) | ✅ same test: item aged out of queue falls back to snapshot; no-queue path = stale snapshot count | live: 2 mislabeled backlog items corrected, failed 7→5 |
+
+**Tier:** Tier-2 code + Tier-3 state reconcile (2 queue items flipped from on-disk verification evidence, no Etsy calls). **Open follow-ups:** (1) the review-reply session never rotates — it accumulates months of items, so even a correct summary is an ever-growing pile; scoping the summary to the current run/recent window is the real cure. (2) The 5 remaining failed items (`unexpected_executor_failure`, no live evidence) want a one-time browser read-back to confirm whether any are already live before re-driving.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
