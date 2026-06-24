@@ -1817,7 +1817,13 @@ def _merge_review_reply_handoff_candidates(candidates: dict[str, dict[str, Any]]
             if str(reply.get("response_kind") or "") != "public_thank_you":
                 continue
             transaction_id = str(reply.get("transaction_id") or "").strip()
-            if not transaction_id or not str(reply.get("listing_id") or "").strip():
+            # Fail CLOSED on a non-numeric transaction_id. Etsy transaction ids are
+            # all-digit; a stray value like "l" (2026-06-24) otherwise minted a
+            # `tx-l` artifact that matched the wrong row only by luck (listing match).
+            # Skipping leaves the review un-replied — visibly surfaced by the
+            # review-reply feed-freshness OS card — instead of forming a corrupt,
+            # mis-targeted workflow whose internal id disagrees with its own slug.
+            if not transaction_id.isdigit() or not str(reply.get("listing_id") or "").strip():
                 continue
             if not str(reply.get("generated_response") or "").strip():
                 continue

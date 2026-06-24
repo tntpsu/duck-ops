@@ -382,6 +382,76 @@ class ReviewReplyExecutorWorkflowTests(unittest.TestCase):
         self.assertIn("reply_posted", states)
         self.assertNotIn("execution_failed", states)
 
+    def test_verified_post_not_failed_when_post_submit_inspect_is_paced_out(self) -> None:
+        """duck-bug-hunt Lens 5 finding: the post-submit verification READ
+        (inspect_reply_row_state) runs one command before the screenshot and was
+        NOT protected by the Surface-35 screenshot try/except. If that read trips
+        the hard pacing ceiling after the submit click landed, the reply is live
+        but the exception used to flip it to failed. It must record posted with
+        verification deferred."""
+        quality_state = {
+            "artifacts": {
+                "artifact-1": {
+                    "decision": {
+                        "artifact_id": "artifact-1",
+                        "flow": "reviews_reply_positive",
+                        "artifact_type": "review_reply",
+                        "decision": "publish_ready",
+                        "execution_state": "queued",
+                        "execution_mode": "manual",
+                        "approved_reply_text": "Thanks so much!",
+                        "review_target": {"transaction_id": "tx-1", "listing_id": "listing-1"},
+                    }
+                }
+            }
+        }
+        queue_state = {"generated_at": None,
+                       "items": {"artifact-1": {"status": "queued", "last_preflight_status": "dry_run_filled"}}}
+        session_state = {"sessions": {}}
+        decision = quality_state["artifacts"]["artifact-1"]["decision"]
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(review_reply_executor, "load_execution_policy", return_value={}))
+            stack.enter_context(patch.object(review_reply_executor, "load_quality_gate_state", return_value=quality_state))
+            stack.enter_context(patch.object(review_reply_executor, "load_queue_state", return_value=queue_state))
+            stack.enter_context(patch.object(review_reply_executor, "load_session_state", return_value=session_state))
+            stack.enter_context(patch.object(review_reply_executor, "load_discovery_approvals", return_value={"approvals": {}}))
+            stack.enter_context(patch.object(review_reply_executor, "artifact_record", return_value=quality_state["artifacts"]["artifact-1"]))
+            stack.enter_context(patch.object(review_reply_executor, "latest_discovery_packet_for_artifact", return_value={"artifact_id": "artifact-1"}))
+            stack.enter_context(patch.object(review_reply_executor, "validate_record_for_queue", return_value=(decision, {})))
+            stack.enter_context(patch.object(review_reply_executor, "choose_session", return_value=("esd", "https://www.etsy.com/shop/myJeepDuck#reviews")))
+            stack.enter_context(patch.object(review_reply_executor, "ensure_authenticated_session", return_value={"reused_existing_session": True}))
+            stack.enter_context(patch.object(review_reply_executor, "load_auth_state", return_value={"storage_state": {}}))
+            stack.enter_context(patch.object(review_reply_executor, "mark_auth_healthy", return_value={"auth_status": "healthy"}))
+            stack.enter_context(patch.object(review_reply_executor, "save_auth_state"))
+            stack.enter_context(patch.object(review_reply_executor, "prepare_review_row_for_execution", return_value=("tx-1", {})))
+            stack.enter_context(patch.object(review_reply_executor, "fill_reply_text_without_submit", return_value={"ok": True}))
+            # pre-submit inspect succeeds; the POST-submit inspect trips the hard ceiling.
+            stack.enter_context(patch.object(review_reply_executor, "inspect_reply_row_state",
+                side_effect=[
+                    {"ok": True, "textareaVisible": True, "valueMatches": True, "submitVisible": True, "submitDisabled": False},
+                    RuntimeError("Etsy automation hit the shared pacing budget and is cooling down until 2026-06-24T10:57:22."),
+                ]))
+            stack.enter_context(patch.object(review_reply_executor, "submit_reply_after_verification", return_value={"ok": True}))
+            stack.enter_context(patch.object(review_reply_executor, "capture_target_review_screenshot", return_value="/tmp/r.png"))
+            stack.enter_context(patch.object(review_reply_executor, "record_attempt", return_value={"status": "posted", "last_preflight_status": "submitted"}))
+            stack.enter_context(patch.object(review_reply_executor, "record_session_event", return_value={"session_id": "sess-1", "items": {}}))
+            stack.enter_context(patch.object(review_reply_executor, "save_session_state"))
+            stack.enter_context(patch.object(review_reply_executor, "save_quality_gate_state"))
+            stack.enter_context(patch.object(review_reply_executor, "save_queue_state"))
+            stack.enter_context(patch.object(review_reply_executor, "run_pw_command"))
+            time_mock = stack.enter_context(patch.object(review_reply_executor, "time"))
+            control_mock = stack.enter_context(patch.object(review_reply_executor, "record_workflow_transition"))
+            time_mock.sleep.return_value = None
+            result = review_reply_executor.run_live_submit("artifact-1")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "posted")
+        self.assertIn("shared pacing budget", result["attempt"].get("post_submit_verification_deferred", ""))
+        states = [call.kwargs["state_reason"] for call in control_mock.call_args_list]
+        self.assertIn("reply_posted", states)
+        self.assertNotIn("execution_failed", states)
+
     def test_classify_pacing_cooldown_is_retryable_not_unexpected(self) -> None:
         """A shared-pacing-budget error must classify as pacing_cooldown (retryable),
         not masquerade as unexpected_executor_failure."""

@@ -934,7 +934,20 @@ Fix: (1) `inspect_reply_row_state` is the authoritative success gate — once it
 | screenshot can't fail a verified post | ✅ `test_review_reply_executor_workflow.py::test_verified_post_is_not_failed_by_screenshot_pacing_error` (inspect confirms, screenshot raises pacing → status stays `posted`, `screenshot_error` recorded, no `execution_failed` transition) | ✅ asserts `reply_posted` present, `execution_failed` absent | live workflow_control `last_verification` confirmed reply live; reconciled to verified |
 | pacing classification | ✅ `::test_classify_pacing_cooldown_is_retryable_not_unexpected` | n/a | matched today's exact error string |
 
-**Bug-hunter note:** none of the deterministic duck-bug-hunt lenses (contract/absence/static) would catch this — it's the "incomplete-fix / post-success side-effect corrupts outcome" class, which is the Lens-5 (adversarial LLM panel) target. An LLM panel asked "is the Surface-32 pacing fix complete?" plausibly flags "soft exempted, hard not." **Open follow-up:** the `transaction_id` was stored as `"l"` internally (queue/filename use `5096110510`) — a separate id-corruption worth investigating.
+**Bug-hunter note + Surface-35 completion (Lens 5):** none of the deterministic duck-bug-hunt lenses would catch this class. We BUILT Lens 5 (adversarial LLM panel: 3 finders → 3-skeptic refute-vote) and pointed it at the Surface-32 fix. It surfaced — surviving the refute-vote **3–0** — a gap the Surface-35 screenshot fix ALSO missed: the **post-submit verification read `inspect_reply_row_state` (`review_reply_executor.py:2998`) runs one command before the screenshot and was itself unprotected from the hard ceiling.** So a cooldown trip on the verification read (not just the screenshot) still false-failed a live reply. Completion fix: the inspect read is now wrapped — a cooldown error AFTER `submit_performed=True` records `posted` with `post_submit_verification_deferred`, never failed (re-driving would duplicate). A genuine "not posted" reading still fails. Regression: `::test_verified_post_not_failed_when_post_submit_inspect_is_paced_out`. This is the headline proof that Lens 5 catches the incomplete-fix class the deterministic lenses can't.
+
+---
+
+## Surface 36 — Non-numeric transaction_id minted a `tx-l` artifact (2026-06-24, found while reconciling Surface 35)
+
+While reconciling the Surface-35 item we found its `transaction_id` stored internally as `"l"` (the queue key + workflow_control filename carried the real `5096110510`, but the record's `transaction_id`/`entity_id` were `tx-l`). Root cause (agent trace): NOT a slicing bug in duck-ops — the slug builder `phase1_observer.py:1831` (`artifact_slug=f"tx-{transaction_id}"`) faithfully interpolates whatever it receives, and the guard at `:1820` only checked **non-empty**, so a stray `"l"` (corrupt upstream of duck-ops; exact mint point not reproducible — live state already reconciled) passed and formed a `tx-l` workflow. The DOM matcher then matched the **wrong-row-by-luck** (listing 4311902199 carried it); on a less distinctive listing this could reply to the wrong review. Fix (fail closed, defense-in-depth at both ends): `phase1_observer.py:1820` rejects a non-`.isdigit()` transaction_id (Etsy ids are all-digit) — the review stays un-replied, visibly surfaced by the feed-freshness card, rather than forming a corrupt workflow; `duckAgent/flows/reviews/steps.py:273` enforces a numeric-or-None contract at the source so a bad value never propagates as a plausible string.
+
+| Slice | Happy | Guard | Verify |
+|---|---|---|---|
+| producer numeric-or-None | ✅ `test_reviews_reply_handoff.py::test_handoff_pairs_ids_with_reply` | ✅ `::test_handoff_nonnumeric_transaction_id_becomes_none` (`"l"`→None, listing kept) | n/a |
+| observer fail-closed | ✅ `test_review_reply_handoff_observer.py::test_handoff_builds_candidate_with_api_exact_target` | ✅ `::test_reply_with_nonnumeric_transaction_id_is_skipped` (no `tx-<garbage>` artifact) | live: all 7 existing review tx ids confirmed numeric |
+
+**Tier:** Tier-2 code both repos. Defense-in-depth — the upstream mint point of `"l"` is unconfirmed (state reconciled away), so the guard converts silent corruption into a visible skip rather than root-causing the origin. Same fail-closed-on-ambiguous-identity discipline as the hard safety rules.
 
 ---
 

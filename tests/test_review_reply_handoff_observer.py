@@ -91,6 +91,16 @@ def test_reply_without_ids_is_skipped(runs):
     assert candidates == {}  # fail-closed: never target by guess
 
 
+def test_reply_with_nonnumeric_transaction_id_is_skipped(runs):
+    """Fail closed on a non-numeric transaction id (observed: "l", 2026-06-24) —
+    it otherwise minted a tx-l artifact that matched the wrong row by luck."""
+    from datetime import date
+    runs(date.today().isoformat(), [_reply(transaction_id="l", listing_id="4296762041")])
+    candidates: dict = {}
+    obs._merge_review_reply_handoff_candidates(candidates)
+    assert candidates == {}  # never form a tx-<garbage> artifact
+
+
 def test_reply_without_draft_is_skipped(runs):
     from datetime import date
     runs(date.today().isoformat(), [_reply(generated_response="")])

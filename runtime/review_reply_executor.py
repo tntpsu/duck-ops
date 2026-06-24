@@ -2995,28 +2995,45 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = False) -> dic
         attempt["submit_performed"] = True
         time.sleep(3.0)
 
-        post_submit_state = inspect_reply_row_state(session_name, expected_transaction_id, approved_reply_text)
-        attempt["post_submit_state"] = post_submit_state
-
-        success = (
-            bool(post_submit_state.get("ok"))
-            and (
-                (not post_submit_state.get("textareaVisible") and not post_submit_state.get("submitVisible"))
-                or post_submit_state.get("rowTextContainsReplySnippet")
+        # Post-submit verification. submit_reply_after_verification (above) already
+        # clicked submit and returned ok, so submit_performed=True and the reply has
+        # landed. From here, our OWN reads can trip the HARD pacing ceiling
+        # (etsy_browser_guard) — and the Surface-32 exemption only covers the SOFT
+        # reservation, never the hard ceiling (its test is literally named
+        # test_hard_ceiling_still_applies...). A cooldown error on THIS read does NOT
+        # mean the post failed; re-driving would duplicate the reply. So a pacing
+        # trip here is recorded as posted-with-deferred-verification, not a false
+        # failure. Found by duck-bug-hunt Lens 5 (the post-submit verification read
+        # runs one command before the screenshot, so the Surface-35 screenshot
+        # try/except alone left this read unprotected).
+        post_submit_state = None
+        try:
+            post_submit_state = inspect_reply_row_state(session_name, expected_transaction_id, approved_reply_text)
+            attempt["post_submit_state"] = post_submit_state
+        except Exception as verify_exc:  # noqa: BLE001
+            if not is_cooldown_error(verify_exc):
+                raise
+            attempt["post_submit_verification_deferred"] = f"{type(verify_exc).__name__}: {verify_exc}"
+            attempt["notes"].append(
+                "Post-submit verification was paced out (shared pacing budget) AFTER the submit "
+                "click landed; recorded as posted with verification deferred, not a false failure."
             )
-        )
-        if not success:
-            raise RuntimeError("Submit was clicked, but Etsy did not show a clear post-submit success state.")
 
-        # The reply is VERIFIED live on Etsy at this point — inspect_reply_row_state
-        # is the authoritative success gate. NOTHING below may downgrade it. The
-        # screenshot is evidence only, and it is an Etsy-visible read that can trip
-        # the HARD pacing ceiling (etsy_browser_guard). Before this guard, a pacing
-        # error on the screenshot raised here, flipped a verified-posted reply to
-        # "failed", and emailed a false "publish failure" while the reply was live
-        # (2026-06-24, tx-5096110510). The Surface-32 fix only exempted the SOFT
-        # reservation from a post's own reads, not this hard ceiling. Evidence
-        # gathering must be best-effort: never let it fail a confirmed post.
+        if post_submit_state is not None:
+            success = (
+                bool(post_submit_state.get("ok"))
+                and (
+                    (not post_submit_state.get("textareaVisible") and not post_submit_state.get("submitVisible"))
+                    or post_submit_state.get("rowTextContainsReplySnippet")
+                )
+            )
+            if not success:
+                raise RuntimeError("Submit was clicked, but Etsy did not show a clear post-submit success state.")
+
+        # The reply is posted (verified, or click-confirmed with verification deferred).
+        # NOTHING below may downgrade it. The screenshot is evidence only and is an
+        # Etsy-visible read that can also trip the hard ceiling — best-effort, never
+        # fatal (2026-06-24, tx-5096110510 was false-failed exactly this way).
         try:
             destination_dir = ROOT / "output" / "execution" / "assets" / slugify(artifact_id)
             destination_dir.mkdir(parents=True, exist_ok=True)
