@@ -923,6 +923,21 @@ Two deep root-causes from parallel read-only agents, then both fixed.
 
 ---
 
+## Surface 35 — Verified review reply false-failed by a post-submit screenshot pacing trip (2026-06-24, operator: "reply publish failure today — I thought we made this robust")
+
+**The same class as Surface 32, through the branch that fix did not touch.** Surface 32 exempted the etsy_browser_guard **soft** reservation from a review-reply post's own reads; it deliberately left the **hard** ceiling applying (the Surface-32 test is literally named `test_hard_ceiling_still_applies_inside_post_window`). Today the hard ceiling fired — but on the post's OWN tail-end read. Timeline for Heather's review (`tx-5096110510`, 10:40–10:42): staged → `submit_confirmed` → `inspect_reply_row_state` **confirmed the reply live** (`rowTextContainsReplySnippet=True`, excerpt "Philip responded on…") → the post-submit **screenshot** read (`review_reply_executor.py:2994`) tripped the hard ceiling and raised → generic `except` recorded `failed` + emailed a false "publish failure." **The reply was live on Etsy the whole time** — a verified post downgraded to failed by cosmetic evidence-gathering, corrupting truth (a blind retry would duplicate).
+
+Fix: (1) `inspect_reply_row_state` is the authoritative success gate — once it confirms, NOTHING downgrades the post; the screenshot is wrapped best-effort (`screenshot_error` recorded, never fatal). (2) `classify_attempt_failure` now classifies the shared-pacing-budget string as `pacing_cooldown`/retryable instead of `unexpected_executor_failure`. Did NOT exempt the hard ceiling (a *pre*-submit ceiling hit legitimately means "didn't post" — exempting would weaken real rate-limit protection). Reconciled the one mislabeled item (queue→posted, quality→posted, workflow_control→verified, evidence-backed); read-only scan found the other 7 failed items are genuine (failed at/before submit), and they're safe to re-drive (code fix + existing AlreadyRespondedError detection prevents duplicates).
+
+| Slice | Happy | Guard | Verify |
+|---|---|---|---|
+| screenshot can't fail a verified post | ✅ `test_review_reply_executor_workflow.py::test_verified_post_is_not_failed_by_screenshot_pacing_error` (inspect confirms, screenshot raises pacing → status stays `posted`, `screenshot_error` recorded, no `execution_failed` transition) | ✅ asserts `reply_posted` present, `execution_failed` absent | live workflow_control `last_verification` confirmed reply live; reconciled to verified |
+| pacing classification | ✅ `::test_classify_pacing_cooldown_is_retryable_not_unexpected` | n/a | matched today's exact error string |
+
+**Bug-hunter note:** none of the deterministic duck-bug-hunt lenses (contract/absence/static) would catch this — it's the "incomplete-fix / post-success side-effect corrupts outcome" class, which is the Lens-5 (adversarial LLM panel) target. An LLM panel asked "is the Surface-32 pacing fix complete?" plausibly flags "soft exempted, hard not." **Open follow-up:** the `transaction_id` was stored as `"l"` internally (queue/filename use `5096110510`) — a separate id-corruption worth investigating.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

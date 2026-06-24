@@ -838,6 +838,14 @@ def classify_attempt_failure(attempt: dict[str, Any], error_text: str) -> dict[s
         failure_class = "review_row_not_found"
         phase = "preflight"
         retryable = True
+    elif is_cooldown_error(error_text):
+        # Shared-pacing-budget / preemptive-cooldown errors. Previously fell
+        # through to unexpected_executor_failure (un-retryable) — masking a
+        # transient throttle as a hard failure (2026-06-24). Transient + the
+        # post may already be live, so retryable (verify-then-skip on retry).
+        failure_class = "pacing_cooldown"
+        phase = "pacing"
+        retryable = True
     elif "sign in again" in lowered or "signed-out view" in lowered or "etsy auth is required" in lowered:
         failure_class = "auth_required"
         phase = "auth"
@@ -2989,9 +2997,6 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = False) -> dic
 
         post_submit_state = inspect_reply_row_state(session_name, expected_transaction_id, approved_reply_text)
         attempt["post_submit_state"] = post_submit_state
-        destination_dir = ROOT / "output" / "execution" / "assets" / slugify(artifact_id)
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        attempt["screenshot_path"] = capture_target_review_screenshot(session_name, destination_dir)
 
         success = (
             bool(post_submit_state.get("ok"))
@@ -3002,6 +3007,23 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = False) -> dic
         )
         if not success:
             raise RuntimeError("Submit was clicked, but Etsy did not show a clear post-submit success state.")
+
+        # The reply is VERIFIED live on Etsy at this point — inspect_reply_row_state
+        # is the authoritative success gate. NOTHING below may downgrade it. The
+        # screenshot is evidence only, and it is an Etsy-visible read that can trip
+        # the HARD pacing ceiling (etsy_browser_guard). Before this guard, a pacing
+        # error on the screenshot raised here, flipped a verified-posted reply to
+        # "failed", and emailed a false "publish failure" while the reply was live
+        # (2026-06-24, tx-5096110510). The Surface-32 fix only exempted the SOFT
+        # reservation from a post's own reads, not this hard ceiling. Evidence
+        # gathering must be best-effort: never let it fail a confirmed post.
+        try:
+            destination_dir = ROOT / "output" / "execution" / "assets" / slugify(artifact_id)
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            attempt["screenshot_path"] = capture_target_review_screenshot(session_name, destination_dir)
+        except Exception as shot_exc:  # noqa: BLE001
+            attempt["screenshot_path"] = None
+            attempt["screenshot_error"] = f"{type(shot_exc).__name__}: {shot_exc}"
 
         attempt["finished_at"] = now_iso()
         attempt["outcome"] = "posted"
