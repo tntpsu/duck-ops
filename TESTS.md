@@ -960,8 +960,14 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 | Slice | Happy | Guard | Verify |
 |---|---|---|---|
 | summary counts reflect live state | ✅ `test_review_reply_executor_workflow.py::test_session_summary_counts_reconcile_against_live_queue` (reconciled-in-queue item counted posted, dismissed→skipped) | ✅ same test: item aged out of queue falls back to snapshot; no-queue path = stale snapshot count | live: 2 mislabeled backlog items corrected, failed 7→5 |
+| per-drain session rotation | ✅ `::test_close_open_session_rotates_so_sessions_dont_accumulate` (next session fresh + empty) | ✅ same test: closing with nothing open is a no-op | live: drain end now closes the session even with 0 posts |
 
-**Tier:** Tier-2 code + Tier-3 state reconcile (2 queue items flipped from on-disk verification evidence, no Etsy calls). **Open follow-ups:** (1) the review-reply session never rotates — it accumulates months of items, so even a correct summary is an ever-growing pile; scoping the summary to the current run/recent window is the real cure. (2) The 5 remaining failed items (`unexpected_executor_failure`, no live evidence) want a one-time browser read-back to confirm whether any are already live before re-driving.
+**Tier:** Tier-2 code + Tier-3 state reconcile (2 queue items flipped from on-disk verification evidence, no Etsy calls).
+
+**Follow-ups — all three closed (2026-06-24, operator: "follow up on those now"):**
+1. **Session never rotated → FIXED.** Root cause was sharper than "never rotates": the session only closed itself when a summary email fired (`drain: posted_count>0`), so drains that posted nothing accumulated failures across days into one heap that the next successful post emailed as "N failed". `close_open_session` now rotates the session at the END of every drain regardless (`status=closed_no_post`), so the next session is fresh and each summary reflects one run, not a months-long pile. (`review_reply_executor.run_drain` + helper.)
+2. **5 stuck items → RE-QUEUED.** Re-queued `tx-5100946874/-5102330927/-5102347203/-5107385834/-5112822129` to `queued` for the next SCHEDULED drain's read-back (a browser window is Tier-3, never ad-hoc). Safe to re-drive: the Surface-35 pacing fixes + the existing AlreadyRespondedError detection mean an already-live one resolves to skipped (no duplicate), and a genuine one posts under the new protection. Drain cap (2/run) paces them over a few days. Queue failed count: now **0**.
+3. **`tx-id="l"` origin → CONCLUDED unpinnable, guard is complete.** `transaction_id` flows verbatim from the Etsy API `review` object (`duckAgent/flows/reviews/etsy_review_helper.py:570`) — no slice/default/single-char transform anywhere in our extraction. The `"l"` originated in the API response or injected upstream data we cannot reproduce. The Surface-36 fail-closed guard is the correct and complete resolution; there is no extraction bug to fix.
 
 ---
 

@@ -478,6 +478,25 @@ class ReviewReplyExecutorWorkflowTests(unittest.TestCase):
         # Without the live queue, it falls back to the stale snapshot (4 failed).
         self.assertEqual(review_reply_executor._session_counts(session)["failed"], 4)
 
+    def test_close_open_session_rotates_so_sessions_dont_accumulate(self) -> None:
+        """Per-drain rotation: a session only closed itself when a summary email
+        fired (posted_count>0), so drains that posted nothing piled failures up
+        for days. close_open_session rotates regardless, so the next session is
+        fresh and the summary reflects one run, not an accumulated heap."""
+        ss: dict = {"sessions": {}, "current_session_id": None}
+        s1 = review_reply_executor.ensure_open_session(ss)
+        s1.setdefault("items", {})["a"] = {"artifact_id": "a", "status": "failed"}
+        closed = review_reply_executor.close_open_session(ss, status="closed_no_post", reason="drain_end_no_post")
+        self.assertEqual(closed["status"], "closed_no_post")
+        self.assertEqual(closed["closed_reason"], "drain_end_no_post")
+        self.assertIsNone(ss["current_session_id"])
+        # next ensure opens a brand-new, empty session
+        s2 = review_reply_executor.ensure_open_session(ss)
+        self.assertNotEqual(s2["session_id"], s1["session_id"])
+        self.assertEqual(s2.get("items"), {})
+        # closing again with nothing open is a no-op
+        self.assertIsNone(review_reply_executor.close_open_session({"sessions": {}, "current_session_id": None}))
+
     def test_classify_pacing_cooldown_is_retryable_not_unexpected(self) -> None:
         """A shared-pacing-budget error must classify as pacing_cooldown (retryable),
         not masquerade as unexpected_executor_failure."""

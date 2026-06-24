@@ -677,6 +677,24 @@ def cleanup_review_reply_browsers(*, force_kill_temp_profiles: bool = False) -> 
     }
 
 
+def close_open_session(session_state: dict[str, Any], *, status: str = "closed",
+                       reason: str | None = None) -> dict[str, Any] | None:
+    """Close the current open session so the next ensure_open_session starts
+    fresh. Without this, a session only rotates when a summary email is sent
+    (drain: posted_count>0), so drains that post NOTHING accumulate failures
+    across days into one ever-growing 'N failed' summary pile — the 2026-06-24
+    false-alarm root cause. Returns the closed session, or None if none open."""
+    open_session = current_open_session(session_state)
+    if open_session is None:
+        return None
+    open_session["status"] = status
+    open_session["closed_at"] = now_iso()
+    if reason:
+        open_session["closed_reason"] = reason
+    session_state["current_session_id"] = None
+    return open_session
+
+
 def backfill_session_from_queue(
     session_state: dict[str, Any],
     quality_state: dict[str, Any],
@@ -3452,6 +3470,14 @@ def drain_queue(
     summary_result = None
     if posted_count > 0 and send_summary:
         summary_result = send_session_summary_email()
+    if summary_result is None:
+        # No summary emailed this run (no successful post). ROTATE anyway so the
+        # session doesn't accumulate failures across drains into a stale pile that
+        # the next successful post would email as one giant "N failed" heap. Reload
+        # session state to avoid clobbering the submit loop's concurrent writes.
+        _rotate_ss = load_session_state()
+        if close_open_session(_rotate_ss, status="closed_no_post", reason="drain_end_no_post"):
+            save_session_state(_rotate_ss)
 
     if not keep_browser_open:
         session_name, _ = choose_session()
