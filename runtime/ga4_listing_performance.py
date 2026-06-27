@@ -101,14 +101,23 @@ def _num(v: Any) -> float:
 # Config + auth (mirrors gsc_search_demand / google_tasks_bridge)
 # --------------------------------------------------------------------------
 
+def _first(env: dict[str, str], names: list[str]) -> str:
+    for n in names:
+        v = (env.get(n) or "").strip()
+        if v:
+            return v
+    return ""
+
+
 def ga4_config(env: dict[str, str] | None = None) -> dict[str, Any]:
     env = env if env is not None else os.environ
-    client_id = (env.get("GOOGLE_CLIENT_ID") or "").strip()
-    client_secret = (env.get("GOOGLE_CLIENT_SECRET") or "").strip()
+    # Existing Google OAuth client lives under GOOGLE_TASKS_* in .env.
+    client_id = _first(env, ["GOOGLE_TASKS_CLIENT_ID", "GOOGLE_CLIENT_ID"])
+    client_secret = _first(env, ["GOOGLE_TASKS_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"])
     # Reuse the GSC refresh token if it was minted with both scopes; else a
     # dedicated GA4 token.
-    refresh_token = (env.get("GA4_REFRESH_TOKEN") or env.get("GSC_REFRESH_TOKEN") or "").strip()
-    property_id = (env.get("GA4_PROPERTY_ID") or "").strip().removeprefix("properties/")
+    refresh_token = _first(env, ["GA4_REFRESH_TOKEN", "GSC_REFRESH_TOKEN"])
+    property_id = _first(env, ["GA4_PROPERTY_ID"]).removeprefix("properties/")
     return {
         "client_id": client_id,
         "client_secret": client_secret,

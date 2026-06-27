@@ -81,12 +81,22 @@ def _safe_http_detail(exc: urllib.error.HTTPError) -> str:
 # Config + auth (mirrors google_tasks_bridge.fetch_google_access_token)
 # --------------------------------------------------------------------------
 
+def _first(env: dict[str, str], names: list[str]) -> str:
+    for n in names:
+        v = (env.get(n) or "").strip()
+        if v:
+            return v
+    return ""
+
+
 def gsc_config(env: dict[str, str] | None = None) -> dict[str, Any]:
     env = env if env is not None else os.environ
-    client_id = (env.get("GOOGLE_CLIENT_ID") or "").strip()
-    client_secret = (env.get("GOOGLE_CLIENT_SECRET") or "").strip()
-    refresh_token = (env.get("GSC_REFRESH_TOKEN") or "").strip()
-    site_url = (env.get("GSC_SITE_URL") or "").strip()
+    # The existing Google OAuth client lives under GOOGLE_TASKS_* in .env; accept
+    # those first, with the generic GOOGLE_* names as a fallback.
+    client_id = _first(env, ["GOOGLE_TASKS_CLIENT_ID", "GOOGLE_CLIENT_ID"])
+    client_secret = _first(env, ["GOOGLE_TASKS_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"])
+    refresh_token = _first(env, ["GSC_REFRESH_TOKEN"])
+    site_url = _first(env, ["GSC_SITE_URL"])
     return {
         "client_id": client_id,
         "client_secret": client_secret,

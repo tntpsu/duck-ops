@@ -53,6 +53,13 @@ class TestConfig:
         cfg = ga4.ga4_config({"GOOGLE_CLIENT_ID": "x", "GSC_REFRESH_TOKEN": "shared", "GA4_PROPERTY_ID": "1"})
         assert cfg["refresh_token"] == "shared" and cfg["credentials_ready"]
 
+    def test_reads_google_tasks_prefixed_client_creds(self):
+        cfg = ga4.ga4_config({
+            "GOOGLE_TASKS_CLIENT_ID": "cid", "GOOGLE_TASKS_CLIENT_SECRET": "sec",
+            "GA4_REFRESH_TOKEN": "rt", "GA4_PROPERTY_ID": "471407647"})
+        assert cfg["client_id"] == "cid" and cfg["client_secret"] == "sec"
+        assert cfg["credentials_ready"] is True
+
     def test_not_ready_missing(self):
         assert ga4.ga4_config({})["credentials_ready"] is False
 

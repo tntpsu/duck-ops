@@ -47,6 +47,14 @@ class TestConfig:
         assert gsc.gsc_config({"GOOGLE_CLIENT_ID": "x"})["credentials_ready"] is False
         assert gsc.gsc_config({})["credentials_ready"] is False
 
+    def test_reads_google_tasks_prefixed_client_creds(self):
+        """The real .env uses GOOGLE_TASKS_CLIENT_ID/SECRET — must be accepted."""
+        cfg = gsc.gsc_config({
+            "GOOGLE_TASKS_CLIENT_ID": "cid", "GOOGLE_TASKS_CLIENT_SECRET": "sec",
+            "GSC_REFRESH_TOKEN": "rt", "GSC_SITE_URL": "sc-domain:x"})
+        assert cfg["client_id"] == "cid" and cfg["client_secret"] == "sec"
+        assert cfg["credentials_ready"] is True
+
 
 # ---- auth (mocked) -----------------------------------------------------------
 
