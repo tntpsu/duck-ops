@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-06-06
+Last updated: 2026-06-27
 
 ## Document Ownership
 
@@ -185,6 +185,18 @@ Companion docs:
 - Quality suggestions are surfaced separately from blocking issues.
 
 ## Highest-Value Open Work
+
+### First-Party Demand Intelligence (GSC + GA4) — core shipped 2026-06-27, follow-ups queued
+
+Real first-party demand now flows into the system: **GSC** (Google search queries → Build-Next) and **GA4** (per-listing Fix/Promote/Watch, split Etsy vs Shopify). Shipped this initiative (Surfaces 38–42, all pushed): Build-Next 7-day momentum re-rank (16.4); GSC search-demand producer + factor (38); GA4 listing-performance producer (39); SEO generation fed by real demand + golden eval (40); gap→collection planner Stage A (41A); GA4 weekly-sale steering (42, drops PROMOTE winners / floats FIX leaks, behind the sale-policy gate).
+
+Queued follow-ups (none block the shipped logic; most are "make it live on cadence"):
+1. **Schedule the producers on launchd (Tier-3 install) + add the deferred two-card OS brackets.** `gsc_search_demand.py`, `ga4_listing_performance.py`, and `sale_steering.py` currently run only on manual trigger; they ship with a 21-day staleness guard that fail-soft DISABLES the consumers if data goes stale. So until they're scheduled weekly, the SEO/Build-Next/sale-steering benefits expire after 21 days. Highest-priority follow-up. Each needs its feed-freshness + throughput bracket (convention #3) added with the schedule.
+2. **`/portal/intel/listing-performance` page + Business Desk tiles** — render the GA4 Fix/Promote/Watch lanes + the GSC gap/rising queries so it replaces the GA4 email (email-to-portal inversion). Deferred from Surfaces 38/39.
+3. **gap → Build-Next candidate minting** — today GSC gaps only BOOST existing competitor candidates; they never MINT new ones, so "custom ducks for jeeps" demand goes nowhere. Feed high-impression gap queries in as first-class Build-Next candidates (the real "make this next" signal).
+4. **SEO L4 outcome measurement** — extend `shopify_seo_outcomes.py` (which today admits it "does not measure organic search lift yet") to compare GSC CTR/position before vs after each rewrite → the system learns which copy lifts clicks (the self-tuning loop).
+5. **GA4 engagement→theme feedback loop** — re-weight Thursday/Build-Next theme selection by which themes actually engage (Phase 2 strategic loop; needs a few weeks of history).
+6. **gap→collection Stage B** — the gated Shopify `collectionCreate` apply path, deferred until the planner actually surfaces candidates (0 on current data; fires when a category query with ≥3 matching products trends).
 
 ### Priority 0: Creative Quality Loop Phase 4.5 — Engagement Write-Back (high-ROI #1, in flight 2026-06-06)
 Phase 4 of CREATIVE_QUALITY_LOOP_V2_PLAN.md shipped the canonical receipt directory and wired meme + jeepfact + thursday through `rank_creative_candidates()`. Phase 4.5 closes the loop by feeding real-world engagement back to the receipt so the system measurably gets better at picking creatives over time.
