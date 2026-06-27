@@ -1,0 +1,30 @@
+{
+  "_note": "Surface 40 golden fixture for scripts/eval_seo_search_demand.py (gated, real API). Append a row whenever the generator is found ignoring offered demand, then fix — regression-test rule.",
+  "gate": {"min_pass_rate": 0.8},
+  "gsc": {
+    "available": true,
+    "term_scores": {"wrangler": 1.0, "scooby": 0.8, "garfield": 0.6, "yoda": 0.5, "pirate": 0.4},
+    "top_queries": [
+      {"query": "jeep wrangler duck", "impressions": 300, "trend": "rising"},
+      {"query": "scooby doo duck", "impressions": 200, "trend": "steady"},
+      {"query": "garfield duck", "impressions": 120, "trend": "steady"},
+      {"query": "baby yoda duck", "impressions": 90, "trend": "rising"},
+      {"query": "pirate duck gift", "impressions": 60, "trend": "steady"}
+    ],
+    "gap_queries": []
+  },
+  "listings": {
+    "available": true,
+    "listings": [
+      {"title": "Jeep Wrangler Duck - Etsy", "channel": "etsy", "verdict": "fix", "engagement_rate": 0.2},
+      {"title": "Pirate Duck", "channel": "shopify", "verdict": "promote", "engagement_rate": 0.7}
+    ]
+  },
+  "resources": [
+    {"id": "1", "kind": "product", "title": "Jeep Wrangler Duck", "resource_url": "/p/1", "seo_title": "", "seo_description": "", "issues": ["weak_generic_seo_description"]},
+    {"id": "2", "kind": "product", "title": "Scooby-Inspired Duck", "resource_url": "/p/2", "seo_title": "", "seo_description": "", "issues": []},
+    {"id": "3", "kind": "product", "title": "Garfield Inspired Duck", "resource_url": "/p/3", "seo_title": "", "seo_description": "", "issues": []},
+    {"id": "4", "kind": "product", "title": "Baby Yoda Duck", "resource_url": "/p/4", "seo_title": "", "seo_description": "", "issues": []},
+    {"id": "5", "kind": "product", "title": "Pirate Duck", "resource_url": "/p/5", "seo_title": "", "seo_description": "", "issues": []}
+  ]
+}

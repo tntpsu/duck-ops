@@ -164,6 +164,15 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         monkeypatch.setattr(_ga4, "LISTING_PERFORMANCE_PATH", tmp_path / "listing_performance.json")
     except ImportError:
         pass
+    # 2026-06-27: seo_demand_context (Surface 40) READS the two state files; point
+    # them at tmp (absent) so SEO tests see an empty context = pre-Surface-40
+    # behavior unless a test writes fixtures there.
+    try:
+        import seo_demand_context as _sdc
+        monkeypatch.setattr(_sdc, "GSC_SEARCH_DEMAND_PATH", tmp_path / "gsc_search_demand.json")
+        monkeypatch.setattr(_sdc, "LISTING_PERFORMANCE_PATH", tmp_path / "listing_performance.json")
+    except ImportError:
+        pass
 
     # 2026-06-12: product_concept_queue.BUILD_NEXT_PROMOTIONS_PATH (Surface 16
     # ingestion). build_product_concept_queue() reads this file by default;

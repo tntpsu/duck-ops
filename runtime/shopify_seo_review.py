@@ -536,21 +536,59 @@ def _next_issue_category(after_category: str | None, audit_payload: dict[str, An
     return None
 
 
-def _generate_proposals(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _generate_proposals(resources: list[dict[str, Any]], *, demand_context: Any = None) -> list[dict[str, Any]]:
     openai_json, _ = _ensure_duckagent_imports()
+    # Surface 40: enrich the prompt with REAL first-party demand (GSC queries +
+    # GA4 verdict). Fail-soft — if the reader or state is unavailable, context is
+    # empty and the prompt is identical to the pre-Surface-40 behavior.
+    if demand_context is None:
+        try:
+            from seo_demand_context import load_seo_demand_context
+            demand_context = load_seo_demand_context()
+        except Exception:
+            demand_context = None
     prompt_resources = []
     for resource in resources:
-        prompt_resources.append(
-            {
-                "id": resource.get("id"),
-                "kind": resource.get("kind"),
-                "title": resource.get("title"),
-                "path": resource.get("resource_url"),
-                "current_seo_title": resource.get("seo_title"),
-                "current_seo_description": resource.get("seo_description"),
-                "issues": [issue.get("code") for issue in resource.get("issues") or [] if isinstance(issue, dict)],
-            }
+        entry = {
+            "id": resource.get("id"),
+            "kind": resource.get("kind"),
+            "title": resource.get("title"),
+            "path": resource.get("resource_url"),
+            "current_seo_title": resource.get("seo_title"),
+            "current_seo_description": resource.get("seo_description"),
+            "issues": [issue.get("code") for issue in resource.get("issues") or [] if isinstance(issue, dict)],
+        }
+        if demand_context is not None and not getattr(demand_context, "is_empty", True):
+            # Enrichment is advisory — a lookup error must never break the core
+            # SEO generation, so degrade this resource to un-enriched.
+            try:
+                title = resource.get("title") or ""
+                searches = demand_context.relevant_queries(title)
+                if searches:
+                    entry["high_intent_searches"] = [s["query"] for s in searches]
+                sig = demand_context.listing_signal(title)
+                if sig and sig.get("verdict"):
+                    entry["engagement"] = {"verdict": sig["verdict"], "engagement_rate": sig.get("engagement_rate")}
+            except Exception:
+                pass
+        prompt_resources.append(entry)
+
+    has_demand = demand_context is not None and not getattr(demand_context, "is_empty", True)
+    demand_rules = ""
+    demand_block = ""
+    if has_demand:
+        demand_rules = (
+            "- When a resource lists high_intent_searches, reflect that real shopper intent in the "
+            "title naturally (never keyword-stuff).\n"
+            "- engagement.verdict == 'fix' means the listing gets traffic but does not convert — make "
+            "the title clearer and more compelling, not just keyword-complete.\n"
         )
+        if demand_context.top_search_terms:
+            demand_block = (
+                "\nSTORE_TOP_SEARCH_TERMS (real Google queries bringing shoppers to the store; "
+                "work the relevant ones in where they fit):\n"
+                + ", ".join(demand_context.top_search_terms) + "\n"
+            )
 
     system = (
         "You write Shopify SEO metadata for a collectible duck store. "
@@ -566,9 +604,11 @@ def _generate_proposals(resources: list[dict[str, Any]]) -> list[dict[str, Any]]
         "- seo_description must be 150-160 characters.\n"
         "- Do not invent pricing, shipping promises, or trademark claims.\n"
         "- Keep titles/descriptions plain text only.\n"
-        "- rationale should be 4-18 words.\n\n"
-        f"RESOURCES_JSON:\n{json.dumps(prompt_resources, ensure_ascii=False)}\n\n"
-        'Return JSON as {"items":[{"id":"...","seo_title":"...","seo_description":"...","rationale":"..."}]}.'
+        "- rationale should be 4-18 words.\n"
+        + demand_rules
+        + f"\nRESOURCES_JSON:\n{json.dumps(prompt_resources, ensure_ascii=False)}\n"
+        + demand_block
+        + '\nReturn JSON as {"items":[{"id":"...","seo_title":"...","seo_description":"...","rationale":"..."}]}.'
     )
     response = openai_json(system, user, max_tokens=2200, temperature=0.3, model="gpt-4o-mini")
     items = response.get("items") if isinstance(response.get("items"), list) else []

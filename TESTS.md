@@ -1072,6 +1072,50 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 
 ---
 
+## Surface 40 — SEO generation fed by first-party demand (2026-06-27, matrix before code; operator: "best use of this data outside direct actions → do #1")
+
+**Goal.** The Shopify SEO generator (`shopify_seo_review._generate_proposals`) writes titles/descriptions from the product title + issue codes alone — it GUESSES keywords. Feed it the real GSC queries shoppers use for each product + the product's GA4 verdict, so generated copy is built from demand, not guesses. Autonomous (improves the generated DRAFT); the existing email-apply gate stays the human checkpoint — data never auto-publishes (Tier-3 boundary preserved). L1 of the SEO maturity model.
+
+**Design.** New `runtime/seo_demand_context.py` reads `state/gsc_search_demand.json` + `state/listing_performance.json` (fail-soft: missing/`available:false` → empty context → generator behaves exactly as today). Provides: `relevant_queries(title, limit)` (GSC queries whose tokens overlap the product, reusing build_next `_tokens`), `listing_signal(title)` (GA4 verdict/engagement/trend by normalized-title match), and global `top_search_terms`. `_generate_proposals` enriches each `prompt_resource` with `high_intent_searches` + `engagement`, adds a global `store_top_searches` block + rules ("work the listed real queries in naturally; a FIX listing's current title isn't converting — make it clearer"). LLM-output surface → convention #5: golden eval `scripts/eval_seo_search_demand.py` (real API, gated) with a deterministic cross-check (did the title include ≥1 relevant high-intent term when one was offered?). Read-only consumer — no new prod-write path, so no isolation guard needed; tests redirect the read paths to tmp.
+
+### 40.1 Demand context reader (seo_demand_context.py) — read-only, fail-soft
+
+| Path | Happy | Missing/unavailable degrades | Empty → not invented |
+|---|---|---|---|
+| `relevant_queries(title)` | ✅ returns GSC queries overlapping the product tokens, by impressions | ✅ no file / available:false → [] | ✅ no overlap → [] |
+| `listing_signal(title)` | ✅ GA4 verdict+engagement+trend for the matched listing | ✅ no file → None | ✅ no match → None |
+| `top_search_terms` | ✅ global high term_scores | ✅ no file → [] | n/a |
+| `load_seo_demand_context()` | ✅ assembles all three | ✅ both files absent → empty context, never raises | n/a |
+
+### 40.2 Generator wiring (_generate_proposals)
+
+| Use case | Happy | No-demand fallback (current behavior preserved) |
+|---|---|---|
+| prompt enrichment | ✅ per-resource high_intent_searches + engagement + global store_top_searches injected | ✅ empty context → prompt identical in spirit to today; existing SEO tests still pass |
+| relevance match | ✅ "Jeep Wrangler Duck" → wrangler queries attached | ✅ unmatched product → no searches, generator proceeds |
+| FIX listing nudge | ✅ verdict=fix adds "current title isn't converting" rule | ✅ no verdict → no nudge |
+
+### 40.3 Golden eval (convention #5, gated, real API — NOT in default pytest)
+
+| Check | Criterion |
+|---|---|
+| demand incorporated | ✅ `scripts/eval_seo_search_demand.py` + `tests/fixtures/seo_search_demand_golden.json`: ≥ gate (0.8) of offered resources produce a title sharing a token with an offered query. **Live: 5/5 = 100% on 2026-06-27.** |
+| deterministic cross-check | ✅ keyword-presence detector flags a proposal that ignored every offered high-intent term (confidence is weak — [[llm-stated-confidence-is-weak]]) |
+| no stuffing / length | ✅ titles stay 45–70 chars, plain text (existing `_trim_to_range` contract) |
+
+### 40.4 Hardening (failure-mode review — duck-bug-hunt Lens 2 + 3 clean)
+
+| Failure mode | Guard | Test |
+|---|---|---|
+| viral-phrase fragments pollute global terms (`help`/`accidentally`/`built`) | `_SEARCH_MODIFIER_STOPWORDS` filters `top_search_terms` | ✅ `test_modifier_words_filtered_from_top_terms` |
+| stalled producer keeps driving titles off weeks-old data | `_is_stale` (>21d) → fail-soft empty; lenient on unparseable | ✅ `test_stale_demand_is_ignored` |
+| lone shared token equates two different products | `listing_signal` needs 2+ shared tokens unless full coverage | ✅ `test_single_shared_token_across_long_titles_not_matched` |
+| an enrichment lookup error breaks the whole SEO run | per-resource `try/except` → degrade to un-enriched, core generation unaffected | covered by empty-context + wiring tests |
+
+**Governance:** Tier-2 code (read-only consumer + prompt change + tests, LLM mocked). Publishing stays behind the existing email-apply gate (Tier-3). Per [[feedback_plausible_fallbacks_mask_failure]] the empty-context path is tested so a broken reader degrades to today's behavior, not silent garbage.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
