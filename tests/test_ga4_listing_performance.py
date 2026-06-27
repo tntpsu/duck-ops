@@ -151,6 +151,28 @@ class TestClassify:
     def test_empty_is_empty(self):
         assert ga4.classify_listings([]) == []
 
+
+class TestMultiWindow:
+    def test_trend_labels(self):
+        W = (7, 28, 90)
+        assert ga4._trend({"7": 200, "28": 300, "90": 320}, W) == "rising"
+        assert ga4._trend({"7": 2, "28": 100, "90": 300}, W) == "fading"
+        assert ga4._trend({"7": 7, "28": 30, "90": 90}, W) == "steady"
+        assert ga4._trend({"7": 5, "28": 0, "90": 0}, W) == "new"
+
+    def test_build_payload_enriches_listings_with_windows_and_trend(self):
+        def r(title, views):
+            return {"title": title, "host": "www.etsy.com", "channel": "etsy",
+                    "page_views": views, "active_users": int(views * 0.6), "new_users": 0,
+                    "engagement_rate": 0.7, "bounce_rate": 0.3, "avg_engagement_time": 40}
+        per_window = {7: [r("winner", 200)], 28: [r("winner", 300)], 90: [r("winner", 320)]}
+        p = ga4.build_payload(per_window, windows=(7, 28, 90), primary_window=28,
+                              property_id="test-prop")
+        assert p["windows"] == [7, 28, 90] and p["listing_count"] == 1
+        w = p["listings"][0]
+        assert w["views_by_window"] == {"7": 200, "28": 300, "90": 320}
+        assert w["trend"] == "rising"
+
     def test_channels_judged_independently(self):
         """A small Etsy winner must not be drowned by a huge Shopify cohort —
         each channel uses its own terciles."""

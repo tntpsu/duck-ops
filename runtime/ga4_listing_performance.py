@@ -47,7 +47,10 @@ GA4_SCOPE = "https://www.googleapis.com/auth/analytics.readonly"
 LISTING_PERFORMANCE_PATH = DUCK_OPS_ROOT / "state" / "listing_performance.json"
 _FROZEN_PRODUCTION_LISTING_PERFORMANCE_PATH = LISTING_PERFORMANCE_PATH.resolve()
 
-DEFAULT_WINDOW_DAYS = 28
+# Multi-window: PRIMARY drives the Fix/Promote classification; the others tag
+# each listing rising / steady / fading by recent-vs-long view rate.
+WINDOWS = (7, 28, 90)
+PRIMARY_WINDOW = 28
 # A listing needs at least this many views in the window to be classified —
 # below it there isn't enough traffic to judge fix-vs-promote.
 MIN_VIEWS_TO_JUDGE = 25
@@ -286,9 +289,32 @@ def _channel_totals(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
     return out
 
 
-def build_payload(rows: list[dict[str, Any]], *, window_days: int, property_id: str,
+def _trend(views_by_window: dict[str, int], windows: tuple[int, ...]) -> str:
+    """rising / steady / fading / new / flat from short-vs-long daily view rate."""
+    short, long = min(windows), max(windows)
+    v_s = views_by_window.get(str(short), 0)
+    v_l = views_by_window.get(str(long), 0)
+    if v_l <= 0:
+        return "new" if v_s > 0 else "flat"
+    ratio = (v_s / short) / (v_l / long)
+    if ratio >= 1.5:
+        return "rising"
+    if ratio <= 0.5:
+        return "fading"
+    return "steady"
+
+
+def build_payload(per_window: dict[int, list[dict[str, Any]]], *,
+                  windows: tuple[int, ...], primary_window: int, property_id: str,
                   available: bool = True, error: str | None = None) -> dict[str, Any]:
-    classified = classify_listings(rows)
+    primary_rows = per_window.get(primary_window, [])
+    classified = classify_listings(primary_rows)
+    views_by_window = {w: {r["title"]: int(r["page_views"]) for r in per_window.get(w, [])}
+                       for w in windows}
+    for r in classified:
+        wmap = {str(w): views_by_window.get(w, {}).get(r["title"], 0) for w in windows}
+        r["views_by_window"] = wmap
+        r["trend"] = _trend(wmap, windows)
     classified.sort(key=lambda r: r["page_views"], reverse=True)
     by = lambda v: [r for r in classified if r["verdict"] == v]  # noqa: E731
     return {
@@ -296,14 +322,15 @@ def build_payload(rows: list[dict[str, Any]], *, window_days: int, property_id: 
         "available": available,
         "source": "google_analytics_4",
         "property_id": property_id,
-        "window_days": window_days,
-        "listing_count": len(rows),
+        "windows": list(windows),
+        "primary_window": primary_window,
+        "listing_count": len(primary_rows),
         "totals": {
-            "page_views": int(sum(r["page_views"] for r in rows)),
-            "active_users": int(sum(r["active_users"] for r in rows)),
-            "new_users": int(sum(r["new_users"] for r in rows)),
+            "page_views": int(sum(r["page_views"] for r in primary_rows)),
+            "active_users": int(sum(r["active_users"] for r in primary_rows)),
+            "new_users": int(sum(r["new_users"] for r in primary_rows)),
         },
-        "channels": _channel_totals(rows),
+        "channels": _channel_totals(primary_rows),
         "fix": by("fix")[:TOP_LIST_LIMIT],
         "promote": by("promote")[:TOP_LIST_LIMIT],
         "watch": by("watch")[:TOP_LIST_LIMIT],
@@ -312,24 +339,34 @@ def build_payload(rows: list[dict[str, Any]], *, window_days: int, property_id: 
     }
 
 
-def collect(config: dict[str, Any], *, window_days: int = DEFAULT_WINDOW_DAYS,
-            today: str | None = None) -> dict[str, Any]:
-    """token -> runReport -> classify. Always returns a payload; never raises."""
+def collect(config: dict[str, Any], *, windows: tuple[int, ...] = WINDOWS,
+            primary_window: int = PRIMARY_WINDOW, today: str | None = None) -> dict[str, Any]:
+    """token -> per-window runReport -> classify primary. Always returns a payload;
+    a primary-window failure degrades to available:false, a secondary window that
+    fails is omitted. Never raises."""
     pid = config.get("property_id") or ""
+
+    def empty(err: str) -> dict[str, Any]:
+        return build_payload({}, windows=windows, primary_window=primary_window,
+                             property_id=pid, available=False, error=err)
+
     if not config.get("credentials_ready"):
-        return build_payload([], window_days=window_days, property_id=pid,
-                             available=False, error="credentials_not_ready")
+        return empty("credentials_not_ready")
     token, tok_meta = fetch_ga4_access_token(config)
     if not token:
-        return build_payload([], window_days=window_days, property_id=pid,
-                             available=False, error=tok_meta.get("error") or "token_unavailable")
+        return empty(tok_meta.get("error") or "token_unavailable")
     end = today or _today_iso()
-    start = _days_before(end, window_days)
-    rows, meta = run_report(token, pid, start, end)
-    if not meta.get("ok"):
-        return build_payload([], window_days=window_days, property_id=pid,
-                             available=False, error=meta.get("error") or "report_failed")
-    return build_payload(rows, window_days=window_days, property_id=pid, available=True)
+    per_window: dict[int, list[dict[str, Any]]] = {}
+    for w in windows:
+        rows, meta = run_report(token, pid, _days_before(end, w), end)
+        if not meta.get("ok"):
+            if w == primary_window:
+                return empty(meta.get("error") or "report_failed")
+            per_window[w] = []
+        else:
+            per_window[w] = rows
+    return build_payload(per_window, windows=windows, primary_window=primary_window,
+                         property_id=pid, available=True)
 
 
 # --------------------------------------------------------------------------
@@ -363,7 +400,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Collect GA4 per-listing performance and classify Fix-or-Promote.")
     parser.add_argument("--dry-run", action="store_true", help="Print summary, don't write")
-    parser.add_argument("--window-days", type=int, default=DEFAULT_WINDOW_DAYS)
     args = parser.parse_args()
 
     if not (os.environ.get("GA4_REFRESH_TOKEN") or os.environ.get("GSC_REFRESH_TOKEN")):
@@ -373,16 +409,16 @@ def main() -> int:
         except Exception:
             pass
 
-    payload = collect(ga4_config(), window_days=args.window_days)
+    payload = collect(ga4_config())
     avail = payload.get("available")
-    print(f"[ga4-listing-performance] available={avail} listings={payload.get('listing_count')} "
-          f"fix={len(payload.get('fix') or [])} promote={len(payload.get('promote') or [])} "
-          f"watch={len(payload.get('watch') or [])}"
+    print(f"[ga4-listing-performance] available={avail} windows={payload.get('windows')} "
+          f"listings={payload.get('listing_count')} fix={len(payload.get('fix') or [])} "
+          f"promote={len(payload.get('promote') or [])} watch={len(payload.get('watch') or [])}"
           + ("" if avail else f"  error={payload.get('error')}"))
     for r in (payload.get("fix") or [])[:5]:
-        print(f"  FIX      {int(r['page_views']):>5} views  {r['engagement_rate']:.0%} eng  {r['title'][:50]}")
+        print(f"  FIX     [{r.get('trend','?'):>6}] {int(r['page_views']):>5} views  {r['engagement_rate']:.0%} eng  {r['title'][:46]}")
     for r in (payload.get("promote") or [])[:5]:
-        print(f"  PROMOTE  {int(r['page_views']):>5} views  {r['engagement_rate']:.0%} eng  {r['title'][:50]}")
+        print(f"  PROMOTE [{r.get('trend','?'):>6}] {int(r['page_views']):>5} views  {r['engagement_rate']:.0%} eng  {r['title'][:46]}")
     if not args.dry_run:
         out = write_listing_performance(payload)
         print(f"  -> {out}")

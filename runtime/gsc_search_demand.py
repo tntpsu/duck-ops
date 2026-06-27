@@ -50,7 +50,11 @@ GSC_SEARCH_DEMAND_PATH = DUCK_OPS_ROOT / "state" / "gsc_search_demand.json"
 _FROZEN_PRODUCTION_GSC_SEARCH_DEMAND_PATH = GSC_SEARCH_DEMAND_PATH.resolve()
 CATALOG_INDEX_PATH = DUCK_OPS_ROOT / "state" / "normalized" / "catalog_index.json"
 
-DEFAULT_WINDOW_DAYS = 28
+# Multi-window: pull each window so a query can be tagged rising / steady /
+# fading / new by comparing its recent rate to its long-run rate. PRIMARY drives
+# the Build-Next term_scores + the headline lists.
+WINDOWS = (7, 28, 90)
+PRIMARY_WINDOW = 28
 DEFAULT_ROW_LIMIT = 250
 # A query needs at least this many impressions to count as a real unmet-demand
 # "gap" — filters one-off long-tail noise from the operator-facing list.
@@ -218,17 +222,49 @@ def _load_catalog_tokens(path: Any = None) -> set[str]:
     return toks
 
 
-def build_payload(rows: list[dict[str, Any]], catalog_tokens: set[str], *,
-                  window_days: int, site_url: str,
+def _trend(impr_by_window: dict[str, int], windows: tuple[int, ...]) -> str:
+    """rising / steady / fading / new / flat, from the SHORT vs LONG window
+    daily rate. Long contains short, so a higher recent daily rate = rising."""
+    short, long = min(windows), max(windows)
+    i_s = impr_by_window.get(str(short), 0)
+    i_l = impr_by_window.get(str(long), 0)
+    if i_l <= 0:
+        return "new" if i_s > 0 else "flat"
+    ratio = (i_s / short) / (i_l / long)
+    if ratio >= 1.5:
+        return "rising"
+    if ratio <= 0.5:
+        return "fading"
+    return "steady"
+
+
+def build_payload(per_window: dict[int, list[dict[str, Any]]], catalog_tokens: set[str], *,
+                  windows: tuple[int, ...], primary_window: int, site_url: str,
                   available: bool = True, error: str | None = None) -> dict[str, Any]:
-    agg = aggregate_search_demand(rows, catalog_tokens)
+    """Aggregate the PRIMARY window for the headline lists + Build-Next term_scores,
+    then enrich each surfaced query with its impressions across every window and a
+    trend tag."""
+    primary_rows = per_window.get(primary_window, [])
+    agg = aggregate_search_demand(primary_rows, catalog_tokens)
+    impr_by_window = {w: {r["query"]: int(r["impressions"]) for r in per_window.get(w, [])}
+                      for w in windows}
+
+    def enrich(item: dict[str, Any]) -> dict[str, Any]:
+        q = item["query"]
+        wmap = {str(w): impr_by_window.get(w, {}).get(q, 0) for w in windows}
+        return {**item, "impressions_by_window": wmap, "trend": _trend(wmap, windows)}
+
+    agg["top_queries"] = [enrich(t) for t in agg["top_queries"]]
+    agg["gap_queries"] = [enrich(g) for g in agg["gap_queries"]]
     return {
         "generated_at": now_local_iso(),
         "available": available,
         "source": "google_search_console",
         "site_url": site_url,
-        "window_days": window_days,
-        "query_count": len(rows),
+        "windows": list(windows),
+        "primary_window": primary_window,
+        "window_query_counts": {str(w): len(per_window.get(w, [])) for w in windows},
+        "query_count": len(primary_rows),
         "error": error,
         **agg,
     }
@@ -242,26 +278,36 @@ def _days_before(end_iso: str, days: int) -> str:
     return (date.fromisoformat(end_iso) - timedelta(days=days)).isoformat()
 
 
-def collect(config: dict[str, Any], *, window_days: int = DEFAULT_WINDOW_DAYS,
-            today: str | None = None, catalog_tokens: set[str] | None = None) -> dict[str, Any]:
-    """Orchestrate token -> query -> aggregate. Always returns a payload; on any
-    failure it's available:false with an error, never a raise."""
+def collect(config: dict[str, Any], *, windows: tuple[int, ...] = WINDOWS,
+            primary_window: int = PRIMARY_WINDOW, today: str | None = None,
+            catalog_tokens: set[str] | None = None) -> dict[str, Any]:
+    """Orchestrate token -> per-window queries -> aggregate. Always returns a
+    payload; a primary-window failure degrades to available:false, a secondary
+    window that fails is simply omitted (its counts read 0). Never raises."""
     site = config.get("site_url") or ""
+
+    def empty(err: str) -> dict[str, Any]:
+        return build_payload({}, set(), windows=windows, primary_window=primary_window,
+                             site_url=site, available=False, error=err)
+
     if not config.get("credentials_ready"):
-        return build_payload([], set(), window_days=window_days, site_url=site,
-                              available=False, error="credentials_not_ready")
+        return empty("credentials_not_ready")
     cat = catalog_tokens if catalog_tokens is not None else _load_catalog_tokens()
     token, tok_meta = fetch_gsc_access_token(config)
     if not token:
-        return build_payload([], cat, window_days=window_days, site_url=site,
-                             available=False, error=tok_meta.get("error") or "token_unavailable")
+        return empty(tok_meta.get("error") or "token_unavailable")
     end = today or _today_iso()
-    start = _days_before(end, window_days)
-    rows, q_meta = query_search_analytics(token, site, start, end)
-    if not q_meta.get("ok"):
-        return build_payload([], cat, window_days=window_days, site_url=site,
-                             available=False, error=q_meta.get("error") or "query_failed")
-    return build_payload(rows, cat, window_days=window_days, site_url=site, available=True)
+    per_window: dict[int, list[dict[str, Any]]] = {}
+    for w in windows:
+        rows, q_meta = query_search_analytics(token, site, _days_before(end, w), end)
+        if not q_meta.get("ok"):
+            if w == primary_window:
+                return empty(q_meta.get("error") or "query_failed")
+            per_window[w] = []  # secondary window failure: omit, don't sink the run
+        else:
+            per_window[w] = rows
+    return build_payload(per_window, cat, windows=windows, primary_window=primary_window,
+                         site_url=site, available=True)
 
 
 # --------------------------------------------------------------------------
@@ -295,7 +341,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Collect Google Search Console first-party search demand for Build-Next.")
     parser.add_argument("--dry-run", action="store_true", help="Print summary, don't write")
-    parser.add_argument("--window-days", type=int, default=DEFAULT_WINDOW_DAYS)
     args = parser.parse_args()
 
     # Credentials live in duckAgent/.env (per the env-in-dotenv convention);
@@ -307,13 +352,14 @@ def main() -> int:
         except Exception:
             pass
 
-    payload = collect(gsc_config(), window_days=args.window_days)
+    payload = collect(gsc_config())
     avail = payload.get("available")
-    print(f"[gsc-search-demand] available={avail} queries={payload.get('query_count')} "
-          f"gaps={len(payload.get('gap_queries') or [])} terms={len(payload.get('term_scores') or {})}"
+    print(f"[gsc-search-demand] available={avail} windows={payload.get('windows')} "
+          f"queries={payload.get('query_count')} gaps={len(payload.get('gap_queries') or [])} "
+          f"terms={len(payload.get('term_scores') or {})}"
           + ("" if avail else f"  error={payload.get('error')}"))
     for q in (payload.get("gap_queries") or [])[:8]:
-        print(f"  gap  {q['impressions']:>5} impr  {q['clicks']:>3} clk  {q['query']}")
+        print(f"  gap [{q.get('trend','?'):>6}]  {q['impressions']:>5} impr  {q['clicks']:>3} clk  {q['query']}")
     if not args.dry_run:
         out = write_search_demand(payload)
         print(f"  -> {out}")

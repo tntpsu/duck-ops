@@ -134,6 +134,29 @@ class TestAggregate:
         assert agg["term_scores"] == {} and agg["gap_queries"] == [] and agg["top_queries"] == []
 
 
+class TestMultiWindow:
+    def test_trend_labels(self):
+        W = (7, 28, 90)
+        assert gsc._trend({"7": 70, "28": 110, "90": 90}, W) == "rising"   # 10/day vs 1/day
+        assert gsc._trend({"7": 1, "28": 50, "90": 90}, W) == "fading"     # 0.14 vs 1
+        assert gsc._trend({"7": 7, "28": 30, "90": 90}, W) == "steady"     # 1 vs 1
+        assert gsc._trend({"7": 5, "28": 0, "90": 0}, W) == "new"
+        assert gsc._trend({"7": 0, "28": 0, "90": 0}, W) == "flat"
+
+    def test_build_payload_enriches_gaps_with_windows_and_trend(self):
+        def row(q, impr):
+            return {"query": q, "impressions": float(impr), "clicks": 0.0, "ctr": 0.1, "position": 5.0}
+        per_window = {7: [row("pirate duck", 70)], 28: [row("pirate duck", 120)],
+                      90: [row("pirate duck", 130)]}
+        p = gsc.build_payload(per_window, catalog_tokens=set(), windows=(7, 28, 90),
+                              primary_window=28, site_url="test://x")
+        assert p["windows"] == [7, 28, 90] and p["primary_window"] == 28
+        g = next(x for x in p["gap_queries"] if x["query"] == "pirate duck")
+        assert g["impressions_by_window"] == {"7": 70, "28": 120, "90": 130}
+        assert g["trend"] == "rising"
+        assert p["window_query_counts"] == {"7": 1, "28": 1, "90": 1}
+
+
 # ---- collect orchestration (fail-soft degrade) -------------------------------
 
 class TestCollect:

@@ -989,6 +989,7 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 | `aggregate_search_demand` | ✅ top_queries sorted; term_scores max-normalized 0..1 | n/a | ✅ empty rows → empty maps | n/a |
 | gap detection | ✅ high-impression query w/ no catalog token overlap → gap_queries | ✅ all-covered → gap_queries=[] | ✅ no catalog → all flagged gap (documented) | n/a |
 | `main(--dry-run)` | ✅ prints summary, no write | ✅ no creds → `available:false` payload, exit 0 (never crash schedule) | n/a | n/a |
+| multi-window (7/28/90) | ✅ `_trend` rising/steady/fading/new/flat; build_payload enriches each query with `impressions_by_window` + `trend`; primary=28 drives term_scores | ✅ secondary-window query failure omitted (counts 0), only primary failure degrades | n/a | n/a |
 | Write | ✅ atomic tmp+replace | n/a | ✅ available:false still written | ✅ conftest redirect + `DUCK_TEST_MODE` FROZEN-path guard + pollution audit test (convention #4) |
 
 ### 38.2 Build-Next factor (build_next_engine.score_search_demand)
@@ -1038,6 +1039,7 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 | `run_report` | ✅ mocked rows parsed (pageTitle + **hostName** + metrics) | ✅ mocked error → ([], error) | ✅ no rows → [] | n/a |
 | `_channel_for` / channel split | ✅ host → etsy / shopify / web; `channels` per-domain totals (Etsy traffic lands in same GA4 property via Etsy's web-analytics tag) | n/a | n/a | n/a |
 | `classify_listings` | ✅ FIX/PROMOTE/WATCH terciles **per channel** (Etsy vs Shopify baselines not comparable) + min-views floor | n/a | ✅ empty → [] | n/a |
+| multi-window (7/28/90) | ✅ `_trend` per listing from short-vs-long view rate; build_payload enriches each listing with `views_by_window` + `trend`; primary=28 drives the classification | ✅ secondary-window failure omitted; only primary degrades | n/a | n/a |
 | totals | ✅ top-line active/new/views from a totals row | ✅ absent totals → zeros | n/a | n/a |
 | `collect` | ✅ live payload (listings + fix/promote/watch subsets) | ✅ not-ready/token/query fail → available:false + error, never raise | n/a | n/a |
 | Write | ✅ atomic | n/a | ✅ available:false still written | ✅ conftest redirect + DUCK_TEST_MODE FROZEN guard + pollution audit test |
