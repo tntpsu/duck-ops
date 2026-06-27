@@ -1179,6 +1179,25 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 
 ---
 
+## Surface 42 — GA4-verdict weekly-sale steering (2026-06-27, matrix before code; operator: "auto-sale steering")
+
+**Goal.** Stop discounting proven winners and prioritize the leaks: steer the weekly Shopify SALE target list by each product's GA4 verdict — **PROMOTE → drop** (don't erode margin on what already sells), **FIX → keep/prioritize** (discount to convert traffic that isn't converting), **neutral/unmatched → unchanged**. Autonomous; rides the EXISTING `evaluate_weekly_sale_policy` approval gate (not unguarded discounting).
+
+**Hook (confirmed):** `duckAgent/flows/weekly/steps.py::_collect_weekly_shopify_sale_targets` (line 578) feeds `evaluate_weekly_sale_policy`. Steering filters/reorders the target list right there. Steering logic + tests in **duck-ops** (reuse `seo_demand_context.listing_signal` for title→verdict match); one-line wire-in in **duckAgent**. Fail-soft: no/stale GA4 → targets pass through untouched.
+
+| Use case | Expected | Layer |
+|---|---|---|
+| PROMOTE-verdict target | dropped from sale (with reason) | unit |
+| FIX-verdict target | kept, prioritized | unit |
+| neutral / no GA4 match | kept unchanged | unit |
+| no GA4 data / stale | all targets pass through (today's behavior) | unit |
+| match | title→verdict via `listing_signal` (2+ shared tokens / full coverage) | unit |
+| wiring | duckAgent `_collect_weekly_shopify_sale_targets` applies steering before policy eval | integration (mocked) |
+
+**OPEN before build:** confirm the sale-target record carries a product **title** (needed to match GA4, which is title-keyed) — if it's product_id only, add a catalog_index id→title lookup. **Governance:** Tier-2 logic; the live discount apply stays behind `evaluate_weekly_sale_policy`'s manual-review/operator-approved gate. Convention #3 bracket (steered-count card) ships with the live lane.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
