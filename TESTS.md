@@ -1116,6 +1116,69 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 
 ---
 
+## Surface 41 — Gap query → draft Shopify collection (SEO path L3) (2026-06-27, matrix before code; operator: "create a collection with the things you found")
+
+**Goal.** Turn unmet search demand into **collections** for products we already sell but haven't grouped. The defining scope rule: a gap query matching **0** catalog products → Build-Next (make it); **1** → listing SEO (Surface 40); **≥N (start 3)** → a collection candidate (this). Gated exactly like SEO (email approve → apply → receipt); **never auto-creates**. Real target: "jeep ducks for sale" (623 impr) → a "Jeep Ducks for Sale" collection grouping every jeep duck.
+
+**Cross-repo boundary** (Plan-confirmed): **duck-ops** owns planning/gating/state/operator surfaces; **duckAgent** owns the Shopify create + apply executor. They talk only through the run-file JSON contract (`member_product_ids` must survive the round-trip — pin it, per the 2026-05 my_shop_velocity round-trip bug). Flow id `shopify_collection`; state under `state/shopify_collection_review/`.
+
+**The one new external primitive (load-bearing):** `shopify_helper` has collection *update* + *add-member* but **no create** — `shopify_collection_create` (GraphQL `collectionCreate` + `userErrors`, REST fallback) is the only genuinely new prod-mutation. Sandbox/dry-run before live; `duck-automation-safety` weight.
+
+**Stage A built 2026-06-27 (read-only planner; no Shopify create yet). Two design corrections the live run forced:**
+1. **Source is ALL queries, not gap_queries.** A "gap" is BY DEFINITION a query with no catalog match (GSC's gap detector), so it can never reach ≥N members — sourcing collections from gaps is self-contradictory. Collections group products we ALREADY sell, so the planner reads `top_queries` + `gap_queries` combined. (Gaps remain the Build-Next signal: 0 matches → make a product.)
+2. **Full-subset token match (coverage 1.0), not 0.5.** At 0.5, "baby yoda duck" `{baby,yoda}` grabbed 9 unrelated products via the generic "baby" → a junk collection. Requiring every distinctive query token be present means a collection only groups genuine theme matches.
+**Empirical result on current data: 0 candidates** — and that's a true signal, not a bug: current unmet/high-traffic demand is product-specific ("baby yoda duck"→1 product→listing SEO) or jeep-model ("custom ducks for jeeps"→0 products→Build-Next), NOT category-level groupings of existing inventory. The lane fires when a category query (e.g. "dog ducks") with ≥3 matching products appears.
+
+### 41.1 Planner producer — `duck-ops/runtime/shopify_collection_planner.py` (✅ Stage A built + 13 tests)
+
+| Use case | Expected | Layer |
+|---|---|---|
+| 0 / 1 matching product | skip (not a collection) | unit |
+| ≥N matching active products | emit candidate spec (handle, title, SEO, member ids+titles, query, impressions, trend) | unit |
+| match bar | ≥0.5 query-token coverage AND ≥2 shared tokens (no lone "duck" match); members active + id-verified | unit |
+| dedup vs existing collections | drop if handle/title-overlap/subset hits an existing collection (custom + smart) | unit |
+| stale / unavailable / missing demand | empty set, `available:false`, no email (reuse `_is_stale` 21d) | unit |
+| under-threshold after filtering | fail closed — drop candidate, never empty collection | unit |
+| write | atomic + DUCK_TEST_MODE FROZEN-path guard (new prod-write path, convention #4) | unit + audit |
+
+### 41.2 LLM title/SEO generation (convention #5) (🔴 planned)
+
+| Check | Criterion |
+|---|---|
+| title reflects intent | gated eval `eval_shopify_collection_titles.py` + golden fixture; deterministic cross-check (title shares ≥1 gap-query token + contains "duck" + 45–70 chars) |
+| fail-soft | LLM miss → deterministic title from the gap query ("Jeep Wrangler Ducks"), never blocks |
+
+### 41.3 Approval gate (duck-ops, mirror SEO) (🔴 planned)
+
+| Piece | Expected |
+|---|---|
+| flow register | `duck_flows.FLOWS["shopify_collection"]` + `ReplyAction("Reply Create","create","create")` |
+| email | cadence-gated; subject `MJD: [shopify_collection] … FLOW:… RUN:… ACTION:review`; body lists member TITLES so operator catches bad groupings |
+| desk tile | `business_operator_desk` shows "N collection proposals awaiting review" from `latest.json` |
+| intake | existing `operator_inbox_poller` forwards FLOW/RUN/ACTION — no change |
+
+### 41.4 Apply path (duckAgent, mirror apply_shopify_seo_review_run) (🔴 planned)
+
+| Step | Fail-safe |
+|---|---|
+| live dedup re-check before create | exists now → skip as "already exists", not failure (covers email→reply race) |
+| re-verify member ids live | any id unconfirmed → **fail closed**, skip candidate (never add guessed/wrong products) |
+| create + add members + verify readback + receipt | per-candidate success/partial/failed; run `applied` only at zero failures else `apply_attempted` (re-runnable, idempotent via dedup) |
+| dispatch | `handle_mail_event` branch `flow==shopify_collection` → wrapped in publish-feedback email |
+| entry point | apply reachable ONLY via operator reply; producer only ever writes `awaiting_review` |
+
+### 41.5 Outcome loop (L4) + observability (🔴 planned)
+
+| Piece | Expected |
+|---|---|
+| `shopify_collection_outcomes.py` | baseline at create, then track GSC impressions/CTR for the source query + `/collections/<handle>` over the window |
+| two-card bracket (convention #3) | producer freshness + apply throughput — built WITH the live lane, not deferred |
+| isolation | conftest redirects in BOTH repos (apply writes receipts into duck-ops state) + FROZEN guard + pollution-audit test |
+
+**Top risks (Plan-flagged):** the new create primitive (live store mutation), the cross-repo run-file contract round-trip, dedup correctness (proposing an existing collection = trust failure), apply-time live re-validation (state drifts between email and reply), and not deferring the health bracket. **Gated build, sandbox-first on the create call.**
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

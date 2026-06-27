@@ -173,6 +173,14 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         monkeypatch.setattr(_sdc, "LISTING_PERFORMANCE_PATH", tmp_path / "listing_performance.json")
     except ImportError:
         pass
+    # 2026-06-27: shopify_collection_planner (Surface 41) — new prod-WRITE path;
+    # redirect so the planner's write tests can't pollute production state
+    # (paired with the DUCK_TEST_MODE FROZEN guard + pollution-audit test).
+    try:
+        import shopify_collection_planner as _scp
+        monkeypatch.setattr(_scp, "COLLECTION_PLAN_PATH", tmp_path / "shopify_collection_review" / "latest.json")
+    except ImportError:
+        pass
 
     # 2026-06-12: product_concept_queue.BUILD_NEXT_PROMOTIONS_PATH (Surface 16
     # ingestion). build_product_concept_queue() reads this file by default;
