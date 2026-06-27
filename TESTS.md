@@ -565,7 +565,7 @@ One weekly answer to "what duck should we build next?": deterministic score = de
 | Factor / path | Happy | Missing input degrades | Empty → [] not invented | Suppression | Isolation |
 |---|---|---|---|---|---|
 | Candidate assembly | ✅ union dedupe by listing_id | n/a | ✅ empty report → [] | n/a | n/a |
-| Demand | ✅ pool max-normalize | ✅ views+favorites fallback / zero pool | n/a | n/a | n/a |
+| Demand (momentum) | ✅ trending_score (sold_7d) preferred over all-time; separate momentum/all-time pools | ✅ views+favorites fallback / zero pool | n/a | ✅ all-time-only capped at FALLBACK_DEMAND_CEILING; new_listing trending_score (lifetime proxy) NOT treated as momentum | n/a |
 | Margin | ✅ confident title match→real % | ✅ no match→flagged median est / no data→neutral flagged | n/a | n/a | n/a |
 | Catalog gap | ✅ no overlap=full gap | n/a | n/a | ✅ high overlap→already-made suppressed | n/a |
 | Occasion fit | ✅ active kw hit→1.0 | ✅ no match→neutral evergreen | n/a | n/a | n/a |
@@ -585,6 +585,8 @@ One weekly answer to "what duck should we build next?": deterministic score = de
 |---|---|---|---|---|---|
 | _record_build_next_promotion | ✅ appends brief_source=build_next, status=pending | ✅ file-write only, no builder call (test) | ✅ dedupe per concept_key | n/a | ✅ ValueError on blank |
 | product_concept_queue ingest | ✅ promoted→ready_for_brief_review | ✅ approval still gates _run_duck_concept_builder | n/a | ✅ Tennessee Vols→blocked_by_guardrail | n/a |
+
+**16.4 — Demand re-ranked on 7-day momentum (2026-06-26).** Operator wanted Build-Next "more trend focused." The demand factor scored on all-time `engagement_score` (views + favorites×2), which favors cooled-off past hits — Duckpool ranked #1 (engagement 12,323) despite 0 recent sales, while the real #1 mover (Breast Cancer Duck, 25 sold/7d) sat lower. Fix: demand now prefers `trending_score` (the competitor engine's sales-weighted metric, sold_7d-primary), normalized in a pool SEPARATE from all-time so the two scales don't mix; all-time-only rows capped at `FALLBACK_DEMAND_CEILING` (0.5) so a cooled-off hit can't outrank a confirmed mover. **Branch caught in live verify (per [[feedback_incomplete_fix_enumerate_all_branches]]):** a `new_listing` row's `trending_score` is `favs×3 + views×0.5` — a lifetime proxy wearing a momentum label (its `views_delta_7d` is the full lifetime count). `_has_snapshot_momentum` gates on `delta_source` so only snapshot-confirmed movement counts as momentum; new_listing routes to the capped all-time pool. Live result: Breast Cancer 25/7d → #1, Highland Cow 13 → #2, Pitbull 12 → #3, Duckpool → demoted + flagged "no recent-momentum (capped)". Golden regressions: `test_cooled_off_past_hit_loses_to_current_mover`, `test_new_listing_trending_score_is_not_treated_as_momentum`.
 
 ### 16.4 Two-card OS bracket (duckAgent viewer)
 
@@ -968,6 +970,103 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 1. **Session never rotated → FIXED.** Root cause was sharper than "never rotates": the session only closed itself when a summary email fired (`drain: posted_count>0`), so drains that posted nothing accumulated failures across days into one heap that the next successful post emailed as "N failed". `close_open_session` now rotates the session at the END of every drain regardless (`status=closed_no_post`), so the next session is fresh and each summary reflects one run, not a months-long pile. (`review_reply_executor.run_drain` + helper.)
 2. **5 stuck items → RE-QUEUED.** Re-queued `tx-5100946874/-5102330927/-5102347203/-5107385834/-5112822129` to `queued` for the next SCHEDULED drain's read-back (a browser window is Tier-3, never ad-hoc). Safe to re-drive: the Surface-35 pacing fixes + the existing AlreadyRespondedError detection mean an already-live one resolves to skipped (no duplicate), and a genuine one posts under the new protection. Drain cap (2/run) paces them over a few days. Queue failed count: now **0**.
 3. **`tx-id="l"` origin → CONCLUDED unpinnable, guard is complete.** `transaction_id` flows verbatim from the Etsy API `review` object (`duckAgent/flows/reviews/etsy_review_helper.py:570`) — no slice/default/single-char transform anywhere in our extraction. The `"l"` originated in the API response or injected upstream data we cannot reproduce. The Surface-36 fail-closed guard is the correct and complete resolution; there is no extraction bug to fix.
+
+---
+
+## Surface 38 — Google Search Console first-party search demand → Build-Next (2026-06-26, matrix before code; operator: "build tier-1 #2 / understand clicks & search terms")
+
+**Goal.** Feed Build-Next a FIRST-PARTY demand signal — what real shoppers search on Google to reach myjeepduck.com — instead of relying only on competitor view-diffs. After verifying Shopify exposes NO search-term API (ShopifyQL = sales/sessions/customers only, [[reference_etsy_transactions_ignores_date_window]] family: confirm the API surface before designing), GSC is the clean-API path: real queries + clicks/impressions/CTR/position, reusing the existing Google OAuth stack (`google_tasks_bridge.py` refresh→access pattern). **Single repo (duck-ops):** producer + Build-Next factor + state + OS cards all live here.
+
+**Design.** Producer `runtime/gsc_search_demand.py` queries `searchconsole.googleapis.com/.../searchAnalytics/query` (dimensions=["query"]), aggregates into `state/gsc_search_demand.json` = top_queries + **gap_queries** (meaningful impressions, NO catalog token overlap = unmet demand) + a normalized `term_scores` map. Build-Next gains a 5th SOFT factor `search_demand` (NEUTRAL_SEARCH=0.6, mirrors occasion_fit) that boosts candidates whose tokens hit hot search terms; absent GSC → uniform neutral → ranking unchanged (no-op until live). **Operational prereq (Tier-3, operator one-time):** verify GSC property for the domain + mint a `webmasters.readonly` refresh token via the bootstrap helper (existing Tasks token lacks the scope). Code + all tests land now with the API mocked; live data flows after the one-time auth.
+
+### 38.1 Producer (gsc_search_demand.py) — API mocked in all tests
+
+| Path | Happy | Missing/!auth degrades (fail-soft) | Empty → not invented | Isolation |
+|---|---|---|---|---|
+| `_gsc_config(env)` | ✅ reads CLIENT_ID/SECRET/GSC_REFRESH_TOKEN/GSC_SITE_URL | ✅ missing creds → `credentials_ready=False`, no raise | n/a | n/a |
+| `fetch_gsc_access_token` | ✅ mocked 200 → token | ✅ mocked 4xx/network → (None, error dict), no raise | n/a | n/a |
+| `query_search_analytics` | ✅ mocked rows parsed (query/clicks/impressions/ctr/position) | ✅ mocked error → [] | ✅ no rows → [] | n/a |
+| `aggregate_search_demand` | ✅ top_queries sorted; term_scores max-normalized 0..1 | n/a | ✅ empty rows → empty maps | n/a |
+| gap detection | ✅ high-impression query w/ no catalog token overlap → gap_queries | ✅ all-covered → gap_queries=[] | ✅ no catalog → all flagged gap (documented) | n/a |
+| `main(--dry-run)` | ✅ prints summary, no write | ✅ no creds → `available:false` payload, exit 0 (never crash schedule) | n/a | n/a |
+| Write | ✅ atomic tmp+replace | n/a | ✅ available:false still written | ✅ conftest redirect + `DUCK_TEST_MODE` FROZEN-path guard + pollution audit test (convention #4) |
+
+### 38.2 Build-Next factor (build_next_engine.score_search_demand)
+
+| Use case | Happy | Neutral degrade | Ranking safety |
+|---|---|---|---|
+| token hit on hot term | ✅ overlap→ up to 1.0, reason names matched term | n/a | n/a |
+| no GSC data / no match | n/a | ✅ NEUTRAL_SEARCH (0.6), reason "no first-party search signal" | ✅ uniform neutral → order unchanged vs pre-GSC |
+| score fold | ✅ 5th multiplicand: demand×margin×gap×occasion×search | ✅ absent input defaults neutral, build never crashes | ✅ existing Surface-16/16.4 tests still green |
+
+### 38.3 Observability (two-card bracket, convention #3) — DEFERRED to activation
+
+| Card | Catches | Status |
+|---|---|---|
+| feed-freshness (input) | producer stale / never ran / available:false | ⏸️ deferred-to-activation `_load_gsc_search_demand_health` + registration + empty-payload test |
+| gap-throughput (output) | data present but 0 gap_queries surfaced for N weeks (signal died) | ⏸️ deferred-to-activation same loader, second card |
+
+**Why deferred (explicit decision, not a silent gap):** the producer is fail-soft `available:false` until the operator completes the one-time OAuth + launchd install (both Tier-3). A bracket watching a deliberately-dormant feed would sit permanently yellow and train alarm-blindness. The cards get built AT activation, in the same change that schedules the producer — so the bracket goes in with a LIVE lane, exactly as convention #3 intends. Until then the feed is self-announcing (`available:false` + `error` string in the payload).
+
+### 38.4 Live verification (post-auth, operator-gated)
+
+| Step | Expectation |
+|---|---|
+| one-time bootstrap | mints `webmasters.readonly` refresh token; operator stores `GSC_REFRESH_TOKEN`/`GSC_SITE_URL` in `.env` (per [[feedback_env_in_dotenv.md]]) |
+| first real run | top_queries non-empty; gap_queries reviewed for plausibility; Build-Next demand reasons start naming search terms |
+
+**Tier:** Tier-2 code (producer + factor + tests, API mocked). The one-time OAuth + `.env` token + launchd install are **Tier-3, operator-run** (not done by me).
+
+---
+
+## Surface 39 — GA4 listing performance → Fix-or-Promote lane (2026-06-26, matrix before code; operator: "what do experts use this data for?")
+
+**Goal.** Most of GA4's value is NOT "what to make" (Build-Next) but "what to FIX or PROMOTE on what we already sell" — a different, higher-ROI decision (monetize traffic we already earned). GA4 already receives per-listing behavior (the operator's GA4 emails show Etsy listing titles with views / active users / bounce). Pull it via the GA4 Data API (`runReport`, scope analytics.readonly), classify each listing, and surface a Fix-or-Promote decision lane; feed only a thin "make more like winners" slice to Build-Next.
+
+**Design.** Producer `runtime/ga4_listing_performance.py` queries `analyticsdata.googleapis.com/v1beta/properties/{id}:runReport` (dimension pageTitle; metrics screenPageViews/activeUsers/newUsers/engagementRate/bounceRate/averageEngagementTimePerActiveUser), writes `state/listing_performance.json`. Classifier verdict per listing, RELATIVE to the catalog (terciles, with a min-views floor so low-traffic noise isn't judged):
+- **FIX** = high views + low engagement (traffic that isn't converting → photos/price/copy).
+- **PROMOTE** = high views + high engagement (proven winner → feature/advertise/variations; this slice loops to Build-Next).
+- **WATCH** = high engagement + low views (good page, needs traffic → SEO/ads).
+- **neutral** otherwise. Reuses the same Google OAuth refresh→access pattern as gsc_search_demand.py (scope differs: analytics.readonly; one token can carry both scopes). Fail-soft available:false; three-layer write isolation.
+
+### 39.1 Producer (ga4_listing_performance.py) — API mocked in all tests
+
+| Path | Happy | Fail-soft degrade | Empty → not invented | Isolation |
+|---|---|---|---|---|
+| `ga4_config(env)` | ✅ reads CLIENT_ID/SECRET/GA4_REFRESH_TOKEN/GA4_PROPERTY_ID | ✅ missing → credentials_ready=False | n/a | n/a |
+| `fetch_ga4_access_token` | ✅ mocked token | ✅ mocked 4xx/network → (None, error) | n/a | n/a |
+| `run_report` | ✅ mocked rows parsed (pageTitle + **hostName** + metrics) | ✅ mocked error → ([], error) | ✅ no rows → [] | n/a |
+| `_channel_for` / channel split | ✅ host → etsy / shopify / web; `channels` per-domain totals (Etsy traffic lands in same GA4 property via Etsy's web-analytics tag) | n/a | n/a | n/a |
+| `classify_listings` | ✅ FIX/PROMOTE/WATCH terciles **per channel** (Etsy vs Shopify baselines not comparable) + min-views floor | n/a | ✅ empty → [] | n/a |
+| totals | ✅ top-line active/new/views from a totals row | ✅ absent totals → zeros | n/a | n/a |
+| `collect` | ✅ live payload (listings + fix/promote/watch subsets) | ✅ not-ready/token/query fail → available:false + error, never raise | n/a | n/a |
+| Write | ✅ atomic | n/a | ✅ available:false still written | ✅ conftest redirect + DUCK_TEST_MODE FROZEN guard + pollution audit test |
+
+### 39.2 Classifier verdicts (relative, deterministic)
+
+| Listing shape | Verdict | Reason names the signal |
+|---|---|---|
+| high views, low engagement | FIX | ✅ "high traffic, low engagement — conversion leak" |
+| high views, high engagement | PROMOTE | ✅ "proven winner — promote / make variations" |
+| low views, high engagement | WATCH | ✅ "engages well, starved of traffic — SEO/ads" |
+| below min-views floor | neutral | ✅ "not enough traffic to judge" |
+
+### 39.3 Consumers — DEFERRED to activation (needs live GA4 data)
+
+| Consumer | Status |
+|---|---|
+| `/portal/intel/listing-performance` page + Business Desk tile (duckAgent viewer) | ⏸️ deferred-to-activation (replaces the GA4 email per email-to-portal inversion) |
+| Build-Next "make more like winners" slice (PROMOTE titles → demand boost) | ⏸️ deferred-to-activation |
+| two OS bracket cards (feed freshness + verdicts-produced) | ⏸️ deferred-to-activation (dormant feed until OAuth, same reason as Surface 38.3) |
+
+### 39.4 Live verification (post-auth, operator-gated)
+
+| Step | Expectation |
+|---|---|
+| one-time bootstrap | mint analytics.readonly refresh token (helper --scope); set GA4_REFRESH_TOKEN + GA4_PROPERTY_ID in .env |
+| first real run | listings non-empty; FIX/PROMOTE lists match the operator's gut on known listings |
+
+**Tier:** Tier-2 code (producer + classifier + tests, API mocked). The OAuth + .env token + GA4 property id + launchd install + portal page are Tier-3 / cross-repo, layered at activation.
 
 ---
 

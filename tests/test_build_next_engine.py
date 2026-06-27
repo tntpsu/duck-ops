@@ -18,12 +18,17 @@ def _report(*, ducks=None, trending=None):
 
 
 def _duck(listing_id, title, *, engagement=1000, views=500, favorites=20,
-          tags=None, priority="medium"):
-    return {
+          tags=None, priority="medium", trending=None, sold_7d=None):
+    row = {
         "listing_id": listing_id, "title": title, "shop_name": "CompShop",
         "engagement_score": engagement, "views": views, "favorites": favorites,
         "tags": tags or [], "priority": priority,
     }
+    if trending is not None:
+        row["trending_score"] = trending
+    if sold_7d is not None:
+        row["sold_last_7d"] = sold_7d
+    return row
 
 
 def _catalog(items):
@@ -124,20 +129,128 @@ class TestLatestCompetitorReport:
 # --------------------------------------------------------------------------
 
 class TestDemand:
-    def test_pool_max_normalizes_to_one(self):
-        row = _duck("1", "X", engagement=5000)
-        value, reason = bne.score_demand(row, pool_max=5000.0)
+    def test_momentum_pool_max_normalizes_to_one(self):
+        row = {"listing_id": "1", "title": "X", "trending_score": 5000, "sold_last_7d": 30}
+        value, reason = bne.score_demand(row, momentum_max=5000.0, alltime_max=0.0)
         assert value == 1.0
-        assert "5000" in reason
+        assert "5000" in reason and "momentum" in reason
+
+    def test_alltime_only_row_is_capped_below_momentum_band(self):
+        """An all-time-only row maxes out at FALLBACK_DEMAND_CEILING even when
+        it tops its own pool — it can never reach the band a mover occupies."""
+        row = _duck("1", "X", engagement=5000)
+        value, reason = bne.score_demand(row, momentum_max=0.0, alltime_max=5000.0)
+        assert value == bne.FALLBACK_DEMAND_CEILING
+        assert "5000" in reason and "capped" in reason
 
     def test_zero_pool_returns_zero(self):
-        value, _ = bne.score_demand(_duck("1", "X"), pool_max=0.0)
+        value, _ = bne.score_demand(_duck("1", "X"), momentum_max=0.0, alltime_max=0.0)
         assert value == 0.0
 
     def test_falls_back_to_views_plus_favorites(self):
         row = {"listing_id": "1", "title": "X", "views": 100, "favorites": 10}
         # strength = 100 + 5*10 = 150
         assert bne._demand_strength(row) == 150.0
+
+    def test_prefers_momentum_over_all_time_engagement(self):
+        """trending_score (recent sales momentum) wins over engagement_score
+        (lifetime popularity) — they disagree and momentum is the truth we want."""
+        row = {"listing_id": "1", "title": "X",
+               "engagement_score": 9000, "trending_score": 42, "sold_last_7d": 0}
+        assert bne._demand_strength(row) == 42.0
+        _, reason = bne.score_demand(row, momentum_max=100.0, alltime_max=9000.0)
+        assert "momentum" in reason and "sold/7d" in reason
+
+    def test_zero_trending_score_falls_back_to_engagement(self):
+        """A row tracked but with no recent movement (trending_score 0) must NOT
+        score 0 demand — fall back to all-time so it still ranks, flagged."""
+        row = {"listing_id": "1", "title": "X",
+               "engagement_score": 800, "trending_score": 0, "views": 500, "favorites": 60}
+        assert bne._demand_strength(row) == 800.0
+        _, reason = bne.score_demand(row, momentum_max=0.0, alltime_max=1000.0)
+        assert "all-time" in reason and "no recent-momentum" in reason
+
+    def test_new_listing_trending_score_is_not_treated_as_momentum(self):
+        """Golden trap (Duckpool, 2026-06-22): a freshly-discovered listing has
+        delta_source='new_listing', so its trending_score (8309) is really
+        favs*3 + views*0.5 — a LIFETIME proxy, not 7-day movement. It must be
+        routed to the capped all-time pool and lose to a real snapshot mover."""
+        new_listing = {"listing_id": "dp", "title": "Duckpool",
+                       "trending_score": 8309, "delta_source": "new_listing",
+                       "sold_last_30d": 8, "engagement_score": 12323,
+                       "views": 10175, "favorites": 1074}
+        mover = {"listing_id": "bc", "title": "Breast Cancer Survivor Duck",
+                 "trending_score": 5713, "delta_source": "snapshot", "sold_last_7d": 25}
+        assert bne._has_snapshot_momentum(new_listing) is False
+        assert bne._has_snapshot_momentum(mover) is True
+        bases = [bne._demand_basis(new_listing), bne._demand_basis(mover)]
+        momentum_max = max((s for s, m in bases if m), default=0.0)
+        alltime_max = max((s for s, m in bases if not m), default=0.0)
+        nl_val, nl_reason = bne.score_demand(new_listing, momentum_max, alltime_max)
+        mv_val, _ = bne.score_demand(mover, momentum_max, alltime_max)
+        assert mv_val == 1.0 and mv_val > nl_val
+        assert nl_val <= bne.FALLBACK_DEMAND_CEILING
+        assert "no recent-momentum" in nl_reason
+
+    def test_cooled_off_past_hit_loses_to_current_mover(self):
+        """Golden divergence (2026-06-22 report): Duckpool was #2 all-time
+        (engagement 8000) but sold 0 in 7 days, while the Breast Cancer Survivor
+        Duck was the #1 mover (25 sold/7d). Momentum ranking must put the mover
+        on top — the exact inversion this change exists to fix."""
+        duckpool = {"listing_id": "dp", "title": "Duckpool",
+                    "engagement_score": 8000, "trending_score": 0, "sold_last_7d": 0,
+                    "views": 7000, "favorites": 200}
+        mover = {"listing_id": "bc", "title": "Breast Cancer Survivor Duck",
+                 "engagement_score": 1200, "trending_score": 5500, "sold_last_7d": 25}
+        bases = [bne._demand_basis(duckpool), bne._demand_basis(mover)]
+        momentum_max = max((s for s, m in bases if m), default=0.0)
+        alltime_max = max((s for s, m in bases if not m), default=0.0)
+        dp_val, _ = bne.score_demand(duckpool, momentum_max, alltime_max)
+        mv_val, _ = bne.score_demand(mover, momentum_max, alltime_max)
+        assert mv_val > dp_val
+        assert mv_val == 1.0  # the current mover tops the momentum pool
+        assert dp_val <= bne.FALLBACK_DEMAND_CEILING  # cooled-off hit stays capped
+
+
+# --------------------------------------------------------------------------
+# Factor: search demand (Surface 38)
+# --------------------------------------------------------------------------
+
+class TestSearchDemand:
+    def test_no_data_is_neutral(self):
+        value, reason = bne.score_search_demand({"pirate"}, {})
+        assert value == bne.NEUTRAL_SEARCH and "no first-party search signal" in reason
+
+    def test_no_match_is_neutral(self):
+        value, reason = bne.score_search_demand({"pirate"}, {"wizard": 1.0})
+        assert value == bne.NEUTRAL_SEARCH and "no first-party search match" in reason
+
+    def test_hot_term_boosts_above_neutral_to_one(self):
+        value, reason = bne.score_search_demand({"pirate", "hat"}, {"pirate": 1.0})
+        assert value == 1.0 and "pirate" in reason
+
+    def test_partial_term_scales_between_neutral_and_one(self):
+        value, _ = bne.score_search_demand({"pirate"}, {"pirate": 0.5})
+        # NEUTRAL_SEARCH + (1-NEUTRAL_SEARCH)*0.5
+        assert bne.NEUTRAL_SEARCH < value < 1.0
+
+    def test_absent_signal_does_not_change_ranking(self):
+        """Uniform neutral when no GSC data: two candidates keep their relative
+        order (the no-op-until-live guarantee)."""
+        a = bne.score_search_demand({"alpha"}, {})[0]
+        b = bne.score_search_demand({"beta"}, {})[0]
+        assert a == b == bne.NEUTRAL_SEARCH
+
+    def test_loader_ignores_unavailable_payload(self, tmp_path):
+        p = tmp_path / "gsc.json"
+        p.write_text('{"available": false, "term_scores": {"pirate": 1.0}}')
+        assert bne._load_search_demand_terms(p) == {}
+
+    def test_loader_reads_available_term_scores(self, tmp_path):
+        p = tmp_path / "gsc.json"
+        p.write_text('{"available": true, "term_scores": {"pirate": 0.8, "bad": "x"}}')
+        terms = bne._load_search_demand_terms(p)
+        assert terms == {"pirate": 0.8}  # non-numeric dropped
 
 
 # --------------------------------------------------------------------------
@@ -233,7 +346,8 @@ class TestOccasionFit:
 class TestBuild:
     def _kwargs(self, **over):
         base = dict(
-            report=_report(ducks=[_duck("1", "Medieval Knight Armor Sword Duck", engagement=4000)]),
+            report=_report(ducks=[_duck("1", "Medieval Knight Armor Sword Duck",
+                                        engagement=4000, trending=4000, sold_7d=18)]),
             report_name="2026-06-12_competitor_report.json",
             catalog=_catalog([_cat_item("Astronaut Space Helmet Duck")]),
             profit={"products": [{"title_variants": ["Medieval Knight Armor Sword Duck"],
@@ -254,7 +368,8 @@ class TestBuild:
         assert entry["score"] > 0
         assert entry["factors"]["demand"] == 1.0
         assert entry["factors"]["margin"] == 0.8
-        assert len(entry["reasons"]) == 4
+        assert entry["factors"]["search_demand"] == bne.NEUTRAL_SEARCH  # no GSC data in test
+        assert len(entry["reasons"]) == 5
 
     def test_already_made_candidate_is_suppressed(self):
         payload = bne.build_build_next_queue(**self._kwargs(

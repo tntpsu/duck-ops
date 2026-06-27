@@ -110,6 +110,9 @@ def main() -> int:
     parser.add_argument("--client-id", required=True)
     parser.add_argument("--client-secret", default="")
     parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--scope", default=SCOPE,
+                        help="OAuth scope to mint (default: Google Tasks). For Search "
+                             "Console use https://www.googleapis.com/auth/webmasters.readonly")
     args = parser.parse_args()
 
     client_id = args.client_id.strip()
@@ -119,7 +122,7 @@ def main() -> int:
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "scope": SCOPE,
+        "scope": args.scope,
         "access_type": "offline",
         "prompt": "consent",
         "code_challenge": challenge,

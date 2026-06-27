@@ -6,8 +6,11 @@ The score fuses four signals, each normalized 0..1 with a reasons[] trail
 
   score = demand x margin x catalog_gap x occasion_fit
 
-  - demand       competitor pull (engagement_score / views+favorites),
-                 max-normalized across the candidate pool
+  - demand       competitor pull, ranked on recent MOMENTUM (trending_score
+                 = sold_7d-primary + 30d-rate ballast, computed by the
+                 competitor engine), max-normalized across the candidate
+                 pool; falls back to all-time engagement only when a row
+                 carries no momentum signal
   - margin       profit_per_product margin_pct for the nearest confident
                  title match; a neutral estimate (flagged) when no match
   - catalog_gap  1 - overlap with our existing catalog (already-made ->
@@ -75,6 +78,13 @@ ALREADY_MADE_OVERLAP = 0.6
 # instead of zeroing it. demand and catalog_gap are the hard drivers.
 NEUTRAL_MARGIN = 0.6
 NEUTRAL_OCCASION = 0.6
+# Surface 38: first-party search demand (Google Search Console). Soft factor —
+# a candidate whose tokens hit a hot real search term scores above neutral;
+# absence (no GSC data / no match) is uniform neutral so RANKING is unchanged
+# until the signal is live. Read-only here; the producer (gsc_search_demand.py)
+# owns the write + isolation guard.
+NEUTRAL_SEARCH = 0.6
+GSC_SEARCH_DEMAND_PATH = DUCK_OPS_ROOT / "state" / "gsc_search_demand.json"
 
 # Tokens that carry no discriminating signal for duck concepts.
 # 2026-06-15: the car-accessory boilerplate (car/decor/decoration/vehicle/
@@ -172,27 +182,92 @@ def assemble_candidates(report: dict[str, Any]) -> list[dict[str, Any]]:
 # Factor scorers — each returns (value in 0..1, reason string, extras dict)
 # --------------------------------------------------------------------------
 
-def _demand_strength(row: dict[str, Any]) -> float:
-    """Raw demand magnitude before pool normalization."""
+def _is_num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+# All-time-only rows (no recent-sales signal) are capped at this fraction of the
+# demand scale so a cooled-off past hit can NEVER outrank a current mover. The
+# two signals live on different scales (trending_score ~tens–thousands of sales-
+# weighted points vs engagement_score ~hundreds–thousands of lifetime views), so
+# they must be normalized in SEPARATE pools, not one shared pool_max — otherwise
+# a big all-time number swamps genuine momentum (the Duckpool inversion).
+FALLBACK_DEMAND_CEILING = 0.5
+
+
+def _has_snapshot_momentum(row: dict[str, Any]) -> bool:
+    """True when a row's trending_score reflects REAL between-snapshot movement,
+    not a new_listing lifetime proxy. delta_source is authoritative; when it's
+    absent (older reports) infer from a concrete sold delta."""
+    delta_source = row.get("delta_source")
+    if delta_source == "new_listing":
+        return False
+    if delta_source == "snapshot":
+        return True
+    return _is_num(row.get("sold_last_7d")) or _is_num(row.get("sold_last_30d"))
+
+
+def _demand_basis(row: dict[str, Any]) -> tuple[float, bool]:
+    """Return (raw_strength, is_momentum).
+
+    Rank on recent MOMENTUM, not lifetime popularity: prefer trending_score
+    (the competitor engine's sales-weighted metric — sold_7d primary with a
+    30d-rate ballast). Fall back to all-time engagement_score (then
+    views+favorites), flagged is_momentum=False, only when a row carries no
+    momentum signal at all. Momentum and all-time strengths are NOT comparable
+    magnitudes — callers normalize each within its own pool (see score_demand).
+
+    CRITICAL: trending_score is only real momentum when delta_source ==
+    'snapshot' (computed from actual between-snapshot deltas). For a
+    'new_listing' row there is no snapshot baseline, so the engine sets
+    trending_score = favorites*3 + views*0.5 — a LIFETIME proxy wearing a
+    momentum label (its views_delta_7d is the full lifetime count). Treating
+    that as momentum let a freshly-discovered listing outrank a confirmed
+    25-sold/7d mover (Duckpool, 2026-06-22). So a new_listing is forced to the
+    capped all-time pool until snapshot history proves recent movement."""
+    if _has_snapshot_momentum(row):
+        trending = row.get("trending_score")
+        if _is_num(trending) and trending > 0:
+            return float(trending), True
     eng = row.get("engagement_score")
-    if isinstance(eng, (int, float)) and not isinstance(eng, bool):
-        return float(eng)
+    if _is_num(eng):
+        return float(eng), False
     views = row.get("views") or 0
     favorites = row.get("favorites") or 0
     try:
-        return float(views) + 5.0 * float(favorites)
+        return float(views) + 5.0 * float(favorites), False
     except (TypeError, ValueError):
-        return 0.0
+        return 0.0, False
 
 
-def score_demand(row: dict[str, Any], pool_max: float) -> tuple[float, str]:
-    strength = _demand_strength(row)
-    if pool_max <= 0:
+def _demand_strength(row: dict[str, Any]) -> float:
+    """Raw demand magnitude (momentum-preferred). See _demand_basis."""
+    return _demand_basis(row)[0]
+
+
+def score_demand(row: dict[str, Any], momentum_max: float,
+                 alltime_max: float) -> tuple[float, str]:
+    """Demand 0..1 with momentum and all-time normalized in separate pools.
+
+    A momentum-backed row scores up to 1.0; an all-time-only row is capped at
+    FALLBACK_DEMAND_CEILING, so a current mover always outranks a cooled-off
+    past hit regardless of how large its lifetime numbers are."""
+    strength, is_momentum = _demand_basis(row)
+    if is_momentum:
+        if momentum_max <= 0:
+            return 0.0, "no momentum signal in competitor pool"
+        value = max(0.0, min(1.0, strength / momentum_max))
+        sold_7d = row.get("sold_last_7d")
+        sold_disp = f"{int(sold_7d)} sold/7d" if _is_num(sold_7d) else "no 7d delta"
+        return value, f"momentum {int(strength)} ({sold_disp}, trending_score)"
+    # No momentum signal — ranked on lifetime popularity, capped below the
+    # momentum band and flagged so a reviewer knows it's NOT backed by sales.
+    if alltime_max <= 0:
         return 0.0, "no demand signal in competitor pool"
-    value = max(0.0, min(1.0, strength / pool_max))
+    value = FALLBACK_DEMAND_CEILING * max(0.0, min(1.0, strength / alltime_max))
     return value, (
-        f"engagement {int(strength)} ({int(row.get('views') or 0)} views, "
-        f"{int(row.get('favorites') or 0)} favs)"
+        f"all-time engagement {int(strength)} ({int(row.get('views') or 0)} views, "
+        f"{int(row.get('favorites') or 0)} favs) — no recent-momentum signal (capped)"
     )
 
 
@@ -279,6 +354,37 @@ def score_occasion_fit(cand_tokens: set[str],
     if best is not None:
         return 1.0, f"fits ACTIVE occasion {best[2]} (peak in {best[1]}d)"
     return NEUTRAL_OCCASION, "evergreen (no active occasion match)"
+
+
+def _load_search_demand_terms(path: Any = None) -> dict[str, float]:
+    """{token -> 0..1 normalized GSC demand weight} from the producer's state
+    file. Returns {} when the file is missing or the producer wrote
+    available:false (no live data yet), so the factor stays neutral."""
+    data = load_json(path or GSC_SEARCH_DEMAND_PATH, {})
+    if not isinstance(data, dict) or not data.get("available"):
+        return {}
+    terms = data.get("term_scores")
+    return {str(k): float(v) for k, v in terms.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)} if isinstance(terms, dict) else {}
+
+
+def score_search_demand(cand_tokens: set[str],
+                        term_scores: dict[str, float]) -> tuple[float, str]:
+    """First-party demand boost: a candidate whose tokens hit a hot real GSC
+    search term scores above neutral, mapped into [NEUTRAL_SEARCH, 1.0] so a
+    match only ever BOOSTS. No data / no match → NEUTRAL_SEARCH (uniform, so
+    ranking is unchanged until the signal is live)."""
+    if not term_scores or not cand_tokens:
+        return NEUTRAL_SEARCH, "no first-party search signal"
+    best_term, best = "", 0.0
+    for tok in cand_tokens:
+        s = term_scores.get(tok, 0.0)
+        if s > best:
+            best, best_term = s, tok
+    if best <= 0:
+        return NEUTRAL_SEARCH, "no first-party search match"
+    value = NEUTRAL_SEARCH + (1.0 - NEUTRAL_SEARCH) * max(0.0, min(1.0, best))
+    return round(value, 3), f"search demand: '{best_term}' ({best:.2f} GSC weight)"
 
 
 # --------------------------------------------------------------------------
@@ -392,6 +498,7 @@ def build_build_next_queue(*,
                            feedback: dict[str, Any],
                            top_n: int = TOP_N,
                            semantic_map: dict[str, dict[str, Any]] | None = None,
+                           search_demand_terms: dict[str, float] | None = None,
                            embed_fn=None) -> dict[str, Any]:
     catalog_items = catalog.get("items") if isinstance(catalog.get("items"), dict) else {}
     catalog_sets = _catalog_token_sets(catalog_items)
@@ -400,9 +507,18 @@ def build_build_next_queue(*,
     active_occasions = [o for o in occasion_intel.get("active_occasions") or [] if isinstance(o, dict)]
     suppressed_keys = _feedback_suppressed_keys(feedback)
     dupe_decisions = _load_dupe_decisions()
+    # First-party search demand (Surface 38). None → load from the producer's
+    # state file; pass {} explicitly in tests to skip the read.
+    if search_demand_terms is None:
+        search_demand_terms = _load_search_demand_terms()
 
     candidates = assemble_candidates(report)
-    pool_max = max((_demand_strength(c) for c in candidates), default=0.0)
+    # Two normalization pools: momentum-backed rows and all-time-only rows are
+    # not comparable magnitudes (see _demand_basis), so each normalizes within
+    # its own pool max.
+    _bases = [_demand_basis(c) for c in candidates]
+    momentum_max = max((s for s, m in _bases if m), default=0.0)
+    alltime_max = max((s for s, m in _bases if not m), default=0.0)
 
     # Semantic catalog match (primary). Computed once (one cached embedding
     # call); {} when embeddings are unavailable, in which case every lookup
@@ -428,9 +544,10 @@ def build_build_next_queue(*,
         sem = semantic_map.get(title) if semantic_map else None
         sources = cand.get("_sources") or []
 
-        demand, demand_reason = score_demand(cand, pool_max)
+        demand, demand_reason = score_demand(cand, momentum_max, alltime_max)
         gap, gap_reason, already_title = score_catalog_gap(cand_tokens, catalog_sets)
         occasion, occasion_reason = score_occasion_fit(cand_tokens, active_occasions)
+        search, search_reason = score_search_demand(cand_tokens, search_demand_terms)
 
         # Margin: prefer the semantic catalog-match's real margin (joined by
         # normalized title); otherwise the token method (now fixed) / median.
@@ -468,12 +585,13 @@ def build_build_next_queue(*,
                 "margin": round(margin, 3),
                 "catalog_gap": round(gap, 3),
                 "occasion_fit": round(occasion, 3),
+                "search_demand": round(search, 3),
             },
             "margin_estimated": margin_estimated,
             "semantic_match": (sem or {}).get("match") if sem else None,
             "possible_dupe": possible_dupe,
             "dupe_score": float(sem.get("score")) if (possible_dupe and sem and sem.get("score") is not None) else None,
-            "reasons": [demand_reason, margin_reason, gap_reason, occasion_reason],
+            "reasons": [demand_reason, margin_reason, gap_reason, occasion_reason, search_reason],
         }
 
         # Operator-confirmed duplicate → suppress (one-click "Confirm duplicate").
@@ -501,7 +619,7 @@ def build_build_next_queue(*,
             suppressed.append(entry)
             continue
 
-        entry["score"] = round(demand * margin * gap * occasion, 4)
+        entry["score"] = round(demand * margin * gap * occasion * search, 4)
         queue.append(entry)
 
     queue.sort(key=lambda e: (-e["score"], str(e["title"])))

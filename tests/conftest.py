@@ -146,6 +146,24 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
     # operator dupe rulings; same three-layer isolation (this redirect + the
     # DUCK_TEST_MODE guard in record_dupe_decision + the no-pollution audit test).
     monkeypatch.setattr(_bne, "BUILD_NEXT_DUPE_DECISIONS_PATH", tmp_path / "build_next_dupe_decisions.json")
+    # 2026-06-26: gsc_search_demand state (Surface 38). build_next_engine READS
+    # it (deterministic tmp so the read doesn't pick up prod), and the producer
+    # gsc_search_demand.py WRITES it (same three-layer isolation: this redirect
+    # + DUCK_TEST_MODE guard in write_search_demand + no-pollution audit test).
+    monkeypatch.setattr(_bne, "GSC_SEARCH_DEMAND_PATH", tmp_path / "gsc_search_demand.json")
+    try:
+        import gsc_search_demand as _gsc
+        monkeypatch.setattr(_gsc, "GSC_SEARCH_DEMAND_PATH", tmp_path / "gsc_search_demand.json")
+    except ImportError:
+        pass
+    # 2026-06-26: ga4_listing_performance state (Surface 39) — same three-layer
+    # isolation (this redirect + DUCK_TEST_MODE guard in write_listing_performance
+    # + no-pollution audit test).
+    try:
+        import ga4_listing_performance as _ga4
+        monkeypatch.setattr(_ga4, "LISTING_PERFORMANCE_PATH", tmp_path / "listing_performance.json")
+    except ImportError:
+        pass
 
     # 2026-06-12: product_concept_queue.BUILD_NEXT_PROMOTIONS_PATH (Surface 16
     # ingestion). build_product_concept_queue() reads this file by default;
