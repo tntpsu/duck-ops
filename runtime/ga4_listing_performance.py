@@ -58,9 +58,12 @@ TOP_LIST_LIMIT = 50
 # (myjeepduck.com) are attributed to the right CHANNEL — the property carries
 # both because Etsy injects our GA tag into its listing pages.
 _DIMENSIONS = ["pageTitle", "hostName"]
+# userEngagementDuration is total engagement seconds (a valid Data API metric);
+# averageEngagementTimePerActiveUser is NOT a real metric — we derive the
+# average ourselves from total / activeUsers.
 _METRICS = [
     "screenPageViews", "activeUsers", "newUsers",
-    "engagementRate", "bounceRate", "averageEngagementTimePerActiveUser",
+    "engagementRate", "bounceRate", "userEngagementDuration",
 ]
 
 
@@ -180,16 +183,19 @@ def run_report(access_token: str, property_id: str, start_date: str, end_date: s
         if not title or len(mets) < len(_METRICS):
             continue
         vals = [_num(m.get("value")) for m in mets]
+        active = vals[1]
+        # vals[5] is TOTAL engagement seconds; average per active user is derived.
+        avg_engagement = round(vals[5] / active, 1) if active else 0.0
         rows.append({
             "title": title,
             "host": host,
             "channel": _channel_for(host),
             "page_views": vals[0],
-            "active_users": vals[1],
+            "active_users": active,
             "new_users": vals[2],
             "engagement_rate": round(vals[3], 4),
             "bounce_rate": round(vals[4], 4),
-            "avg_engagement_time": round(vals[5], 1),
+            "avg_engagement_time": avg_engagement,
         })
     return rows, {"ok": True}
 
