@@ -1192,9 +1192,9 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 | neutral / no GA4 match | kept unchanged | unit |
 | no GA4 data / stale | all targets pass through (today's behavior) | unit |
 | match | title→verdict via `listing_signal` (2+ shared tokens / full coverage) | unit |
-| wiring | duckAgent `_collect_weekly_shopify_sale_targets` applies steering before policy eval | integration (mocked) |
+| wiring | ✅ duckAgent `_collect_weekly_shopify_sale_targets` calls `_apply_sale_steering` (reads duck-ops `state/sale_steering.json`) before policy eval; 3 duckAgent tests | integration |
 
-**OPEN before build:** confirm the sale-target record carries a product **title** (needed to match GA4, which is title-keyed) — if it's product_id only, add a catalog_index id→title lookup. **Governance:** Tier-2 logic; the live discount apply stays behind `evaluate_weekly_sale_policy`'s manual-review/operator-approved gate. Convention #3 bracket (steered-count card) ships with the live lane.
+**RESOLVED:** sale records are product_id-only → directives keyed by product_id (duck-ops `sale_steering.build_steering_directives` maps catalog id→title→GA4 verdict, writes `state/sale_steering.json`; duckAgent reads it file-based — no cross-repo import). Live: 1 promote excluded, 4 fix prioritized. **Built 2026-06-27** (duck-ops producer + 16 tests; duckAgent reader + 3 tests). **Governance:** the live discount apply stays behind `evaluate_weekly_sale_policy`'s manual-review/operator-approved gate. Convention #3 bracket (steered-count card) + launchd schedule for the directives producer remain to add with the live cadence.
 
 ---
 

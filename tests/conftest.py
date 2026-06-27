@@ -181,6 +181,13 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         monkeypatch.setattr(_scp, "COLLECTION_PLAN_PATH", tmp_path / "shopify_collection_review" / "latest.json")
     except ImportError:
         pass
+    # 2026-06-27: sale_steering directives (Surface 42) — new prod-WRITE path
+    # read by the duckAgent weekly-sale flow.
+    try:
+        import sale_steering as _sst
+        monkeypatch.setattr(_sst, "SALE_STEERING_PATH", tmp_path / "sale_steering.json")
+    except ImportError:
+        pass
 
     # 2026-06-12: product_concept_queue.BUILD_NEXT_PROMOTIONS_PATH (Surface 16
     # ingestion). build_product_concept_queue() reads this file by default;
