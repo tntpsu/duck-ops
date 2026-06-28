@@ -1578,7 +1578,9 @@ def build_review_items(state_bundle: dict[str, dict[str, Any]]) -> list[dict[str
 
 
 def annotate_review_freshness(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    auto_flows = _auto_approved_flows()
     for item in items:
+        item["auto_handled"] = item_is_auto_handled(item, auto_flows)
         age_days = item_age_days(item.get("created_at"))
         is_fresh = age_days is not None and age_days <= FRESH_REVIEW_WINDOW_DAYS
         if age_days is None:
@@ -1593,8 +1595,39 @@ def annotate_review_freshness(items: list[dict[str, Any]]) -> list[dict[str, Any
     return items
 
 
+def _auto_approved_flows() -> set[str]:
+    """SINGLE SOURCE OF TRUTH for flows the system posts WITHOUT an operator
+    decision (the auto-approve path). The decision queue and the auto-enqueue
+    must agree on this set, or a flow that auto-posts still nags the operator
+    for approval (the 2026-06-27 reviews_reply_positive bug). Driven by the live
+    execution policy, so turning auto-approve ON for ANY future flow drops it
+    from the operator queue automatically — no per-flow repeat of the bug."""
+    flows: set[str] = set()
+    try:
+        from review_reply_executor import load_execution_policy
+        policy = load_execution_policy()
+        if policy.get("auto_execution_enabled") and policy.get("auto_queue_publish_ready_positive"):
+            flows.add("reviews_reply_positive")
+    except Exception:
+        pass
+    return flows
+
+
+def item_is_auto_handled(item: dict[str, Any], auto_flows: set[str] | None = None) -> bool:
+    """True when this item will be posted automatically (no operator decision):
+    its flow is on the auto-approve path AND the gate already passed
+    (publish_ready). Such items stay review_status=pending (the auto-enqueue
+    keys off that) but must NOT surface as a human decision."""
+    flows = _auto_approved_flows() if auto_flows is None else auto_flows
+    return (str(item.get("flow") or "") in flows
+            and str(item.get("decision") or "") == "publish_ready")
+
+
 def surfaced_review_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [item for item in items if item.get("is_fresh")]
+    # Surface fresh items that genuinely need the operator — exclude auto-handled
+    # ones (they post automatically; asking the operator to approve them is the
+    # bug). review_status stays pending so the auto-enqueue still picks them up.
+    return [item for item in items if item.get("is_fresh") and not item.get("auto_handled")]
 
 
 def assign_short_ids(items: list[dict[str, Any]], operator_state: dict[str, Any]) -> None:

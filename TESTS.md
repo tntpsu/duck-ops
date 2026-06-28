@@ -1200,6 +1200,25 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 
 ---
 
+## Surface 43 — Auto-approved flows must not nag the operator (2026-06-27, operator: "I got the posted email before I approved")
+
+**Root cause (architectural):** the review `review_status == "pending"` field is OVERLOADED for two consumers — the auto-enqueue (`auto_enqueue_publish_ready`) reads `pending` as "post this," and the operator decision queue reads `pending` as "needs a human." So a positive reply (auto-approved by design) sat as `pending` in the operator queue during the window between *drafted* and *auto-enqueued*, making it look like it needed approval it never needed. Naively flipping the status to hide it would STARVE the auto-poster (it keys off `pending`) — the trap that made this subtle.
+
+**Fix (display-only, general):** `surfaced_review_items` now excludes items flagged `auto_handled` (flow on the auto-approve path AND `publish_ready`), while `review_status` stays `pending` so auto-enqueue is unaffected. The auto-approved set is a SINGLE SOURCE OF TRUTH (`_auto_approved_flows`, driven by the live execution policy) shared by both layers — so any FUTURE flow turned auto-approve drops out of the operator queue automatically, no per-flow repeat.
+
+| Use case | Expected | Test |
+|---|---|---|
+| reviews_reply_positive + publish_ready, policy on | auto_handled → excluded from operator queue | ✅ `test_review_queue_auto_handled.py` |
+| same flow, needs_revision | still a human decision (not auto_handled) | ✅ |
+| non-auto flow (newduck) + publish_ready | still surfaced | ✅ |
+| generality: any flow in the set | excluded with zero extra code (future-proof) | ✅ |
+| review_status untouched | stays `pending` → auto-enqueue still posts | ✅ (display-only filter) |
+| policy off | `_auto_approved_flows` empty → nothing excluded | ✅ |
+
+**Audit answer (would this hit other flows?):** yes — any flow given an auto-approve policy without this shared-set wiring would repeat it. Now structurally prevented. Same family as [[feedback_passthrough_chain_audit]] / [[feedback_portal_action_vs_card_refresh]] (two readers of one truth). **Tier-2, display-only; 7 tests; 984 suite green.**
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
