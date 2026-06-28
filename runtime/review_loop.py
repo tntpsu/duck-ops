@@ -1618,6 +1618,12 @@ def item_is_auto_handled(item: dict[str, Any], auto_flows: set[str] | None = Non
     its flow is on the auto-approve path AND the gate already passed
     (publish_ready). Such items stay review_status=pending (the auto-enqueue
     keys off that) but must NOT surface as a human decision."""
+    # Persisted handling wins (Surface 44 single source of truth); else derive
+    # from flow + policy. Both layers (this display filter + the auto-enqueue)
+    # now agree on the automation axis.
+    stored = str(item.get("handling") or "").strip().lower()
+    if stored in {"auto", "manual"}:
+        return stored == "auto" and str(item.get("decision") or "") == "publish_ready"
     flows = _auto_approved_flows() if auto_flows is None else auto_flows
     return (str(item.get("flow") or "") in flows
             and str(item.get("decision") or "") == "publish_ready")

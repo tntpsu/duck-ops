@@ -1389,6 +1389,29 @@ def queue_review_reply(
     }
 
 
+def resolve_handling(decision: dict[str, Any], *, policy: dict[str, Any] | None = None) -> str:
+    """SINGLE SOURCE OF TRUTH for the automation axis: 'auto' (system posts
+    without a human) or 'manual'. A persisted `handling` wins; otherwise it's
+    derived from the flow + live execution policy. Both the auto-enqueue and the
+    operator decision queue must resolve auto/manual through THIS function so the
+    two layers never disagree (STATUS_CONTRACT.md; Surface 43/44)."""
+    stored = str((decision or {}).get("handling") or "").strip().lower()
+    if stored in {"auto", "manual"}:
+        return stored
+    pol = policy if policy is not None else load_execution_policy()
+    flow = str((decision or {}).get("flow") or "")
+    if (flow == "reviews_reply_positive"
+            and pol.get("auto_execution_enabled")
+            and pol.get("auto_queue_publish_ready_positive")):
+        return "auto"
+    return "manual"
+
+
+# review_status values that mean the operator (or reconciliation) has terminally
+# decided NOT to post — the auto-enqueue must respect these even for auto flows.
+_OPERATOR_KILL_STATUSES = {"rejected", "archived"}
+
+
 def auto_enqueue_publish_ready(
     *,
     queued_by: str = "phase2_sidecar_auto_enqueue",
@@ -1422,7 +1445,13 @@ def auto_enqueue_publish_ready(
             continue
         if decision.get("decision") != "publish_ready":
             continue
-        if decision.get("review_status") != "pending":
+        # Surface 44: gate on the AUTOMATION axis (handling==auto), not the
+        # overloaded review_status=="pending". execution_state is the dedup
+        # (queued once → never re-queued); the operator-kill guard ensures a
+        # rejected/archived reply never auto-posts even on an auto flow.
+        if resolve_handling(decision, policy=policy) != "auto":
+            continue
+        if str(decision.get("review_status") or "") in _OPERATOR_KILL_STATUSES:
             continue
         if str(decision.get("execution_state") or "not_queued") != "not_queued":
             continue

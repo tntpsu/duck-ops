@@ -1219,6 +1219,29 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 
 ---
 
+## Surface 44 — Persist `handling` and decouple the auto-poster from `review_status` (2026-06-27, Surface 43 structural root)
+
+**Goal.** Stop overloading `review_status=="pending"` as the auto-post trigger. Introduce `resolve_handling(decision) -> auto|manual` as the SINGLE SOURCE OF TRUTH for the automation axis (persisted value wins; else derived from flow + live execution policy). The auto-enqueue keys off `handling==auto` instead of `review_status==pending`; the operator-decision queue keeps using `review_status`. Persist `handling` (backfilled lazily) so the field is real, per STATUS_CONTRACT debt #1.
+
+**Safety (the careful part):** dropping the `review_status==pending` gate must NOT let a rejected/archived reply post. New gate = `handling==auto AND decision==publish_ready AND execution_state==not_queued AND review_status NOT IN {rejected, archived}`. `execution_state` remains the dedup (queued once → never re-queued). Behavior is preserved: auto items still queue, manual skip, operator-kill wins; the only delta is an *approved-but-unqueued* auto item now posts (correct — it's approved).
+
+| Use case | Expected | Test |
+|---|---|---|
+| auto flow, publish_ready, not_queued, pending | queued (unchanged) | 🔴 planned `test_auto_enqueue_gating` |
+| manual flow (handling=manual) | skipped (humans handle it) | 🔴 |
+| operator rejected/archived an auto item | NEVER auto-posts (kill wins) | 🔴 |
+| already queued (execution_state!=not_queued) | not re-queued (dedup) | 🔴 |
+| `resolve_handling`: persisted value wins | returns stored handling | 🔴 |
+| `resolve_handling`: absent → derived from flow+policy | auto when policy on, else manual | 🔴 |
+| handling persisted on reconcile | `decision["handling"]` set, backfills old artifacts | 🔴 |
+| display layer (`item_is_auto_handled`) routes through `resolve_handling` | one predicate, both layers agree | 🔴 |
+
+**Governance:** touches the live Etsy review-reply auto-poster → heavy tests + duck-bug-hunt Lens-2/contract + deploy-check before commit. Tier-2 logic (no new external mutation; same posting path, different trigger field).
+
+**Built 2026-06-27.** `resolve_handling` (single source of truth) + auto-enqueue repointed off `review_status==pending` → `handling==auto` with operator-kill (rejected/archived) + execution_state dedup guards; `item_is_auto_handled` now honors persisted `handling` too. 10 new tests (resolve_handling + every gating case incl. operator-kill, dedup, the approved-unqueued behavior change); contract lens clean; 993 suite green. **Authority is read-time** (`resolve_handling` derives auto/manual from flow+policy when `handling` is absent, and persisted value wins) — so the field is authoritative everywhere now; a produce-time stamp that writes `handling` into the artifact at creation is a clean LOW follow-up (not behavior-affecting since read-time resolution already covers it).
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
