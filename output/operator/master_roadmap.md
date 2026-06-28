@@ -198,6 +198,13 @@ Queued follow-ups (none block the shipped logic; most are "make it live on caden
 5. **GA4 engagement→theme feedback loop** — re-weight Thursday/Build-Next theme selection by which themes actually engage (Phase 2 strategic loop; needs a few weeks of history).
 6. **gap→collection Stage B** — the gated Shopify `collectionCreate` apply path, deferred until the planner actually surfaces candidates (0 on current data; fires when a category query with ≥3 matching products trends).
 
+### Data-model integrity — status-field overload (from the 2026-06-27 Surface 43 audit)
+
+Canonical field meanings now live in `duck-ops/STATUS_CONTRACT.md` (owned under `duck-data-model-governance`). The audit found two HIGH-risk debts beyond the shipped Surface 43 display fix:
+1. **Persist `handling: auto|manual`** — Surface 43's structural root. Auto-enqueue keys off the overloaded `review_status==pending`; the shipped fix is display-only until `handling` is a real field the auto-enqueue keys off instead. The auto/manual concept currently lives in 3 unsynced places.
+2. **Cross-repo `decision` vocabulary mismatch (possible latent bug)** — duckAgent flows write `decision` values (`auto_schedule_allowed`/`manual_review_required`/…) that duck-ops readers checking `== "publish_ready"` silently never match. Verify this isn't mis-handling meme/jeepfact/weekly/thursday artifacts, then unify or namespace the vocabulary.
+Lower: `chain_state` needs `chain_kind` to disambiguate; `available` conflates transient-absence with permanent capability-gap. Rule going forward: a new automation property gets one persisted field every consumer reads — never overload a lifecycle field.
+
 ### Priority 0: Creative Quality Loop Phase 4.5 — Engagement Write-Back (high-ROI #1, in flight 2026-06-06)
 Phase 4 of CREATIVE_QUALITY_LOOP_V2_PLAN.md shipped the canonical receipt directory and wired meme + jeepfact + thursday through `rank_creative_candidates()`. Phase 4.5 closes the loop by feeding real-world engagement back to the receipt so the system measurably gets better at picking creatives over time.
 
