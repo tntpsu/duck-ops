@@ -59,8 +59,9 @@ for display but is the debt below.
 - Means: is there fresh data right now? `false` = retry later (missing/stale producer output).
 - **Must NOT** be overloaded for "feature not wired / never coming" — that permanent capability-gap needs a separate marker (some surfaces nest `status:"unavailable"`). Readers can't currently tell "retry later" from "never." `seo_demand_context.py` does it right (checks staleness separately).
 
-### `chain_state` — read ONLY with `chain_kind`
-- Two disjoint state machines share this key: SEO review chain (`awaiting_review` / `apply_attention` / `ready_to_send_next` / `all_clear` / `idle`) and promotion lifecycle (`active` / `observing` / …). Always branch readers on `chain_kind` ("seo" vs "promotion"); collision risk if promotion ever emits `ready`/`idle`.
+### `chain_state` — disjoint domains, cross-kind bucketed by design
+- Two state machines share this key: review_apply (`awaiting_review` / `apply_attention` / `ready_to_send_next` / `all_clear` / `idle`, from `shopify_seo_outcomes.py`) and promotion (`active` / `ready` / `blocked` / `observing`, from `business_operator_desk.py`). **Verified disjoint 2026-06-27.**
+- The operator desk INTENTIONALLY buckets cross-kind (merges `ready_to_send_next`+`ready`, `apply_attention`+`blocked` into one operator view). That's safe **only while the two domains stay disjoint** — guarded by `tests/test_chain_state_domains.py` (fails if a producer ever emits a colliding value). If you add a value, keep the domains disjoint or branch the bucketer on `chain_kind`.
 
 ### `status` — SURFACE-LOCAL; never cross-read
 - Each surface owns its own `status` vocabulary: OS health cards (`green/yellow/red`, `gap/observing/ready_to_test/…`), scheduler receipts (`healthy/missed_run/failed/timeout/hung/orphaned/slow/running/fixed_pending_next_run`), execution queue (`queued/running/posted/skipped/dismissed/…`), dependency_health (`ok/warn/bad`). **Never apply one surface's vocabulary to another's values.** Safe today (no cross-read path); keep it that way.
@@ -74,10 +75,10 @@ for display but is the debt below.
 
 1. **HIGH — persist `handling: auto|manual`.** Surface 43's root. Auto-enqueue keys off `review_status==pending` (overloaded). Add `handling`, set it at produce time, key auto-enqueue off it; then `review_status` is purely human-lifecycle. The shipped Surface 43 fix is display-only until this lands.
 2. **~~HIGH — cross-repo `decision` mismatch~~ → RESOLVED (false alarm, verified 2026-06-27).** Live artifacts use the canonical vocabulary across all flows; the flagged values were a separate jeepfact-local scheduling var. Downgraded to the LOW naming-hygiene note above (rename the local `decision`).
-3. **MEDIUM — `chain_state`** depends on `chain_kind` to disambiguate; document or branch.
-4. **MEDIUM-LOW — `available`** can't distinguish transient absence from permanent capability-gap.
+3. **~~MEDIUM — `chain_state`~~ → GUARDED (2026-06-27).** Verified the two domains are disjoint; cross-kind bucketing is intentional and safe. Pinned by `tests/test_chain_state_domains.py` so a future colliding value fails loudly. (Stronger follow-up: extract the domains into shared constants the producers + bucketer both import.)
+4. **MEDIUM-LOW — `available`** can't distinguish transient absence from permanent capability-gap. (Open — lowest priority.)
 
-So after verification there is really **one HIGH debt** (persist `handling`) plus two MEDIUM/LOW. The data model is healthier than the raw audit suggested.
+So after verification: HIGH debt #1 (persist/decouple `handling`) is **fixed** (Surface 44), #2 was a **false alarm**, #3 is **guarded**, leaving only the MEDIUM-LOW #4. The data model is in good shape.
 
 ## Rule of thumb
 When you add an automation property (auto-approve, auto-apply, auto-schedule) to
