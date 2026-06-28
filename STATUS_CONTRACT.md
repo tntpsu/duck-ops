@@ -56,8 +56,8 @@ for display but is the debt below.
 - Values: `not_queued` / `queued` / `running` / `posted` / `failed` / `skipped` / `resolved`. Single-purpose. Leave as-is.
 
 ### `available` — data presence (transient) ONLY
-- Means: is there fresh data right now? `false` = retry later (missing/stale producer output).
-- **Must NOT** be overloaded for "feature not wired / never coming" — that permanent capability-gap needs a separate marker (some surfaces nest `status:"unavailable"`). Readers can't currently tell "retry later" from "never." `seo_demand_context.py` does it right (checks staleness separately).
+- Means: is there fresh data right now? `false` = retry later (missing/stale producer output). This is the **top-level** producer flag (gsc_search_demand, listing_performance, sale_steering, profit_intel, …) that readers like `build_next_engine`, `seo_demand_context`, `roi_triage` check.
+- **Permanent "feature not wired" is a DIFFERENT field at a different path**, carrying its own marker: `status:"unavailable"` + a `note` (reference: `shopify_seo_outcomes.py` `traffic_signal.available:false, status:"unavailable"`). **Verified 2026-06-27:** no reader cross-reads these two — transient `available` and the nested capability-gap are separate paths/consumers. Convention to keep: a transient gap is a bare `available:false`; a permanent capability-gap MUST also carry `status:"unavailable"` (+ note), never a bare `available:false`.
 
 ### `chain_state` — disjoint domains, cross-kind bucketed by design
 - Two state machines share this key: review_apply (`awaiting_review` / `apply_attention` / `ready_to_send_next` / `all_clear` / `idle`, from `shopify_seo_outcomes.py`) and promotion (`active` / `ready` / `blocked` / `observing`, from `business_operator_desk.py`). **Verified disjoint 2026-06-27.**
@@ -76,9 +76,9 @@ for display but is the debt below.
 1. **HIGH — persist `handling: auto|manual`.** Surface 43's root. Auto-enqueue keys off `review_status==pending` (overloaded). Add `handling`, set it at produce time, key auto-enqueue off it; then `review_status` is purely human-lifecycle. The shipped Surface 43 fix is display-only until this lands.
 2. **~~HIGH — cross-repo `decision` mismatch~~ → RESOLVED (false alarm, verified 2026-06-27).** Live artifacts use the canonical vocabulary across all flows; the flagged values were a separate jeepfact-local scheduling var. Downgraded to the LOW naming-hygiene note above (rename the local `decision`).
 3. **~~MEDIUM — `chain_state`~~ → GUARDED (2026-06-27).** Verified the two domains are disjoint; cross-kind bucketing is intentional and safe. Pinned by `tests/test_chain_state_domains.py` so a future colliding value fails loudly. (Stronger follow-up: extract the domains into shared constants the producers + bucketer both import.)
-4. **MEDIUM-LOW — `available`** can't distinguish transient absence from permanent capability-gap. (Open — lowest priority.)
+4. **~~MEDIUM-LOW — `available`~~ → VERIFIED SAFE (2026-06-27).** Transient `available` (top-level) and the permanent capability-gap (`traffic_signal.available` + `status:"unavailable"`) are different paths read by different consumers; no conflation. Convention documented above. No code change needed.
 
-So after verification: HIGH debt #1 (persist/decouple `handling`) is **fixed** (Surface 44), #2 was a **false alarm**, #3 is **guarded**, leaving only the MEDIUM-LOW #4. The data model is in good shape.
+So after verification ALL FOUR audit debts are closed: #1 **fixed** (Surface 44), #2 **false alarm**, #3 **guarded** (invariant test), #4 **verified safe**. The data model is in good shape, and the status-overload class that caused Surface 43 is structurally addressed (canonical contract + the real overload removed + latent risks guarded).
 
 ## Rule of thumb
 When you add an automation property (auto-approve, auto-apply, auto-schedule) to
