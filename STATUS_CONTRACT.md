@@ -39,7 +39,8 @@ for display but is the debt below.
 ### `decision` — machine quality verdict ONLY
 - Means: the gate's verdict on output quality. **Must NOT** encode auto-vs-manual or human approval.
 - Values: `publish_ready` / `needs_revision` / `discard`.
-- ⚠️ **Cross-repo collision (Debt #2):** duckAgent flows write a DIFFERENT vocabulary into `decision` (`auto_schedule_allowed`, `manual_review_required`, `manual_publish_allowed`, `auto_apply_allowed`, `approved_for_publish`, `blocked`). duck-ops readers checking `decision == "publish_ready"` silently never match duckAgent-authored artifacts. Either unify the vocabulary or namespace by `artifact_type`.
+- ✅ **Verified canonical across flows (2026-06-27):** live `quality_gate_state.json` shows EVERY flow (meme/jeepfact/weekly/thursday/newduck/reviews_*) uses only `publish_ready`/`needs_revision`/`discard`. duck-ops `== "publish_ready"` checks DO match all flows. (An earlier audit flagged a "cross-repo mismatch" — that was a false alarm: jeepfact has a *local* variable also named `decision` holding scheduling-policy values (`auto_schedule_allowed`/`manual_publish_allowed`/…) that drives buttons/confirmation, NOT the artifact's gate `decision`. Different field, no collision. See naming-hygiene note below.)
+- 🟡 **Naming-hygiene (LOW):** `flows/jeepfact/steps.py` reuses the name `decision` for a publish-scheduling-policy local var — distinct from the gate `decision`. Footgun if ever serialized into the artifact. Consider renaming the local to `schedule_policy`.
 
 ### `review_status` — operator decision lifecycle ONLY
 - Means: where the human decision stands. **Must NOT** be an automation trigger.
@@ -72,9 +73,11 @@ for display but is the debt below.
 ## Known debts (ranked)
 
 1. **HIGH — persist `handling: auto|manual`.** Surface 43's root. Auto-enqueue keys off `review_status==pending` (overloaded). Add `handling`, set it at produce time, key auto-enqueue off it; then `review_status` is purely human-lifecycle. The shipped Surface 43 fix is display-only until this lands.
-2. **HIGH — cross-repo `decision` vocabulary mismatch.** duckAgent's `decision` values never match duck-ops `==publish_ready` checks. Verify this isn't silently mis-handling meme/jeepfact/weekly/thursday artifacts, then unify or namespace.
+2. **~~HIGH — cross-repo `decision` mismatch~~ → RESOLVED (false alarm, verified 2026-06-27).** Live artifacts use the canonical vocabulary across all flows; the flagged values were a separate jeepfact-local scheduling var. Downgraded to the LOW naming-hygiene note above (rename the local `decision`).
 3. **MEDIUM — `chain_state`** depends on `chain_kind` to disambiguate; document or branch.
 4. **MEDIUM-LOW — `available`** can't distinguish transient absence from permanent capability-gap.
+
+So after verification there is really **one HIGH debt** (persist `handling`) plus two MEDIUM/LOW. The data model is healthier than the raw audit suggested.
 
 ## Rule of thumb
 When you add an automation property (auto-approve, auto-apply, auto-schedule) to

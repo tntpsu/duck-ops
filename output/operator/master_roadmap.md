@@ -202,7 +202,7 @@ Queued follow-ups (none block the shipped logic; most are "make it live on caden
 
 Canonical field meanings now live in `duck-ops/STATUS_CONTRACT.md` (owned under `duck-data-model-governance`). The audit found two HIGH-risk debts beyond the shipped Surface 43 display fix:
 1. **Persist `handling: auto|manual`** — Surface 43's structural root. Auto-enqueue keys off the overloaded `review_status==pending`; the shipped fix is display-only until `handling` is a real field the auto-enqueue keys off instead. The auto/manual concept currently lives in 3 unsynced places.
-2. **Cross-repo `decision` vocabulary mismatch (possible latent bug)** — duckAgent flows write `decision` values (`auto_schedule_allowed`/`manual_review_required`/…) that duck-ops readers checking `== "publish_ready"` silently never match. Verify this isn't mis-handling meme/jeepfact/weekly/thursday artifacts, then unify or namespace the vocabulary.
+2. **~~Cross-repo `decision` mismatch~~ → RESOLVED (false alarm, verified live 2026-06-27).** Every flow's quality_gate `decision` is the canonical `publish_ready`/`needs_revision`/`discard`; the flagged `auto_schedule_allowed`/… values were a separate jeepfact-local scheduling variable, not the gate decision. Downgraded to a LOW naming-hygiene item (rename the jeepfact local `decision`). So the only HIGH data-model debt is persisting `handling`.
 Lower: `chain_state` needs `chain_kind` to disambiguate; `available` conflates transient-absence with permanent capability-gap. Rule going forward: a new automation property gets one persisted field every consumer reads — never overload a lifecycle field.
 
 ### Priority 0: Creative Quality Loop Phase 4.5 — Engagement Write-Back (high-ROI #1, in flight 2026-06-06)
