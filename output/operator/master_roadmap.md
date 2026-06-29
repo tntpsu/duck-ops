@@ -207,7 +207,10 @@ Canonical field meanings now live in `duck-ops/STATUS_CONTRACT.md` (owned under 
 2. **~~Cross-repo `decision` mismatch~~ → RESOLVED (false alarm, verified live 2026-06-27).** Every flow's quality_gate `decision` is the canonical `publish_ready`/`needs_revision`/`discard`; the flagged `auto_schedule_allowed`/… values were a separate jeepfact-local scheduling variable, not the gate decision. Downgraded to a LOW naming-hygiene item (rename the jeepfact local `decision`). So the only HIGH data-model debt is persisting `handling`.
 Lower: `chain_state` needs `chain_kind` to disambiguate; `available` conflates transient-absence with permanent capability-gap. Rule going forward: a new automation property gets one persisted field every consumer reads — never overload a lifecycle field.
 
-### Priority 0: Creative Quality Loop Phase 4.5 — Engagement Write-Back (high-ROI #1, in flight 2026-06-06)
+### ~~Priority 0: Creative Quality Loop Phase 4.5 — Engagement Write-Back~~ → SHIPPED (2026-06-06; verified live 2026-06-28)
+**All 7 Phase 5 steps shipped** (the roadmap previously mislabeled this "in flight"). Verified 2026-06-28: real receipts finalizing 24h+7d outcomes (`meme_2026-06-15`, `jeepfact_2026-06-10` at `final_7d`), the IG-queue receipt gap closed in the sidecar, all three lanes stamp post_id→run_id, the collector writes outcomes back, `current_learnings.executed_experiments_last_14d` reads real receipts (no longer hardcoded 0), and a Surface 9 OS watchdog card guards the "published-but-0-outcomes" case. The only follow-up — **the cross-repo prod-write three-layer isolation it shipped without — was completed 2026-06-28** (conftest redirects both repos + `_guard_receipt_write` source guard + pollution-audit tests; see TESTS.md Surface 9). **Phase 6 (ranker retraining on 30+ posts of outcome data) is the real next creative-quality step, and is now unblocked** — outcomes are accumulating.
+
+Historical scoping (kept for context):
 Phase 4 of CREATIVE_QUALITY_LOOP_V2_PLAN.md shipped the canonical receipt directory and wired meme + jeepfact + thursday through `rank_creative_candidates()`. Phase 4.5 closes the loop by feeding real-world engagement back to the receipt so the system measurably gets better at picking creatives over time.
 
 Why this is high value:

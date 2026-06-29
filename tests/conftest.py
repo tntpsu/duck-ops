@@ -161,6 +161,19 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
     # so this is test-hygiene (hermetic staleness path), NOT the 3-layer write
     # isolation — no FROZEN guard / pollution-audit test is needed for a read.
     monkeypatch.setattr(_bne, "COMPETITOR_REPORTS_DIR", tmp_path / "competitor_reports")
+    # 2026-06-28: creative_quality_receipts dir (Surface 9 isolation gap). The
+    # social_performance_collector WRITES outcomes into duckAgent's receipts dir
+    # cross-repo (and current_learnings READS it). Redirect both module constants
+    # to tmp so the full-run collector path can't pollute prod receipts. The
+    # WRITE itself is also guarded source-side by creative_quality_loop's
+    # DUCK_TEST_MODE frozen-dir check + a pollution-audit test.
+    for _modname, _const in (("social_performance_collector", "CREATIVE_QUALITY_RECEIPTS_DIR"),
+                             ("current_learnings", "CREATIVE_QUALITY_RECEIPTS_DIR")):
+        try:
+            _m = __import__(_modname)
+            monkeypatch.setattr(_m, _const, tmp_path / "creative_quality_receipts")
+        except (ImportError, AttributeError):
+            pass
     # 2026-06-26: ga4_listing_performance state (Surface 39) — same three-layer
     # isolation (this redirect + DUCK_TEST_MODE guard in write_listing_performance
     # + no-pollution audit test).

@@ -246,7 +246,7 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 **Coverage:** 11 assembler tests (`test_learning_inspector_payload.py`) + 4 page-section tests (`test_learnings_intel_page.py::InspectorSectionsTests`) = 15 new tests covering the load-bearing logic. Tile JS + HTTP endpoint are smoke-verified, not unit-tested — same gap pattern as the rest of the intel-page surfaces (`profit`, `competitors`, `reviews`).
 
 **Known gaps (acceptable for ship):**
-- `executed_experiments_last_14d` is hard-coded to 0 because no operator write-back exists yet (Phase 4.5 of `CREATIVE_QUALITY_LOOP_V2_PLAN.md`). The signal gap "N experiments queued, 0 executed receipts" surfaces this honestly. When write-back lands, that field becomes real and the gap text needs an update.
+- ~~`executed_experiments_last_14d` is hard-coded to 0~~ **STALE NOTE (write-back shipped 2026-06-06, Surface 9).** It now reads the real value from `current_learnings._executed_experiments_from_receipts(window_days=14)` (line ~1091); the viewer hardcode is gone. The signal_gap shrinks as outcome receipts land (meme/jeepfact already finalizing 24h+7d outcomes on real data 2026-06-28).
 - Tracking-targets section sorts by `avg_engagement_score` desc with nulls last. If a profile is observed but the benchmark hasn't scored it yet (edge case during first-run), it sorts to the bottom — acceptable.
 - No test for the cache-invalidation path: `_load_learnings_intel` now calls `build_learning_inspector_payload` per system-health refresh (every 5 min via launchd). The compute is ~5 file reads + dict assembly (~10ms measured) so the additional cost is negligible.
 
@@ -263,6 +263,14 @@ The Workflows card on the operator desk + portal shows all 7 lane/manual flows (
 | 2026-06-13 silent-pipeline fix | ✅ `test_social_performance_collector_writeback.py::WindowSelectionTests` (catch-up 24h spans 20–144h, 7d unbounded) + `::test_day3_post_still_writes_24h_outcome` + `::test_evening_publish_daily_cadence_lands_on_day2` | ✅ `test_creative_quality_outcome_schema.py::StampPublishLinkTests::test_rejects_known_placeholder_post_ids` | ✅ `test_creative_outcome_watchdog.py` (reader: no-receipts green / published-but-0-outcomes RED / recent green / stale yellow→red; registration incl. empty payload) |
 
 **Background:** Phase 4 wired three flows through `rank_creative_candidates()` but engagement after publish is never measured. Phase 5 closes the loop: queued IG posts get receipts written by the sidecar, every published variant stamps post_id → run_id, the existing `social_performance_collector` writes outcomes back to `data/creative_quality_receipts/<flow>_<run_id>.json` at 24h + 7d windows, and `current_learnings` surfaces `executed_experiments_last_14d` so the Inspector's "0 executed" signal_gap shrinks.
+
+**2026-06-28 — three-layer isolation completed (the one thing Phase 5 shipped without).** The collector WRITES outcomes into duckAgent's `data/creative_quality_receipts/` cross-repo — a new prod-write path that lacked all three isolation layers (architectural convention #4, the one that bit 3× in 10 days). Closed: (1) conftest redirects in BOTH repos — duckAgent patches `_creative_quality_receipts_dir`, duck-ops patches `social_performance_collector`/`current_learnings.CREATIVE_QUALITY_RECEIPTS_DIR`; (2) source guard `_guard_receipt_write` in `creative_quality_loop.py` raises `CreativeReceiptStateError` under `DUCK_TEST_MODE=1` if a write targets the frozen prod dir (one chokepoint protects both repos since all writes funnel through it); (3) `test_no_test_pollution_in_creative_quality_receipts.py` audit in BOTH repos. Verified: live receipts already finalizing real outcomes (meme/jeepfact 24h+7d) and zero pollution markers. Latent exposure (the full-run collector path + full-flow publish tests) was real but had not yet fired.
+
+| isolation layer (2026-06-28) | covered |
+|---|---|
+| Layer 1 conftest redirect (both repos) | ✅ duckAgent `_isolate_creative_quality_receipts`; duck-ops `CREATIVE_QUALITY_RECEIPTS_DIR` redirect |
+| Layer 2 source `DUCK_TEST_MODE` guard | ✅ `test_no_test_pollution_in_creative_quality_receipts.py` (duckAgent) guard unit tests: `_guard_receipt_write` / `_atomic_replace_receipt` / `write_creative_quality_receipt` all refuse prod under test mode; allow tmp; no-op without test mode |
+| Layer 3 post-suite pollution audit (both repos) | ✅ same file (duckAgent) + duck-ops sibling — scan prod receipts for placeholder post_ids / test-slug filenames / test-sourced outcomes |
 
 | Use case | Happy | Receipt missing | API down | Replayed event | Deleted post | Idempotency boundary |
 |---|---|---|---|---|---|---|
