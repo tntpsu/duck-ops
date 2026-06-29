@@ -1272,22 +1272,27 @@ demand(listing, W) = ( favorites_velocity(W) + SALES_WEIGHT * sales_proxy(W) ) *
 - **Bucket A "Same duck — they're outselling you":** for each MY listing, matched competitor listing (existing `_find_similar_competitor_products`) whose **demand** beats mine by margin+ratio on *flow* (not stock). Output: my_title ↔ their_title, demand breakdown, window, action=refresh/promote mine.
 - **Bucket B "They sell it, you don't":** gap ducks (existing semantic dedupe) ranked by **demand** (was: raw `engagement_delta_7d≥100`). Output: title, shop, demand + its favorites-velocity/sales-proxy breakdown, window, price.
 
+_Test files: `duckAgent/tests/test_demand_score.py` (helper, 10), `test_competitor_demand_buckets.py` (engine wiring + golden, 9)._
+
 | use case | happy (7d) | happy (30d) | missing W-prior snapshot | missing favorites/qty field | exact shop sales missing | dedupe (embedding) outage | empty input |
 |---|---|---|---|---|---|---|---|
-| `demand_score(listing, W)` arithmetic | 🔴 unit | 🔴 unit | 🔴 window→None, don't fabricate | 🔴 component→0, flag, no crash | 🔴 credibility=1.0 neutral | n/a | 🔴 |
-| **Bucket A** flags same-duck on *flow* | 🔴 unit | 🔴 unit | 🔴 falls to available window | 🔴 | 🔴 | 🔴 lexical fallback (dedupe_degraded) | 🔴 no my-listings→[] |
-| **Bucket A** old high-stock / zero-velocity does NOT flag (the key fix) | 🔴 **regression unit** | 🔴 | n/a | n/a | n/a | n/a | n/a |
-| **Bucket B** gap duck ranked by demand | 🔴 unit | 🔴 unit | 🔴 | 🔴 | 🔴 | 🔴 | 🔴 no competitors→[] |
-| **Bucket B** already-made duck stays suppressed | 🔴 unit | n/a | n/a | n/a | n/a | 🔴 lexical hard-skip | n/a |
-| shop_credibility weights real seller up / view-only down | 🔴 unit | n/a | n/a | n/a | 🔴 neutral | n/a | n/a |
-| window selector (7d vs 30d) changes ranking | 🔴 unit | 🔴 unit | 🔴 30d unavailable→7d only, labeled | n/a | n/a | n/a | n/a |
-| render: both buckets, **7d + 30d columns side by side** (sorted by 7d), breakdown in email + payload | 🔴 unit | 🔴 unit | 🔴 unavailable window shows "—", not blank | n/a | n/a | n/a | 🔴 "none this window" |
+| `demand_score(listing, W)` arithmetic | ✅ `test_demand_blends...` | ✅ same helper | ✅ `test_window_unavailable_when_no_prior` | ✅ `test_missing_components_do_not_crash` | ✅ `test_shop_credibility...neutral` | n/a | ✅ |
+| **Bucket A** flags same-duck on *flow* | ✅ `test_bucket_a_flags_when_competitor_demand_high` | ✅ via `their_demand_30d` | ✅ falls to available window | ✅ component→0 | ✅ neutral cred | ✅ lexical fallback (unchanged) | ✅ `test_bucket_a_no_similar_no_flag` |
+| **Bucket A** old high-stock / zero-velocity does NOT flag (the key fix) | ✅ `test_bucket_a_old_high_stock_does_not_flag` + `test_old_high_stock_listing_does_not_flag` | ✅ | n/a | n/a | n/a | n/a | n/a |
+| **Bucket B** gap duck ranked by demand | ✅ `test_bucket_b_gates_and_ranks_by_demand` | ✅ 30d cols asserted | ✅ `test_bucket_b_new_listing_falls_back_to_engagement` | ✅ compute_demand | ✅ neutral cred | ✅ degraded path forced in test | ✅ empty list→[] |
+| **Bucket B** already-made duck stays suppressed | ✅ existing dedupe (`test_fuzzy_matching_dedupe`) unchanged | n/a | n/a | n/a | n/a | ✅ lexical hard-skip preserved | n/a |
+| shop_credibility weights real seller up / view-only down | ✅ `test_real_selling_shop_weights_up...` | n/a | n/a | n/a | ✅ neutral | n/a | n/a |
+| window selector (7d vs 30d) changes ranking | ✅ `test_attach_listing_demand_7d_vs_30d` | ✅ same | ✅ `test_attach_demand_unavailable_when_no_prior` | n/a | n/a | n/a | n/a |
+| render: both buckets, **7d + 30d columns side by side** (sorted by 7d), breakdown in email + payload | ✅ live-render smoke (both headers + Demand 7d/30d cols) | ✅ | ✅ `_demand_cell`→"—" | n/a | n/a | n/a | ✅ "No … this window" |
+| golden fixture gates retunes | ✅ `test_golden_fixture_surface_decisions` (5 cases) | — | — | — | — | — | — |
 
 **Window presentation (operator decision 2026-06-28):** each bucket shows **7d and 30d demand in adjacent columns, sorted by 7d** — so "hot this week" vs "steady all month" is visible at a glance. A window with no prior snapshot renders "—" in that column, never a fabricated number.
 
 **Honest limits (label in output, don't hide):** no exact per-listing competitor sales exists (Etsy doesn't expose it) → demand is a *proxy*; favorites-velocity is a *leading* indicator not a sale; the 100-listing API page cap still bounds each shop's visible catalog (separate item). **Determinism:** all-arithmetic, temp-0 N/A (no LLM in the score) — the only LLM-adjacent step is the existing embedding dedupe, which already fails open to lexical.
 
 **Tunables to pin in config (versioned-config recipe):** `SALES_WEIGHT`, `SHOP_REF`, credibility `lo/hi`, Bucket-A margin+ratio, Bucket-B demand floor. A golden fixture (hand-picked "should/shouldn't surface" ducks) gates any retune.
+
+**Built 2026-06-28 (duckAgent 4100d13).** `flows/competitor/demand_score.py` (pure scorer) + `config/demand_scoring.json` (versioned tunables) + `tests/fixtures/demand_scoring_golden.json`. Both buckets re-ranked on demand; Bucket A (improvement_opportunities) wired into the email for the first time; my-shop snapshot now stores favorites for future my-side velocity. 19 new tests + golden, 308 green. Verified on live 06-28: top demand = Breast Cancer / Highland Cow / Pitbull; 30d surfaces steady sellers (Highland Cow 303 vs 7d 82). The one ⏸️ still-open follow-up: a my-side demand baseline (currently 0 until favorites history accrues) so Bucket A compares your flow vs theirs, not just "is a competitor selling this."
 
 **Roadmap (operator: "later, roadmap what things look like over the year"):** a separate surface — seasonal/year view over the **157 backfilled reports'** time series (exact shop sales + demand by theme over 12 months) to spot recurring patterns (e.g. patriotic spikes in Jun-Jul, dog breeds steady). Not this surface; flagged so the matrix has the row when we get there.
 
