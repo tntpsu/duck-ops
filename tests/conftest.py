@@ -156,6 +156,11 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         monkeypatch.setattr(_gsc, "GSC_SEARCH_DEMAND_PATH", tmp_path / "gsc_search_demand.json")
     except ImportError:
         pass
+    # 2026-06-28: competitor reports dir (Surface 47) — build_next_engine READS
+    # it for the demand signal + staleness check. Read-only (duckAgent writes it),
+    # so this is test-hygiene (hermetic staleness path), NOT the 3-layer write
+    # isolation — no FROZEN guard / pollution-audit test is needed for a read.
+    monkeypatch.setattr(_bne, "COMPETITOR_REPORTS_DIR", tmp_path / "competitor_reports")
     # 2026-06-26: ga4_listing_performance state (Surface 39) — same three-layer
     # isolation (this redirect + DUCK_TEST_MODE guard in write_listing_performance
     # + no-pollution audit test).

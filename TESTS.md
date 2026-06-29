@@ -1321,6 +1321,8 @@ _Test files: `duckAgent/tests/test_demand_score.py` (helper, 10), `test_competit
 
 **Scope honesty:** the "MINT not just boost" framing is ~90% already done — don't bill it as new wiring. The high-value change is the one-spot silent-drop fix. Effort: ~half a day, no new write path, no LLM.
 
+**BUILT 2026-06-28.** `_demand_basis` now returns a 3-class signal (demand/momentum/alltime) reading `demand_7d` first (+`demand_30d` 0.25 ballast); `_pool_maxes` normalizes each class in its own pool; `score_demand` gained `demand_max`/`allow_demand` (backward-compatible kwargs). `_competitor_report_is_stale` (21-day, lenient) + `allow_demand=not stale` degrade demand on a stale report; `sources.competitor_report_stale` stamped; entries pass through `demand_7d`/`demand_30d`/`demand_breakdown`. Conftest redirects `COMPETITOR_REPORTS_DIR` (read-only hermetic). **No FROZEN guard / pollution-audit added (read-only) — by design.** 19 new tests (keystone `test_higher_demand_7d_outranks`, separate-pool, stale-disables, integration) + 2 existing updated to the class API; full duck-ops suite **1010 passed**. Post-deploy producer re-run clean (53 ranked, stale=False). The demand *class* goes live once the next native competitor run writes `demand_7d` onto `ducks_to_build`.
+
 ---
 
 ## Process note (this is the first matrix; previous work shipped without one)

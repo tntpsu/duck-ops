@@ -161,6 +161,34 @@ def latest_competitor_report(reports_dir: Path = COMPETITOR_REPORTS_DIR) -> tupl
     return {}, None
 
 
+# Surface 47: a competitor report older than this is too stale to drive demand
+# ranking — its 7d/30d flow is no longer "recent". Mirrors the GSC/GA4 producer
+# guard (seo_demand_context.STALE_MAX_DAYS). Demand DEGRADES on a stale report
+# (rows fall to momentum/all-time, today's behavior), it never crashes.
+COMPETITOR_REPORT_STALE_MAX_DAYS = 21
+
+
+def _competitor_report_is_stale(report: dict[str, Any], report_name: str | None,
+                                *, now: datetime | None = None,
+                                max_days: int = COMPETITOR_REPORT_STALE_MAX_DAYS) -> bool:
+    """True when the report's date is more than max_days old. Lenient: an
+    empty/missing report or an unparseable date returns False (let the missing-
+    report path handle absence; never disable demand on a guess)."""
+    if not report:
+        return False
+    stamp = report.get("report_date") or report.get("generated_at")
+    date_str = stamp[:10] if isinstance(stamp, str) and len(stamp) >= 10 else None
+    if date_str is None and report_name and len(report_name) >= 10:
+        date_str = report_name[:10]
+    if not date_str:
+        return False
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return ((now or datetime.now()).date() - d).days > max_days
+
+
 def assemble_candidates(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Union ducks_to_build + trending_products, deduped by listing_id.
     ducks_to_build wins on conflict (it carries the priority field)."""
@@ -207,60 +235,94 @@ def _has_snapshot_momentum(row: dict[str, Any]) -> bool:
     return _is_num(row.get("sold_last_7d")) or _is_num(row.get("sold_last_30d"))
 
 
-def _demand_basis(row: dict[str, Any]) -> tuple[float, bool]:
-    """Return (raw_strength, is_momentum).
+# Surface 47 demand-signal classes, strongest first. `demand` = the competitor
+# engine's 7d/30d demand score (favorites-velocity + sales-proxy x exact-sales
+# credibility — Surface 46); `momentum` = snapshot trending_score; `alltime` =
+# capped lifetime fallback. Each normalizes in its OWN pool — the three live on
+# different magnitude scales and mixing them re-creates the Duckpool inversion.
+_DEMAND_CLASS_DEMAND = "demand"
+_DEMAND_CLASS_MOMENTUM = "momentum"
+_DEMAND_CLASS_ALLTIME = "alltime"
 
-    Rank on recent MOMENTUM, not lifetime popularity: prefer trending_score
-    (the competitor engine's sales-weighted metric — sold_7d primary with a
-    30d-rate ballast). Fall back to all-time engagement_score (then
-    views+favorites), flagged is_momentum=False, only when a row carries no
-    momentum signal at all. Momentum and all-time strengths are NOT comparable
-    magnitudes — callers normalize each within its own pool (see score_demand).
+
+def _demand_basis(row: dict[str, Any], allow_demand: bool = True) -> tuple[float, str]:
+    """Return (raw_strength, signal_class).
+
+    Rank on recent FLOW, not lifetime popularity. Order of preference:
+    1. `demand_7d` (Surface 46 competitor demand) when present and allowed — the
+       richest signal (it already folds favorites-velocity + sales proxy +
+       exact-shop-sales credibility). A `demand_30d` term rides as ballast.
+    2. snapshot `trending_score` (momentum).
+    3. all-time `engagement_score` / views+favorites (capped fallback).
+    `allow_demand=False` (a stale competitor report) skips class 1 so 3-week-old
+    demand never drives ranking — the row degrades to today's momentum/all-time
+    behavior. demand_7d == None (new-to-tracking gap duck) also falls through.
 
     CRITICAL: trending_score is only real momentum when delta_source ==
-    'snapshot' (computed from actual between-snapshot deltas). For a
-    'new_listing' row there is no snapshot baseline, so the engine sets
-    trending_score = favorites*3 + views*0.5 — a LIFETIME proxy wearing a
-    momentum label (its views_delta_7d is the full lifetime count). Treating
-    that as momentum let a freshly-discovered listing outrank a confirmed
-    25-sold/7d mover (Duckpool, 2026-06-22). So a new_listing is forced to the
-    capped all-time pool until snapshot history proves recent movement."""
+    'snapshot'. For a 'new_listing' row the engine sets trending_score =
+    favorites*3 + views*0.5 — a LIFETIME proxy wearing a momentum label, which
+    let a freshly-discovered listing outrank a 25-sold/7d mover (Duckpool,
+    2026-06-22). So a new_listing is forced to the capped all-time pool."""
+    if allow_demand:
+        d7 = row.get("demand_7d")
+        if _is_num(d7):
+            d30 = row.get("demand_30d")
+            ballast = 0.25 * float(d30) if _is_num(d30) else 0.0
+            return float(d7) + ballast, _DEMAND_CLASS_DEMAND
     if _has_snapshot_momentum(row):
         trending = row.get("trending_score")
         if _is_num(trending) and trending > 0:
-            return float(trending), True
+            return float(trending), _DEMAND_CLASS_MOMENTUM
     eng = row.get("engagement_score")
     if _is_num(eng):
-        return float(eng), False
+        return float(eng), _DEMAND_CLASS_ALLTIME
     views = row.get("views") or 0
     favorites = row.get("favorites") or 0
     try:
-        return float(views) + 5.0 * float(favorites), False
+        return float(views) + 5.0 * float(favorites), _DEMAND_CLASS_ALLTIME
     except (TypeError, ValueError):
-        return 0.0, False
+        return 0.0, _DEMAND_CLASS_ALLTIME
 
 
 def _demand_strength(row: dict[str, Any]) -> float:
-    """Raw demand magnitude (momentum-preferred). See _demand_basis."""
+    """Raw demand magnitude (demand-preferred). See _demand_basis."""
     return _demand_basis(row)[0]
 
 
-def score_demand(row: dict[str, Any], momentum_max: float,
-                 alltime_max: float) -> tuple[float, str]:
-    """Demand 0..1 with momentum and all-time normalized in separate pools.
+def _pool_maxes(bases: list[tuple[float, str]]) -> dict[str, float]:
+    """Per-class max for separate-pool normalization (see _demand_basis)."""
+    return {
+        cls: max((s for s, c in bases if c == cls), default=0.0)
+        for cls in (_DEMAND_CLASS_DEMAND, _DEMAND_CLASS_MOMENTUM, _DEMAND_CLASS_ALLTIME)
+    }
 
-    A momentum-backed row scores up to 1.0; an all-time-only row is capped at
-    FALLBACK_DEMAND_CEILING, so a current mover always outranks a cooled-off
-    past hit regardless of how large its lifetime numbers are."""
-    strength, is_momentum = _demand_basis(row)
-    if is_momentum:
+
+def score_demand(row: dict[str, Any], momentum_max: float = 0.0,
+                 alltime_max: float = 0.0, *, demand_max: float = 0.0,
+                 allow_demand: bool = True) -> tuple[float, str]:
+    """Demand 0..1 with each signal class normalized in its own pool.
+
+    A `demand`- or `momentum`-backed row scores up to 1.0; an `alltime`-only row
+    is capped at FALLBACK_DEMAND_CEILING, so a current mover always outranks a
+    cooled-off past hit regardless of how large its lifetime numbers are."""
+    strength, cls = _demand_basis(row, allow_demand=allow_demand)
+    if cls == _DEMAND_CLASS_DEMAND:
+        if demand_max <= 0:
+            return 0.0, "no demand signal in competitor pool"
+        value = max(0.0, min(1.0, strength / demand_max))
+        bd = row.get("demand_breakdown") if isinstance(row.get("demand_breakdown"), dict) else {}
+        return value, (
+            f"demand {int(strength)} (favΔ {bd.get('fav_velocity')}, "
+            f"sold~ {bd.get('sales_proxy')}, cred {bd.get('credibility')}; 7d/30d flow)"
+        )
+    if cls == _DEMAND_CLASS_MOMENTUM:
         if momentum_max <= 0:
             return 0.0, "no momentum signal in competitor pool"
         value = max(0.0, min(1.0, strength / momentum_max))
         sold_7d = row.get("sold_last_7d")
         sold_disp = f"{int(sold_7d)} sold/7d" if _is_num(sold_7d) else "no 7d delta"
         return value, f"momentum {int(strength)} ({sold_disp}, trending_score)"
-    # No momentum signal — ranked on lifetime popularity, capped below the
+    # No demand/momentum signal — ranked on lifetime popularity, capped below the
     # momentum band and flagged so a reviewer knows it's NOT backed by sales.
     if alltime_max <= 0:
         return 0.0, "no demand signal in competitor pool"
@@ -513,12 +575,16 @@ def build_build_next_queue(*,
         search_demand_terms = _load_search_demand_terms()
 
     candidates = assemble_candidates(report)
-    # Two normalization pools: momentum-backed rows and all-time-only rows are
-    # not comparable magnitudes (see _demand_basis), so each normalizes within
-    # its own pool max.
-    _bases = [_demand_basis(c) for c in candidates]
-    momentum_max = max((s for s, m in _bases if m), default=0.0)
-    alltime_max = max((s for s, m in _bases if not m), default=0.0)
+    # Surface 47: rank on the competitor demand signal (7d/30d flow) when fresh.
+    # A stale report (>21d) degrades demand to absent so 3-week-old flow never
+    # drives ranking (rows fall to momentum/all-time — today's behavior).
+    report_stale = _competitor_report_is_stale(report, report_name)
+    allow_demand = not report_stale
+    # Separate normalization pools: demand / momentum / all-time live on
+    # different magnitude scales (see _demand_basis), so each normalizes within
+    # its own pool max — one shared max would re-create the Duckpool inversion.
+    _bases = [_demand_basis(c, allow_demand=allow_demand) for c in candidates]
+    pools = _pool_maxes(_bases)
 
     # Semantic catalog match (primary). Computed once (one cached embedding
     # call); {} when embeddings are unavailable, in which case every lookup
@@ -544,7 +610,9 @@ def build_build_next_queue(*,
         sem = semantic_map.get(title) if semantic_map else None
         sources = cand.get("_sources") or []
 
-        demand, demand_reason = score_demand(cand, momentum_max, alltime_max)
+        demand, demand_reason = score_demand(
+            cand, pools["momentum"], pools["alltime"],
+            demand_max=pools["demand"], allow_demand=allow_demand)
         gap, gap_reason, already_title = score_catalog_gap(cand_tokens, catalog_sets)
         occasion, occasion_reason = score_occasion_fit(cand_tokens, active_occasions)
         search, search_reason = score_search_demand(cand_tokens, search_demand_terms)
@@ -588,6 +656,9 @@ def build_build_next_queue(*,
                 "search_demand": round(search, 3),
             },
             "margin_estimated": margin_estimated,
+            "demand_7d": cand.get("demand_7d"),
+            "demand_30d": cand.get("demand_30d"),
+            "demand_breakdown": cand.get("demand_breakdown"),
             "semantic_match": (sem or {}).get("match") if sem else None,
             "possible_dupe": possible_dupe,
             "dupe_score": float(sem.get("score")) if (possible_dupe and sem and sem.get("score") is not None) else None,
@@ -629,6 +700,7 @@ def build_build_next_queue(*,
         "generated_at": now_local_iso(),
         "sources": {
             "competitor_report": report_name,
+            "competitor_report_stale": report_stale,
             "competitor_candidates": len(candidates),
             "catalog_products": len(catalog_items),
             "classifier_coverage": classifier_coverage,

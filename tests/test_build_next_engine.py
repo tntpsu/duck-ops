@@ -31,6 +31,20 @@ def _duck(listing_id, title, *, engagement=1000, views=500, favorites=20,
     return row
 
 
+def _gap(listing_id, title, *, demand_7d=None, demand_30d=None, breakdown=None,
+         engagement=1000, trending=None, sold_7d=None, delta_source="snapshot"):
+    """A competitor gap duck (Surface 46/47): carries demand_7d/30d, NOT
+    trending_score, and delta_source='snapshot'."""
+    row = _duck(listing_id, title, engagement=engagement, trending=trending, sold_7d=sold_7d)
+    row["delta_source"] = delta_source
+    row["demand_7d"] = demand_7d
+    if demand_30d is not None:
+        row["demand_30d"] = demand_30d
+    if breakdown is not None:
+        row["demand_breakdown"] = breakdown
+    return row
+
+
 def _catalog(items):
     return {"items": _cat_items(items)}
 
@@ -183,11 +197,9 @@ class TestDemand:
                  "trending_score": 5713, "delta_source": "snapshot", "sold_last_7d": 25}
         assert bne._has_snapshot_momentum(new_listing) is False
         assert bne._has_snapshot_momentum(mover) is True
-        bases = [bne._demand_basis(new_listing), bne._demand_basis(mover)]
-        momentum_max = max((s for s, m in bases if m), default=0.0)
-        alltime_max = max((s for s, m in bases if not m), default=0.0)
-        nl_val, nl_reason = bne.score_demand(new_listing, momentum_max, alltime_max)
-        mv_val, _ = bne.score_demand(mover, momentum_max, alltime_max)
+        pools = bne._pool_maxes([bne._demand_basis(new_listing), bne._demand_basis(mover)])
+        nl_val, nl_reason = bne.score_demand(new_listing, pools["momentum"], pools["alltime"], demand_max=pools["demand"])
+        mv_val, _ = bne.score_demand(mover, pools["momentum"], pools["alltime"], demand_max=pools["demand"])
         assert mv_val == 1.0 and mv_val > nl_val
         assert nl_val <= bne.FALLBACK_DEMAND_CEILING
         assert "no recent-momentum" in nl_reason
@@ -202,11 +214,9 @@ class TestDemand:
                     "views": 7000, "favorites": 200}
         mover = {"listing_id": "bc", "title": "Breast Cancer Survivor Duck",
                  "engagement_score": 1200, "trending_score": 5500, "sold_last_7d": 25}
-        bases = [bne._demand_basis(duckpool), bne._demand_basis(mover)]
-        momentum_max = max((s for s, m in bases if m), default=0.0)
-        alltime_max = max((s for s, m in bases if not m), default=0.0)
-        dp_val, _ = bne.score_demand(duckpool, momentum_max, alltime_max)
-        mv_val, _ = bne.score_demand(mover, momentum_max, alltime_max)
+        pools = bne._pool_maxes([bne._demand_basis(duckpool), bne._demand_basis(mover)])
+        dp_val, _ = bne.score_demand(duckpool, pools["momentum"], pools["alltime"], demand_max=pools["demand"])
+        mv_val, _ = bne.score_demand(mover, pools["momentum"], pools["alltime"], demand_max=pools["demand"])
         assert mv_val > dp_val
         assert mv_val == 1.0  # the current mover tops the momentum pool
         assert dp_val <= bne.FALLBACK_DEMAND_CEILING  # cooled-off hit stays capped
@@ -536,3 +546,124 @@ class TestDupeFlag:
             assert False, "expected TestModeRefusalError"
         except bne.TestModeRefusalError:
             pass
+
+
+# --------------------------------------------------------------------------
+# Surface 47 — demand-rank Build-Next on the competitor demand signal
+# --------------------------------------------------------------------------
+
+from datetime import datetime  # noqa: E402
+
+
+class TestDemandSignal:
+    def _pools_score(self, *rows, allow_demand=True, which=0):
+        pools = bne._pool_maxes([bne._demand_basis(r, allow_demand=allow_demand) for r in rows])
+        return bne.score_demand(rows[which], pools["momentum"], pools["alltime"],
+                                demand_max=pools["demand"], allow_demand=allow_demand)
+
+    def test_demand_class_full_range_not_capped(self):
+        row = _gap("a", "Highland Cow Duck", demand_7d=80)
+        val, reason = self._pools_score(row)
+        assert val == 1.0 and "demand" in reason  # NOT capped at FALLBACK_DEMAND_CEILING
+
+    def test_higher_demand_7d_outranks(self):  # KEYSTONE — the silent-drop bug
+        hi, lo = _gap("a", "A", demand_7d=120), _gap("b", "B", demand_7d=40)
+        hv, _ = self._pools_score(hi, lo, which=0)
+        lv, _ = self._pools_score(hi, lo, which=1)
+        assert hv == 1.0 and hv > lv
+
+    def test_demand_30d_ballast_counts(self):
+        a = _gap("a", "A", demand_7d=40, demand_30d=400)  # 40 + 0.25*400 = 140
+        b = _gap("b", "B", demand_7d=120)
+        av, _ = self._pools_score(a, b, which=0)
+        bv, _ = self._pools_score(a, b, which=1)
+        assert av == 1.0 and av > bv
+
+    def test_demand_none_falls_to_capped_alltime(self):
+        # new-to-tracking gap duck (demand_7d None) keeps TODAY's capped behavior
+        row = _gap("a", "New Duck", demand_7d=None, engagement=5000)
+        assert bne._demand_basis(row)[1] == "alltime"
+        val, reason = self._pools_score(row)
+        assert val <= bne.FALLBACK_DEMAND_CEILING and "capped" in reason
+
+    def test_separate_pools_trending_does_not_swamp_demand(self):
+        big_mom = _duck("m", "Mover", trending=5000, sold_7d=25); big_mom["delta_source"] = "snapshot"
+        small_dem = _gap("d", "Demand Duck", demand_7d=60)
+        val, _ = self._pools_score(big_mom, small_dem, which=1)  # the demand row
+        assert val == 1.0  # full range in its OWN pool, not swamped by trending 5000
+
+    def test_momentum_unchanged_when_no_demand(self):
+        row = _duck("m", "Mover", trending=4000, sold_7d=20); row["delta_source"] = "snapshot"
+        assert bne._demand_basis(row)[1] == "momentum"
+
+    def test_stale_report_disables_demand_class(self):
+        # allow_demand=False -> demand_7d ignored -> row degrades to momentum
+        row = _gap("a", "A", demand_7d=80, trending=4000, sold_7d=18)
+        assert bne._demand_basis(row, allow_demand=False)[1] == "momentum"
+
+    def test_demand_max_zero_no_div_by_zero(self):
+        row = _gap("a", "A", demand_7d=50)
+        val, reason = bne.score_demand(row, 0.0, 0.0, demand_max=0.0)
+        assert val == 0.0 and "no demand signal" in reason
+
+    def test_demand_breakdown_missing_does_not_crash(self):
+        row = _gap("a", "A", demand_7d=50)  # no demand_breakdown
+        val, reason = bne.score_demand(row, 0.0, 0.0, demand_max=100.0)
+        assert val == 0.5 and "demand 50" in reason
+
+
+class TestCompetitorReportStaleness:
+    def _dt(self, s):
+        return datetime.strptime(s, "%Y-%m-%d")
+
+    def test_fresh_report_not_stale(self):
+        assert bne._competitor_report_is_stale(
+            {"report_date": "2026-06-28"}, None, now=self._dt("2026-06-30")) is False
+
+    def test_old_report_is_stale(self):
+        assert bne._competitor_report_is_stale(
+            {"report_date": "2026-06-01"}, None, now=self._dt("2026-06-28")) is True
+
+    def test_missing_report_not_stale(self):
+        assert bne._competitor_report_is_stale({}, None, now=self._dt("2026-06-28")) is False
+
+    def test_falls_back_to_filename_date(self):
+        r = {"ducks_to_build": []}  # non-empty, no date field
+        assert bne._competitor_report_is_stale(
+            r, "2026-06-01_competitor_report.json", now=self._dt("2026-06-28")) is True
+        assert bne._competitor_report_is_stale(
+            r, "2026-06-20_competitor_report.json", now=self._dt("2026-06-28")) is False
+
+    def test_unparseable_date_is_lenient(self):
+        assert bne._competitor_report_is_stale(
+            {"report_date": "not-a-date!!"}, None, now=self._dt("2026-06-28")) is False
+
+
+class TestDemandIntegration:
+    """End-to-end through build_build_next_queue (uses today's date so the
+    report is always fresh, independent of the wall clock)."""
+    def _kwargs(self, **over):
+        base = dict(
+            catalog=_catalog([_cat_item("Astronaut Space Helmet Duck")]),
+            profit={"products": [{"title_variants": ["x"], "margin_pct": 80.0, "is_confident_margin": True}]},
+            occasion_intel={"active_occasions": []},
+            feedback={"concepts": {}},
+            semantic_map={},
+        )
+        base.update(over)
+        return base
+
+    def test_demand_flows_into_queue_and_entry(self):
+        from datetime import date
+        today = date.today().strftime("%Y-%m-%d")
+        report = {"report_date": today, "ducks_to_build": [
+            _gap("z", "Highland Cow Jeep Duck", demand_7d=120, demand_30d=300,
+                 breakdown={"fav_velocity": 25, "sales_proxy": 10, "credibility": 1.5})]}
+        payload = bne.build_build_next_queue(
+            report=report, report_name=f"{today}_competitor_report.json", **self._kwargs())
+        assert payload["sources"]["competitor_report_stale"] is False
+        e = payload["queue"][0]
+        assert e["factors"]["demand"] == 1.0
+        assert e["demand_7d"] == 120 and e["demand_30d"] == 300
+        # strength folds the 30d ballast: 120 + 0.25*300 = 195; breakdown shown
+        assert any("demand 195" in r and "favΔ 25" in r for r in e["reasons"])
