@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-06-27
+Last updated: 2026-06-28
 
 ## Document Ownership
 
@@ -190,10 +190,12 @@ Companion docs:
 
 Real first-party demand now flows into the system: **GSC** (Google search queries → Build-Next) and **GA4** (per-listing Fix/Promote/Watch, split Etsy vs Shopify). Shipped this initiative (Surfaces 38–42, all pushed): Build-Next 7-day momentum re-rank (16.4); GSC search-demand producer + factor (38); GA4 listing-performance producer (39); SEO generation fed by real demand + golden eval (40); gap→collection planner Stage A (41A); GA4 weekly-sale steering (42, drops PROMOTE winners / floats FIX leaks, behind the sale-policy gate).
 
+**Extended 2026-06-28 (Surfaces 45–46, pushed):** competitor leaderboard now ranks on Etsy's EXACT sold-count delta (45, replacing the 4-6× biased quantity-drop proxy); the two competitor comparison buckets ("they sell it you don't" / "same duck they outsell you") re-ranked on a 7d/30d **demand score** (favorites-velocity + sales-proxy × exact-sales credibility) instead of lifetime engagement (46). The demand-ranked gap ducks are the new MINT source for Build-Next (Surface 47, next — see below).
+
 Queued follow-ups (none block the shipped logic; most are "make it live on cadence"):
-1. **Schedule the producers on launchd (Tier-3 install) + add the deferred two-card OS brackets.** `gsc_search_demand.py`, `ga4_listing_performance.py`, and `sale_steering.py` currently run only on manual trigger; they ship with a 21-day staleness guard that fail-soft DISABLES the consumers if data goes stale. So until they're scheduled weekly, the SEO/Build-Next/sale-steering benefits expire after 21 days. Highest-priority follow-up. Each needs its feed-freshness + throughput bracket (convention #3) added with the schedule.
+1. ✅ **DONE 2026-06-28 — Producers scheduled on launchd.** `gsc_search_demand.py` (07:05), `ga4_listing_performance.py` (07:08), `sale_steering.py` (07:13) installed via Tier-3 plists + kickstart-verified through `run_duck_ops_observe_review.sh`. The `first_party_demand_feeds` OS card (duckAgent viewer.py) covers feed-freshness; `scheduler_health` covers did-it-run. (The 21-day staleness guard no longer silently expires the consumers.)
 2. **`/portal/intel/listing-performance` page + Business Desk tiles** — render the GA4 Fix/Promote/Watch lanes + the GSC gap/rising queries so it replaces the GA4 email (email-to-portal inversion). Deferred from Surfaces 38/39.
-3. **gap → Build-Next candidate minting** — today GSC gaps only BOOST existing competitor candidates; they never MINT new ones, so "custom ducks for jeeps" demand goes nowhere. Feed high-impression gap queries in as first-class Build-Next candidates (the real "make this next" signal).
+3. **→ NEXT (Surface 47, spec'd 2026-06-28): demand-rank Build-Next on the competitor demand signal.** Plan-agent finding reshaped this: competitor gap ducks ALREADY mint into Build-Next (`assemble_candidates` unions `ducks_to_build`) and the cross-repo read ALREADY exists — the real defect is a single silent drop: gap ducks carry `demand_7d`/`demand_30d` but not `trending_score`, so `_demand_basis` falls through and caps them in the all-time pool, never reading demand. Fix = read `demand_7d` as a third normalization class + a 21-day staleness guard. ~half a day, read-only (no new isolation). The *GSC*-gap → first-class-candidate minting (the original framing here) remains a smaller separate follow-up.
 4. **SEO L4 outcome measurement** — extend `shopify_seo_outcomes.py` (which today admits it "does not measure organic search lift yet") to compare GSC CTR/position before vs after each rewrite → the system learns which copy lifts clicks (the self-tuning loop).
 5. **GA4 engagement→theme feedback loop** — re-weight Thursday/Build-Next theme selection by which themes actually engage (Phase 2 strategic loop; needs a few weeks of history).
 6. **gap→collection Stage B** — the gated Shopify `collectionCreate` apply path, deferred until the planner actually surfaces candidates (0 on current data; fires when a category query with ≥3 matching products trends).
@@ -405,12 +407,14 @@ Slice status:
 
 The pattern has been extended past the original 5 surfaces — business_intelligence, engineering_governance, and shopify_seo were added to the cadence registry in the same shape. Any future report-style email follows the same recipe: portal page + cadence policy + OS card + tests.
 
-## Recommended Next 3 Steps
+## Recommended Next 3 Steps (refreshed 2026-06-28)
 
-### 1. Promote Weekly Sale Into The Autonomy Gate (Priority 1 next slice)
-- Foundations from the 2026-05-26 work now make this safe: cadence gate covers 8 surfaces, browser guard no longer self-trips on routine sync, workflow_cooldown_sweeper auto-recovers stuck lanes, and the Agent OS now has a guard-source card that distinguishes self-imposed from Etsy-imposed blocks.
-- Concrete first move: use the Promotion Readiness gate on Business Desk to advance weekly sale from manual email approval → auto-apply after operator approval, with rollback receipts.
-- Pattern model for the other policy/watch/promote lanes (Meme Monday, Tuesday review carousel, Jeep Fact Wednesday) once weekly sale proves the path.
+### 1. Demand-rank Build-Next on the competitor demand signal (Surface 47 — spec'd, matrix in TESTS.md)
+- The execution lever for the demand intelligence just shipped: turn the demand-ranked competitor gap ducks into actual production decisions instead of a report you read.
+- Precise + small: fix the one silent drop in `build_next_engine.py::_demand_basis` (read `demand_7d` as a third pool class) + a 21-day staleness guard. ~half a day, read-only, no new isolation. Matrix written first (Surface 47).
+- Then pairs with Per-Product Profit Drill-Down (Priority 0.6): demand says what to BUILD, profit says what to KEEP/RETIRE.
+
+> ~~Promote Weekly Sale Into The Autonomy Gate~~ — **largely moot (2026-06-22):** the operator turned OFF the sale *posts* and the recurring "pick the final weekly sale post" decision; the weekly Shopify SALE already auto-applies and is never gated. The decision this step wanted to automate no longer exists. Independent `sale_posts` toggle lives on `/portal/workflows-status`.
 
 ### 2. Phase 1 Of The Prompt Contract Audit (Priority 5)
 - Phase 0 inventory complete (2026-05-26) — see [PROMPT_CONTRACT_AUDIT_PHASE_0_INVENTORY.md](/Users/philtullai/ai-agents/duckAgent/docs/current_system/PROMPT_CONTRACT_AUDIT_PHASE_0_INVENTORY.md).

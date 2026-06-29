@@ -1298,6 +1298,31 @@ _Test files: `duckAgent/tests/test_demand_score.py` (helper, 10), `test_competit
 
 ---
 
+## Surface 47 — Demand-rank Build-Next on the competitor demand signal (2026-06-28, **matrix BEFORE code**; operator: "turn the heads-up into what we build")
+
+**Headline (Plan agent finding, both repos read):** the MINT path and cross-repo read **already exist** — `assemble_candidates()` already unions `ducks_to_build` into the pool (build_next_engine.py:164-178), and `COMPETITOR_REPORTS_DIR` + `latest_competitor_report()` already read duckAgent's report cache (lines 57, 138-161). The real defect is a **single silent drop**: gap-duck entries carry `demand_7d`/`demand_30d` but NOT `trending_score`; `_demand_basis()` sees `delta_source=="snapshot"` → reads `trending_score` → `None` → falls through to `engagement_score` → caps the row at `FALLBACK_DEMAND_CEILING=0.5`. So **every demand-ranked gap duck is demoted to the capped all-time pool and its demand signal is never read.** That IS the "ranks on all-time, not 7d/30d" debt, biting exactly the mint source.
+
+**Fix:** `_demand_basis` reads `demand_7d` FIRST as a third signal class (`demand` / `momentum` / `alltime`), each normalized in its OWN pool (the `demand_7d`~tens-hundreds vs `trending_score`~hundreds-thousands magnitude gap re-creates the Duckpool inversion if mixed). Missing demand degrades to the existing capped path (mirrors `NEUTRAL_SEARCH=0.6` spirit). + a 21-day staleness guard on `latest_competitor_report` (mirror `seo_demand_context.py` `STALE_MAX_DAYS`).
+
+**Isolation:** read-only consumption of `COMPETITOR_REPORTS_DIR` → **NO new FROZEN constant / pollution-audit test** (the 3-layer rule is for new *written* prod paths; the only write, `BUILD_NEXT_QUEUE_PATH`, is already covered). One read-only hardening: redirect `COMPETITOR_REPORTS_DIR` in `tests/conftest.py` so the staleness test is hermetic. State this in the PR to preempt a reviewer asking for dead ceremony.
+
+| use case | happy (demand present) | demand_7d None (new-to-tracking) | report missing | report stale >21d | malformed breakdown / all-None pool |
+|---|---|---|---|---|---|
+| `_demand_basis` reads demand_7d as its own class | 🔴 demand pool, full [0,1], NOT capped; reason cites breakdown | 🔴 falls to capped all-time pool (**today's behavior preserved**) | n/a | 🔴 demand absent → degrade | 🔴 `demand_max=0` → no div-by-zero, 0.0 + clean reason |
+| higher demand_7d outranks (the inversion regression) | 🔴 **keystone unit** | n/a | n/a | n/a | n/a |
+| separate-pool invariant (trending_score row can't swamp a demand_7d row) | 🔴 each normalizes in its own pool | n/a | n/a | n/a | n/a |
+| momentum (trending_products) ranking unchanged | 🔴 regression | n/a | n/a | n/a | n/a |
+| staleness / fail-soft | n/a | n/a | 🔴 empty queue, warn, no crash (exists) | 🔴 `sources.competitor_report_stale=True`, rows degrade, no crash | n/a |
+| catalog dedup preserved | 🔴 already-made suppressed (regression) | n/a | n/a | n/a | n/a |
+| product_concept_queue dedup (Phase 3, optional) | 🔴 pending concept suppressed w/ reason | n/a | n/a | n/a | n/a |
+| conftest redirect makes staleness test hermetic | 🔴 reads tmp dir not prod cache | n/a | n/a | n/a | n/a |
+
+**Phases:** 5 (matrix) → 1 (3-class `_demand_basis` + `score_demand` N-pool + entry passthrough) → 2 (staleness guard) → 3 (optional concept-queue dedup) → 1-bonus (optional duckAgent: copy demand onto `trending_products` so both sources share one pool). All duck-ops except the optional bonus. Regression gates: existing pollution-audit + `test_weekly_packet_build_next_nominations.py`. Re-run the producer after merge to refresh prod state.
+
+**Scope honesty:** the "MINT not just boost" framing is ~90% already done — don't bill it as new wiring. The high-value change is the one-spot silent-drop fix. Effort: ~half a day, no new write path, no LLM.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
