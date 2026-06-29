@@ -1242,6 +1242,57 @@ Fix: `_session_counts(session, queue_state)` + `_live_item_status` reconcile eac
 
 ---
 
+## Surface 45 — Competitor exact weekly sales via `transaction_sold_count` delta (2026-06-28, shipped duckAgent 0983c90; operator: "are there Etsy tools with a better calc?")
+
+**Goal.** Replace the quantity-drop *proxy* leaderboard with Etsy's own exact sold-count, diffed week-over-week — the method real Etsy-analytics tools use. The proxy over-counts big catalogs 4-6× (routine restocks/edits read as sales) and under-counts restocking shops; it ranked myJeepDuck 5th-6th when the truth (counter delta) is **3rd**. Shop-level only; per-listing stays proxy (Etsy exposes no per-listing sales to anyone).
+
+| use case | happy | no prior counter | counter went backwards | non-dated/test report | empty input |
+|---|---|---|---|---|---|
+| `_load_prior_shop_sold_counts` finds nearest prior (±3d) | ✅ `test_competitor_exact_sales.py::test_loads_nearest_prior_within_tolerance` | ✅ `::test_returns_empty_when_no_prior_in_window` | n/a | ✅ `::test_skips_non_dated_test_reports` | ✅ returns `({},None)` |
+| `_attach_exact_sold_7d` computes delta | ✅ `::test_exact_delta_is_computed` | ✅ `::test_no_prior_counter_falls_back` (keeps labeled proxy) | ✅ `::test_counter_going_backwards_is_rejected` (never negative) | n/a | ✅ |
+| render prefers exact, no tilde | ✅ `::test_format_prefers_exact_no_tilde` | ✅ `::test_format_falls_back_to_labeled_proxy` | n/a | n/a | n/a |
+| leaderboard sorts by exact over proxy | ✅ `::test_sort_key_uses_exact_over_proxy` | n/a | n/a | n/a | n/a |
+| "your rank #k of M" line | ✅ `::test_rank_note_places_you_correctly` / `::test_full_render_shows_exact_and_rank` | ✅ `::test_rank_note_absent_without_data` | n/a | n/a | ✅ absent |
+
+**Shipped.** 12 tests (`duckAgent/tests/test_competitor_exact_sales.py`), 50 green across competitor suite. 157 historical reports backfilled (no API). Fails closed: backwards counter → no number, not a negative; no prior → labeled proxy fallback. **Follow-up (LOW):** an OS card that flags when many shops go `counter_anomaly`/stale so a silent Etsy data gap doesn't quietly revert the board to proxy.
+
+---
+
+## Surface 46 — Demand-ranked competitor comparison (2026-06-28, **matrix BEFORE code**; operator: "same duck and they're selling more, or a different duck selling more")
+
+**Goal.** The report already has both comparison buckets, but both rank on **lifetime engagement (views + favorites *stock*)** — so an old listing that banked 5,000 favorites two years ago "beats" a new one selling now. Re-rank both on a **demand score** (current *flow*) over operator-selectable **7d and 30d** windows, and present them as the two explicit operator buckets.
+
+**Demand score** (per competitor listing, per window W∈{7d,30d}; pure arithmetic on snapshot ints → deterministic, no LLM):
+```
+demand(listing, W) = ( favorites_velocity(W) + SALES_WEIGHT * sales_proxy(W) ) * shop_credibility
+  favorites_velocity(W) = max(0, favorers_now − favorers_{W ago})   # leading buy signal; 7d=prev snapshot, 30d=4-week-prior
+  sales_proxy(W)        = capped quantity-drop over W (_capped_sold against the W-prior snapshot)
+  shop_credibility      = clamp(exact_sold_7d / SHOP_REF, lo, hi)   # a real-selling shop weights up; view-only weights down
+```
+- **Bucket A "Same duck — they're outselling you":** for each MY listing, matched competitor listing (existing `_find_similar_competitor_products`) whose **demand** beats mine by margin+ratio on *flow* (not stock). Output: my_title ↔ their_title, demand breakdown, window, action=refresh/promote mine.
+- **Bucket B "They sell it, you don't":** gap ducks (existing semantic dedupe) ranked by **demand** (was: raw `engagement_delta_7d≥100`). Output: title, shop, demand + its favorites-velocity/sales-proxy breakdown, window, price.
+
+| use case | happy (7d) | happy (30d) | missing W-prior snapshot | missing favorites/qty field | exact shop sales missing | dedupe (embedding) outage | empty input |
+|---|---|---|---|---|---|---|---|
+| `demand_score(listing, W)` arithmetic | 🔴 unit | 🔴 unit | 🔴 window→None, don't fabricate | 🔴 component→0, flag, no crash | 🔴 credibility=1.0 neutral | n/a | 🔴 |
+| **Bucket A** flags same-duck on *flow* | 🔴 unit | 🔴 unit | 🔴 falls to available window | 🔴 | 🔴 | 🔴 lexical fallback (dedupe_degraded) | 🔴 no my-listings→[] |
+| **Bucket A** old high-stock / zero-velocity does NOT flag (the key fix) | 🔴 **regression unit** | 🔴 | n/a | n/a | n/a | n/a | n/a |
+| **Bucket B** gap duck ranked by demand | 🔴 unit | 🔴 unit | 🔴 | 🔴 | 🔴 | 🔴 | 🔴 no competitors→[] |
+| **Bucket B** already-made duck stays suppressed | 🔴 unit | n/a | n/a | n/a | n/a | 🔴 lexical hard-skip | n/a |
+| shop_credibility weights real seller up / view-only down | 🔴 unit | n/a | n/a | n/a | 🔴 neutral | n/a | n/a |
+| window selector (7d vs 30d) changes ranking | 🔴 unit | 🔴 unit | 🔴 30d unavailable→7d only, labeled | n/a | n/a | n/a | n/a |
+| render: both buckets, **7d + 30d columns side by side** (sorted by 7d), breakdown in email + payload | 🔴 unit | 🔴 unit | 🔴 unavailable window shows "—", not blank | n/a | n/a | n/a | 🔴 "none this window" |
+
+**Window presentation (operator decision 2026-06-28):** each bucket shows **7d and 30d demand in adjacent columns, sorted by 7d** — so "hot this week" vs "steady all month" is visible at a glance. A window with no prior snapshot renders "—" in that column, never a fabricated number.
+
+**Honest limits (label in output, don't hide):** no exact per-listing competitor sales exists (Etsy doesn't expose it) → demand is a *proxy*; favorites-velocity is a *leading* indicator not a sale; the 100-listing API page cap still bounds each shop's visible catalog (separate item). **Determinism:** all-arithmetic, temp-0 N/A (no LLM in the score) — the only LLM-adjacent step is the existing embedding dedupe, which already fails open to lexical.
+
+**Tunables to pin in config (versioned-config recipe):** `SALES_WEIGHT`, `SHOP_REF`, credibility `lo/hi`, Bucket-A margin+ratio, Bucket-B demand floor. A golden fixture (hand-picked "should/shouldn't surface" ducks) gates any retune.
+
+**Roadmap (operator: "later, roadmap what things look like over the year"):** a separate surface — seasonal/year view over the **157 backfilled reports'** time series (exact shop sales + demand by theme over 12 months) to spot recurring patterns (e.g. patriotic spikes in Jun-Jul, dog breeds steady). Not this surface; flagged so the matrix has the row when we get there.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
