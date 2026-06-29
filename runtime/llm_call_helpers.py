@@ -43,6 +43,7 @@ MODEL_PRICING_USD_PER_1M_TOKENS = {
     "gpt-4o": {"prompt": 2.500, "completion": 10.000},
     "gpt-4.1-mini": {"prompt": 0.400, "completion": 1.600},
     "gpt-4.1": {"prompt": 2.000, "completion": 8.000},
+    "gpt-3.5-turbo": {"prompt": 0.500, "completion": 1.500},  # gpt-3.5-turbo-0125
     # Anthropic — covers what duckAgent flows will surface once Scope B
     # instrumentation lands (currently no Anthropic calls in the log).
     "claude-opus-4-7": {"prompt": 15.000, "completion": 75.000},
