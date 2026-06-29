@@ -36,7 +36,10 @@ def sync_ops_control(customer_queue: dict[str, Any], review_queue: dict[str, Any
         age_hours = round((datetime.now().astimezone() - freshest).total_seconds() / 3600.0, 2)
 
     customer_attention = int((customer_queue.get("counts") or {}).get("operator_queue_items") or len(customer_queue.get("items") or []))
-    review_pending = int(review_queue.get("pending_count_all") or review_queue.get("pending_count") or len(review_queue.get("items") or []))
+    # Operator-facing: count only items that NEED approval (surfaced/filtered),
+    # not auto-handled replies that auto-post (2026-06-29). pending_count is the
+    # producer's filtered count; surfaced_items is the fallback for older files.
+    review_pending = int(review_queue.get("pending_count") or len(review_queue.get("surfaced_items") or []))
 
     if age_hours is not None and age_hours >= 36:
         state = "blocked"

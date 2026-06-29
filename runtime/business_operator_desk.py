@@ -2259,9 +2259,17 @@ def _custom_build_items(custom_build_candidates: dict[str, Any]) -> list[dict[st
 
 def _review_queue_items(review_queue: dict[str, Any] | None) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    source_items = list((review_queue or {}).get("surfaced_items") or [])
-    if not source_items:
-        source_items = list((review_queue or {}).get("items") or [])
+    rq = review_queue or {}
+    # Prefer the producer's filtered operator list. CRITICAL (2026-06-29): only
+    # fall back to the full `items` when `surfaced_items` is ABSENT (legacy
+    # file) — NOT when it's an empty list. An empty surfaced_items means "no
+    # items need approval" (auto-handled replies excluded); falling back to the
+    # full list there would re-surface the auto items. This path has no flow
+    # skip, so the empty-list fallback was a real latent leak.
+    if "surfaced_items" in rq:
+        source_items = list(rq.get("surfaced_items") or [])
+    else:
+        source_items = list(rq.get("items") or [])
     for item in source_items:
         short_id = str(item.get("short_id") or "").strip()
         decision = str(item.get("decision") or "").strip()
