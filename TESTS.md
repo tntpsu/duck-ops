@@ -1402,6 +1402,20 @@ _Test files: `duckAgent/tests/test_demand_score.py` (helper, 10), `test_competit
 
 ---
 
+## Surface 50 — Intel directory + nav entry (2026-07-01, operator: "how do I get to these intel screens? not in the main menu")
+
+**Discoverability gap.** The 8 `/portal/intel/*` pages (profit, competitors, reviews, learnings, recommendations, cost, custom-builds, build-next) were only reachable via clickable Desk metric tiles — no menu entry, so the operator couldn't find them. Added a **`/portal/intel` directory page** (`intel_directory_page.py`, pure links via `_render_portal_shell`, no data load so it can't fail) listing all 8 with one-line "what question does this answer" copy, and an **"Intel" nav entry** in the shared shell (`portal_shell._PORTAL_NAV_ITEMS`) plus the hardcoded SPA navs (Desk + siblings, inserted between Workflows and Training; the cockpit nav after Library).
+
+| use case | happy | route intact |
+|---|---|---|
+| directory lists every intel page w/ link | ✅ `test_intel_directory.py::test_lists_every_intel_page_with_a_link` (all 8 routes+titles) | n/a |
+| Build-Next is the lead card | ✅ `::test_build_next_is_present_and_first` | n/a |
+| nav has Intel entry | ✅ `::test_nav_has_intel_entry` + live: Desk nav shows Intel, `/portal/intel` marks it active | ✅ `/portal/intel/build-next` still 200 (exact-match route, no shadow) |
+
+**BUILT 2026-07-01.** duckAgent directory+smoke+viewer+page suites **273 pass** (3 new directory tests). Live: `/portal/intel` renders 8 cards, Desk nav shows "Intel", all sub-routes intact. Tier 2 (portal render + nav, no state writes).
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
