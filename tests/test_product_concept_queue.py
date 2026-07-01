@@ -253,5 +253,53 @@ class BuildNextPromotionIngestionTests(unittest.TestCase):
         self.assertEqual(product_concept_queue._build_next_promotion_items({}), [])
 
 
+class CrossScoutMergeTests(unittest.TestCase):
+    """Surface 49 follow-up: two scouts proposing the same duck under
+    differently-cleaned themes must collapse to one queue item. The old
+    exact-slug key missed keyword-stuffed themes; the boilerplate-stripped
+    merge key catches them."""
+
+    def _key(self, theme):
+        return product_concept_queue._theme_merge_key(theme)
+
+    def test_merge_key_strips_boilerplate_to_core_subject(self) -> None:
+        # The real miss: trend "Chef" vs a Build-Next promote cleaned to
+        # "3d Chef Pla Plastic" — same subject, now the same key.
+        self.assertEqual(self._key("Chef"), "chef")
+        self.assertEqual(self._key("3d Chef Pla Plastic"), "chef")
+        self.assertEqual(self._key("Golden Retriever"), self._key("Golden Retriever Duck 3D Printed"))
+
+    def test_merge_key_keeps_distinct_subjects_apart(self) -> None:
+        # wine <-> highland cow must NOT collapse (thematic words survive).
+        self.assertNotEqual(self._key("Wine Ducks Adventure Collectibles"),
+                            self._key("Highland Cow Adventure Rustic"))
+
+    def test_merge_key_all_boilerplate_falls_back_to_slug(self) -> None:
+        # If nothing survives the strip, keep the raw slug so two all-boilerplate
+        # themes stay distinct instead of both collapsing to "".
+        self.assertEqual(self._key("Car Duck"), "car-duck")
+        self.assertNotEqual(self._key("Car Duck"), self._key("Jeep Duck"))
+
+    def test_merge_collapses_cross_scout_duplicate(self) -> None:
+        items = [
+            {"theme": "Chef", "source_type": "trend_candidate", "score": 0.5,
+             "evidence": ["trend chef"], "guardrails": ["a"]},
+            {"theme": "3d Chef Pla Plastic", "source_type": "build_next_promotion",
+             "score": 0.8, "evidence": ["competitor chef"], "guardrails": ["b"]},
+        ]
+        merged = product_concept_queue._merge_duplicate_themes(items)
+        self.assertEqual(len(merged), 1)                      # collapsed
+        self.assertEqual(merged[0]["score"], 0.8)             # higher-score wins
+        self.assertIn("b", merged[0]["guardrails"])
+        self.assertIn("a", merged[0]["guardrails"])           # evidence/guardrails combined
+
+    def test_merge_keeps_distinct_concepts_separate(self) -> None:
+        items = [
+            {"theme": "Wine Ducks Adventure", "source_type": "trend_candidate", "score": 0.5},
+            {"theme": "Highland Cow Adventure Rustic", "source_type": "competitor_motif", "score": 0.6},
+        ]
+        self.assertEqual(len(product_concept_queue._merge_duplicate_themes(items)), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

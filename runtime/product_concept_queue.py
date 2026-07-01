@@ -89,6 +89,40 @@ def _slugify(value: Any) -> str:
     return text or "concept"
 
 
+# Manufacturing/marketing boilerplate stripped from a theme before cross-scout
+# dedup. Mirrors duckAgent's semantic_dedupe boilerplate list. Two scouts
+# proposing the same duck under differently-cleaned themes ("chef" vs
+# "3d chef pla plastic") only slug-matched if identical — keyword-stuffed
+# competitor titles never did, so the merge missed and a duplicate concept
+# slipped through (2026-06-30, TESTS.md Surface 49). Stripping the boilerplate
+# first makes the merge key the core SUBJECT. Deliberately excludes thematic
+# words (adventure/rustic/western/…): those still distinguish concepts.
+_MERGE_BOILERPLATE: frozenset[str] = frozenset({
+    "3d", "printed", "print", "printing", "pla", "plastic", "resin",
+    "duck", "ducks", "ducky", "ducking", "figurine", "figure",
+    "collectible", "collectibles", "collectable", "gift", "gifts",
+    "car", "cars", "dashboard", "dash", "decor", "decoration",
+    "accessory", "accessories", "cruise", "cruises", "vehicle",
+    "jeep", "jeeper", "jeeping", "buddy", "toy", "toys", "rubber",
+    "novelty", "custom", "personalized", "quirky", "funny", "unique",
+    "cute", "mini", "small", "style", "styles", "based", "for", "the",
+    "and", "with", "inspired", "lover", "lovers", "edition", "version",
+    "design", "designs", "handmade", "perfect", "great",
+})
+
+
+def _theme_merge_key(theme: Any) -> str:
+    """Cross-scout dedup key: the theme reduced to its core-subject tokens
+    (boilerplate + short words stripped, order-independent). Falls back to the
+    raw slug when nothing survives, so two all-boilerplate themes stay distinct
+    instead of collapsing to an empty key."""
+    toks = sorted(
+        t for t in re.split(r"[^a-z0-9]+", str(theme or "").lower())
+        if len(t) > 2 and t not in _MERGE_BOILERPLATE
+    )
+    return "-".join(toks) if toks else _slugify(theme)
+
+
 def _concept_feedback_key(value: Any) -> str:
     text = re.sub(r"\bducks?\b", " ", str(value or "").lower())
     text = text.replace("3dprinting", "3d printing")
@@ -425,7 +459,7 @@ def _strategy_idea_items(current_learnings: dict[str, Any], benchmark: dict[str,
 def _merge_duplicate_themes(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     for item in items:
-        key = _slugify(item.get("theme"))
+        key = _theme_merge_key(item.get("theme"))
         existing = merged.get(key)
         if not existing:
             merged[key] = item
