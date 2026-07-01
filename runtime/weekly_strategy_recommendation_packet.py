@@ -154,6 +154,73 @@ def _top_competitor_hook_row(competitor_social_payload: dict[str, Any]) -> dict[
     return None
 
 
+def _norm_account(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _top_post_for_account(snapshot_payload: dict[str, Any], account: Any) -> dict[str, Any] | None:
+    """The single highest-engagement competitor post for an account, from the
+    raw snapshot posts — the ACTUAL hook the operator should study, so a
+    "borrow a hook from X" recommendation carries the real text + link instead
+    of telling the operator to go look it up."""
+    target = _norm_account(account)
+    if not target:
+        return None
+    best: dict[str, Any] | None = None
+    best_score = -1.0
+    for post in snapshot_payload.get("posts") or []:
+        if not isinstance(post, dict):
+            continue
+        if target not in _norm_account(post.get("account_handle")) and \
+                target not in _norm_account(post.get("account_name")):
+            continue
+        score = _safe_float(post.get("engagement_score")) or 0.0
+        if score > best_score:
+            best_score, best = score, post
+    if best is None:
+        return None
+    eng = best.get("engagement_visible") if isinstance(best.get("engagement_visible"), dict) else {}
+    hook = _compact_text(best.get("visible_hook") or best.get("caption_excerpt"))
+    return {
+        "account": _compact_text(account),
+        "hook": hook[:280],
+        "hook_family": _compact_text(best.get("hook_family")),
+        "format": _compact_text(best.get("post_format")),
+        "url": _compact_text(best.get("post_url")),
+        "engagement_score": best.get("engagement_score"),
+        "likes": eng.get("likes"),
+        "plays": eng.get("plays") or eng.get("views"),
+        "comments": eng.get("comments"),
+        "hashtags": best.get("hashtags") if isinstance(best.get("hashtags"), list) else [],
+        "theme": _compact_text(best.get("theme")),
+    }
+
+
+def _own_post_coverage(social_payload: dict[str, Any],
+                       social_posts_payload: dict[str, Any]) -> dict[str, Any]:
+    """Concrete backing for the 'own-post signal' — how many of our posts we
+    actually have data on, split by workflow, so "low signal on self" reads as
+    "18 memes, 1 Thursday" instead of a vague label."""
+    by_workflow = []
+    for row in ((social_payload.get("rollups") or {}).get("by_workflow") or []):
+        if isinstance(row, dict) and _compact_text(row.get("label")):
+            by_workflow.append({
+                "label": _compact_text(row.get("label")),
+                "count": int(row.get("post_count") or 0),
+                "avg_score": row.get("avg_engagement_score"),
+            })
+    posts = [p for p in (social_posts_payload.get("posts") or [])
+             if isinstance(p, dict) and not p.get("is_future_post")]
+    top = sorted(posts, key=lambda p: _safe_float(p.get("engagement_score")) or 0.0, reverse=True)[:3]
+    top_posts = [{
+        "workflow": _compact_text(p.get("workflow")),
+        "score": p.get("engagement_score"),
+        "excerpt": _compact_text(p.get("caption") or p.get("title"))[:90],
+        "url": _compact_text(p.get("url")),
+    } for p in top]
+    return {"post_count": len(posts), "by_workflow": by_workflow, "top_posts": top_posts}
+
+
 def _stable_patterns(
     social_payload: dict[str, Any],
     competitor_social_payload: dict[str, Any],
@@ -207,6 +274,7 @@ def _stable_patterns(
                     f"{stability.get('stable_top_account_count') or 0} of the last {stability.get('recent_snapshot_count') or 0} competitor snapshots."
                 ),
                 "confidence": competitor_signal[0],
+                "top_post": _top_post_for_account(snapshot_payload, stable_top_account),
             }
         )
 
@@ -243,6 +311,7 @@ def _experimental_ideas(
                     f"{stability.get('stable_top_account_count') or 0} of the last {stability.get('recent_snapshot_count') or 0} competitor snapshots."
                 ),
                 "confidence": competitor_signal[0],
+                "top_post": _top_post_for_account(snapshot_payload, stable_top_account),
             }
         )
 
@@ -1833,8 +1902,10 @@ def build_weekly_strategy_recommendation_packet() -> dict[str, Any]:
             f"`{_compact_text(stability.get('stable_top_account'))}` stayed on top across "
             f"{stability.get('stable_top_account_count') or 0} of the last {stability.get('recent_snapshot_count') or 0} snapshots."
         )
+    own_post_coverage = _own_post_coverage(social_payload, social_posts_payload)
     payload = {
         "generated_at": generated_at,
+        "own_post_coverage": own_post_coverage,
         "summary": {
             "headline": "Weekly strategy packet built from own-post performance and competitor social learnings.",
             "own_signal_confidence": own_signal[0],

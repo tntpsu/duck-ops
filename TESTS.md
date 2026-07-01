@@ -1416,6 +1416,23 @@ _Test files: `duckAgent/tests/test_demand_score.py` (helper, 10), `test_competit
 
 ---
 
+## Surface 51 — Real competitor hooks + own-post coverage in Social Strategy (2026-07-01, operator: "these hints are vague — why can't the AI grab the actual hook so I don't have to go look?")
+
+**The recommendations gave strategic nudges** ("borrow a hook from f3dprinted", "go review their posts") instead of the actual content — even though `competitor_social_snapshots.json` carries every post's real `visible_hook`, engagement, format, and URL. And "own-post signal: LOW" was a bare label with no backing.
+
+**Fix (Design 1 + 2v1 — deterministic joins, no LLM):** the weekly_strategy producer now (a) `_top_post_for_account` joins each competitor recommendation to that account's **highest-engagement real post** (hook text + plays/likes + format + link), attached as `top_post`; and (b) `_own_post_coverage` adds `own_post_coverage` to the packet (28 posts tracked, by-workflow, top posts). The recommendations page renders a **hook block** (the actual hook + "open post ↗") on each competitor rec, and a **"Your post coverage"** card that makes "low signal" concrete ("18 memes, 1 thursday — thin lanes flagged"). The AI-drafted duck version (2v2) is a deferred, spec-first follow-up.
+
+| use case | happy | no match / empty | future posts |
+|---|---|---|---|
+| producer attaches real top post | ✅ `test_weekly_strategy_recommendation_packet.py::RealHooksAndCoverageTests::test_top_post_for_account_picks_highest_engagement` (+ normalized-handle match) | ✅ `::test_top_post_matches_normalized_handle` (None on no match / empty) | n/a |
+| own-post coverage by workflow | ✅ `::test_own_post_coverage_counts_by_workflow_and_excludes_future` | n/a | ✅ future posts excluded from count |
+| page renders real hook + link | ✅ `test_recommendations_hooks.py::test_hook_block_renders_real_hook_and_link` (hook, "1,565,673 plays", open-post link) | ✅ `::test_hook_block_empty_when_no_hook` | n/a |
+| page coverage card | ✅ `::test_coverage_card_shows_count_and_thin_lane` | ✅ `::test_coverage_empty_when_no_data` | n/a |
+
+**BUILT 2026-07-01.** duck-ops full **1030 pass** (3 new producer tests); duckAgent recs+viewer+smoke **256 pass** (4 new page tests, full `test_viewer` run per the CI lesson). Live: the f3dprinted rec shows its real top post — *"3D Printed Octopus Shot Drink Maker," 1.5M plays, reel* + link; coverage card shows 28 posts (18 meme / 1 thursday). Tier 1 (producer re-run, read-only social state).
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

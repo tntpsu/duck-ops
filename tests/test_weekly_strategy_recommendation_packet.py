@@ -313,3 +313,53 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealHooksAndCoverageTests(unittest.TestCase):
+    """Design 1+2v1: the packet must carry the ACTUAL top competitor hook (so
+    'borrow a hook from X' is concrete, not 'go look') and own-post coverage
+    (so 'low signal on self' means '18 memes, 1 thursday')."""
+
+    def test_top_post_for_account_picks_highest_engagement(self) -> None:
+        snap = {"posts": [
+            {"account_handle": "f3dprinted", "account_name": "f3dprinted",
+             "visible_hook": "Low one", "engagement_score": 5,
+             "engagement_visible": {"likes": 1, "plays": 10}, "post_format": "reel",
+             "post_url": "https://x/1"},
+            {"account_handle": "f3dprinted", "account_name": "f3dprinted",
+             "visible_hook": "3D Printed Octopus Shot Drink Maker", "engagement_score": 900,
+             "engagement_visible": {"likes": 4310, "plays": 1565673}, "post_format": "reel",
+             "post_url": "https://x/2"},
+            {"account_handle": "someoneelse", "visible_hook": "unrelated", "engagement_score": 999},
+        ]}
+        tp = weekly_strategy_recommendation_packet._top_post_for_account(snap, "f3dprinted")
+        self.assertEqual(tp["hook"], "3D Printed Octopus Shot Drink Maker")
+        self.assertEqual(tp["plays"], 1565673)
+        self.assertEqual(tp["url"], "https://x/2")
+
+    def test_top_post_matches_normalized_handle(self) -> None:
+        snap = {"posts": [{"account_handle": "wilderkind.studio", "account_name": "WilderkindStudioCo",
+                           "visible_hook": "H", "engagement_score": 1}]}
+        self.assertIsNotNone(weekly_strategy_recommendation_packet._top_post_for_account(snap, "WilderkindStudioCo"))
+        self.assertIsNone(weekly_strategy_recommendation_packet._top_post_for_account(snap, "nomatch"))
+        self.assertIsNone(weekly_strategy_recommendation_packet._top_post_for_account({"posts": []}, "x"))
+
+    def test_own_post_coverage_counts_by_workflow_and_excludes_future(self) -> None:
+        social = {"rollups": {"by_workflow": [
+            {"label": "meme", "post_count": 18, "avg_engagement_score": 12},
+            {"label": "thursday", "post_count": 1, "avg_engagement_score": 20},
+        ]}}
+        posts = {"posts": [
+            {"workflow": "meme", "engagement_score": 23, "caption": "Meme Monday", "url": "u1"},
+            {"workflow": "thursday", "engagement_score": 20, "caption": "ToT", "url": "u2"},
+            {"workflow": "meme", "engagement_score": 5, "is_future_post": True},  # excluded
+        ]}
+        cov = weekly_strategy_recommendation_packet._own_post_coverage(social, posts)
+        self.assertEqual(cov["post_count"], 2)  # future excluded
+        self.assertEqual([(w["label"], w["count"]) for w in cov["by_workflow"]],
+                         [("meme", 18), ("thursday", 1)])
+        self.assertEqual(cov["top_posts"][0]["workflow"], "meme")  # highest score first
+
+
+if __name__ == "__main__":
+    unittest.main()
