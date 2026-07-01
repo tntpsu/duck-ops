@@ -47,6 +47,7 @@ from workflow_control import TestModeRefusalError
 # suppressed here too (no parallel, drifting suppression list).
 from product_concept_queue import (
     PRODUCT_CONCEPT_FEEDBACK_PATH,
+    PRODUCT_CONCEPT_QUEUE_PATH,
     SUPPRESSING_FEEDBACK_RESOLUTIONS,
     _concept_feedback_key,
 )
@@ -61,7 +62,7 @@ BUILD_NEXT_QUEUE_PATH = DUCK_OPS_ROOT / "state" / "build_next_queue.json"
 # "duplicate" -> suppress next build; "distinct" -> stop flagging. Kept separate
 # from the concept-feedback store so a candidate can be ruled on BEFORE promotion.
 BUILD_NEXT_DUPE_DECISIONS_PATH = DUCK_OPS_ROOT / "state" / "build_next_dupe_decisions.json"
-_VALID_DUPE_DECISIONS = {"duplicate", "distinct"}
+_VALID_DUPE_DECISIONS = {"duplicate", "distinct", "improve"}
 
 # Comparison anchor for the DUCK_TEST_MODE write guard (architectural
 # convention 4): captured at import, while the guard reads the LIVE module
@@ -69,7 +70,7 @@ _VALID_DUPE_DECISIONS = {"duplicate", "distinct"}
 _FROZEN_PRODUCTION_BUILD_NEXT_QUEUE_PATH = BUILD_NEXT_QUEUE_PATH.resolve()
 _FROZEN_PRODUCTION_BUILD_NEXT_DUPE_DECISIONS_PATH = BUILD_NEXT_DUPE_DECISIONS_PATH.resolve()
 
-SURFACE_VERSION = 1
+SURFACE_VERSION = 3  # v3 (2026-06-30): entries carry `in_concept_queue` (funnel awareness)
 TOP_N = 12
 # Token overlap (candidate vs an existing catalog item) at/above this is
 # treated as "we already make this" -> suppressed as a near-duplicate.
@@ -481,6 +482,13 @@ _SEMANTIC_HARD_BAND = "already_made"
 # the band is fuzzy enough that hiding it drops distinct ducks (e.g. Labrador
 # vs Golden Retriever at 0.721). The operator confirms/dismisses per concept.
 _SEMANTIC_SOFT_BAND = "possible_dupe"
+# Splits the soft band (2026-06-29). A cosine >= this counts as "you already
+# make this" (improve_existing); below it the match is too weak to trust — it's
+# usually shared SEO boilerplate, not the same subject (wine-duck cosine 0.46 vs
+# highland-cow) — so it defaults to build_new with a correctable weak-match hint.
+# Calibrated above the wine↔cow false-positive (0.46) and below the Dachshund
+# real near-dup (0.71). Operator rulings still override either way.
+CONFIDENT_DUPE_FLOOR = 0.55
 _ON_BRAND_TOKENS = {"duck", "ducks", "ducky", "dashboard", "dash", "jeep"}
 
 
@@ -551,6 +559,94 @@ def _norm_title(s: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()
 
 
+def _own_listing_index(catalog_items: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """{normalized title -> {title, handle, url, image_src}} for the operator's
+    own catalog. Used to attach `own_listing` to an `improve_existing` build
+    candidate so the page can show YOUR product (link + image) next to theirs.
+    URL derived from the Shopify handle; price isn't in the catalog (degrades to
+    link + image — see the Build-Next split, 2026-06-29)."""
+    out: dict[str, dict[str, Any]] = {}
+    for v in (catalog_items or {}).values():
+        if not isinstance(v, dict):
+            continue
+        title = v.get("title")
+        if not title:
+            continue
+        handle = str(v.get("handle") or "").strip()
+        out[_norm_title(title)] = {
+            "title": title,
+            "handle": handle or None,
+            "url": f"https://www.myjeepduck.com/products/{handle}" if handle else None,
+            "image_src": v.get("image_src") or None,
+        }
+    return out
+
+
+# Concept-queue awareness (2026-06-30). Build-Next is one of four scouts feeding
+# the product_concept_queue funnel; the funnel merges cross-scout duplicates by
+# _slugify(theme), but competitor titles are keyword-stuffed so their cleaned
+# theme ("3d chef pla plastic") never slug-matches a clean trend theme ("chef")
+# — the merge misses and a duplicate concept slips through. So Build-Next reads
+# the funnel here and flags any candidate already in it, so the page can badge it
+# and disable Promote (no re-proposing what's already in flight).
+_CONCEPT_QUEUE_COVERAGE_MIN = 0.8  # the clean queued theme must be ~fully present
+_CONCEPT_SOURCE_LABELS = {
+    "trend_candidate": "trend scout",
+    "build_next_promotion": "Build-Next",
+    "competitor_motif": "competitor motif",
+    "strategy_idea": "strategy idea",
+}
+
+
+def _load_active_concept_themes(path: Any = None) -> list[dict[str, Any]]:
+    """Active (not operator-suppressed) product-concept-queue items as
+    {theme, tokens, source_type, queue_state} for dedup. Read-only; never
+    raises (fail-soft to []) so a malformed funnel file can't crash Build-Next."""
+    data = load_json(path or PRODUCT_CONCEPT_QUEUE_PATH, {})
+    items = data.get("items") if isinstance(data, dict) else None
+    out: list[dict[str, Any]] = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        if it.get("queue_state") == "suppressed_by_operator":
+            continue  # an already-killed concept shouldn't block a fresh gap
+        theme = str(it.get("theme") or it.get("raw_theme") or "").strip()
+        toks = _tokens(theme)
+        if not theme or not toks:
+            continue
+        out.append({
+            "theme": theme,
+            "tokens": toks,
+            "source_type": it.get("source_type"),
+            "queue_state": it.get("queue_state"),
+        })
+    return out
+
+
+def _concept_queue_match(cand_tokens: set[str],
+                         active_concepts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The queued concept this candidate already covers, or None. Matches when
+    the clean queued theme is ~fully present in the (keyword-stuffed) candidate
+    — robust to the slug-merge miss that lets a duplicate through."""
+    best: dict[str, Any] | None = None
+    best_cov = 0.0
+    for c in active_concepts or []:
+        toks = c.get("tokens") or _tokens(c.get("theme"))
+        # coverage of the queued theme specifically (not _overlap's smaller-set,
+        # which could key off the candidate when it's the shorter one)
+        cov = (len(cand_tokens & toks) / len(toks)) if toks else 0.0
+        if cov >= _CONCEPT_QUEUE_COVERAGE_MIN and cov > best_cov:
+            best, best_cov = c, cov
+    if best is None:
+        return None
+    return {
+        "theme": best["theme"],
+        "source_type": best.get("source_type"),
+        "source_label": _CONCEPT_SOURCE_LABELS.get(str(best.get("source_type")), "another scout"),
+        "queue_state": best.get("queue_state"),
+    }
+
+
 def build_build_next_queue(*,
                            report: dict[str, Any],
                            report_name: str | None,
@@ -561,14 +657,20 @@ def build_build_next_queue(*,
                            top_n: int = TOP_N,
                            semantic_map: dict[str, dict[str, Any]] | None = None,
                            search_demand_terms: dict[str, float] | None = None,
+                           active_concepts: list[dict[str, Any]] | None = None,
                            embed_fn=None) -> dict[str, Any]:
     catalog_items = catalog.get("items") if isinstance(catalog.get("items"), dict) else {}
     catalog_sets = _catalog_token_sets(catalog_items)
+    own_listings = _own_listing_index(catalog_items)  # for the improve_existing side-by-side
     margin_pairs, median_margin = _margin_index(profit)
     catalog_margin = _catalog_margin_map(catalog_items, profit)
     active_occasions = [o for o in occasion_intel.get("active_occasions") or [] if isinstance(o, dict)]
     suppressed_keys = _feedback_suppressed_keys(feedback)
     dupe_decisions = _load_dupe_decisions()
+    # Concept-queue funnel awareness. None → load from the funnel state file;
+    # pass [] explicitly in tests to skip the read.
+    if active_concepts is None:
+        active_concepts = _load_active_concept_themes()
     # First-party search demand (Surface 38). None → load from the producer's
     # state file; pass {} explicitly in tests to skip the read.
     if search_demand_terms is None:
@@ -637,10 +739,34 @@ def build_build_next_queue(*,
         else:
             sem_suppressed, sem_reason = (gap < (1.0 - ALREADY_MADE_OVERLAP)), f"already made — {gap_reason}"
 
-        # Soft-flag (kept, not suppressed) unless the operator already ruled on it.
+        # Soft-flag band split (2026-06-29). The semantic dedupe "possible_dupe"
+        # band (0.43-0.72) is too wide to treat as one thing: a 0.71 match is
+        # very likely the same duck, a 0.46 match is usually just shared SEO
+        # boilerplate (the wine-duck ↔ highland-cow false-positive). So we split
+        # the band by CONFIDENT_DUPE_FLOOR:
+        #   - confident (>= floor): improve_existing ("you already make this")
+        #   - weak (< floor): defaults to build_new (likely a genuine gap), but
+        #     carries a `weak_match` hint so the operator can one-tap-correct it
+        #     INTO a dup if it really is one.
+        # Operator rulings always win over the score.
         dupe_decision = _dupe_decision_for(dupe_decisions, title)
-        possible_dupe = bool(sem and str(sem.get("band")) == _SEMANTIC_SOFT_BAND
-                             and dupe_decision != "distinct")
+        match_title = (sem or {}).get("match") if sem else None
+        own_listing = own_listings.get(_norm_title(match_title)) if match_title else None
+        in_soft_band = bool(sem and str(sem.get("band")) == _SEMANTIC_SOFT_BAND)
+        raw_score = (float(sem.get("score"))
+                     if (in_soft_band and sem and sem.get("score") is not None) else None)
+        # Operator rulings override the score. "improve" = "yes I sell this, show
+        # me theirs so I can compare/update my listing" → force improve_existing
+        # even for a weak score. "distinct" = "different product" → build_new.
+        # "duplicate" = "hide it" → suppressed by the block below.
+        if dupe_decision == "improve" and sem:
+            confident_dupe, weak_dupe = True, False
+        elif dupe_decision == "distinct":
+            confident_dupe, weak_dupe = False, False
+        else:
+            confident_dupe = bool(in_soft_band and raw_score is not None
+                                  and raw_score >= CONFIDENT_DUPE_FLOOR)
+            weak_dupe = bool(in_soft_band and not confident_dupe)
 
         entry = {
             "title": title,
@@ -659,11 +785,34 @@ def build_build_next_queue(*,
             "demand_7d": cand.get("demand_7d"),
             "demand_30d": cand.get("demand_30d"),
             "demand_breakdown": cand.get("demand_breakdown"),
-            "semantic_match": (sem or {}).get("match") if sem else None,
-            "possible_dupe": possible_dupe,
-            "dupe_score": float(sem.get("score")) if (possible_dupe and sem and sem.get("score") is not None) else None,
+            "semantic_match": match_title,
+            "possible_dupe": confident_dupe,
+            "dupe_score": raw_score if in_soft_band else None,
             "reasons": [demand_reason, margin_reason, gap_reason, occasion_reason, search_reason],
+            # Which list this belongs to. improve_existing = "you already make
+            # this, improve yours"; build_new = a genuine gap to produce.
+            "lane": "improve_existing" if confident_dupe else "build_new",
         }
+        # Funnel awareness: is this already sitting in the concept queue (queued
+        # via any scout)? If so the page badges it and disables Promote so the
+        # operator can't double-create it. Attached to build_new candidates
+        # (an improve_existing one is a catalog match, a different concern).
+        if not confident_dupe:
+            in_queue = _concept_queue_match(cand_tokens, active_concepts)
+            if in_queue:
+                entry["in_concept_queue"] = in_queue
+        # A confident improve_existing candidate carries YOUR matching listing
+        # (link + image) so the page shows your duck vs theirs.
+        if confident_dupe:
+            entry["own_listing"] = own_listing
+        # A weak match defaults to build_new but keeps the hint, so the operator
+        # can correct it ("actually I make this") with one tap.
+        elif weak_dupe:
+            entry["weak_match"] = {
+                "title": match_title,
+                "score": raw_score,
+                "own_listing": own_listing,
+            }
 
         # Operator-confirmed duplicate → suppress (one-click "Confirm duplicate").
         if dupe_decision == "duplicate":
@@ -713,6 +862,9 @@ def build_build_next_queue(*,
         "suppressed": suppressed,
         "queue_count": len(queue),
         "suppressed_count": len(suppressed),
+        "build_new_count": sum(1 for e in queue[:top_n] if e.get("lane") != "improve_existing"),
+        "improve_existing_count": sum(1 for e in queue[:top_n] if e.get("lane") == "improve_existing"),
+        "already_in_concept_queue_count": sum(1 for e in queue[:top_n] if e.get("in_concept_queue")),
     }
 
 

@@ -1,5 +1,9 @@
 # Contract: `product_concept_queue`
 
+> **Architecture overview (start here):** [`docs/PRODUCT_CONCEPT_PIPELINE.md`](../docs/PRODUCT_CONCEPT_PIPELINE.md)
+> — the four scouts → funnel → Studio flow, the two approval gates, and the
+> three dedup layers. This file is the field-level contract.
+
 ## Purpose
 
 Represent product concept candidates Duck Ops can safely surface before DuckAgent generates design briefs, images, models, or listings.

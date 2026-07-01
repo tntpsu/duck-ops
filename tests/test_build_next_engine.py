@@ -53,10 +53,15 @@ def _cat_items(items):
     return {str(i): it for i, it in enumerate(items)}
 
 
-def _cat_item(title, *, status="active", core_terms="", classified=False):
+def _cat_item(title, *, status="active", core_terms="", classified=False,
+              handle=None, image_src=None):
     item = {"title": title, "status": status, "core_terms": core_terms}
     if classified:
         item["theme_classification"] = {"primary_category": "Animals & Pets"}
+    if handle is not None:
+        item["handle"] = handle
+    if image_src is not None:
+        item["image_src"] = image_src
     return item
 
 
@@ -423,6 +428,160 @@ class TestBuild:
         payload = bne.build_build_next_queue(**self._kwargs(report=report))
         assert payload["queue_count"] == 0
         assert "off-brand" in payload["suppressed"][0]["suppressed_reason"]
+
+    # ---- Surface 47.1 Build-Next split: lane + own_listing ---------------
+
+    def test_build_new_lane_on_genuine_gap(self):
+        """A candidate with no semantic dupe is lane='build_new', carries no
+        own_listing, and is counted in build_new_count."""
+        payload = bne.build_build_next_queue(**self._kwargs())
+        entry = payload["queue"][0]
+        assert entry["lane"] == "build_new"
+        assert "own_listing" not in entry
+        assert payload["build_new_count"] == 1
+        assert payload["improve_existing_count"] == 0
+
+    def test_confident_dupe_lane_attaches_own_listing(self):
+        """A CONFIDENT soft-band match (>= CONFIDENT_DUPE_FLOOR) is
+        lane='improve_existing' and carries the operator's matching listing
+        (link + image) joined by title."""
+        payload = bne.build_build_next_queue(**self._kwargs(
+            report=_report(ducks=[_duck("1", "Sausage Dog Buddy", engagement=4000)]),
+            catalog=_catalog([_cat_item("Dachshund Duck Long Loyal",
+                                        handle="dachshund-duck", image_src="https://cdn/x.jpg")]),
+            semantic_map={"Sausage Dog Buddy": {"match": "Dachshund Duck Long Loyal",
+                                                 "score": 0.71, "band": "possible_dupe"}}))
+        assert payload["queue_count"] == 1
+        entry = payload["queue"][0]
+        assert entry["lane"] == "improve_existing"
+        assert entry["possible_dupe"] is True
+        assert entry["dupe_score"] == 0.71
+        own = entry["own_listing"]
+        assert own["url"] == "https://www.myjeepduck.com/products/dachshund-duck"
+        assert own["image_src"] == "https://cdn/x.jpg"
+        assert "weak_match" not in entry
+        assert payload["improve_existing_count"] == 1
+        assert payload["build_new_count"] == 0
+
+    def test_weak_dupe_defaults_to_build_new_with_hint(self):
+        """A WEAK soft-band match (< CONFIDENT_DUPE_FLOOR) — the wine↔highland-cow
+        false-positive class — defaults to build_new but carries a correctable
+        weak_match hint (title + score + own listing)."""
+        assert bne.CONFIDENT_DUPE_FLOOR == 0.55  # pin the calibrated floor
+        payload = bne.build_build_next_queue(**self._kwargs(
+            report=_report(ducks=[_duck("1", "Highland Cow Adventure Duck", engagement=4000)]),
+            catalog=_catalog([_cat_item("Wine Ducks Off-Road",
+                                        handle="wine-ducks", image_src="https://cdn/wine.jpg")]),
+            semantic_map={"Highland Cow Adventure Duck": {"match": "Wine Ducks Off-Road",
+                                                          "score": 0.46, "band": "possible_dupe"}}))
+        assert payload["queue_count"] == 1
+        entry = payload["queue"][0]
+        assert entry["lane"] == "build_new"
+        assert entry["possible_dupe"] is False
+        weak = entry["weak_match"]
+        assert weak["title"] == "Wine Ducks Off-Road"
+        assert weak["score"] == 0.46
+        assert weak["own_listing"]["url"] == "https://www.myjeepduck.com/products/wine-ducks"
+        assert payload["build_new_count"] == 1
+        assert payload["improve_existing_count"] == 0
+
+    def test_confident_dupe_own_listing_none_when_join_misses(self):
+        """If the matched title isn't found in the operator catalog, own_listing
+        degrades to None rather than crashing (the page shows competitor-only)."""
+        payload = bne.build_build_next_queue(**self._kwargs(
+            report=_report(ducks=[_duck("1", "Sausage Dog Buddy", engagement=4000)]),
+            catalog=_catalog([_cat_item("Astronaut Space Helmet Duck")]),
+            semantic_map={"Sausage Dog Buddy": {"match": "Some Other Duck Not In Catalog",
+                                                 "score": 0.71, "band": "possible_dupe"}}))
+        entry = payload["queue"][0]
+        assert entry["lane"] == "improve_existing"
+        assert entry["own_listing"] is None
+
+    def test_improve_ruling_forces_weak_match_into_improve_existing(self):
+        """Operator 'improve' ruling routes a WEAK match (below the floor) into
+        Improve Existing so they can compare vs their listing — the 'Yes —
+        compare to mine' action, not a hide."""
+        bne.record_dupe_decision("Sausage Dog Buddy", "improve", matched="Dachshund Duck Long Loyal")
+        payload = bne.build_build_next_queue(**self._kwargs(
+            report=_report(ducks=[_duck("1", "Sausage Dog Buddy", engagement=4000)]),
+            catalog=_catalog([_cat_item("Dachshund Duck Long Loyal",
+                                        handle="dachshund-duck", image_src="https://cdn/x.jpg")]),
+            semantic_map={"Sausage Dog Buddy": {"match": "Dachshund Duck Long Loyal",
+                                                 "score": 0.46, "band": "possible_dupe"}}))  # weak
+        entry = payload["queue"][0]
+        assert entry["lane"] == "improve_existing"       # promoted from build_new
+        assert entry["possible_dupe"] is True
+        assert entry["own_listing"]["url"].endswith("/dachshund-duck")
+        assert "weak_match" not in entry
+
+    def test_distinct_ruling_forces_build_new_even_when_confident(self):
+        """An operator 'distinct' ruling overrides a confident score → build_new,
+        no flag (the correction path: 'these aren't the same product'). The
+        store is redirected to a tmp path by conftest."""
+        bne.record_dupe_decision("Sausage Dog Buddy", "distinct")
+        payload = bne.build_build_next_queue(**self._kwargs(
+            report=_report(ducks=[_duck("1", "Sausage Dog Buddy", engagement=4000)]),
+            catalog=_catalog([_cat_item("Dachshund Duck Long Loyal")]),
+            semantic_map={"Sausage Dog Buddy": {"match": "Dachshund Duck Long Loyal",
+                                                 "score": 0.71, "band": "possible_dupe"}}))
+        entry = payload["queue"][0]
+        assert entry["lane"] == "build_new"
+        assert entry["possible_dupe"] is False
+        assert "weak_match" not in entry
+
+    def test_lane_counts_sum_to_queue_count(self):
+        payload = bne.build_build_next_queue(**self._kwargs())
+        assert (payload["build_new_count"] + payload["improve_existing_count"]
+                == payload["queue_count"])
+
+    # ---- Concept-queue funnel awareness (2026-06-30) --------------------
+
+    def test_candidate_already_in_concept_queue_is_flagged(self):
+        """A build_new candidate whose subject is already queued via another
+        scout gets in_concept_queue (theme + source label) so the page can
+        badge it and disable Promote — closes the slug-merge duplicate hole."""
+        payload = bne.build_build_next_queue(**self._kwargs(
+            report=_report(ducks=[_duck("1", "Beaver Dam Builder Dashboard Duck Gift", engagement=4000)]),
+            active_concepts=[{"theme": "Beaver", "source_type": "trend_candidate",
+                              "queue_state": "ready_for_brief_review"}]))
+        entry = payload["queue"][0]
+        assert entry["lane"] == "build_new"
+        inq = entry["in_concept_queue"]
+        assert inq["theme"] == "Beaver"
+        assert inq["source_label"] == "trend scout"
+        assert payload["already_in_concept_queue_count"] == 1
+
+    def test_candidate_not_in_queue_has_no_flag(self):
+        payload = bne.build_build_next_queue(**self._kwargs(
+            active_concepts=[{"theme": "Beaver", "source_type": "trend_candidate"}]))
+        entry = payload["queue"][0]  # the medieval-knight default candidate
+        assert "in_concept_queue" not in entry
+        assert payload["already_in_concept_queue_count"] == 0
+
+    def test_operator_suppressed_queue_item_does_not_block(self):
+        """A concept the operator already killed must NOT flag a fresh gap."""
+        active = bne._load_active_concept_themes.__doc__  # sanity: helper exists
+        assert active
+        # feed the loader a suppressed item via a written file
+        import json as _json
+        import tempfile as _tf
+        from pathlib import Path as _P
+        with _tf.TemporaryDirectory() as tmp:
+            p = _P(tmp) / "q.json"
+            p.write_text(_json.dumps({"items": [
+                {"theme": "Beaver", "source_type": "trend_candidate",
+                 "queue_state": "suppressed_by_operator"}]}), encoding="utf-8")
+            loaded = bne._load_active_concept_themes(p)
+        assert loaded == []  # suppressed item dropped
+
+    def test_load_active_concept_themes_failsoft_on_garbage(self):
+        import tempfile as _tf
+        from pathlib import Path as _P
+        with _tf.TemporaryDirectory() as tmp:
+            p = _P(tmp) / "q.json"
+            p.write_text("not json{", encoding="utf-8")
+            assert bne._load_active_concept_themes(p) == []
+        assert bne._load_active_concept_themes(_P("/does/not/exist.json")) == []
 
     def test_on_brand_trending_kept(self):
         report = {"ducks_to_build": [], "trending_products": [_duck("1", "Cowboy Duck Dashboard", engagement=9000)]}
