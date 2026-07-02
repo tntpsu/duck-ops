@@ -1433,6 +1433,20 @@ _Test files: `duckAgent/tests/test_demand_score.py` (helper, 10), `test_competit
 
 ---
 
+## Surface 52 — 12 blind OS cards: status-key naming drift (2026-07-02, operator: "half the OS dashboard is blank")
+
+**12 of ~27 `*_health` cards rendered blank on the Agent OS dashboard.** Root cause: the card loaders split into two conventions — "watchdog" cards set **`_status`**/`_status_reason` (underscore); "intel/inspector" cards set plain **`status`** (no underscore); and two "bracket" cards (occasion, theme) set only sub-statuses (`freshness_status`/`selection_status`, `coverage_status`/`backlog_status`) with no rollup. The OS dashboard + `os_health` aggregate classify on `_status`, and the assembler (`get_system_health_detail`) + cache producer did **no normalization** — so ~36 `status`-only cards + 2 bracket cards were invisible. Not a crash, not stale data: a field-name contract mismatch (the infra-level [[STATUS_CONTRACT]] "one field, one meaning" + [[feedback_loader_and_registration_both_need_tests]] "passes its own tests but invisible on the page"). 10 of the 12 were computing fine (incl. a hidden **shopify_seo YELLOW** and **theme_classification YELLOW 11d-stale**).
+
+**Fix:** `_card_rollup_status(card)` resolves every card to one canonical `_status`/`_status_reason` from whichever convention it used — plain `status`, `_status`, OR the worst of any `*_status` bracket sub-fields (with its matching `<prefix>_reason`). Applied in a loop at the single assembly point in `get_system_health_detail`, **before** `_build_os_health` so the aggregate sees corrected statuses. A card with no status of any kind → **yellow** ("unknown → notice it"), never silently green or blank. No loader edits (fix is one place); reused the existing `_normalize_card_status`.
+
+| use case | plain `status` | `_status` | bracket sub-status | no status at all |
+|---|---|---|---|---|
+| card resolves to canonical _status | ✅ `test_viewer.py::test_rollup_plain_status_convention` | ✅ `::test_rollup_underscore_status_convention` | ✅ `::test_rollup_bracket_takes_worst_and_its_reason` (worst + its reason) / `::test_rollup_bracket_all_green` | ✅ `::test_rollup_no_status_defaults_yellow_not_blank` (yellow, never blind) |
+
+**BUILT 2026-07-02.** 5 new rollup tests; **full `test_viewer` + smoke 257 pass** (ran test_viewer per the CI lesson). Live after cache regen: **0 blind cards** (was 12); 3 red / 19 green / 5 yellow; occasion green ("1 active of 10, intel 17h"), theme yellow ("11d stale — weekly sync due"), shopify_seo yellow — all previously invisible. Tier 2 (read-only viewer assembler).
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
