@@ -1447,6 +1447,20 @@ _Test files: `duckAgent/tests/test_demand_score.py` (helper, 10), `test_competit
 
 ---
 
+## Surface 53 — theme_classification false "stale" on a stable catalog (2026-07-02, operator: "why is theme classification 11d stale?")
+
+**The card yellowed "11d stale" though classification was fine.** Root cause: `categorize_all_existing_ducks` (the daily 4am sweep) does `if not todo: return 0` **before** the `write_classification_health(...)` call. So when nothing needs reclassifying (stable catalog — no new/changed products), the sweep returns early and never refreshes `theme_classification_health.json`. Its `generated_at` ages, and the OS card reads that as stale — even though the daily job ran healthy every day (confirmed: `sync_weekly_daily` last_start today 04:00, green). **The freshness signal was coupled to reclassification ACTIVITY instead of "the sweep ran and verified"** — a stable, healthy catalog looked broken ([[feedback_alive_status_is_not_progress]] inverted).
+
+**Fix:** refresh the health summary on the empty-todo path too, so `generated_at` reflects "swept, all N classified, 0 stale" every run. A stable catalog now reports fresh + accurate.
+
+| use case | nothing stale (stable catalog) | products stale |
+|---|---|---|
+| sweep refreshes health summary | ✅ `test_theme_health_freshness.py::test_categorize_refreshes_health_when_nothing_stale` (empty todo still calls write_classification_health) | ✅ existing per-product path (line 290) |
+
+**BUILT 2026-07-02.** 1 new test; theme + sync suites 33 pass. Live: sweep = 0 of 259 need reclassification, health refreshed to today, card's 11d-stale cleared — now shows the HONEST signal: 3 products flagged needs_review (a real minor backlog, not a false alarm). Tier 1 (read cache + write health state).
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
