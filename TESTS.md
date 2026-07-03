@@ -1445,6 +1445,8 @@ _Test files: `duckAgent/tests/test_demand_score.py` (helper, 10), `test_competit
 
 **BUILT 2026-07-02.** 5 new rollup tests; **full `test_viewer` + smoke 257 pass** (ran test_viewer per the CI lesson). Live after cache regen: **0 blind cards** (was 12); 3 red / 19 green / 5 yellow; occasion green ("1 active of 10, intel 17h"), theme yellow ("11d stale — weekly sync due"), shopify_seo yellow — all previously invisible. Tier 2 (read-only viewer assembler).
 
+**Follow-up fix 2026-07-03 (`test_rollup_ignores_domain_status_fields`):** the rollup treated ANY `*_status` field as a bracket sub-status, so `shopify_seo`'s **domain** field `review_status="applied"` normalized to yellow and overrode its real `status=green`. Gate the sub-status scan on a color-valued (`green/yellow/red`) value only — domain lifecycle fields (`review_status`, `execution_status`) are not health signals. `test_viewer` 241 pass; SEO card green after the fix.
+
 ---
 
 ## Surface 53 — theme_classification false "stale" on a stable catalog (2026-07-02, operator: "why is theme classification 11d stale?")
