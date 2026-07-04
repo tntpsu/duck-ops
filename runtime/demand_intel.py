@@ -27,11 +27,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from seo_demand_context import (  # reuse the ONE canonical title join
+from seo_demand_context import (  # tokenizers reused; buys join is by id/SKU, not title
     load_seo_demand_context,
     _tokens,
     _strip_channel,
-    _MATCH_MIN_OVERLAP,
 )
 
 DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +56,43 @@ _DEFAULT_CONFIG = {
 }
 
 
+# Catalog boilerplate that carries no identity — stripped before trusting a GA4
+# title match (Etsy listing_performance has no product_id, so views join by title;
+# without this "Oklahoma Sooners …officially licensed…duck" cross-matches
+# "Michigan Wolverines …officially licensed…duck". 2026-07-03).
+_BOILERPLATE = frozenset({
+    "duck", "ducks", "3d", "printed", "print", "collectible", "collectibles", "figurine",
+    "gift", "gifts", "dashboard", "decor", "dog", "loyal", "playful", "officially", "licensed",
+    "college", "the", "and", "with", "for", "of", "edition", "custom", "personalized", "keepsake",
+    "sculpture", "toy", "mashup", "hybrid", "animal", "pet", "lover", "lovers", "themed", "desk",
+    "car", "jeep", "vibe", "vibes", "inspired", "art", "home", "cute", "funny", "quirky", "novelty",
+    "small", "large", "mini", "fan", "fans", "collectic", "gameday", "game", "day",
+    "team", "spirit", "pride", "official", "spirited",
+})
+
+
+def _distinctive(title: Any) -> set[str]:
+    """Identity-bearing tokens: length >= 3, non-boilerplate. (_tokens returns an
+    unordered set, so anything positional would be nondeterministic.)"""
+    return {t for t in _tokens(_strip_channel(title)) if len(t) >= 3 and t not in _BOILERPLATE}
+
+
+def _ga4_match_is_trustworthy(duck_title: Any, matched_title: Any) -> bool:
+    """A GA4-by-title match is trustworthy only when the duck and the matched
+    listing SHARE their subject — at least half the smaller side's distinctive
+    tokens overlap. Shared template words alone (two 'officially licensed college
+    … duck' titles) are NOT enough: that's how Oklahoma inherited Michigan's
+    views. If the subjects don't overlap, the views belong to a different duck;
+    discard rather than attribute wrong traffic (2026-07-03)."""
+    if not matched_title:
+        return False
+    a, b = _distinctive(duck_title), _distinctive(matched_title)
+    if not a or not b:
+        return False
+    shared = len(a & b)
+    return shared >= 1 and shared / min(len(a), len(b)) >= 0.5
+
+
 class TestModeRefusalError(RuntimeError):
     """Raised when write_demand_intel would write the frozen production path
     while DUCK_TEST_MODE=1 — loud per [[feedback_swallowed_errors_lie]]."""
@@ -79,45 +115,16 @@ def load_config(path: Any = None) -> dict[str, Any]:
     return cfg if isinstance(cfg, dict) and cfg.get("version") else dict(_DEFAULT_CONFIG)
 
 
-# ── title join helpers (same overlap logic as seo_demand_context.listing_signal) ──
-def _build_title_index(pairs: list[tuple[str, Any]]) -> list[tuple[frozenset, str, Any]]:
-    """pairs = [(title, value), ...] -> [(tokens, title, value)] for matching."""
-    out = []
-    for title, value in pairs:
-        toks = _tokens(_strip_channel(title))
-        if toks:
-            out.append((frozenset(toks), str(title), value))
-    return out
-
-
-def _best_match(title: Any, index: list[tuple[frozenset, str, Any]]) -> Any:
-    """Best token-overlap match value for a title, or None. Mirrors the
-    listing_signal guard: 1-token overlap only counts on full short-name cover."""
-    toks = _tokens(_strip_channel(title))
-    if not toks:
-        return None
-    best, best_ov, best_shared = None, 0.0, 0
-    for ltoks, _t, value in index:
-        if not ltoks:
-            continue
-        shared = len(ltoks & toks)
-        ov = shared / min(len(ltoks), len(toks))
-        if ov > best_ov:
-            best_ov, best, best_shared = ov, value, shared
-    if best is None or best_ov < _MATCH_MIN_OVERLAP:
-        return None
-    if best_shared < 2 and best_ov < 1.0:
-        return None
-    return best
-
-
-def _derive_buys_7d(tx_snapshot: dict, *, now_epoch: float, days: int = 7) -> list[tuple[frozenset, str, int]]:
-    """Aggregate Etsy transaction quantities within the last `days` by title.
-    Returns a title index of (tokens, title, units) for matching to the catalog.
+def _derive_buys_7d_by_id(tx_snapshot: dict, sku_to_pid: dict[str, str], *,
+                          now_epoch: float, days: int = 7) -> dict[str, int]:
+    """Aggregate Etsy transaction quantities within the last `days`, keyed by
+    Shopify product_id via the SKU→id map. Title joins are NOT used: boilerplate,
+    keyword-stuffed titles ("3D-Printed…Dog Duck Collectible") match each other,
+    so Boxer/Doberman falsely inherited the Dachshund's sales (2026-07-03).
     The v3 shop-transactions endpoint ignores date windows, so filter here on
     created_timestamp ([[reference_etsy_transactions_ignores_date_window]])."""
     cutoff = now_epoch - days * 86400
-    by_title: dict[str, int] = {}
+    by_id: dict[str, int] = {}
     for it in (tx_snapshot.get("items") or []):
         if not isinstance(it, dict):
             continue
@@ -127,15 +134,15 @@ def _derive_buys_7d(tx_snapshot: dict, *, now_epoch: float, days: int = 7) -> li
             created = 0
         if created < cutoff:
             continue
-        title = str(it.get("title") or "").strip()
-        if not title:
+        pid = sku_to_pid.get(str(it.get("sku") or "").strip().lower())
+        if not pid:
             continue
         try:
             qty = int(it.get("quantity") or 0)
         except (TypeError, ValueError):
             qty = 0
-        by_title[title] = by_title.get(title, 0) + qty
-    return _build_title_index([(t, u) for t, u in by_title.items()])
+        by_id[pid] = by_id.get(pid, 0) + qty
+    return by_id
 
 
 def _active_occasion_ids(occasion_intel: dict) -> set[str]:
@@ -257,10 +264,21 @@ def build_demand_intel(*, catalog: dict | None = None, ctx: Any = None,
         items = {}
         errors.append("catalog_index missing/empty")
 
-    buys7_index = _derive_buys_7d(tx_snapshot, now_epoch=now_epoch)
-    profit_index = _build_title_index(
-        [(p.get("label"), p) for p in (profit.get("products") or []) if isinstance(p, dict) and p.get("label")]
-    )
+    # EXACT joins by Shopify product_id / SKU — NOT title tokens (boilerplate
+    # titles mis-match; see _derive_buys_7d_by_id). profit_by_id: id→entry;
+    # sku_to_pid: SKU→id so 7d transactions (which carry a SKU) attribute cleanly.
+    profit_products = [p for p in (profit.get("products") or []) if isinstance(p, dict)]
+    profit_by_id: dict[str, dict] = {}
+    sku_to_pid: dict[str, str] = {}
+    for p in profit_products:
+        pid = str(p.get("sample_product_id") or "").strip()
+        if not pid:
+            continue
+        profit_by_id.setdefault(pid, p)
+        for sku in (p.get("distinct_skus") or []):
+            if str(sku).strip():
+                sku_to_pid[str(sku).strip().lower()] = pid
+    buys7_by_id = _derive_buys_7d_by_id(tx_snapshot, sku_to_pid, now_epoch=now_epoch)
     active_occ = _active_occasion_ids(occasion)
 
     ducks: list[dict] = []
@@ -269,14 +287,18 @@ def build_demand_intel(*, catalog: dict | None = None, ctx: Any = None,
             continue
         title = str(item.get("title") or "").strip()
         sig = ctx.listing_signal(title) if title else None
+        # Discard a boilerplate cross-match (its views belong to another duck).
+        if sig and not _ga4_match_is_trustworthy(title, sig.get("matched_title")):
+            sig = None
         vbw = (sig or {}).get("views_by_window") or {}
         views_7d = _as_int(vbw.get("7"))
         views_28d = _as_int(vbw.get("28"))
         eng = _as_float((sig or {}).get("engagement_rate"))
         bounce = _as_float((sig or {}).get("bounce_rate"))
 
-        buys_7d = _best_match(title, buys7_index)  # int units or None
-        prof = _best_match(title, profit_index) or {}
+        pid_str = str(item.get("id") or pid)
+        prof = profit_by_id.get(pid_str) or {}
+        buys_7d = buys7_by_id.get(pid_str)  # int units or None (None = no id-matched sale)
         buys_30d = _as_int(prof.get("units_sold"))
         margin_pct = _as_float(prof.get("margin_pct"))
         is_conf_margin = bool(prof.get("is_confident_margin"))
@@ -349,7 +371,7 @@ def build_demand_intel(*, catalog: dict | None = None, ctx: Any = None,
             "profit_window_days": profit.get("window_days"),
             "occasion_generated_at": occasion.get("generated_at"),
             "tx_max_created": tx_snapshot.get("max_created"),
-            "buys_source": "etsy_transactions_7d" if buys7_index else "none",
+            "buys_source": "etsy_transactions_7d_by_sku" if buys7_by_id else "none",
         },
         "ducks": ducks,
         "errors": errors,

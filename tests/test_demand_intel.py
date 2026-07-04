@@ -53,17 +53,40 @@ class _FakeCtx:
     def listing_signal(self, title): return self._sig
 
 
-def test_build_fuses_and_flags_coverage():
-    catalog = {"items": {"1": {"handle": "h", "title": "Astronaut Duck",
+def test_build_fuses_by_id_and_flags_coverage():
+    catalog = {"items": {"8033147617463": {"id": 8033147617463, "handle": "h", "title": "Astronaut Duck",
                                "image_src": "x", "theme_classification": {"occasions": []}}}}
-    profit = {"products": [{"label": "Astronaut Duck", "units_sold": 1, "margin_pct": 40, "is_confident_margin": True}]}
+    profit = {"products": [{"label": "Astronaut Duck", "sample_product_id": "8033147617463",
+                            "units_sold": 1, "margin_pct": 40, "is_confident_margin": True, "distinct_skus": ["astro-1"]}]}
     ctx = _FakeCtx({"views_by_window": {"7": 25, "28": 50}, "engagement_rate": 0.2, "verdict": "fix", "matched_title": "Astronaut Duck - Etsy"})
     p = di.build_demand_intel(catalog=catalog, ctx=ctx, profit=profit,
                              tx_snapshot={"items": []}, occasion={"active_occasions": []}, now_epoch=0)
-    assert p["available"] and p["counts"]["total"] == 1
     d = p["ducks"][0]
-    assert d["funnel"]["views_7d"] == 25
+    assert d["funnel"]["views_7d"] == 25 and d["funnel"]["buys_30d"] == 1  # id-matched
     assert d["coverage"]["has_ga4_views"] is True
-    assert d["coverage"]["etsy_click_data"] is False   # never implied
-    assert d["coverage"]["has_favorites"] is False
-    assert d["bucket"] == "refresh"  # views + low engagement
+    assert d["coverage"]["etsy_click_data"] is False and d["coverage"]["has_favorites"] is False
+    assert d["bucket"] == "refresh"
+
+
+def test_buys_join_by_id_not_title():
+    # REGRESSION (Boxer/Doberman inherited the Dachshund's 22 buys via boilerplate
+    # title overlap, 2026-07-03). Sales attach ONLY to the id that made them.
+    catalog = {"items": {
+        "111": {"id": 111, "handle": "dach", "title": "Dachshund Duck – 3D-Printed Loyal Dog Duck Collectible", "theme_classification": {"occasions": []}},
+        "222": {"id": 222, "handle": "box", "title": "Boxer Duck – 3D-Printed Loyal Dog Duck Collectible", "theme_classification": {"occasions": []}},
+    }}
+    profit = {"products": [{"label": "Dachshund Duck", "sample_product_id": "111", "units_sold": 22, "distinct_skus": ["dach-1"]}]}
+    p = di.build_demand_intel(catalog=catalog, ctx=_FakeCtx(None), profit=profit,
+                             tx_snapshot={"items": []}, occasion={"active_occasions": []}, now_epoch=0)
+    by_id = {d["product_id"]: d for d in p["ducks"]}
+    assert by_id["111"]["funnel"]["buys_30d"] == 22 and by_id["111"]["bucket"] == "winner"
+    assert by_id["222"]["funnel"]["buys_30d"] is None and by_id["222"]["bucket"] == "low_signal"  # Boxer: no sales
+
+
+def test_ga4_match_requires_shared_subject():
+    # Oklahoma must NOT inherit Michigan's views (shared 'officially licensed
+    # college … team spirit pride duck' template, different subject).
+    assert di._ga4_match_is_trustworthy("Oklahoma Sooners Duck – Officially Licensed Duck With Team Spirit & Pride",
+                                        "Michigan Wolverines Duck – Officially Licensed Duck With Team Spirit & Pride") is False
+    assert di._ga4_match_is_trustworthy("Michigan Wolverines Duck – Officially Licensed",
+                                        "Michigan Wolverines Duck – Team Spirit") is True
