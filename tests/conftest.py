@@ -206,6 +206,15 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         monkeypatch.setattr(_sst, "SALE_STEERING_PATH", tmp_path / "sale_steering.json")
     except ImportError:
         pass
+    # 2026-07-03: demand_intel (Demand page) — new prod-WRITE path (funnel action
+    # buckets); three-layer isolation (this redirect + DUCK_TEST_MODE guard in
+    # write_demand_intel + tests/test_no_test_pollution_in_demand_intel.py). Also
+    # isolates the _carry_bucket_since prod read.
+    try:
+        import demand_intel as _dmi
+        monkeypatch.setattr(_dmi, "DEMAND_INTEL_PATH", tmp_path / "demand_intel.json")
+    except ImportError:
+        pass
 
     # 2026-06-12: product_concept_queue.BUILD_NEXT_PROMOTIONS_PATH (Surface 16
     # ingestion). build_product_concept_queue() reads this file by default;

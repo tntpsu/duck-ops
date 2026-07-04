@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "generated_note": "Funnel-stage thresholds for demand_intel bucketing. Deterministic; no LLM. Etsy demand funnel: views -> engagement -> buys. Favorites + Etsy per-listing search are unavailable via API (scrape-only) and are never inferred.",
+  "traffic": {
+    "_note": "Calibrated to real data 2026-07-03: only ~50/259 ducks have GA4 views; views_7d median 4, p90 17, max 105. Sales (buys_30d) is the rich signal; views are supplementary.",
+    "min_views_7d_to_judge": 8,
+    "high_traffic_views_7d": 15,
+    "winner_min_buys_7d": 2,
+    "winner_min_buys_30d": 4
+  },
+  "engagement": {
+    "low_engagement_rate": 0.45,
+    "healthy_engagement_rate": 0.60
+  },
+  "trend": {
+    "up_ratio": 1.15,
+    "down_ratio": 0.85,
+    "prior_window_days": 21
+  },
+  "fading": {
+    "_note": "Fading requires ACTUAL view-based decline (trend down), not merely 'no sale this week' — with ~24 sales/week across 259 SKUs, a quiet week is the baseline, not a decline.",
+    "had_buys_30d_min": 3,
+    "stale_views_7d_max": 20
+  },
+  "low_signal_confidence_units": 3
+}

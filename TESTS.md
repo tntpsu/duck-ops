@@ -1463,6 +1463,25 @@ _Test files: `duckAgent/tests/test_demand_score.py` (helper, 10), `test_competit
 
 ---
 
+## Surface 54 — Demand intel page: "improve what you already sell" (2026-07-03, operator: "what ducks people view/click/buy, refresh or sale?")
+
+The counterpart to Build-Next (what to MAKE): a `/portal/intel/demand` page that reads each duck's **Etsy demand funnel (views → engagement → buys)** and sorts it into an action bucket — **Winner** (protect, `sale_steering.exclude`), **Put on sale** (`sale_steering.prioritize`), **Refresh** (`seo_review.refresh_request`), **Fading**, **Seasonal-dormant**, or **low-signal** (the long tail). Producer `duck-ops/runtime/demand_intel.py` fuses catalog_index (spine) + GA4 listing views (via the seo_demand_context title join, now exposing views) + profit (30d buys/margin) + Etsy transactions (**7d buys, filtered client-side on created_timestamp** per [[reference_etsy_transactions_ignores_date_window]]) + occasion overlay. Deterministic, config-driven buckets (`config/demand_buckets.json` v1) — no LLM.
+
+**Data honesty (the load-bearing calibration).** Measurable traffic is ~100% Etsy; views are sparse (only ~50/259 ducks, median 4/7d) so **sales are the rich signal and "no sale this week" is the baseline, NOT fading** — fading requires actual view-based decline. Favorites + Etsy per-listing search are unavailable via API and render as "n/a", never fake zeros. Thresholds calibrated to the real distribution, not round numbers.
+
+| use case | happy | no GA4 view match | buys uncovered (7d) | off-season seasonal | low traffic |
+|---|---|---|---|---|---|
+| Winner (buys ≥ floor) → exclude | ✅ `test_demand_intel::test_winner_on_sales_even_without_views` | ✅ buys-driven, survives view miss | ✅ buys_30d path | n/a | n/a |
+| Sale (engaged, not buying) → prioritize | ✅ `::test_sale_when_engaged_but_not_buying` | n/a (needs views) | ✅ 0-buys is the trigger | n/a | n/a |
+| Refresh (traffic bounces) → refresh_request | ✅ `::test_refresh_when_traffic_bounces` + `test_demand_intel_page::test_coverage_is_honest` | n/a | n/a | n/a | n/a |
+| Fading vs steady long-tail | ✅ `::test_fading_requires_view_based_decline` | ✅ `::test_low_signal_not_fading_when_no_traffic` | ✅ | ✅ `::test_seasonal_dormant_preempts_fading` | ✅ low_signal |
+| Coverage never faked (favs/Etsy clicks) | ✅ `::test_build_fuses_and_flags_coverage` + page `::test_coverage_is_honest` | | | | |
+| Prod-state isolation | ✅ `test_no_test_pollution_in_demand_intel` + conftest redirect + write_demand_intel FROZEN guard | | | | |
+
+**BUILT 2026-07-03 (v1, read-only page).** 8 producer + 3 page tests; duck-ops 85 / duckAgent 251 pass. Live at `/portal/intel/demand` (24 winners, 3 sale, 1 refresh, 231 low-signal) + in the intel directory. **OPEN:** (v1.1) one-click Sale/Protect/Refresh action buttons → `demand_action_receipts` → sale_steering/seo_refresh, with `acted_at`/`metrics_at_action` already persisted for (v2) the "did it work?" outcome loop; (Tier 3) launchd cadence so the producer stays fresh (seeded once, not yet scheduled).
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

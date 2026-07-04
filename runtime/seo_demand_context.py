@@ -129,6 +129,12 @@ class SeoDemandContext:
             "engagement_rate": best.get("engagement_rate"),
             "trend": best.get("trend"),
             "channel": best.get("channel"),
+            # Funnel-top fields for demand_intel (additive; existing callers ignore):
+            "page_views": best.get("page_views"),
+            "views_by_window": best.get("views_by_window"),
+            "bounce_rate": best.get("bounce_rate"),
+            "reason": best.get("reason"),
+            "matched_title": best.get("title"),
         }
 
 
