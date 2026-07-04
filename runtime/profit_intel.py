@@ -191,10 +191,21 @@ def _channel_mix_window(receipts: list[dict[str, Any]]) -> dict[str, Any]:
     etsy_revenue = 0.0
     for r in receipts:
         meta = r.get("metadata") or {}
-        shopify_orders += int(meta.get("shopify_orders") or 0)
+        s_ord = int(meta.get("shopify_orders") or 0)
+        e_rev = float(meta.get("etsy_revenue") or 0)
+        s_rev = meta.get("shopify_revenue")
+        # The daily receipt often omits the per-channel shopify_revenue split, but
+        # total_revenue DOES include Shopify — so it rendered $0.00 while real
+        # Shopify sales existed (2026-07-04). Derive shopify = total - etsy when
+        # there are Shopify orders but no split recorded.
+        if (s_rev is None or float(s_rev) == 0.0) and s_ord > 0:
+            total = meta.get("total_revenue")
+            if total is not None:
+                s_rev = max(0.0, round(float(total) - e_rev, 2))
+        shopify_orders += s_ord
         etsy_orders += int(meta.get("etsy_orders") or 0)
-        shopify_revenue += float(meta.get("shopify_revenue") or 0)
-        etsy_revenue += float(meta.get("etsy_revenue") or 0)
+        shopify_revenue += float(s_rev or 0)
+        etsy_revenue += e_rev
     return {
         "shopify_orders": shopify_orders,
         "etsy_orders": etsy_orders,
