@@ -3057,6 +3057,34 @@ def _decision_gateway_result(
     }
 
 
+def _mirror_skip_to_workflow_control(item: dict[str, Any]) -> None:
+    """When the operator SKIPS a publish-lane decision in the inbox, mirror a
+    'dismissed' transition into workflow_control so the OS weekly_lane_approval
+    card clears too — the two stores were unsynced (2026-07-03), so a skip cleared
+    the inbox but left the card red. Match on the structured lane+run_id. Trend /
+    customer items with no workflow_control run simply no-op. Never raises."""
+    try:
+        import workflow_control as wc  # same duck-ops/runtime dir
+        flow = str(item.get("flow") or "").strip()
+        run_id = str(item.get("run_id") or "").strip()
+        if not flow or not run_id:
+            return
+        terminal = {"dismissed", "published", "scheduled", "auto_schedule_pending"}
+        for st in wc.list_workflow_states():
+            if (str(st.get("lane") or "").strip() == flow
+                    and str(st.get("run_id") or "").strip() == run_id
+                    and str(st.get("state") or "").strip() not in terminal):
+                wc.record_workflow_transition(
+                    workflow_id=st["workflow_id"], lane=flow,
+                    display_label=st.get("display_label") or st["workflow_id"],
+                    state="dismissed", state_reason="operator_skipped_in_inbox",
+                    requires_confirmation=False, clear_next_action=True,
+                    history_summary="Operator skipped this occurrence in the decision inbox; "
+                                    "mirrored to workflow_control so the OS card clears.")
+    except Exception:
+        pass
+
+
 def record_decision_and_dispatch(
     *,
     flow: str,
@@ -3513,6 +3541,8 @@ def handle_operator_text(
         channel=channel,
     )
     write_state_source(source_name, state_bundle[source_name])
+    if desired_resolution == "skip":
+        _mirror_skip_to_workflow_control(target_item)
     recorded_decision = (
         ((state_bundle.get(source_name) or {}).get("artifacts") or {}).get(target_item["artifact_id"], {}).get("decision") or {}
     )
