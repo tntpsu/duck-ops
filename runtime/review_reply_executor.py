@@ -3353,6 +3353,24 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = False) -> dic
                 pass
 
 
+def _result_is_retryable_throttle(result: dict[str, Any]) -> bool:
+    """True when a failed drain step is a transient pacing/cooldown throttle,
+    not a real fault.
+
+    Such a failure must NOT trip ``stop_after_first_failure``. A single throttled
+    item at the front of the queue would otherwise halt the ENTIRE drain every
+    run and silently block all review replies — the 2026-06-26 item stuck on
+    ``pacing_cooldown`` did exactly this and wedged posting for 11 days. On a
+    throttle we defer the item and continue instead of breaking.
+    """
+    if not isinstance(result, dict):
+        return False
+    queue_item = result.get("queue_item")
+    if isinstance(queue_item, dict) and str(queue_item.get("last_failure_class") or "") == "pacing_cooldown":
+        return True
+    return is_cooldown_error(str(result.get("message") or ""))
+
+
 def drain_queue(
     *,
     max_items: int | None = None,
@@ -3448,6 +3466,7 @@ def drain_queue(
     posted_count = 0
     failed_count = 0
     skipped_count = 0
+    throttled_count = 0
 
     for item in eligible:
         artifact_id = str(item.get("artifact_id") or "")
@@ -3469,6 +3488,10 @@ def drain_queue(
                 }
             )
             if not dry_run.get("ok"):
+                if _result_is_retryable_throttle(dry_run):
+                    # Transient pacing throttle — defer this item, keep draining.
+                    throttled_count += 1
+                    continue
                 failed_count += 1
                 if stop_after_first_failure:
                     break
@@ -3492,6 +3515,11 @@ def drain_queue(
             elif submit.get("status") == "skipped":
                 skipped_count += 1
         else:
+            if _result_is_retryable_throttle(submit):
+                # Transient pacing throttle — defer this item and keep draining.
+                # Must not trip stop_after_first_failure (that is the 11-day wedge).
+                throttled_count += 1
+                continue
             failed_count += 1
             if stop_after_first_failure:
                 break
@@ -3524,17 +3552,22 @@ def drain_queue(
         status = "posted"
     elif skipped_count:
         status = "skipped"
+    elif throttled_count:
+        # Nothing posted or hard-failed — the run was only deferred by pacing.
+        status = "deferred_pacing"
 
     return {
         "ok": True,
         "status": status,
         "message": (
-            f"Drained {posted_count + failed_count + skipped_count} queued review replies: "
-            f"{posted_count} posted, {failed_count} failed, {skipped_count} skipped."
+            f"Drained {posted_count + failed_count + skipped_count + throttled_count} queued review replies: "
+            f"{posted_count} posted, {failed_count} failed, {skipped_count} skipped, "
+            f"{throttled_count} deferred (pacing)."
         ),
         "posted_count": posted_count,
         "failed_count": failed_count,
         "skipped_count": skipped_count,
+        "throttled_count": throttled_count,
         "results": results,
         "summary_result": summary_result,
     }

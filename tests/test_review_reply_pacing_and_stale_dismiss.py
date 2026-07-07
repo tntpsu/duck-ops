@@ -145,3 +145,62 @@ def test_ignores_terminal_statuses(no_transition):
     assert rre.auto_dismiss_stale_queued(
         items, policy={"auto_dismiss_after_days": 14}, now=NOW
     ) == []
+
+
+def test_result_is_retryable_throttle_detection():
+    # Primary signal: the failed queue_item carries last_failure_class.
+    assert rre._result_is_retryable_throttle(
+        {"queue_item": {"last_failure_class": "pacing_cooldown"}}
+    ) is True
+    # A real hard fault is NOT a throttle.
+    assert rre._result_is_retryable_throttle(
+        {"queue_item": {"last_failure_class": "reply_box_not_visible"},
+         "message": "reply textarea did not appear"}
+    ) is False
+    assert rre._result_is_retryable_throttle({}) is False
+    assert rre._result_is_retryable_throttle(None) is False
+
+
+def test_pacing_throttle_on_front_item_does_not_halt_drain():
+    # Regression (11-day outage): a retryable pacing_cooldown on the FIRST
+    # eligible item must NOT trip stop_after_first_failure and wedge the whole
+    # drain. The throttled item defers; later items still post.
+    from contextlib import nullcontext
+
+    item_a = {"artifact_id": "A", "status": "queued",
+              "queued_at": "2026-06-26T00:00:00+00:00", "last_preflight_status": "dry_run_filled"}
+    item_b = {"artifact_id": "B", "status": "queued",
+              "queued_at": "2026-06-27T00:00:00+00:00", "last_preflight_status": "dry_run_filled"}
+    queue_state = {"items": {"A": item_a, "B": item_b}}
+
+    def fake_submit(artifact_id, *, keep_browser_open=False):
+        if artifact_id == "A":
+            return {"ok": False, "status": "failed", "message": "preemptive cooldown",
+                    "queue_item": {"last_failure_class": "pacing_cooldown"}}
+        return {"ok": True, "status": "posted"}
+
+    with patch.object(rre, "load_queue_state", return_value=queue_state), \
+         patch.object(rre, "save_queue_state", lambda *a, **k: None), \
+         patch.object(rre, "auto_dismiss_stale_queued", lambda *a, **k: {}), \
+         patch.object(rre, "requeue_recoverable_failed", lambda *a, **k: {}), \
+         patch.object(rre, "prepare_auth_for_drain", lambda *a, **k: {"ready": True}), \
+         patch.object(rre, "run_live_submit", side_effect=fake_submit), \
+         patch.object(rre, "review_reply_post_window", lambda *a, **k: nullcontext()), \
+         patch.object(rre, "load_session_state", lambda *a, **k: {}), \
+         patch.object(rre, "close_open_session", lambda *a, **k: False), \
+         patch.object(rre, "save_session_state", lambda *a, **k: None), \
+         patch.object(rre, "send_session_summary_email", lambda *a, **k: None):
+        result = rre.drain_queue(
+            keep_browser_open=True,
+            send_summary=False,
+            policy_override={
+                "auto_execution_enabled": True,
+                "auto_drain_enabled": True,
+                "stop_after_first_failure": True,
+                "auto_drain_max_submits_per_run": 5,
+            },
+        )
+
+    assert result["posted_count"] == 1, result   # B posted despite A throttling first
+    assert result["throttled_count"] == 1, result
+    assert result["failed_count"] == 0, result
