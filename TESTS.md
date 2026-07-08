@@ -1496,7 +1496,7 @@ Also: daily collect uses `get_etsy_shop_reviews(days_back=1)` — no catch-up (m
 
 | use case | happy | auth/401 | missed day / gap | already-replied / dup | idempotent re-run | test isolation |
 |---|---|---|---|---|---|---|
-| Draft reply for 4★ (CORE) | 🔴 `duckAgent test_reviews_handoff_ratings::four_star_gets_reply` | n/a | n/a | 🔴 3★ excluded, ≤2★→followup | 🔴 same tx→same draft key | n/a |
+| Draft reply for 4★ (CORE) | ✅ `duckAgent test_reviews_handoff_ratings::test_four_star_review_gets_a_reply_draft` | n/a | n/a | ✅ `::test_three_star_excluded…` + `::test_low_rating_routed…` | 🔴 same tx→same draft key (P2 watermark) | n/a |
 | Catch-up ingest (watermark) | 🔴 `test_reviews_catchup_watermark::window_from_watermark` | 🔴 auth-fail leaves watermark unmoved | 🔴 **3-day gap → 3 days ingested** (+paginate >100) | 🔴 gap re-run skips ingested tx | 🔴 watermark monotonic | 🔴 3-layer (new `REVIEWS_INGEST_WATERMARK_PATH`) |
 | Handoff → feed (`publish_candidates`) | 🔴 `duck-ops test_review_reply_handoff_4star_feed::4star_lands` | n/a | 🔴 backlog handoff all land | 🔴 existing tx not re-added | 🔴 re-run = no dup rows | 🔴 conftest both repos |
 | Auto-enqueue positive → exec queue | 🔴 `test_auto_enqueue_independence::queues_standalone` | n/a | n/a | 🔴 already-queued tx skipped | 🔴 idempotent | 🔴 pollution audit |
@@ -1506,7 +1506,7 @@ Also: daily collect uses `get_etsy_shop_reviews(days_back=1)` — no catch-up (m
 
 **Phase map** (P0 tests red first, per this skill):
 - **P0** — all 🔴 above + these TESTS rows, both repos + creative_agent. 3-layer isolation for `REVIEWS_INGEST_WATERMARK_PATH` (autouse conftest BOTH repos + `DUCK_TEST_MODE` FROZEN guard modeled on `gsc_search_demand.write_search_demand` + pollution-audit test).
-- **P1** — duckAgent: draft 4★ (`generate_daily_review_summary` source = rating ≥ 4; ensure 4★ handoff carries numeric `transaction_id`/`listing_id`/`generated_response` or duck-ops fails them closed). **Ship first, verify a 4★ reaches `publish_candidates.json`.**
+- **P1 — ✅ SHIPPED 2026-07-08 (duckAgent 42fbae9):** `generate_daily_review_summary` now loops `positive_reviews` (rating ≥ 4); rating-aware fallback; handoff builder carries true rating with no 5★ re-filter (verified). 5 P0 tests (red→green) + 13 regression pass. *Remaining verify:* confirm a real 4★ reaches `publish_candidates.json` on the next daily reviews run (regression canary).
 - **P2** — duckAgent: watermark catch-up window across the 3 `days_back=1` call-sites + pagination.
 - **P3** — duck-ops: **verify riskiest-unknown from logs first**, then decouple `auto_enqueue_publish_ready` from the pacing-wedge-prone `drain_queue` in `etsy_browser_batch._run_review_reply_batch` (enqueue result must persist even if drain defers); ensure enqueue runs before any archival sweep. **Tier-3 (launchd + browser).**
 - **P4** — duck-ops: idempotent one-shot backfill (`scripts/backfill_review_replies.py`), dedup by tx, queues-not-posts (paced drain clears over ~a week).
@@ -1514,7 +1514,7 @@ Also: daily collect uses `get_etsy_shop_reviews(days_back=1)` — no catch-up (m
 
 **By dimension:** unit (rating gate, watermark math, card count, dedup key); integration (mocked Etsy API + tmp state, collect→draft→feed→queue chain); e2e (backfill fixture, idempotent, no double-post); manual/Tier-3 (paced real posting, real read-back). **Golden fixture** `reviews_backfill_golden.json` (~10 reviews: 5★/4★/3★, one already-replied, one dup tx). **Regression canary:** "a 4★ review must appear in `publish_candidates.json` within one ingest run." **Tier-3:** P3 only (launchd/browser); backfill-queue + card are not.
 
-**STATUS: SPEC ONLY (2026-07-08).** Not built. Riskiest unknown (P3) unresolved pending next browser window.
+**STATUS: P0+P1 SHIPPED 2026-07-08** (duckAgent `42fbae9` — 4★ now drafted). P2-P5 pending. Riskiest unknown (P3: did the 07-07 drain fix un-wedge 5★ enqueue?) unresolved pending next browser window.
 
 ---
 
