@@ -1,6 +1,6 @@
 # TESTS — Coverage Matrix (Duck Ops + DuckAgent)
 
-Last updated: 2026-06-06 (post Phase 5 + Surface 10 + Surface 11 ship)
+Last updated: 2026-07-08 (Surface 55 — review-reply ingestion repair, SPEC-first)
 
 Built by running `/coverage-matrix` against the 2026-05-25 → 2026-05-26 shipped work after the operator surfaced that some integration-boundary tests had been skipped. This matrix lives next to [master_roadmap.md](output/operator/master_roadmap.md) per the skill's convention.
 
@@ -1481,6 +1481,40 @@ The counterpart to Build-Next (what to MAKE): a `/portal/intel/demand` page that
 **BUILT 2026-07-03 (v1, read-only page).** 8 producer + 3 page tests; duck-ops 85 / duckAgent 251 pass. Live at `/portal/intel/demand` + in the intel directory.
 
 **CRITICAL JOIN FIX 2026-07-03 (operator: "I didn't sell any Boxers — are you sure?").** v1 joined profit/buys by TITLE token-overlap, so Boxer/Doberman inherited the Dachshund's 22 sales (all share "3D-Printed…Loyal…Dog Duck Collectible" boilerplate — the [[feedback_competitor_titles_defeat_text_dedup]] trap, again). Fixed: **buys join by exact Shopify product_id / SKU** (`test_buys_join_by_id_not_title`) — catalog.id ↔ profit.sample_product_id, 7d via tx.sku→id map. GA4 views (Etsy, no product_id, still title-joined) get a **shared-subject guard** (`test_ga4_match_requires_shared_subject`): a match counts only if ≥½ the smaller side's distinctive (non-boilerplate) tokens overlap — else the views belong to another duck and are discarded (fixed Oklahoma inheriting Michigan's 20 views). After: winners 24→**7 real top sellers** (Dachshund 22, Football 6…), Boxer/Doberman correctly low-signal. Lesson banked: **never title-join a boilerplate-titled catalog — use id/SKU; for the one source without an id (Etsy GA4), require subject overlap and fail to "no data," not wrong data.** **OPEN:** (v1.1) one-click Sale/Protect/Refresh action buttons → `demand_action_receipts` → sale_steering/seo_refresh, with `acted_at`/`metrics_at_action` already persisted for (v2) the "did it work?" outcome loop; (Tier 3) launchd cadence so the producer stays fresh (seeded once, not yet scheduled).
+
+---
+
+## Surface 55 — Review-reply INGESTION repair (SPEC-FIRST, 2026-07-08, operator: "there are several 4 and 5 star reviews since June 26 with no replies")
+
+The **input half** of the review-reply bracket. The output half (drain wedged on a `pacing_cooldown` throttle that tripped `stop_after_first_failure`) shipped 2026-07-07 (`_result_is_retryable_throttle` + `review_reply_drain_stall` OS card). This surface fixes why new reviews never reach the queue at all. **Cross-repo + Plan-agent verified — two premises corrected before speccing:**
+
+- **CORE break = 4★ are never drafted.** `duckAgent/flows/reviews/etsy_review_helper.py::generate_daily_review_summary` computes `four_star_reviews` but builds `thank_you_messages` in a loop over `five_star_reviews` **only** (line ~550). 4★ never become a reply → never enter `_build_reviews_reply_handoff` → never reach the feed. One loop. This is the operator's "4★ with no replies."
+- **`review_reply_post_index.json` is NOT the feed** — it is a derived *posted*-receipts index rebuilt from `review_reply_execution_sessions.json` (`customer_case_enrichment.load_review_reply_post_index`). Its staleness is a *symptom* of the drain stall, not the ingestion break. The real feed is `state/normalized/publish_candidates.json` (`phase1_observer.normalize_publish_candidates`), and it **already carries the new 5★ tx** (5124/5130xxx confirmed). Don't build against post_index.
+- **5★ reach the feed but don't post** because `auto_enqueue_publish_ready` and the (previously wedged) `drain_queue` run in ONE `etsy_browser_batch` process. **Riskiest unknown (gates Phase 3):** did the 2026-07-07 drain fix also un-wedge enqueue? Not yet resolvable — the execution queue hasn't regenerated since 07-07 17:28 (no browser window has fired since the fix). Verify at the next window before writing Phase 3.
+
+Also: daily collect uses `get_etsy_shop_reviews(days_back=1)` — no catch-up (miss a day = permanently missed); ~36 existing 4-5★ need a backfill; the Etsy reviews API returns **no seller-reply field**, so dedup is by `transaction_id` against post_index ∪ execution_queue ∪ posted receipts, backstopped by the drain's existing read-back guard ([[Surface 253-style existing-reply detection]]).
+
+| use case | happy | auth/401 | missed day / gap | already-replied / dup | idempotent re-run | test isolation |
+|---|---|---|---|---|---|---|
+| Draft reply for 4★ (CORE) | 🔴 `duckAgent test_reviews_handoff_ratings::four_star_gets_reply` | n/a | n/a | 🔴 3★ excluded, ≤2★→followup | 🔴 same tx→same draft key | n/a |
+| Catch-up ingest (watermark) | 🔴 `test_reviews_catchup_watermark::window_from_watermark` | 🔴 auth-fail leaves watermark unmoved | 🔴 **3-day gap → 3 days ingested** (+paginate >100) | 🔴 gap re-run skips ingested tx | 🔴 watermark monotonic | 🔴 3-layer (new `REVIEWS_INGEST_WATERMARK_PATH`) |
+| Handoff → feed (`publish_candidates`) | 🔴 `duck-ops test_review_reply_handoff_4star_feed::4star_lands` | n/a | 🔴 backlog handoff all land | 🔴 existing tx not re-added | 🔴 re-run = no dup rows | 🔴 conftest both repos |
+| Auto-enqueue positive → exec queue | 🔴 `test_auto_enqueue_independence::queues_standalone` | n/a | n/a | 🔴 already-queued tx skipped | 🔴 idempotent | 🔴 pollution audit |
+| Backfill ~36 (one-shot) | 🔴 `test_review_reply_backfill::N_queued_0_double` | 🔴 auth-fail aborts clean | n/a | 🔴 **already-replied tx → skipped, not re-queued** | 🔴 **run twice → same queue** | 🔴 3-layer (if receipt file) |
+| Input-sanity OS card | 🔴 `creative_agent test_review_reply_ingestion_gap::red_when_absent` | 🔴 API-snapshot missing → yellow (not green) | 🔴 gap → red | 🔴 replied tx excluded | n/a | 🔴 registration + empty-payload |
+| Drain posts backfill (paced) | ✅ Surface (drain-stall + throttle tests, shipped) | n/a | n/a | manual: real read-back | n/a | ✅ shipped |
+
+**Phase map** (P0 tests red first, per this skill):
+- **P0** — all 🔴 above + these TESTS rows, both repos + creative_agent. 3-layer isolation for `REVIEWS_INGEST_WATERMARK_PATH` (autouse conftest BOTH repos + `DUCK_TEST_MODE` FROZEN guard modeled on `gsc_search_demand.write_search_demand` + pollution-audit test).
+- **P1** — duckAgent: draft 4★ (`generate_daily_review_summary` source = rating ≥ 4; ensure 4★ handoff carries numeric `transaction_id`/`listing_id`/`generated_response` or duck-ops fails them closed). **Ship first, verify a 4★ reaches `publish_candidates.json`.**
+- **P2** — duckAgent: watermark catch-up window across the 3 `days_back=1` call-sites + pagination.
+- **P3** — duck-ops: **verify riskiest-unknown from logs first**, then decouple `auto_enqueue_publish_ready` from the pacing-wedge-prone `drain_queue` in `etsy_browser_batch._run_review_reply_batch` (enqueue result must persist even if drain defers); ensure enqueue runs before any archival sweep. **Tier-3 (launchd + browser).**
+- **P4** — duck-ops: idempotent one-shot backfill (`scripts/backfill_review_replies.py`), dedup by tx, queues-not-posts (paced drain clears over ~a week).
+- **P5** — creative_agent viewer: `_load_review_reply_ingestion_gap_health` + register next to `review_reply_drain_stall` — RED when API-recent tx absent from feed ∪ queue ∪ posted; data via a snapshot the daily flow writes (no live API from the viewer). Completes the two-card bracket.
+
+**By dimension:** unit (rating gate, watermark math, card count, dedup key); integration (mocked Etsy API + tmp state, collect→draft→feed→queue chain); e2e (backfill fixture, idempotent, no double-post); manual/Tier-3 (paced real posting, real read-back). **Golden fixture** `reviews_backfill_golden.json` (~10 reviews: 5★/4★/3★, one already-replied, one dup tx). **Regression canary:** "a 4★ review must appear in `publish_candidates.json` within one ingest run." **Tier-3:** P3 only (launchd/browser); backfill-queue + card are not.
+
+**STATUS: SPEC ONLY (2026-07-08).** Not built. Riskiest unknown (P3) unresolved pending next browser window.
 
 ---
 
