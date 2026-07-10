@@ -83,6 +83,39 @@ class ReviewLoopReconciliationTests(unittest.TestCase):
         self.assertEqual(decision["review_status"], "archived")
         self.assertEqual(decision["archive_reason"], "stale This-or-That Thursday package")
 
+    def test_publish_ready_review_reply_not_archived_while_awaiting_drain(self) -> None:
+        # 2026-07-09 regression: a ready auto-post reply awaiting a (down) browser
+        # drain must NOT be archived. Archiving flips review_status to "archived",
+        # which auto_enqueue's kill-set reads as "operator rejected → never post" —
+        # this silently killed 28 ready 5-star replies during the scheduler outage.
+        aid = "publish::reviews_reply_positive::2000-01-01::tx-999"
+        state = {"artifacts": {aid: {"decision": {
+            "artifact_id": aid, "artifact_type": "review_reply",
+            "flow": "reviews_reply_positive", "run_id": "2000-01-01-tx-999",
+            "created_at": "2000-01-01T00:00:00+00:00",
+            "review_status": "pending", "decision": "publish_ready",
+            "execution_state": "not_queued",
+        }}}}
+        review_loop.archive_stale_quality_gate_items(state)
+        decision = state["artifacts"][aid]["decision"]
+        self.assertEqual(decision["review_status"], "pending")  # NOT archived
+        self.assertNotIn("archive_reason", decision)
+
+    def test_needs_revision_review_reply_still_archived(self) -> None:
+        # Guard against over-broadening: a NON-publish_ready stale reviews item is
+        # still archived (unchanged behavior — only ready auto-posts are protected).
+        aid = "publish::reviews_reply_positive::2000-01-01::tx-888"
+        state = {"artifacts": {aid: {"decision": {
+            "artifact_id": aid, "artifact_type": "review_reply",
+            "flow": "reviews_reply_positive", "run_id": "2000-01-01-tx-888",
+            "created_at": "2000-01-01T00:00:00+00:00",
+            "review_status": "pending", "decision": "needs_revision",
+            "execution_state": "not_queued",
+        }}}}
+        changed = review_loop.archive_stale_quality_gate_items(state)
+        self.assertTrue(changed)
+        self.assertEqual(state["artifacts"][aid]["decision"]["review_status"], "archived")
+
     def test_duckagent_publish_reconciliation_detects_recurring_social_proofs(self) -> None:
         cases = [
             (

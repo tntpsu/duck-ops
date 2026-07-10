@@ -672,6 +672,21 @@ def archive_stale_quality_gate_items(state: dict[str, Any]) -> bool:
 
         artifact_type = decision.get("artifact_type") or ""
         flow = decision.get("flow") or ""
+
+        # 2026-07-09: NEVER archive a publish_ready review reply that is merely
+        # awaiting the (possibly-down) browser drain. Archiving flips review_status
+        # to "archived", which auto_enqueue's _OPERATOR_KILL_STATUSES reads as
+        # "operator rejected → never post" — permanently killing a ready auto-post.
+        # During the 2026-06-25→07-09 scheduler outage this silently archived 28
+        # ready 5-star replies. A pending auto-post is not "stale"; keep it pending
+        # until it drains (the drain-stall / batch-liveness cards catch a stuck drain).
+        if (
+            flow == "reviews_reply_positive"
+            and decision.get("decision") == "publish_ready"
+            and str(decision.get("execution_state") or "not_queued") in ("", "not_queued")
+        ):
+            continue
+
         age_days = decision_age_days(decision)
         if age_days is None:
             continue
