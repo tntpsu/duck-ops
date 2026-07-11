@@ -269,10 +269,20 @@ class ReservationTests(unittest.TestCase):
                     return exc, etsy_browser_guard.load_state()
 
     def test_read_deferred_when_reserve_reached(self) -> None:
-        # 14 visible reads = MAX(18) - RESERVED(4). A 15th read is deferred.
-        exc, state = self._run(self._visible_reads(14), ("goto", "https://etsy.com/x"))
+        # Surface 56: reads are no longer Etsy-facing, so the soft reserve now
+        # keys off the TOTAL-command backstop. At BACKSTOP - RESERVED reads the
+        # next read is deferred (a runaway read-loop yields before it hard-cools).
+        near = etsy_browser_guard.TOTAL_COMMANDS_BACKSTOP - etsy_browser_guard.RESERVED_FOR_MUTATING
+        exc, state = self._run(self._visible_reads(near), ("goto", "https://etsy.com/x"))
         self.assertIsInstance(exc, etsy_browser_guard.PacingReservationError)
         # Soft: it must NOT persist a global cooldown (posts stay free).
+        self.assertIsNone(state.get("blocked_until"))
+
+    def test_read_burst_below_backstop_does_not_trip(self) -> None:
+        # Surface 56 core invariant: a big burst of pure reads (past the OLD 18
+        # ceiling) must NOT cool down — that self-throttle was the bug.
+        exc, state = self._run(self._visible_reads(30), ("eval", "return document.title;"))
+        self.assertIsNone(exc, f"read burst wrongly throttled: {exc}")
         self.assertIsNone(state.get("blocked_until"))
 
     def test_post_allowed_when_reads_filled_reserve(self) -> None:
@@ -285,10 +295,14 @@ class ReservationTests(unittest.TestCase):
         exc, _ = self._run(self._visible_reads(13), ("goto", "https://etsy.com/x"))
         self.assertIsNone(exc, f"read below reserve should pass: {exc}")
 
-    def test_hard_cooldown_still_trips_at_max(self) -> None:
-        # At the true ceiling (18) any command — including a post — trips the
-        # persistent cooldown. Regression guard: reservation didn't remove it.
-        exc, state = self._run(self._visible_reads(18), ("click", "#reply-submit"))
+    def test_hard_cooldown_still_trips_at_backstop(self) -> None:
+        # Surface 56: a real overload (runaway read-loop at the TOTAL backstop)
+        # still trips the persistent cooldown for any command — the backstop
+        # replaces the old count-everything ceiling as the runaway guard.
+        exc, state = self._run(
+            self._visible_reads(etsy_browser_guard.TOTAL_COMMANDS_BACKSTOP),
+            ("click", "#reply-submit"),
+        )
         self.assertIsInstance(exc, RuntimeError)
         self.assertNotIsInstance(exc, etsy_browser_guard.PacingReservationError)
         self.assertEqual(state.get("block_reason"), "rate_limit_preemptive_cooldown")

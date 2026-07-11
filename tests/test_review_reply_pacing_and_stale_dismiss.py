@@ -42,9 +42,15 @@ def _aid(date: str, n: int = 1) -> str:
 
 # ---- Fix 1: pacing reservation exempts review-reply post reads -------------
 
-def _state_at_14_visible_reads() -> dict:
-    """14 visible non-mutating Etsy reads, well-spaced so the gap sleep is a
-    no-op. 14 == MAX_COMMANDS_PER_WINDOW - RESERVED_FOR_MUTATING (18-4)."""
+def _state_at_reservation_threshold() -> dict:
+    """Visible non-mutating reads at the soft-reserve line. Surface 56: reads
+    are no longer Etsy-facing, so the reserve keys off TOTAL_COMMANDS_BACKSTOP,
+    not the old 18 ceiling. n == BACKSTOP - RESERVED_FOR_MUTATING."""
+    n = guard.TOTAL_COMMANDS_BACKSTOP - guard.RESERVED_FOR_MUTATING
+    return _state_at_visible_reads(n)
+
+
+def _state_at_visible_reads(n: int) -> dict:
     # Events must sit inside the 5-min rolling window (RATE_WINDOW_SECONDS) or
     # _prune_events drops them, and >MIN_GAP_SECONDS before now or before_command
     # sleeps to enforce the inter-command gap. 30s ago satisfies both. Use real
@@ -52,7 +58,7 @@ def _state_at_14_visible_reads() -> dict:
     recent = (datetime.now().astimezone() - timedelta(seconds=30)).isoformat()
     events = [
         {"at": recent, "session": "esr", "command": "eval", "mutating": False}
-        for _ in range(14)
+        for _ in range(n)
     ]
     return {"blocked_until": None, "block_reason": None, "events": events}
 
@@ -60,8 +66,8 @@ def _state_at_14_visible_reads() -> dict:
 def test_read_deferred_at_reservation_threshold_outside_post_window(tmp_path):
     state_path = tmp_path / "guard_state.json"
     with patch.object(guard, "STATE_PATH", state_path):
-        guard.save_state(_state_at_14_visible_reads())
-        # A plain read at 14/18 is deferred to reserve slots for posts.
+        guard.save_state(_state_at_reservation_threshold())
+        # A plain read at BACKSTOP-RESERVED is deferred (runaway read-loop yields).
         with pytest.raises(guard.PacingReservationError):
             guard.before_command("esr", ("eval", "() => document.title"))
 
@@ -69,7 +75,7 @@ def test_read_deferred_at_reservation_threshold_outside_post_window(tmp_path):
 def test_read_exempt_inside_review_reply_post_window(tmp_path):
     state_path = tmp_path / "guard_state.json"
     with patch.object(guard, "STATE_PATH", state_path):
-        guard.save_state(_state_at_14_visible_reads())
+        guard.save_state(_state_at_reservation_threshold())
         # The SAME read, issued during a review-reply post, is exempt — the
         # reservation must not block the post's own setup/verify reads.
         with guard.review_reply_post_window():
@@ -81,16 +87,11 @@ def test_read_exempt_inside_review_reply_post_window(tmp_path):
 
 
 def test_hard_ceiling_still_applies_inside_post_window(tmp_path):
-    """The exemption is only for the SOFT reservation. At the hard ceiling
-    (18/18) even a post-window read must still cool down."""
+    """The exemption is only for the SOFT reservation. At the hard runaway
+    backstop even a post-window read must still cool down (Surface 56)."""
     state_path = tmp_path / "guard_state.json"
     with patch.object(guard, "STATE_PATH", state_path):
-        st = _state_at_14_visible_reads()
-        old = st["events"][0]["at"]
-        st["events"] = [
-            {"at": old, "session": "esr", "command": "eval", "mutating": False}
-            for _ in range(guard.MAX_COMMANDS_PER_WINDOW)
-        ]
+        st = _state_at_visible_reads(guard.TOTAL_COMMANDS_BACKSTOP)
         guard.save_state(st)
         with guard.review_reply_post_window():
             with pytest.raises(RuntimeError) as exc:

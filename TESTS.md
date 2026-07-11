@@ -1518,6 +1518,35 @@ Also: daily collect uses `get_etsy_shop_reviews(days_back=1)` — no catch-up (m
 
 ---
 
+## Surface 56 — Guard hard-ceiling counts local read-evals (drain self-throttles) (SPEC-FIRST, 2026-07-11, operator: "the drain posts 0 even though the batch runs")
+
+**Root cause:** `etsy_browser_guard.before_command` computes `visible_count` as *every* non-`_LOCAL_ONLY` command, so **local DOM read-evals** (querySelector reads, textarea fill, the click-to-open-composer) count against `MAX_COMMANDS_PER_WINDOW=18` even though they generate **zero Etsy traffic**. One reply's ~6 setup evals × a few items hits 18 → `rate_limit_preemptive_cooldown` → the batch runs but posts 0 (observed 2026-07-11: 17 eval + 1 run-code = 18, backlog undrained). Third self-inflicted throttle on the review-reply lane, after the stale scheduler lock and the React-fill bug.
+
+**Why the fix is low-risk:** `_is_mutating_command` **already** classifies the only evals that touch Etsy — navigation (`location.assign`/`window.location`, per `navigate_within_session`) and the submit (`submit.click(`/`.submit()`/`form.submit`) — as mutating. So the network-generating evals are already identified and already capped by `MAX_MUTATING_COMMANDS_PER_WINDOW=8`. The hard ceiling just needs to stop counting the *non*-mutating (read) evals.
+
+**Change:** the hard burst ceiling counts **Etsy-facing** commands only = non-local commands that are either mutating (nav/submit/form-write) **or** a non-eval/run-code command; a non-mutating eval/run-code is treated as local for the ceiling. Add an explicit high **`TOTAL_COMMANDS_BACKSTOP` (60)** on *all* non-local events (incl. reads) so a runaway read-loop still trips a cooldown — replacing the runaway-backstop role the old 18-on-everything played. Re-key the soft `RESERVED_FOR_MUTATING` reservation to the backstop (reads no longer threaten the post budget, so the reservation only fires near the runaway limit). Also extend `_is_mutating_command` to inspect `run-code` content like `eval` (a `run-code` submit must still count).
+
+**Effect:** `MAX_MUTATING=8` (posts+navs / 45-min window) becomes the true Etsy-facing governor — unchanged, so no rise in Etsy-visible volume. A page-1 reply costs 1 mutating (submit), a page-2/3 reply 2 (nav+submit) → ~4–8 replies/window instead of ~1; backlog of 14 drains in ~1–2 days across the 3 jittered windows. (If faster draining is wanted later, raising `MAX_MUTATING` is the lever — operator's call, separate change.)
+
+## Use case × failure mode
+
+|                                          | Happy | Read burst | Post burst | Runaway loop | Isolation |
+|---|---|---|---|---|---|
+| Drain does N read-evals, then a post     | 🔴 `test_guard_eval_budget::reads_do_not_block_post` (20 reads + post allowed) | 🔴 reads alone never cooldown | n/a | n/a | autouse tmp `STATE_PATH` |
+| Post budget still capped                 | n/a | n/a | 🔴 `::mutating_cap_still_trips` (8 mutating → cooldown) | n/a | 〃 |
+| Navigation eval counts as facing         | 🔴 `::location_assign_counts_mutating` | n/a | 🔴 navs count toward the 8 | n/a | 〃 |
+| run-code submit counts                   | 🔴 `::run_code_submit_is_mutating` | n/a | 🔴 | n/a | 〃 |
+| Runaway read-loop backstop               | n/a | n/a | n/a | 🔴 `::backstop_trips_at_total` (60 total → cooldown) | 〃 |
+
+**Phase map:**
+- **P0** — TESTS rows above (all 🔴 first). Guard change is pure-Python, deterministic, no browser → fully unit-testable; NOT Tier-3 (no launchd/publish; it *loosens* a self-throttle without raising Etsy-visible post volume, since `MAX_MUTATING` is untouched).
+- **P1** — implement `_event_is_etsy_facing` + `TOTAL_COMMANDS_BACKSTOP` + re-keyed reservation + `run-code` mutating-classification; regression tests green.
+- **P2 (optional, later)** — if the backlog must clear faster, raise `MAX_MUTATING` (operator decision; document the new Etsy-visible/day figure).
+
+**By dimension:** unit only (guard is deterministic pure-Python over an in-memory event list); no integration/e2e/hardware. Isolation: autouse `conftest` already monkeypatches `STATE_PATH` per test (verify). Regression-class: "20 read-evals in a window must not block a post" is the permanent guard against re-introducing the read-starves-posts bug.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

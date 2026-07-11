@@ -31,6 +31,12 @@ MAX_MUTATING_COMMANDS_PER_WINDOW = 8
 # posting budget. This does NOT raise Etsy-visible post volume (posts keep
 # their own MAX_MUTATING cap + gap); it only paces reads earlier.
 RESERVED_FOR_MUTATING = 4
+# Surface 56: the hard burst ceiling counts Etsy-FACING commands (mutating
+# nav/submit/form-writes), NOT local read-evals — a drain's DOM reads generate
+# no Etsy request, so they must not self-throttle posts. MAX_MUTATING is the
+# real Etsy-visible governor. This backstop still catches a runaway read-loop
+# (evals that never mutate) by capping TOTAL non-local commands in the window.
+TOTAL_COMMANDS_BACKSTOP = 60
 MIN_GAP_SECONDS = 1.25
 MIN_MUTATING_GAP_SECONDS = 3.5
 
@@ -170,7 +176,7 @@ def _is_mutating_command(args: tuple[str, ...]) -> bool:
     # Form-input commands write to Etsy's UI state.
     if command in {"fill", "type", "press", "click"}:
         return True
-    if command == "eval":
+    if command in {"eval", "run-code"}:
         script = " ".join(str(part or "") for part in args[1:]).lower()
         # Previously matched `.click(` too — that caught every "click
         # to expand thread" / "click to load more" eval and fired the
@@ -491,8 +497,18 @@ def before_command(session: str, args: tuple[str, ...]) -> None:
         if str(event.get("command") or "").strip().lower() not in _LOCAL_ONLY_COMMANDS
     ]
     mutating_count = sum(1 for event in visible_events if bool(event.get("mutating")))
-    visible_count = len(visible_events)
-    if visible_count >= MAX_COMMANDS_PER_WINDOW or (mutating and mutating_count >= MAX_MUTATING_COMMANDS_PER_WINDOW):
+    total_count = len(visible_events)
+    # Surface 56: only Etsy-FACING commands count toward the burst ceiling.
+    # Local read-evals (querySelector reads, textarea fill, open-composer click)
+    # generate no Etsy request, so counting them let a drain's own setup reads
+    # trip MAX_COMMANDS_PER_WINDOW and post 0. Navigation (location.assign) and
+    # the submit (submit.click) are already flagged `mutating`, so the facing
+    # count == mutating count; MAX_MUTATING stays the true Etsy-visible governor.
+    etsy_facing_count = mutating_count
+    over_facing = etsy_facing_count >= MAX_COMMANDS_PER_WINDOW
+    over_mutating = mutating and mutating_count >= MAX_MUTATING_COMMANDS_PER_WINDOW
+    over_backstop = total_count >= TOTAL_COMMANDS_BACKSTOP  # runaway read-loop guard
+    if over_facing or over_mutating or over_backstop:
         cooldown_until = now + timedelta(minutes=15)
         state["blocked_until"] = cooldown_until.isoformat()
         state["block_reason"] = "rate_limit_preemptive_cooldown"
@@ -502,15 +518,16 @@ def before_command(session: str, args: tuple[str, ...]) -> None:
             f"Etsy automation hit the shared pacing budget and is cooling down until {cooldown_until.isoformat()}."
         )
 
-    # Soft reservation: stop read-only commands before they consume the slots
-    # reserved for mutating (review-reply post) commands. Unlike the hard
-    # ceiling above, this does NOT persist a cooldown — it refuses only this
-    # one read, leaving posts free to proceed, and clears as events age out of
-    # the rolling window. Mutating commands are never blocked here.
-    if not mutating and not _in_review_reply_post() and visible_count >= MAX_COMMANDS_PER_WINDOW - RESERVED_FOR_MUTATING:
+    # Soft reservation: only defer reads as the TOTAL-command backstop nears, so
+    # a runaway read-loop yields before it hard-cools. Reads no longer threaten
+    # the post budget (they aren't Etsy-facing), so this fires far later than
+    # before. Unlike the hard ceiling, it does NOT persist a cooldown — it
+    # refuses only this one read and clears as events age out. Mutating commands
+    # are never blocked here.
+    if not mutating and not _in_review_reply_post() and total_count >= TOTAL_COMMANDS_BACKSTOP - RESERVED_FOR_MUTATING:
         raise PacingReservationError(
-            f"Etsy read command deferred: {visible_count}/{MAX_COMMANDS_PER_WINDOW} pacing slots used; "
-            f"reserving the last {RESERVED_FOR_MUTATING} for review-reply posts."
+            f"Etsy read command deferred: {total_count}/{TOTAL_COMMANDS_BACKSTOP} total-command slots used; "
+            f"reserving the last {RESERVED_FOR_MUTATING} before the runaway backstop."
         )
 
     if events:
