@@ -1547,6 +1547,43 @@ Also: daily collect uses `get_etsy_shop_reviews(days_back=1)` — no catch-up (m
 
 ---
 
+## Surface 57 — Drain resilience: one unfindable row halts the queue + lane budget contention (SPEC-FIRST, 2026-07-11, operator: "we started customer messages and ran out of actions before review-reply could run — and the budget numbers seem too low")
+
+**Root cause (verified from the 2026-07-11 15:10 batch receipt, not inferred):** the batch runs drain-first and DID get its budget. It picked ONE queued item — `tx-5116124038`, a 2026-07-01 review — and `run_dry_run_fill` returned `ok=false` with *"Exact review row could not be found in the signed-in Etsy session. Auto-retrying later."* That is a **transient locate failure**, but `_result_is_retryable_throttle` only defers *pacing/cooldown* faults, so the drain classified it as a real failure → `failed_count += 1; if stop_after_first_failure: break` → **the whole drain halted on item 1**, never reaching the ~14 recent (07-05/06/07, page-1, easily-postable) items behind it. `0 posted, 1 failed`. THEN the customer-inbox sync ran, spent the shared 8-action mutating budget on message-thread navigations, and tripped the cooldown. Two independent defects; the review-reply one is primary (it quit before the budget mattered).
+
+Sibling of the 11-day `pacing_cooldown` wedge (Fix A, 73f2096): that added throttle-deferral but **locate-failure is a different transient branch that wasn't enumerated** — the exact [[feedback_incomplete_fix_enumerate_all_branches]] trap.
+
+**Fixes:**
+1. **Skip-and-continue past transient locate failures** (primary). Broaden the "defer, don't stop" set beyond `pacing_cooldown` to include `review_row_not_found` / "could not be surfaced" / dry-run `status=queued` auto-retry outcomes. Enumerate EVERY non-throttle, non-fatal branch of `run_dry_run_fill`/`run_live_submit` and decide break-vs-continue per class (a real auth/identity fault still stops; a "can't locate this one right now" skips to the next item). Do not blanket-continue on all failures — that would hide a genuine broken-session fault.
+2. **Drain newest-first.** Order `eligible` by review/submitted date descending. Recent rows are on page 1 and postable; old rows are the unfindable ones. Spend budget where it succeeds.
+3. **Retire dead rows.** A row that returns not-found for K consecutive windows (or whose date is older than the page-walk reach ≈ `review_page_walk_max_pages × ~14`) is parked/dismissed, not retried every window forever. Same sweep should catch the March `missing_target_identifiers` items still in the queue.
+4. **Reserve the review-reply lane's budget.** Run the review-reply drain with a guaranteed mutating sub-budget the customer-inbox sync cannot consume (e.g. cap `customer_read` mutating spend, or reserve N mutating slots for review-reply when a review backlog exists). The lanes share `etsy_browser_guard`'s `MAX_MUTATING_COMMANDS_PER_WINDOW`; today the inbox sync can starve a review backlog.
+5. **Budget re-tune (OPERATOR DECISION — the "numbers too low" question).** `MAX_MUTATING_COMMANDS_PER_WINDOW=8` per 45-min window (×3 windows = 24 Etsy-facing actions/day) is very conservative — a human seller replies to far more than 8 items in a sitting, and `MIN_MUTATING_GAP_SECONDS=3.5` (≥3.5s between mutating actions) is the actual anti-bot-detection control, not the raw count. Recommend raising to ~16–20/window while KEEPING the 3.5s gap + 3 jittered windows (those, plus session caps, are the real block-avoidance mechanisms). This is the genuine Etsy-risk lever, so it ships only with explicit operator sign-off and starts at the low end (16) with the liveness/throughput cards watched for any block signal.
+
+## Use case × failure mode
+
+|                                          | Happy | Locate-fail (transient) | Auth/identity fault | Budget contention | Isolation |
+|---|---|---|---|---|---|
+| Drain reaches postable items past a bad one | 🔴 `test_drain_skips_not_found_continues` (item1 not-found → item2 posts) | 🔴 not-found does NOT break the loop | 🔴 real auth fault STILL stops | n/a | autouse tmp queue |
+| Ordering                                 | 🔴 `test_drain_newest_first` (07-07 before 07-01) | n/a | n/a | n/a | 〃 |
+| Dead-row retirement                      | 🔴 `test_row_not_found_k_times_dismissed` | 🔴 K-th not-found → parked | n/a | n/a | 〃 |
+| Missing-id rows                          | 🔴 `test_missing_identifiers_dismissed_not_retried` | n/a | n/a | n/a | 〃 |
+| Lane budget reservation                  | n/a | n/a | n/a | 🔴 `test_customer_read_cannot_starve_review_backlog` (review reserve honored) | guard tmp state |
+| MAX_MUTATING re-tune                      | 🔴 `test_mutating_cap_value` pins the agreed number | n/a | n/a | 🔴 gap still enforced at 3.5s | 〃 |
+
+**Phase map:**
+- **P0** — TESTS rows above (🔴 first). Fixes 1–3 are pure-Python drain-logic changes over an in-memory queue → deterministic, unit-testable, NOT Tier-3 (no live browser in the test).
+- **P1** — implement 1 (broaden deferral + per-class break/continue) and 2 (newest-first) together — the minimum that unblocks the lane. Regression: a not-found item followed by a postable item → the postable one posts.
+- **P2** — implement 3 (dead-row retirement / dismiss missing-id + persistent-not-found).
+- **P3** — implement 4 (lane budget reservation) in `etsy_browser_batch` + guard.
+- **P4 (Tier-3, operator sign-off)** — 5: raise `MAX_MUTATING` to the agreed number; keep `MIN_MUTATING_GAP`; watch `etsy_browser_batch_liveness` + throughput for any block signal for a few windows before further raising.
+
+**By dimension:** unit (drain break/continue per failure class, ordering, dismiss thresholds, budget reservation math); no integration/e2e (real posting stays manual/paced). Isolation: autouse conftest tmp queue + guard `STATE_PATH` (both already patterned). **Regression-class:** "a not-found item at the head of the queue must not block a postable item behind it" — the permanent guard against re-introducing the stop-after-first-failure wedge. **Observability:** the batch reported `status=failed` but the *reason* (drain quit on unfindable row, then inbox sync cooled down) was only visible by reading the receipt JSON — consider a drain-outcome breakdown on the liveness card so "tried 1, all not-found, stopped" is legible without log spelunking.
+
+**STATUS: SPEC-ONLY 2026-07-11.** Not implemented — bridge is manual posting of recent items this session; P1–P3 next session, P4 on operator sign-off.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
