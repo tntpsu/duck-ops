@@ -1667,7 +1667,16 @@ def fill_reply_text_without_submit(session_name: str, transaction_id: str, reply
             "const textarea = row.querySelector('textarea'); "
             "if (!textarea) return { ok: false, reason: 'textarea_missing' }; "
             "textarea.focus(); "
-            "textarea.value = replyText; "
+            # Etsy's review composer is a React controlled input. Assigning
+            # textarea.value directly does NOT update React's _valueTracker, so
+            # the next re-render reverts the box to empty and the submit posts
+            # nothing (2026-07-11: silently dropped fills for weeks). Set via the
+            # native prototype setter and rewind the tracker to the prior value so
+            # React's onChange fires and commits the text to component state.
+            "const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set; "
+            "const priorValue = textarea.value; "
+            "nativeSetter.call(textarea, replyText); "
+            "if (textarea._valueTracker) { textarea._valueTracker.setValue(priorValue); } "
             "textarea.dispatchEvent(new Event('input', { bubbles: true })); "
             "textarea.dispatchEvent(new Event('change', { bubbles: true })); "
             "const submit = row.querySelector(`button[data-action=\"submit-response\"][data-transaction-id=\"${tx}\"]`); "
