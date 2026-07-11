@@ -3380,6 +3380,33 @@ def _result_is_retryable_throttle(result: dict[str, Any]) -> bool:
     return is_cooldown_error(str(result.get("message") or ""))
 
 
+def _result_is_transient_locate_failure(result: dict[str, Any]) -> bool:
+    """True when a drain step failed ONLY because the target review row could
+    not be located this run (Etsy hadn't surfaced it / lazy render / the shared
+    session was on the wrong page). Like a throttle, this must NOT trip
+    stop_after_first_failure — one unfindable row must not halt the whole queue
+    (2026-07-11 drain-starve: a single "could not be found" on the head item
+    blocked ~14 postable rows behind it). The item stays queued and retries next
+    window. A genuine auth/identity/text-mismatch fault is NOT this and still
+    stops the drain."""
+    if not isinstance(result, dict):
+        return False
+    message = str(result.get("message") or "").lower()
+    if (
+        "could not be found" in message
+        or "auto-retrying later" in message
+        or "could not be surfaced" in message
+    ):
+        return True
+    queue_item = result.get("queue_item")
+    if isinstance(queue_item, dict) and str(queue_item.get("last_failure_class") or "") in {
+        "review_row_not_found",
+        "review_surface_unreachable",
+    }:
+        return True
+    return False
+
+
 def drain_queue(
     *,
     max_items: int | None = None,
@@ -3476,6 +3503,7 @@ def drain_queue(
     failed_count = 0
     skipped_count = 0
     throttled_count = 0
+    locate_deferred_count = 0
 
     for item in eligible:
         artifact_id = str(item.get("artifact_id") or "")
@@ -3500,6 +3528,11 @@ def drain_queue(
                 if _result_is_retryable_throttle(dry_run):
                     # Transient pacing throttle — defer this item, keep draining.
                     throttled_count += 1
+                    continue
+                if _result_is_transient_locate_failure(dry_run):
+                    # Row not locatable this run — skip and keep draining so the
+                    # postable rows behind it still post (Surface 57 backstop).
+                    locate_deferred_count += 1
                     continue
                 failed_count += 1
                 if stop_after_first_failure:
@@ -3528,6 +3561,10 @@ def drain_queue(
                 # Transient pacing throttle — defer this item and keep draining.
                 # Must not trip stop_after_first_failure (that is the 11-day wedge).
                 throttled_count += 1
+                continue
+            if _result_is_transient_locate_failure(submit):
+                # Row vanished/not locatable at submit — skip, keep draining.
+                locate_deferred_count += 1
                 continue
             failed_count += 1
             if stop_after_first_failure:
@@ -3561,22 +3598,24 @@ def drain_queue(
         status = "posted"
     elif skipped_count:
         status = "skipped"
-    elif throttled_count:
-        # Nothing posted or hard-failed — the run was only deferred by pacing.
+    elif throttled_count or locate_deferred_count:
+        # Nothing posted or hard-failed — the run was only deferred (pacing or a
+        # row that couldn't be located this window). Not a failure.
         status = "deferred_pacing"
 
     return {
         "ok": True,
         "status": status,
         "message": (
-            f"Drained {posted_count + failed_count + skipped_count + throttled_count} queued review replies: "
+            f"Drained {posted_count + failed_count + skipped_count + throttled_count + locate_deferred_count} queued review replies: "
             f"{posted_count} posted, {failed_count} failed, {skipped_count} skipped, "
-            f"{throttled_count} deferred (pacing)."
+            f"{throttled_count} deferred (pacing), {locate_deferred_count} deferred (not-found)."
         ),
         "posted_count": posted_count,
         "failed_count": failed_count,
         "skipped_count": skipped_count,
         "throttled_count": throttled_count,
+        "locate_deferred_count": locate_deferred_count,
         "results": results,
         "summary_result": summary_result,
     }

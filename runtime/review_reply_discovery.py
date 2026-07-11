@@ -36,6 +36,15 @@ QUALITY_GATE_STATE_PATH = STATE_DIR / "quality_gate_state.json"
 DISCOVERY_SESSION_STATE_PATH = STATE_DIR / "review_reply_discovery_sessions.json"
 DISCOVERY_CONFIG_PATH = CONFIG_DIR / "review_reply_discovery.json"
 DEFAULT_ETSY_REVIEWS_URL = "https://www.etsy.com/your/shops/me/dashboard"
+# The public shop reviews page — the ONLY surface that reliably renders the
+# review rows with seller respond controls (the dashboard URL above redirects to
+# /signin when logged out; see reference_etsy_review_reply_reauth). Used as the
+# canonical navigation target so we never depend on finding a reviews link on
+# the current page (a reused session left on about:blank has none).
+SHOP_PUBLIC_REVIEWS_URL = "https://www.etsy.com/shop/myJeepDuck/reviews?ref=pagination&page=1"
+# Etsy's reviews page lazy-loads its rows; a fixed 1s post-navigation wait is not
+# enough, and locating before the rows render returns a false "row not found".
+REVIEWS_ROW_RENDER_TIMEOUT_SECONDS = 8.0
 PWCLI_PATH = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "skills" / "playwright" / "scripts" / "playwright_cli.sh"
 MANUAL_BROWSER_KEEPALIVE_HOURS = 2
 
@@ -363,57 +372,74 @@ def navigate_within_session(session: str, url: str, wait_seconds: float = 1.0) -
     return parse_page_metadata(snapshot_output)
 
 
+def wait_for_review_rows(
+    session: str,
+    *,
+    timeout_seconds: float = REVIEWS_ROW_RENDER_TIMEOUT_SECONDS,
+    poll_interval: float = 1.0,
+) -> dict[str, Any]:
+    """Poll until the reviews page has rendered its review rows (or a sign-in
+    wall appears / the timeout elapses). Etsy lazy-loads the rows, so locating
+    immediately after navigation returns a false 'row not found'. Returns the
+    final probe: {"rows": int, "signin": bool}."""
+    deadline = time.time() + max(0.0, timeout_seconds)
+    probe: dict[str, Any] = {"rows": 0, "signin": False}
+    while True:
+        output = run_pw_command(
+            session,
+            "eval",
+            (
+                "(() => { "
+                "const rows = document.querySelectorAll('li[data-review-region]').length; "
+                "const signin = /\\/signin/i.test(location.href) "
+                "  || Array.from(document.querySelectorAll('a,button')).some(n => /^sign in$/i.test((n.innerText||'').trim())); "
+                "return { rows, signin }; "
+                "})()"
+            ),
+        )
+        parsed = parse_eval_json(output)
+        if isinstance(parsed, dict):
+            probe = {"rows": int(parsed.get("rows") or 0), "signin": bool(parsed.get("signin"))}
+            if probe["rows"] > 0 or probe["signin"]:
+                return probe
+        if time.time() >= deadline:
+            return probe
+        time.sleep(poll_interval)
+
+
 def navigate_to_reviews_surface(session: str) -> dict[str, Any]:
+    # Always force-navigate to a REAL shop reviews URL, then wait for the rows to
+    # render. Derive the target from the current shop page when we're on one,
+    # else use the canonical public reviews page. Do NOT trust a reused session's
+    # current page (a prior lane — e.g. the customer-inbox sync sharing this
+    # session — can leave it on about:blank or a message thread), and do NOT
+    # depend on finding a reviews link on the current page (about:blank has
+    # none). 2026-07-11: that reused-session-page-trust + a fixed 1s settle was
+    # the "Exact review row could not be found" bug that starved the drain even
+    # for rows sitting on page 1.
     snapshot_output = run_pw_command(session, "snapshot")
     current_url, page_title = parse_page_metadata(snapshot_output)
-    current_surface = review_surface_url(current_url)
-    if current_surface:
-        if current_url == current_surface:
-            return {
-                "strategy": "already_on_shop_reviews_surface",
-                "start_url": current_url,
-                "landed_url": current_surface,
-                "page_title": page_title,
-            }
-        landed_url, landed_title = navigate_within_session(session, current_surface)
-        return {
-            "strategy": "navigate_via_canonical_shop_reviews_page",
-            "start_url": current_url,
-            "navigated_to": current_surface,
-            "landed_url": landed_url or current_surface,
-            "page_title": landed_title or page_title,
-        }
+    target = review_surface_url(current_url) or SHOP_PUBLIC_REVIEWS_URL
+    already_on_target = bool(current_url) and current_url == target
 
-    href_output = run_pw_command(
-        session,
-        "eval",
-        (
-            "(() => { "
-            "const links = Array.from(document.querySelectorAll('a[href]')).map(node => node.href).filter(Boolean); "
-            "const pagedReviews = links.find(href => href.includes('/shop/') && href.includes('/reviews')); "
-            "const direct = links.find(href => href.includes('/shop/') && href.includes('#reviews')); "
-            "const shop = links.find(href => href.includes('/shop/')); "
-            "return pagedReviews || direct || (shop ? shop.split('#')[0] + '/reviews?ref=pagination&page=1' : null); "
-            "})()"
-        ),
-    )
-    href = parse_eval_json(href_output)
-    if not isinstance(href, str) or not href.strip():
-        return {
-            "strategy": "no_review_surface_link_found",
-            "start_url": current_url,
-            "landed_url": current_url,
-            "page_title": page_title,
-        }
+    if not already_on_target:
+        landed_url, landed_title = navigate_within_session(session, target, wait_seconds=1.5)
+    else:
+        landed_url, landed_title = current_url, page_title
 
-    canonical_href = review_surface_url(href) or href
-    landed_url, landed_title = navigate_within_session(session, canonical_href)
+    probe = wait_for_review_rows(session)
+
+    # Re-read metadata after the rows have settled so callers get the true page.
+    settled_snapshot = run_pw_command(session, "snapshot")
+    settled_url, settled_title = parse_page_metadata(settled_snapshot)
     return {
-        "strategy": "navigate_via_shop_reviews_page" if "/reviews" in canonical_href else "navigate_via_shop_reviews_anchor",
+        "strategy": "already_on_shop_reviews_surface" if already_on_target else "navigate_via_canonical_shop_reviews_page",
         "start_url": current_url,
-        "navigated_to": canonical_href,
-        "landed_url": landed_url or canonical_href,
-        "page_title": landed_title,
+        "navigated_to": target,
+        "landed_url": settled_url or landed_url or target,
+        "page_title": settled_title or landed_title or page_title,
+        "rows_rendered": probe.get("rows", 0),
+        "signin_wall": probe.get("signin", False),
     }
 
 
