@@ -444,6 +444,18 @@ class CurrentLearningsTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            # Isolate the live-posts feed (SOCIAL_POSTS_PATH) the change notifier
+            # reads to verify slot-missed claims. Unpatched, it read the real
+            # production social_performance_posts.json, which goes stale and
+            # flipped this assertion to weekly_strategy_feed_stale on any day the
+            # prod feed was >24h old (observed 2026-07-11). Seed a FRESH feed with
+            # no matching post so the slot is deterministically "missed".
+            from datetime import datetime as _dt
+            live_posts_path = root / "state" / "social_performance_posts.json"
+            live_posts_path.write_text(
+                json.dumps({"generated_at": _dt.now().astimezone().isoformat(), "posts": []}),
+                encoding="utf-8",
+            )
             weekly_strategy_path.write_text(
                 json.dumps(
                     {
@@ -493,6 +505,8 @@ class CurrentLearningsTests(unittest.TestCase):
             )
 
             with patch.object(current_learnings, "SOCIAL_ROLLUPS_PATH", social_path), patch.object(
+                current_learnings, "SOCIAL_POSTS_PATH", live_posts_path
+            ), patch.object(
                 current_learnings, "COMPETITOR_BENCHMARK_PATH", competitor_path
             ), patch.object(
                 current_learnings, "COMPETITOR_SOCIAL_BENCHMARK_PATH", competitor_social_path
