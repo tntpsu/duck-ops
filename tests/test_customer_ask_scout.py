@@ -108,3 +108,27 @@ def test_write_guard_refuses_frozen_prod_path(monkeypatch):
     monkeypatch.setenv("DUCK_TEST_MODE", "1")
     with pytest.raises(cas.TestModeRefusalError):
         cas._write_json(cas._FROZEN_CANDIDATES_PATH, cas._FROZEN_CANDIDATES_PATH, {"x": 1})
+
+
+def test_feeder_turns_candidate_into_customer_ask_queue_item():
+    import product_concept_queue as pcq
+    payload = {"candidates": [
+        {"subject": "corgi", "distinct_requesters": 2,
+         "sample_quotes": ["Do you make a corgi duck?"],
+         "source_artifact_ids": ["sig-1", "sig-2"]},
+    ]}
+    items = pcq._customer_ask_items(payload)
+    assert len(items) == 1
+    item = items[0]
+    assert item["source_type"] == "customer_ask"
+    assert "corgi" in item["theme"].lower()
+    assert item["queue_state"] in ("ready_for_brief_review", "blocked_by_guardrail")
+    assert item["concept_design_brief"]["brief_source"] == "customer_ask"
+    # Frequency shows in score + evidence (2 requesters -> 0.8).
+    assert item["score"] == pytest.approx(0.8)
+    assert any("2 distinct" in e for e in item["evidence"])
+
+
+def test_feeder_empty_payload_holds():
+    import product_concept_queue as pcq
+    assert pcq._customer_ask_items({"candidates": []}) == []

@@ -42,6 +42,7 @@ PRODUCT_CONCEPT_FEEDBACK_PATH = STATE_DIR / "product_concept_feedback.json"
 # promoted concept becomes a design brief for review — credits are still
 # spent only when the operator approves the brief in DuckAgent's Studio.
 BUILD_NEXT_PROMOTIONS_PATH = STATE_DIR / "build_next_promotions.json"
+CUSTOMER_ASK_CANDIDATES_PATH = STATE_DIR / "customer_ask_candidates.json"  # Surface 58
 
 SURFACE_VERSION = 1
 DEFAULT_MAX_ITEMS = 12
@@ -419,6 +420,86 @@ def _learning_motif_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
+def _customer_ask_items(payload: Any = None) -> list[dict[str, Any]]:
+    """Surface 58: turn customer-ask scout candidates (mined from inbox + review
+    text by customer_ask_scout.py) into queue items. Mirrors
+    _build_next_promotion_items — same name/trend/brief machinery + fail-closed
+    guardrail — but lineage is source_type/brief_source='customer_ask' and the
+    evidence is the distinct-requester count, so the operator sees WHO asked. The
+    subject is normalized through _clean_theme so a customer ask for 'corgi'
+    collapses with a trend/competitor 'corgi' via _merge_duplicate_themes."""
+    data = payload if payload is not None else load_json(CUSTOMER_ASK_CANDIDATES_PATH, {"candidates": []})
+    candidates = data.get("candidates") if isinstance(data, dict) else data
+    items: list[dict[str, Any]] = []
+    for cand in list(candidates or []):
+        if not isinstance(cand, dict):
+            continue
+        raw_theme = str(cand.get("subject") or "").strip()
+        if not raw_theme:
+            continue
+        requesters = int(cand.get("distinct_requesters") or 1)
+        name_quality = concept_name_quality(raw_theme)
+        trend_quality_gate = evaluate_trend_quality(
+            raw_theme=raw_theme,
+            signal_summary={},
+            source_refs=[],
+            catalog_status="gap",
+            latest_observed_at=None,
+        )
+        concept_design_brief = build_concept_design_brief(
+            raw_theme=raw_theme,
+            signal_summary={},
+            source_refs=[],
+            catalog_status="gap",
+            latest_observed_at=None,
+            review_status="customer_requested",
+            confidence=0.6,
+            trend_quality_gate=trend_quality_gate,
+            brief_source="customer_ask",
+        )
+        theme = _clean_theme(concept_design_brief.get("concept_title") or raw_theme)
+        if trend_quality_gate.get("status") == "blocked_by_policy" or name_quality.get("status") != "product_ready":
+            queue_state = "blocked_by_guardrail"
+            next_step = "Reframe this customer-requested concept into a product-ready, public-safe duck before briefing."
+        else:
+            queue_state = "ready_for_brief_review"
+            next_step = "Customers asked for this; send to DuckAgent design_brief_queue for brief approval."
+        guardrails = [
+            "public_concept_allowed",
+            "Do not copy competitor artwork, wording, photos, tags, or listing structure.",
+            "Keep this duck-first; avoid readable logos, team marks, brand names, copyrighted characters.",
+        ]
+        guardrails.extend(str(i) for i in name_quality.get("issues") or [])
+        guardrails.extend(str(i) for i in trend_quality_gate.get("issues") or [])
+        quotes = [str(q) for q in (cand.get("sample_quotes") or [])][:2]
+        source_ids = [a for a in (cand.get("source_artifact_ids") or []) if a]
+        # Frequency-weighted: 1 requester -> 0.7, 2 -> 0.8, 3+ -> capped 0.9.
+        score = min(0.9, 0.6 + 0.1 * max(1, requesters))
+        items.append({
+            "concept_id": _stable_id("customerask", theme, raw_theme),
+            "source_type": "customer_ask",
+            "source_artifact_id": source_ids[0] if source_ids else None,
+            "theme": theme,
+            "raw_theme": raw_theme,
+            "catalog_status": "gap",
+            "queue_state": queue_state,
+            "score": score,
+            "confidence": 0.6,
+            "name_quality": name_quality,
+            "trend_quality_gate": trend_quality_gate,
+            "concept_design_brief": concept_design_brief,
+            "evidence": [
+                f"{requesters} distinct customer(s) asked for this in reviews/inbox.",
+                *[f'"{q}"' for q in quotes],
+            ],
+            "guardrails": guardrails,
+            "recommended_next_step": next_step,
+            "duckagent_task": "design_brief_queue",
+            "source_refs": [{"kind": "customer_ask", "artifact_id": a} for a in source_ids[:5]],
+        })
+    return items
+
+
 def _strategy_idea_items(current_learnings: dict[str, Any], benchmark: dict[str, Any]) -> list[dict[str, Any]]:
     ideas: list[str] = []
     for payload in (current_learnings, benchmark):
@@ -539,6 +620,7 @@ def build_product_concept_queue(
 
     items = [_trend_candidate_to_queue_item(item) for item in _candidate_items(trend_payload)]
     items.extend(_build_next_promotion_items())
+    items.extend(_customer_ask_items())  # Surface 58: 5th scout
     if isinstance(learning_payload, dict):
         items.extend(_learning_motif_items(learning_payload))
     if isinstance(learning_payload, dict) and isinstance(benchmark_payload, dict):

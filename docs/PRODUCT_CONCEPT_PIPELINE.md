@@ -28,7 +28,7 @@ This doc is the map. For field-level contract, see
 - **The concept queue is the single source of truth** for "products in flight."
   The scouts are recommenders *into* it; Studio is the builder *from* it.
 
-## The four scouts (feeders)
+## The five scouts (feeders)
 
 Each writes queue items tagged with a `source_type`. Code: `runtime/product_concept_queue.py`.
 
@@ -38,9 +38,12 @@ Each writes queue items tagged with a `source_type`. Code: `runtime/product_conc
 | ② | **Build-Next "Promote"** (competitor-demand ranking) | `build_next_promotion` | `state/build_next_promotions.json` |
 | ③ | Competitor-motif detector (learning motifs) | `competitor_motif` | `output/operator/current_learnings.json` |
 | ④ | Weekly strategy ideas | `strategy_idea` | `current_learnings.json` + `state/competitor_social_benchmark.json` |
+| ⑤ | **Customer-Ask scout** (Surface 58) — mines inbox + review text for explicit "do you make X?" requests, ranked by distinct-requester count | `customer_ask` | `state/customer_ask_candidates.json` (from `runtime/customer_ask_scout.py`) |
 
-> Thursday, occasion tags, memes, jeepfacts, reviews, etc. are **content-publish
-> lanes**, not product-concept scouts — they do **not** feed this queue.
+> Thursday, occasion tags, memes, jeepfacts, etc. are **content-publish lanes**,
+> not product-concept scouts — they do **not** feed this queue. **Reviews + inbox
+> DO feed it now, but only via scout ⑤** (explicit product requests, temp-0
+> classified, own-mail excluded) — not as raw content.
 
 ## Where Build-Next fits
 
