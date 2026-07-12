@@ -186,6 +186,15 @@ Companion docs:
 
 ## Highest-Value Open Work
 
+> **2026-07-11 audit correction** (verified against code + TESTS.md + git; truth order code > TESTS.md > roadmap). This section below lagged reality. Corrections:
+> - **Priority 0.6 Per-Product Profit Drill-Down → ✅ SHIPPED.** `runtime/profit_per_product.py` does per-SKU COGS join across Etsy+Shopify → `/portal/intel/profit` (Surface 11, tested). Do not rebuild.
+> - **Surface 47 demand-rank Build-Next → ✅ SHIPPED** (`build_next_engine.py` reads competitor `demand_7d`; commit `c8556bf`).
+> - **Priority 0.5 LLM Cost Ceiling → ⚠️ PARTIAL.** Per-flow *logging* + `/portal/intel/cost` shipped (Surface 10); the **hard ceiling / auto-stop is NOT built** (deliberate observability-first call 2026-06-06). Open item = enforcement only. **Spec'd 2026-07-11 as TESTS.md Surface 59.**
+> - **Priority 2 outcome loops → mostly ❌ NOT BUILT.** SEO outcome monitor verifies the fix *stayed* but has **no traffic tie-back** (`traffic_signal_available_count:0`); **relist lift, reply→conversion, GA4-engagement→theme-selection, and Creative Phase 6 ranker-retrain are all unbuilt** (outcomes are collected, never fed back into selection/ranking).
+> - **Priority 0.7 Repeat-Buyer Automation → ❌ NOT BUILT** (no repeat-buyer/repurchase code at all).
+> - **NEW GAP found — Customer-Ask Scout → ❌ NOT BUILT.** The product-concept pipeline explicitly excludes reviews + inbox from its 4 scouts, so "what customers literally ask us to make" (168 inbox threads + every review) is unmined demand signal with a fully-built downstream home (concept queue → Studio → Promote gate). **Highest-leverage open work; spec'd 2026-07-11 as TESTS.md Surface 58.**
+> - Review-text → per-SKU QA is ⚠️ PARTIAL (shop-wide extraction exists, not per-SKU-routed).
+
 ### First-Party Demand Intelligence (GSC + GA4) — core shipped 2026-06-27, follow-ups queued
 
 Real first-party demand now flows into the system: **GSC** (Google search queries → Build-Next) and **GA4** (per-listing Fix/Promote/Watch, split Etsy vs Shopify). Shipped this initiative (Surfaces 38–42, all pushed): Build-Next 7-day momentum re-rank (16.4); GSC search-demand producer + factor (38); GA4 listing-performance producer (39); SEO generation fed by real demand + golden eval (40); gap→collection planner Stage A (41A); GA4 weekly-sale steering (42, drops PROMOTE winners / floats FIX leaks, behind the sale-policy gate).

@@ -1587,6 +1587,49 @@ Sibling of the 11-day `pacing_cooldown` wedge (Fix A, 73f2096): that added throt
 
 ---
 
+## Surface 58 — Customer-Ask Scout: mine inbox + review text into the product-concept queue (SPEC-FIRST, 2026-07-11, operator: "are we leveraging all the information we have?")
+
+**Gap (verified by 2026-07-11 audit):** the product-concept pipeline has exactly 4 scouts (trend / build_next_promotion / competitor_motif / strategy_idea) and `docs/PRODUCT_CONCEPT_PIPELINE.md` *explicitly* states reviews + inbox "do not feed this queue." So the highest-intent demand signal we own — a customer literally asking us to make something we don't sell, across ~168 inbox threads + every review — is unmined, even though the entire downstream (concept queue → Studio → Promote gate → brief-approval) is already built. This is a "turn a dead asset into decisions" win with no new downstream plumbing.
+
+**Design (reuse existing infra; add ONE new scout + source):**
+- **Producer** `customer_ask_scout.py`: scans the already-collected customer inbox state + review text, extracts explicit product REQUESTS ("do you make a &lt;X&gt; duck?", "can you do &lt;team/breed/theme&gt;?") and mints `product_concept_queue` candidates with a new `source_type="customer_ask"` alongside the 4 existing scouts. Runs on a launchd cadence (producer/reader pattern).
+- **LLM-output-surface recipe (all 5 pieces, per the top-level CLAUDE.md rule):** (1) versioned `config/customer_ask_taxonomy.json` (request-vs-not categories, `*_version`); (2) golden fixture `tests/fixtures/customer_ask_golden.json` (hand-labeled asks vs non-asks vs ambiguous); (3) gated eval `scripts/eval_customer_ask.py` (real API, promotion criteria, NOT in default pytest); (4) **needs_review escape** — an ambiguous ask is flagged for the operator, never silently minted; (5) deterministic keyword cross-check ("do you make/sell/have", "can you", "wish you had", "looking for") to catch confidently-wrong LLM output. **Classification runs at temperature 0.**
+- **Own-mail exclusion** ([[feedback_mailbox_detectors_exclude_own_mail]]): strip the system's OWN outbound (MJD:/FLOW:/ACTION:/RUN: markers) + Etsy notification emails BEFORE classifying; pin false-positives in the golden fixture.
+- **Frequency weighting:** aggregate similar asks — N distinct customers requesting the same subject is a strong signal; a one-off is weak. Rank customer-ask candidates by distinct-requester count.
+- **Dedup:** reuse the pipeline's 3 dedup layers so an ask for something already in the catalog / concept queue does not mint (guard against the known slug-merge fragility for non-Build-Next scouts, [[reference_product_concept_pipeline]]).
+- **Gates unchanged:** customer-ask concepts flow through the identical Promote (no-credits) + brief-approval (credits) gates — no auto image/3D spend.
+
+## Use case × failure mode
+
+|                                          | Happy | Ambiguous ask | Own-mail / notification | Dup of catalog | Isolation |
+|---|---|---|---|---|---|
+| Explicit request → concept minted        | 🔴 golden: "do you make a corgi duck" → candidate | 🔴 unsure → needs_review, NOT minted | 🔴 MJD:/Etsy-notif excluded before classify | 🔴 already-sell → suppressed | 🔴 3-layer prod-path (both repos) |
+| Frequency ranking                        | 🔴 3 requesters > 1 requester | n/a | n/a | n/a | 〃 |
+| Deterministic cross-check                | 🔴 LLM "yes" + no ask-keyword → flagged | n/a | n/a | n/a | 〃 |
+| Two-card bracket                         | 🔴 input: scanner finds asks (not empty) | n/a | n/a | 🔴 output: asks reach queue / acted on | registration + empty-payload |
+
+**Phase map:** **P0** TESTS rows + golden fixture (spec-first). **P1** producer + `source_type=customer_ask` + temp-0 classifier + own-mail exclusion + 3-layer isolation. **P2** frequency ranking + dedup reuse. **P3** gated eval with promotion criteria; two-card bracket (input filter-sanity + output throughput). **Cross-repo** (reads duckAgent-collected inbox/review state, writes duck-ops concept queue) → **run a Plan agent before implementing** ([[feedback_plan_agent_before_cross_repo]]). By dimension: unit (classifier mock, keyword cross-check, dedup, frequency); gated eval (real API); no e2e. **STATUS: SPEC-ONLY 2026-07-11.**
+
+## Surface 59 — LLM Cost-Ceiling Enforcement: the stop, not just the log (SPEC-FIRST, 2026-07-11)
+
+**Gap (verified):** per-flow cost *logging* + `/portal/intel/cost` + a soft daily *alert* are shipped (Surface 10), but there is **no hard daily cap, no per-flow cap, and no auto-stop** — a deliberate "observability-first" call (2026-06-06). That call is now higher-risk: lanes run unattended, so one misbehaving loop can quietly spend $100 overnight with nothing to halt it. Open work = **enforcement only** (do NOT rebuild the dashboard).
+
+**Design:**
+- **Pre-call budget gate** in the shared LLM helper (`runtime/llm_call_helpers.py` / `call_openai` / `call_anthropic`): before each call, read today's total spend + this flow's spend from a fast running counter (seeded from the `llm_call_log` rollup); if `today >= DAILY_CAP_USD` or `flow_today >= PER_FLOW_CAP_USD`, **raise `BudgetExceededError` instead of calling.** Fail-CLOSED on the spend (don't call), fail-LOUD (OS-card signal + log line), never silent ([[feedback_swallowed_errors_lie.md]]).
+- **Config as data:** `config/llm_budget.json` (`daily_cap_usd`, `per_flow_caps`, `version`) — calibrate caps to observed spend + generous headroom so a normal day never trips (a cap that fires on legit work is worse than none).
+- **Explicit override, never silent:** an operator flag / env to lift the cap for a known-heavy run, recorded in a receipt.
+- **Two-card bracket:** input filter-sanity (is the gate wired + reading real running spend, not a stale/zero counter?) + output (did a flow actually stop when over cap? is daily spend within cap?).
+
+## Use case × failure mode
+
+|                                    | Under cap | At daily cap | At per-flow cap | Counter stale/zero | Override |
+|---|---|---|---|---|---|
+| LLM call proceeds / stops          | 🔴 under → call proceeds | 🔴 over daily → BudgetExceededError, no call | 🔴 over flow → stop that flow only | 🔴 counter unreadable → fail-closed + loud (not fail-open) | 🔴 override lifts cap, records receipt |
+
+**Phase map:** **P0** TESTS rows (spec-first). **P1** budget gate + `config/llm_budget.json` + `BudgetExceededError` + OS-card signal. **P2** override path + receipt. **Cross-repo** (the helper is used by both repos) → Plan agent before implementing. Calibrate caps against the shipped `llm_cost_summary` history first. By dimension: unit (mock spend levels → assert proceed/stop, fail-closed on unreadable counter); no e2e. **STATUS: SPEC-ONLY 2026-07-11.** Note: the operator chose observability-first once before — confirm the ceiling values before shipping so it protects without throttling legit work.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
