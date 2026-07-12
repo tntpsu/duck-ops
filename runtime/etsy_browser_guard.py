@@ -24,7 +24,13 @@ DISCOVERY_SESSION_STATE_PATH = ROOT / "state" / "review_reply_discovery_sessions
 BLOCK_WINDOW_MINUTES = 45
 RATE_WINDOW_SECONDS = 5 * 60
 MAX_COMMANDS_PER_WINDOW = 18
-MAX_MUTATING_COMMANDS_PER_WINDOW = 8
+# 2026-07-11 (operator sign-off, Surface 57 P4): raised 8 -> 16 to let the
+# review-reply drain clear a backlog faster. The raw count is NOT the
+# bot-detection control — MIN_MUTATING_GAP_SECONDS (>=3.5s between mutating
+# actions) + 3 jittered windows/day + session caps are. A human seller replies
+# to far more than 8 reviews in a sitting. Watch etsy_browser_batch_liveness +
+# throughput for any block signal before raising further.
+MAX_MUTATING_COMMANDS_PER_WINDOW = 16
 # Of MAX_COMMANDS_PER_WINDOW, keep this many slots available for mutating
 # (review-reply post) commands. Read-only commands are soft-refused once they
 # would eat into the reserve, so a burst of reads can't starve the drain of

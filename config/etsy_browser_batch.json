@@ -36,7 +36,7 @@
   "review_reply": {
     "enabled": true,
     "queue_publish_ready": true,
-    "max_replies_per_session": 2
+    "max_replies_per_session": 5
   },
   "relist": {
     "enabled": true,

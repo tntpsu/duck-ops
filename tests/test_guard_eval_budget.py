@@ -87,6 +87,14 @@ class GuardEvalBudgetTests(unittest.TestCase):
         exc = self._run(seeded, ("eval", "return document.title;"))
         self.assertIsInstance(exc, Exception)
 
+    def test_mutating_cap_and_gap_pinned(self):
+        # Surface 57 P4 (operator sign-off): the agreed Etsy-facing budget. This
+        # is a deliberate change-detector — raising the mutating cap is an
+        # Etsy-block-risk decision, so a future change must be intentional. The
+        # 3.5s gap is the real anti-burst control and must be retained.
+        self.assertEqual(guard.MAX_MUTATING_COMMANDS_PER_WINDOW, 16)
+        self.assertEqual(guard.MIN_MUTATING_GAP_SECONDS, 3.5)
+
 
 if __name__ == "__main__":
     unittest.main()

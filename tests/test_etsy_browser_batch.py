@@ -171,7 +171,7 @@ class EtsyBrowserBatchTests(unittest.TestCase):
         )
         queue_mock.assert_called_once()
         drain_mock.assert_called_once()
-        self.assertEqual(drain_mock.call_args.kwargs["max_items"], 2)
+        self.assertEqual(drain_mock.call_args.kwargs["max_items"], 5)
         relist_mock.assert_called_once()
         control_mock.assert_called_once()
 
