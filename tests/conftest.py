@@ -146,6 +146,15 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
     # operator dupe rulings; same three-layer isolation (this redirect + the
     # DUCK_TEST_MODE guard in record_dupe_decision + the no-pollution audit test).
     monkeypatch.setattr(_bne, "BUILD_NEXT_DUPE_DECISIONS_PATH", tmp_path / "build_next_dupe_decisions.json")
+    # 2026-07-11: customer_ask_scout output paths (Surface 58) — same three-layer
+    # isolation (this redirect + the DUCK_TEST_MODE write guard in
+    # customer_ask_scout._write_json + tests/test_no_test_pollution_in_customer_ask.py).
+    try:
+        import customer_ask_scout as _cas
+        monkeypatch.setattr(_cas, "CUSTOMER_ASK_CANDIDATES_PATH", tmp_path / "customer_ask_candidates.json")
+        monkeypatch.setattr(_cas, "CUSTOMER_ASK_NEEDS_REVIEW_PATH", tmp_path / "customer_ask_needs_review.json")
+    except ImportError:
+        pass
     # 2026-06-26: gsc_search_demand state (Surface 38). build_next_engine READS
     # it (deterministic tmp so the read doesn't pick up prod), and the producer
     # gsc_search_demand.py WRITES it (same three-layer isolation: this redirect

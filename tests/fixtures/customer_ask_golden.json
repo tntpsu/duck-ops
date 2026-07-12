@@ -1,0 +1,19 @@
+{
+  "notes": "Hand-labeled golden set for scripts/eval_customer_ask.py (Surface 58). Each entry is a customer signal. is_ask=true = an explicit NEW-PRODUCT request; expected_subject is the clean product subject the scout should mint (run through clean_product_theme for dedup). own_mail=true = the system's own outbound / an Etsy notification that MUST be excluded before classification and must NEVER classify as an ask. ambiguous=true → needs_review, not minted. The dedup pair (ask 'corgi' + an existing 'corgi' trend) must collapse to the same theme slug. Regression rule: every field misclassification found later gets APPENDED here before the fix.",
+  "entries": [
+    {"id": "ask-corgi-inbox", "channel": "mailbox_email", "subject": "quick question", "text": "Hi! Do you make a corgi duck? I would love one for my desk.", "is_ask": true, "expected_subject": "corgi"},
+    {"id": "ask-team-inbox", "channel": "mailbox_email", "subject": "packers duck?", "text": "Any chance you could make a Green Bay Packers duck for my dad?", "is_ask": true, "expected_subject": "green bay packers"},
+    {"id": "ask-profession-inbox", "channel": "mailbox_email", "subject": "idea", "text": "Wish you had a firefighter duck — my son is a firefighter and would love it.", "is_ask": true, "expected_subject": "firefighter"},
+    {"id": "ask-in-review", "channel": "etsy_review", "text": "Love this so much! Would love to see a nurse duck too if you ever make one.", "is_ask": true, "expected_subject": "nurse"},
+    {"id": "ask-breed-inbox", "channel": "mailbox_email", "subject": "dachshund", "text": "Looking for a dachshund duck, do you have anything like that?", "is_ask": true, "expected_subject": "dachshund"},
+    {"id": "praise-review-postman", "channel": "etsy_review", "text": "My husband loves the rubber duckies and collects them. He is a postman so he positively loved this one!", "is_ask": false},
+    {"id": "praise-review-gift", "channel": "etsy_review", "text": "Perfect gift, arrived quickly, great quality. Highly recommend!", "is_ask": false},
+    {"id": "variant-color-inbox", "channel": "mailbox_email", "subject": "colors", "text": "Do you have this duck in other colors? I would like a blue one.", "is_ask": false, "note": "variant of existing product, not a new product"},
+    {"id": "logistics-shipping-inbox", "channel": "mailbox_email", "subject": "order", "text": "When will my order ship? I ordered last week.", "is_ask": false},
+    {"id": "ambiguous-vague-inbox", "channel": "mailbox_email", "subject": "ducks", "text": "Do you have any other fun ducks?", "is_ask": false, "ambiguous": true, "note": "no specific subject to mint"},
+    {"id": "ownmail-mjd-subject", "channel": "mailbox_email", "subject": "MJD: [newduck] Corgi Duck | FLOW:newduck | RUN:20260711 | ACTION:review", "text": "Please review this custom duck concept before we generate the image.", "own_mail": true, "is_ask": false, "note": "system outbound; body has 'custom duck' but subject marks it own-mail"},
+    {"id": "ownmail-etsy-sale", "channel": "mailbox_email", "subject": "You made a sale on Etsy!", "text": "Congratulations, you made a sale.", "own_mail": true, "is_ask": false},
+    {"id": "ownmail-review-summary", "channel": "mailbox_email", "subject": "Daily Etsy review summary", "text": "Here is your review summary.", "own_mail": true, "is_ask": false},
+    {"id": "dedup-corgi-second", "channel": "mailbox_email", "subject": "corgi please", "text": "Can you make a corgi duck? My whole family wants one.", "is_ask": true, "expected_subject": "corgi", "note": "must collapse to the same theme slug as ask-corgi-inbox and any existing 'corgi' trend candidate"}
+  ]
+}

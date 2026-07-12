@@ -1,0 +1,42 @@
+{
+  "customer_ask_taxonomy_version": 1,
+  "notes": "Versioned taxonomy for the customer-ask scout (Surface 58). Bump customer_ask_taxonomy_version on ANY category/keyword change so cached classifications invalidate. The classifier decides whether a customer signal (inbox message or review text) is an explicit NEW-PRODUCT request. `ask_keywords` are NOT used to classify — they feed the deterministic evidence cross-check in customer_ask_scout.py that flags an item when the LLM says is_ask=true but zero ask-keyword is present (a confidently-wrong positive). `not_a_new_product` phrases distinguish variant/logistics questions about an EXISTING product from a genuine new-product request. Keep both lists short and high-precision.",
+  "categories": {
+    "product_request": "An explicit request for a NEW duck subject/theme we do not currently sell — a character, animal, breed, sports team, profession, hobby, or motif the customer wants made into a duck.",
+    "variant_request": "A question about an EXISTING product's variant (color, size, quantity) — not a new product. Routes to ops, never mints a concept.",
+    "not_a_request": "Praise, thanks, logistics (shipping/refund/order status), complaint, or unrelated chatter — no product-concept signal.",
+    "ambiguous": "Unclear whether it is a genuine new-product request — flag needs_review, never mint."
+  },
+  "ask_keywords": [
+    "do you make",
+    "do you sell",
+    "do you have a",
+    "can you make",
+    "can you do",
+    "could you make",
+    "would you make",
+    "will you make",
+    "any chance you",
+    "wish you had",
+    "would love a",
+    "would love to see",
+    "looking for a",
+    "please make",
+    "make one of"
+  ],
+  "not_a_new_product": [
+    "other colors",
+    "different color",
+    "what size",
+    "how big",
+    "when will it ship",
+    "where is my order",
+    "order status",
+    "refund",
+    "return",
+    "tracking",
+    "how long does shipping",
+    "is this in stock",
+    "restock this"
+  ]
+}
