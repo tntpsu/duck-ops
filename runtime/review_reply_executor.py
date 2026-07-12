@@ -3380,6 +3380,23 @@ def _result_is_retryable_throttle(result: dict[str, Any]) -> bool:
     return is_cooldown_error(str(result.get("message") or ""))
 
 
+def _review_recency_key(item: dict[str, Any]) -> str:
+    """Sort key for draining NEWEST reviews first (Surface 57 fix 2). Recent
+    reviews sit on page 1 and are reliably locatable/postable; old ones sink out
+    of page-walk reach, so spending the (paced) budget on them first wastes the
+    window. Prefer the actual review date, then the date embedded in the
+    artifact_id (publish::reviews_reply_positive::YYYY-MM-DD::tx-...), then the
+    reconcile-touched queued_at as a last resort."""
+    target = item.get("review_target") if isinstance(item.get("review_target"), dict) else {}
+    submitted = str(item.get("review_submitted_at") or target.get("review_submitted_at") or "").strip()
+    if submitted:
+        return submitted
+    parts = str(item.get("artifact_id") or "").split("::")
+    if len(parts) >= 3 and parts[2].strip():
+        return parts[2].strip()
+    return str(item.get("queued_at") or "")
+
+
 def _result_is_transient_locate_failure(result: dict[str, Any]) -> bool:
     """True when a drain step failed ONLY because the target review row could
     not be located this run (Etsy hadn't surfaced it / lazy render / the shared
@@ -3467,7 +3484,8 @@ def drain_queue(
                 )
             )
         ],
-        key=lambda item: str(item.get("queued_at") or ""),
+        key=_review_recency_key,
+        reverse=True,  # newest reviews first — they're the findable/postable ones
     )
     if max_items is None:
         try:

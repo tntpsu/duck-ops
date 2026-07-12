@@ -73,14 +73,45 @@ def test_drain_skips_not_found_head_and_posts_next(monkeypatch):
     assert res["failed_count"] == 0, res
 
 
-def test_drain_still_stops_on_genuine_fault(monkeypatch):
+def test_drain_orders_newest_review_first(monkeypatch):
+    # The OLD review has the EARLIER queued_at (old code would drain it first);
+    # the NEW review has a later queued_at. Newest-review-first must pick the
+    # NEW one when only 1 slot is available — proving it sorts on review date,
+    # not the reconcile-touched queued_at.
     items = {
-        "aid_fault": {"artifact_id": "aid_fault", "status": "queued", "queued_at": "2026-07-01T00:00:00+00:00"},
-        "aid_postable": {"artifact_id": "aid_postable", "status": "queued", "queued_at": "2026-07-02T00:00:00+00:00"},
+        "publish::reviews_reply_positive::2026-06-01::tx-old": {
+            "artifact_id": "publish::reviews_reply_positive::2026-06-01::tx-old",
+            "status": "queued", "queued_at": "2026-07-01T00:00:00+00:00"},
+        "publish::reviews_reply_positive::2026-07-08::tx-new": {
+            "artifact_id": "publish::reviews_reply_positive::2026-07-08::tx-new",
+            "status": "queued", "queued_at": "2026-07-10T00:00:00+00:00"},
+    }
+    posted: list[str] = []
+
+    def dry(aid, **k):
+        return {"ok": True, "status": "dry_run_filled"}
+
+    def submit(aid, **k):
+        posted.append(aid)
+        return {"ok": True, "status": "posted"}
+
+    _wire_drain(monkeypatch, dry, submit, items)
+    res = rre.drain_queue(max_items=1, keep_browser_open=True, send_summary=False)
+    assert res["posted_count"] == 1, res
+    assert posted == ["publish::reviews_reply_positive::2026-07-08::tx-new"], posted
+
+
+def test_drain_still_stops_on_genuine_fault(monkeypatch):
+    # Fault item is the NEWEST so newest-first drains it at the head.
+    fault = "publish::reviews_reply_positive::2026-07-08::tx-fault"
+    ok = "publish::reviews_reply_positive::2026-07-05::tx-ok"
+    items = {
+        fault: {"artifact_id": fault, "status": "queued", "queued_at": "2026-07-08T00:00:00+00:00"},
+        ok: {"artifact_id": ok, "status": "queued", "queued_at": "2026-07-05T00:00:00+00:00"},
     }
 
     def dry(aid, **k):
-        if aid == "aid_fault":
+        if aid == fault:
             return {"ok": False, "status": "failed",
                     "message": "The textarea no longer matches the exact approved reply text."}
         return {"ok": True, "status": "dry_run_filled"}
