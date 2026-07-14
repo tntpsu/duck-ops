@@ -375,3 +375,84 @@ class ShopifySeoReviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Surface60NearDuplicateTitleTests(unittest.TestCase):
+    """Surface 60: the audit correctly flags near-duplicate SEO titles, but the
+    generator used to echo each page's own title back as the 'fix' (no-op). The
+    guard must fail closed on an echo/still-colliding proposal and the prompt
+    must instruct differentiation."""
+
+    def _two_near_dup_pages(self):
+        return {
+            "generated_at": "2026-07-13T09:00:00-04:00",
+            "shopify_domain": "example.myshopify.com",
+            "top_actions": [
+                {
+                    "id": "gid://shopify/Page/1", "kind": "page", "title": "Mix & Match",
+                    "resource_url": "/pages/collection-bundles",
+                    "seo_title": "Mix & Match | MyJeepDuck Collectible Ducks gift idea",
+                    "seo_description": "Explore Mix & Match at MyJeepDuck for collectible ducks, custom gift ideas, and playful flock favorites built for dashboard displays, ducking fans.",
+                    "issues": [{"code": "near_duplicate_seo_title", "message": "Near-duplicate SEO title.", "severity": "medium"}],
+                },
+                {
+                    "id": "gid://shopify/Page/2", "kind": "page", "title": "Mix and Match",
+                    "resource_url": "/pages/collection-bundle",
+                    "seo_title": "Mix and Match | MyJeepDuck Collectible Ducks gift idea",
+                    "seo_description": "Explore Mix and Match at MyJeepDuck for collectible ducks, custom gift ideas, and playful flock favorites built for dashboard displays, ducking fans.",
+                    "issues": [{"code": "near_duplicate_seo_title", "message": "Near-duplicate SEO title.", "severity": "medium"}],
+                },
+            ],
+        }
+
+    def _run(self, proposals):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(shopify_seo_review, "REVIEW_STATE_DIR", root / "s"), \
+                 patch.object(shopify_seo_review, "REVIEW_RUN_DIR", root / "s" / "runs"), \
+                 patch.object(shopify_seo_review, "REVIEW_OUTPUT_MD", root / "out.md"), \
+                 patch.object(shopify_seo_review, "build_shopify_seo_audit", return_value=self._two_near_dup_pages()), \
+                 patch.object(shopify_seo_review, "_generate_proposals", return_value=proposals):
+                payload = shopify_seo_review.build_shopify_seo_review(limit=10, force_audit=True)
+            md = (root / "out.md").read_text()
+        return payload, md
+
+    def test_echo_proposal_flags_needs_differentiation_and_does_not_apply(self):
+        echo = [
+            {"id": "gid://shopify/Page/1", "seo_title": "Mix & Match | MyJeepDuck Collectible Ducks gift idea",
+             "seo_description": "Explore Mix & Match at MyJeepDuck for collectible ducks, custom gift ideas, and playful flock favorites built for dashboard displays, ducking fans.", "rationale": "x"},
+            {"id": "gid://shopify/Page/2", "seo_title": "Mix and Match | MyJeepDuck Collectible Ducks gift idea",
+             "seo_description": "Explore Mix and Match at MyJeepDuck for collectible ducks, custom gift ideas, and playful flock favorites built for dashboard displays, ducking fans.", "rationale": "x"},
+        ]
+        payload, md = self._run(echo)
+        for item in payload["items"]:
+            self.assertTrue(item.get("title_needs_differentiation"), item)
+            self.assertFalse(item.get("apply_seo_title", True))       # fail closed: not auto-applied
+            self.assertTrue(item.get("consolidation_candidate"))      # two near-identical pages
+        self.assertIn("NEEDS MANUAL DIFFERENTIATION", md)
+
+    def test_distinct_proposal_passes_without_flag(self):
+        distinct = [
+            {"id": "gid://shopify/Page/1", "seo_title": "Mix & Match Duck Gift Bundles | MyJeepDuck Collectibles",
+             "seo_description": "Build your own duck gift bundle at MyJeepDuck with mix-and-match collectible ducks, custom sets, and playful flock favorites for gifting.", "rationale": "x"},
+            {"id": "gid://shopify/Page/2", "seo_title": "Build-Your-Own Duck Flock Sets | MyJeepDuck Mix Match",
+             "seo_description": "Create a custom flock at MyJeepDuck by mixing collectible ducks into your own gift set, with quick-ship favorites and dashboard-ready picks.", "rationale": "x"},
+        ]
+        payload, md = self._run(distinct)
+        for item in payload["items"]:
+            self.assertFalse(item.get("title_needs_differentiation", False), item)
+        self.assertNotIn("NEEDS MANUAL DIFFERENTIATION", md)
+
+    def test_prompt_includes_differentiation_instruction(self):
+        captured = {}
+        def fake_openai_json(system, user, **kwargs):
+            captured["user"] = user
+            return {"items": []}
+        with patch.object(shopify_seo_review, "_ensure_duckagent_imports", return_value=(fake_openai_json, None)):
+            shopify_seo_review._generate_proposals(self._two_near_dup_pages()["top_actions"])
+        self.assertIn("CRITICAL DIFFERENTIATION", captured["user"])
+        self.assertIn("gid://shopify/Page/1", captured["user"])
+
+
+if __name__ == "__main__":
+    unittest.main()

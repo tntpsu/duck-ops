@@ -1632,6 +1632,25 @@ Sibling of the 11-day `pacing_cooldown` wedge (Fix A, 73f2096): that added throt
 
 ---
 
+## Surface 60 — Shopify SEO near-duplicate title: no-op "fix" (2026-07-13, operator: "the recommendation looks exactly like the input, right?")
+
+**Root cause (verified in `shopify_seo_review.py`):** the audit correctly detects `near_duplicate_seo_title` ("avoid blending into another similar search result"), but (1) the finding was **never fed into the generation prompt** — `_generate_proposals` prompted the LLM on each resource *in isolation* with no sibling context and no differentiation instruction, so for two near-identical pages (`/collection-bundles` "Mix **&** Match" vs `/collection-bundle` "Mix **and** Match") it echoed near-identical titles; and (2) **no guard checked proposed ≠ current** — `_title_needs_fallback` only checks empty/placeholder/length, so an echo of the current title (in-range length) passed straight through as "SEO title action", identical to the current title. The prior "privacy-choices special-case" was a one-page band-aid for the same general bug. ([[feedback_plausible_fallbacks_mask_failure]].)
+
+**Fix (SHIPPED 2026-07-13):**
+1. **Prompt injection** — `_generate_proposals` computes `_title_differentiation_groups` (resources sharing a normalized current title; `&`→`and`, case/space-insensitive) and adds a CRITICAL DIFFERENTIATION rule listing the colliding ids+titles, instructing each `seo_title` be distinct from its group and its own current title.
+2. **Fail-closed guard** — `_flag_title_differentiation` post-pass: a near/dup-title item whose proposal echoes the current title OR still collides with a sibling's proposal is flagged `title_needs_differentiation` and `apply_seo_title=False` (never auto-applied); the email shows "NEEDS MANUAL DIFFERENTIATION" instead of the no-op echo.
+3. **Consolidation flag** — two near-identical PAGES get `consolidation_candidate` + an email note ("consider merging + 301-redirecting one") since the real fix is a redirect, not a retitle.
+
+## Use case × failure mode
+
+|                                    | Distinct proposal | Echo of current | Sibling collision | Prompt |
+|---|---|---|---|---|
+| Near-dup title pair                | 🟢 `test_distinct_proposal_passes_without_flag` (no flag) | 🟢 `test_echo_proposal_flags_needs_differentiation_and_does_not_apply` (flagged, not applied, consolidation) | 🟢 covered by echo/collision guard | 🟢 `test_prompt_includes_differentiation_instruction` |
+
+**By dimension:** unit (mocked `_generate_proposals` + captured prompt); deterministic guard (no LLM). **STATUS: SHIPPED 2026-07-13** — `runtime/shopify_seo_review.py` + `tests/test_shopify_seo_review.py` (3 tests), full suite green (1075). **Follow-up (P2, not built):** golden fixture + gated real-API eval that a near-dup pair produces *distinct* titles (LLM-differentiation accuracy), per the LLM-output-surface recipe.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

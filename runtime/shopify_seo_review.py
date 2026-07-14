@@ -462,6 +462,58 @@ def _issue_codes(resource: dict[str, Any]) -> set[str]:
     }
 
 
+# ---- Surface 60: near-duplicate SEO title differentiation --------------------
+_DUP_TITLE_ISSUE_CODES = {"near_duplicate_seo_title", "duplicate_seo_title"}
+
+
+def _dup_title_key(value: Any) -> str:
+    """Normalized key for near-identical SEO titles so 'Mix & Match | …' and
+    'Mix and Match | …' collapse to one key."""
+    text = _normalize_text(value).lower().replace("&", "and")
+    return " ".join(text.split())
+
+
+def _title_differentiation_groups(resources: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Resource ids grouped by normalized CURRENT seo_title; only groups with
+    2+ members (the resources that currently collide)."""
+    groups: dict[str, list[str]] = {}
+    for resource in resources:
+        key = _dup_title_key(resource.get("seo_title"))
+        if key:
+            groups.setdefault(key, []).append(str(resource.get("id") or ""))
+    return {key: ids for key, ids in groups.items() if len(ids) > 1}
+
+
+def _flag_title_differentiation(items: list[dict[str, Any]]) -> None:
+    """Fail closed when the auto-proposal did NOT differentiate a near/duplicate
+    title — it echoed the current title or still collides with a sibling. Such an
+    item is flagged `title_needs_differentiation` and its title is NOT auto-
+    applied, so a no-op 'recommendation' is never presented as a fix (the
+    2026-07-13 "SEO title action == current title" bug). Two near-identical PAGES
+    also get `consolidation_candidate` — the real fix there is a 301 redirect."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        key = _dup_title_key(item.get("current_seo_title"))
+        if key:
+            groups.setdefault(key, []).append(item)
+    for item in items:
+        if not item.get("apply_seo_title", True):
+            continue
+        codes = {str(i.get("code") or "") for i in (item.get("issues") or []) if isinstance(i, dict)}
+        cur_key = _dup_title_key(item.get("current_seo_title"))
+        prop_key = _dup_title_key(item.get("proposed_seo_title"))
+        siblings = [s for s in groups.get(cur_key, []) if s is not item]
+        echoes_current = bool(prop_key) and prop_key == cur_key
+        collides_sibling = bool(prop_key) and any(
+            _dup_title_key(s.get("proposed_seo_title")) == prop_key for s in siblings
+        )
+        if (codes & _DUP_TITLE_ISSUE_CODES or siblings) and (echoes_current or collides_sibling):
+            item["title_needs_differentiation"] = True
+            item["apply_seo_title"] = False  # fail closed: never auto-apply a non-fix
+        if siblings and item.get("kind") == "page":
+            item["consolidation_candidate"] = True
+
+
 def _priority_sort_key(resource: dict[str, Any]) -> tuple[int, int, str]:
     issues = resource.get("issues") if isinstance(resource.get("issues"), list) else []
     high = sum(1 for issue in issues if isinstance(issue, dict) and issue.get("severity") == "high")
@@ -596,6 +648,23 @@ def _generate_proposals(resources: list[dict[str, Any]], *, demand_context: Any 
         "Keep titles clear and clickable without keyword stuffing. "
         "Keep descriptions plain text, shopper-friendly, and accurate."
     )
+    # Surface 60: feed the near-duplicate finding INTO the prompt. Without this
+    # the model saw each resource in isolation and echoed near-identical titles
+    # for near-identical pages (the "SEO title action == current title" bug).
+    dup_groups = _title_differentiation_groups(resources)
+    dedup_rule = ""
+    if dup_groups:
+        title_by_id = {str(r.get("id") or ""): _normalize_text(r.get("seo_title")) for r in resources}
+        group_lines = [
+            " / ".join(f'{i} ("{title_by_id.get(i, "")}")' for i in ids)
+            for ids in dup_groups.values()
+        ]
+        dedup_rule = (
+            "- CRITICAL DIFFERENTIATION: the ids below CURRENTLY share near-identical SEO titles. "
+            "For each, produce a seo_title clearly DISTINCT from the others in its group AND from its own "
+            "current_seo_title — never echo the current title. Groups (id (current title)):\n  "
+            + "\n  ".join(group_lines) + "\n"
+        )
     user = (
         "Create proposed replacement SEO for each Shopify resource below.\n"
         "Rules:\n"
@@ -605,6 +674,7 @@ def _generate_proposals(resources: list[dict[str, Any]], *, demand_context: Any 
         "- Do not invent pricing, shipping promises, or trademark claims.\n"
         "- Keep titles/descriptions plain text only.\n"
         "- rationale should be 4-18 words.\n"
+        + dedup_rule
         + demand_rules
         + f"\nRESOURCES_JSON:\n{json.dumps(prompt_resources, ensure_ascii=False)}\n"
         + demand_block
@@ -767,6 +837,8 @@ def build_shopify_seo_review(
             }
         )
 
+    _flag_title_differentiation(items)  # Surface 60: fail closed on undifferentiated near-dup titles
+
     preview_limit = 15 if review_type == "missing_only_bulk" and len(items) > 15 else 0
     if review_type == "issue_category_batch" and len(items) > 15:
         preview_limit = 15
@@ -842,12 +914,15 @@ def render_shopify_seo_review_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Kind: `{item.get('kind', '')}`")
         lines.append(f"- Path: `{item.get('resource_url', '')}`")
         lines.append(f"- Why: `{item.get('rationale', '')}`")
-        if item.get("apply_seo_title", True):
-            lines.append(f"- Current SEO title: `{item.get('current_seo_title', '')}`")
+        lines.append(f"- Current SEO title: `{item.get('current_seo_title', '')}`")
+        if item.get("title_needs_differentiation"):
+            lines.append("- SEO title action: `NEEDS MANUAL DIFFERENTIATION` — the auto-proposal echoed the current title; this page is a near-duplicate of another. Give it a distinct title, or consolidate + 301-redirect one page.")
+        elif item.get("apply_seo_title", True):
             lines.append(f"- Proposed SEO title: `{item.get('proposed_seo_title', '')}`")
         else:
-            lines.append(f"- Current SEO title: `{item.get('current_seo_title', '')}`")
             lines.append("- SEO title action: `keep current`")
+        if item.get("consolidation_candidate"):
+            lines.append("- ⚠ Consolidation: near-identical to another page in this batch — consider merging + 301-redirecting one instead of retitling.")
         if item.get("apply_seo_description", True):
             lines.append(f"- Current SEO description: `{item.get('current_seo_description', '')}`")
             lines.append(f"- Proposed SEO description: `{item.get('proposed_seo_description', '')}`")
@@ -925,7 +1000,11 @@ def render_shopify_seo_review_email(payload: dict[str, Any]) -> tuple[str, str, 
             for issue in issues
             if isinstance(issue, dict)
         )
-        title_action = item.get("proposed_seo_title", "") if item.get("apply_seo_title", True) else "(keep current)"
+        if item.get("title_needs_differentiation"):
+            title_action = ("NEEDS MANUAL DIFFERENTIATION — auto-proposal echoed the current title; "
+                            "near-duplicate of another page. Give it a distinct title, or consolidate + 301-redirect one.")
+        else:
+            title_action = item.get("proposed_seo_title", "") if item.get("apply_seo_title", True) else "(keep current)"
         description_action = item.get("proposed_seo_description", "") if item.get("apply_seo_description", True) else "(keep current)"
         text_lines.extend(
             [
