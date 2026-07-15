@@ -456,3 +456,26 @@ class Surface60NearDuplicateTitleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Surface61SeoTitleQualityTests(unittest.TestCase):
+    """Surface 61: deterministic quality scorer used by the gated eval + as a
+    stronger cross-check than the length-only fallback."""
+
+    def q(self, title, subject):
+        return shopify_seo_review._seo_title_quality(title, subject=subject)
+
+    def test_good_title_passes(self):
+        self.assertEqual(self.q("Firefighter Duck Collectible Gift for First Responders", "Firefighter"), [])
+
+    def test_too_short(self):
+        self.assertIn("too_short", self.q("Nurse Duck", "Nurse"))
+
+    def test_off_subject(self):
+        self.assertIn("subject_missing", self.q("A Lovely Collectible Duck Gift Idea for Fans of Fun Stuff", "Astronaut"))
+
+    def test_keyword_stuffing(self):
+        self.assertIn("duck_stuffing", self.q("Duck Duck Duck Duck Duck Astronaut Collectible Gift Idea Set", "Astronaut"))
+
+    def test_placeholder(self):
+        self.assertIn("placeholder", self.q("Astronaut Duck collectible flock favorite for space fans gift", "Astronaut"))

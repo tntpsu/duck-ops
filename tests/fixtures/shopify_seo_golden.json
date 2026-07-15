@@ -1,0 +1,13 @@
+{
+  "notes": "Golden set for scripts/eval_shopify_seo.py (Surface 61). Each entry is a Shopify resource the SEO generator proposes a title for. Titles are scored deterministically by shopify_seo_review._seo_title_quality (length 45-70, subject present, no keyword-stuffing, no placeholder) plus a differentiation check on dup_group members. Promotion gate: >=90% of titles pass ALL quality checks AND every dup_group produces DISTINCT titles. Bump/append when a real miss is found. `subject` is the core concept the title must retain.",
+  "resources": [
+    {"id": "p1", "kind": "product", "title": "Bigfoot Duck", "resource_url": "/products/bigfoot-duck", "seo_title": "", "seo_description": "", "issues": [{"code": "missing_seo_title"}], "subject": "Bigfoot"},
+    {"id": "p2", "kind": "product", "title": "Firefighter Duck", "resource_url": "/products/firefighter-duck", "seo_title": "", "seo_description": "", "issues": [{"code": "missing_seo_title"}], "subject": "Firefighter"},
+    {"id": "p3", "kind": "product", "title": "Nurse Duck", "resource_url": "/products/nurse-duck", "seo_title": "Nurse Duck", "seo_description": "", "issues": [{"code": "weak_seo_title"}], "subject": "Nurse"},
+    {"id": "p4", "kind": "product", "title": "Astronaut Duck", "resource_url": "/products/astronaut-duck", "seo_title": "Duck Duck Duck Duck | MyJeepDuck MyJeepDuck", "seo_description": "", "issues": [{"code": "generic_seo_title"}], "subject": "Astronaut"},
+    {"id": "c1", "kind": "collection", "title": "Holiday Ducks", "resource_url": "/collections/holiday", "seo_title": "", "seo_description": "", "issues": [{"code": "missing_seo_title"}], "subject": "Holiday"},
+    {"id": "pg1", "kind": "page", "title": "About Us", "resource_url": "/pages/about", "seo_title": "About", "seo_description": "", "issues": [{"code": "weak_seo_title"}], "subject": "About"},
+    {"id": "d1", "kind": "page", "title": "Mix & Match", "resource_url": "/pages/collection-bundles", "seo_title": "Mix & Match | MyJeepDuck Collectible Ducks gift idea", "seo_description": "Explore Mix & Match at MyJeepDuck for collectible ducks and gift ideas.", "issues": [{"code": "near_duplicate_seo_title"}], "subject": "Mix Match", "dup_group": "mixmatch"},
+    {"id": "d2", "kind": "page", "title": "Mix and Match", "resource_url": "/pages/collection-bundle", "seo_title": "Mix and Match | MyJeepDuck Collectible Ducks gift idea", "seo_description": "Explore Mix and Match at MyJeepDuck for collectible ducks and gift ideas.", "issues": [{"code": "near_duplicate_seo_title"}], "subject": "Mix Match", "dup_group": "mixmatch"}
+  ]
+}

@@ -462,6 +462,43 @@ def _issue_codes(resource: dict[str, Any]) -> set[str]:
     }
 
 
+# ---- Surface 61: deterministic SEO title quality scorer ----------------------
+_SEO_SUBJECT_STOPWORDS = {
+    "duck", "ducks", "gift", "gifts", "idea", "ideas", "the", "and", "for",
+    "with", "collectible", "myjeepduck", "collection", "page",
+}
+
+
+def _seo_title_quality(title: str, *, subject: str = "", min_len: int = 45, max_len: int = 70) -> list[str]:
+    """Deterministic quality checks for a generated SEO title — the cross-check
+    the gated eval (scripts/eval_shopify_seo.py) scores against, and a stronger
+    guard than _title_needs_fallback's length-only check. Returns a list of
+    issue codes; empty list = passes. Catches confidently-wrong LLM output the
+    length check misses (off-subject, keyword-stuffed, placeholder)."""
+    issues: list[str] = []
+    text = _normalize_text(title)
+    low = text.lower()
+    if len(text) < min_len:
+        issues.append("too_short")
+    if len(text) > max_len:
+        issues.append("too_long")
+    subject_tokens = [
+        w for w in _normalize_text(subject).lower().replace("&", " ").split()
+        if len(w) >= 3 and w not in _SEO_SUBJECT_STOPWORDS
+    ]
+    if subject_tokens and not any(w in low for w in subject_tokens):
+        issues.append("subject_missing")
+    if low.count("duck") > 3:
+        issues.append("duck_stuffing")
+    if low.count("myjeepduck") > 1:
+        issues.append("brand_repeat")
+    if text.count("|") > 1:
+        issues.append("multi_separator")
+    if "collectible flock favorite" in low:
+        issues.append("placeholder")
+    return issues
+
+
 # ---- Surface 60: near-duplicate SEO title differentiation --------------------
 _DUP_TITLE_ISSUE_CODES = {"near_duplicate_seo_title", "duplicate_seo_title"}
 

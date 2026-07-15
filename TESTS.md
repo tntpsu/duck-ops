@@ -1651,6 +1651,26 @@ Sibling of the 11-day `pacing_cooldown` wedge (Fix A, 73f2096): that added throt
 
 ---
 
+## Surface 61 — SEO generator gets the LLM-output-surface recipe (golden fixture + gated eval + quality cross-check) (2026-07-14, operator: "can we improve design of our seo agent")
+
+**Gap:** unlike `theme_classifier` (full 5-piece recipe), the Shopify SEO generator wrote LLM copy straight to Shopify with only length/placeholder fallback checks — no golden set, no gated eval, no promotion threshold, weak deterministic cross-check. It could silently regress and nothing would catch it.
+
+**Fix (SHIPPED 2026-07-14):**
+- **Deterministic quality cross-check** `_seo_title_quality(title, subject)` in `shopify_seo_review.py` — checks length 45-70, subject presence (core concept retained), keyword-stuffing (`duck`>3, brand repeat), multi-separator, placeholder. Stronger than the length-only `_title_needs_fallback`; catches confidently-wrong LLM output.
+- **Golden fixture** `tests/fixtures/shopify_seo_golden.json` — products/pages incl. a near-dup pair, each with a `subject` constraint. Regression rule: append every real miss.
+- **Gated eval** `scripts/eval_shopify_seo.py` — runs the REAL LLM on the golden set, scores with `_seo_title_quality` + a dup-differentiation check, gates at **≥90% quality pass AND 100% dup-group distinctness**, exit 0/1, NOT in default pytest.
+- Unit tests pin the scorer (good/short/off-subject/stuffed/placeholder).
+
+**By dimension:** unit (deterministic scorer, 5 cases); gated eval (real API, manual). **STATUS: SHIPPED 2026-07-14** — full suite green (1080). **Follow-up (P2):** wire `_seo_title_quality` as a live guard (route failing generations to needs_review, not silent fallback) and close the OUTCOME loop (per-page GSC clicks before/after an apply) — the open-loop gap from the roadmap audit.
+
+---
+
+## Infra note — launchd StartInterval → StartCalendarInterval migration (2026-07-14)
+
+The nightly ~01:36 wedge (see memory `reference_etsy_browser_scheduler` / `feedback_verify_the_job_is_firing_first`) killed EVERY `StartInterval` LaunchAgent, not just the review-reply checker — `system_health_refresh` (the operator health dashboard) was frozen 07-12 01:36 → 07-14, so the RED batch-liveness card never surfaced. Migrated all 7 to `StartCalendarInterval` (or `KeepAlive` for whatsapp-bridge's 20s service); backups at `~/Library/LaunchAgents/*.plist.bak-20260714b`. Verified firing (system_health.json refreshed on load; checker at runs=45/day). launchd is machine-local (not git) — this is a documented operator state, not a committed change.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
