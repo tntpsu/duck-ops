@@ -1671,6 +1671,31 @@ The nightly ~01:36 wedge (see memory `reference_etsy_browser_scheduler` / `feedb
 
 ---
 
+## Surface 62 — newduck Etsy description: LLM-written, tone/occasion-aware, SEO-front-loaded, quality-gated (SPEC-FIRST, 2026-07-16, operator: "this description needs to be SEO friendly" + the operator-direction leak)
+
+**Context:** the operator-direction *leak* is already fixed (2f16ba7 — it's steering-only now). This is the separate quality upgrade. Plan-agent correction: the newduck description is NOT purely deterministic — `newduck_generate_ingredients` (temp 0.5) + `_newduck_harden_generated_copy` (temp 0.2) already LLM-write the prose; the tone-deaf output ("Breast Cancer Fighting **fans**", raw `visual_summary` image-caption opener) comes from the **deterministic FALLBACK** (`_fallback_newduck_ingredients`) winning when a policy-rebuild triggers (`should_prefer_deterministic`). So three prongs: (a) prompt awareness, (b) fallback parity, (c) quality gate.
+
+**Design (decisions baked in — operator may override):** LLM-write **only the body prose paragraphs** (shared by Etsy body + Shopify `body_html`); keep the SEO **meta** description, GIFT IDEAS / OCCASIONS / SPECS / disclaimer / tags **deterministic**. Temp stays ≤0.5. Sensitivity via the existing free-text occasion `angle` (no cross-repo calendar change). Fields: `operator_direction` (steering, never echoed) + an occasion/tone line feed the prompt; front-load the top keyword + a visible color/feature in sentence 1.
+
+**Build (5 phases):**
+1. **Deterministic quality checker** `helpers/seo_rules.py::newduck_description_quality(...)` + `NEWDUCK_LIVE_DESCRIPTION_ISSUE_CODES` (mirrors `_seo_title_quality`/Surface 61). Codes: `naive_fans_slot`, `raw_caption_opener`, `operator_direction_echo` (→ **block**); `subject_missing`, `color_missing`, `keyword_not_frontloaded`, `too_short/long`, `placeholder` (→ warn/advisory). Folds into the EXISTING `_audit_newduck_copy_package` → `copy_review` warnings/blockers (reuses the 2-step email gate, no parallel plumbing).
+2. **Steering + occasion into the prompt** — label `operator_direction` as steer-don't-echo (per [[feedback_llm_detection_vs_generation]] — verify output, don't trust prompt) + inject `occasion_context.occasion_copy_tone_line()` (new, soft/product-agnostic) + front-load instruction; mirror into the hardener.
+3. **Fallback parity** — add an `awareness/cause` audience family + extend `_newduck_theme_family` to detect cause terms (breast cancer, awareness, ribbon, survivor); replace `f"{theme_phrase} fans"`; stop pasting `visual_summary` verbatim as the opener.
+4. **Golden fixture + gated eval** — `tests/fixtures/newduck_description_golden.json` (incl. a cause/sensitive duck) + `scripts/eval_newduck_description.py` (real LLM, ≥90% gate, exit 0/1, not in default pytest — mirror `eval_shopify_seo.py`).
+5. **Docs** — MASTER_IMPLEMENTATION_PLAN + this surface.
+
+## Use case × failure mode
+
+|                                    | Happy (grounded, keyword-led) | Cause/sensitive theme | Operator-direction | Fallback wins |
+|---|---|---|---|---|
+| Body prose quality                 | 🔴 keyword+color in sentence 1 | 🔴 no "{theme} fans"; respectful tone | 🔴 steers tone, NEVER echoed (`operator_direction_echo` blocks) | 🔴 fallback isn't tone-deaf (parity) |
+| needs-review routing               | n/a | 🔴 tone-deaf slot → block email | 🔴 echo → block | 🔴 naive-fans → block |
+| Deterministic quality fn           | 🔴 unit: each code | 🔴 cause fixture | 🔴 echo detection | n/a |
+
+**Phase map:** P1 (quality fn + wire to audit, pure-Python unit tests) → P2 (prompt steering+occasion) → P3 (fallback parity) → P4 (golden + gated eval) → P5 (docs). All in duckAgent (Codex repo — respect AGENTS.md); intra-duckAgent (occasion `angle` avoids the cross-repo calendar). **STATUS: SPEC-ONLY 2026-07-16, Plan done.** Operator to confirm the 5 decisions (esp. #1 keep SEO-meta deterministic) before P2.
+
+---
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
