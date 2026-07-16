@@ -1688,22 +1688,24 @@ The nightly ~01:36 wedge (see memory `reference_etsy_browser_scheduler` / `feedb
 
 **Voice examples (gold, operator-approved 2026-07-16):** 3 exemplar prose bodies define the shop voice for the system prompt — a persona/humor case, a plain-subject case, and the sensitive cause case (breast-cancer duck: supportive/empowering, NO "{theme} fans", no medical/charity claims). Voice = persona + one evocative beat, keyword-front-loaded, audience nod without stuffing. These become the few-shot examples; do NOT mine existing auto-generated descriptions (they carry the "{theme} fans" bug).
 
-**Build (5 phases):**
-1. **Deterministic quality checker** `helpers/seo_rules.py::newduck_description_quality(...)` + `NEWDUCK_LIVE_DESCRIPTION_ISSUE_CODES` (mirrors `_seo_title_quality`/Surface 61). Codes: `naive_fans_slot`, `raw_caption_opener`, `operator_direction_echo` (→ **block**); `subject_missing`, `color_missing`, `keyword_not_frontloaded`, `too_short/long`, `placeholder` (→ warn/advisory). Folds into the EXISTING `_audit_newduck_copy_package` → `copy_review` warnings/blockers (reuses the 2-step email gate, no parallel plumbing).
-2. **Steering + occasion into the prompt** — label `operator_direction` as steer-don't-echo (per [[feedback_llm_detection_vs_generation]] — verify output, don't trust prompt) + inject `occasion_context.occasion_copy_tone_line()` (new, soft/product-agnostic) + front-load instruction; mirror into the hardener.
-3. **Fallback parity** — add an `awareness/cause` audience family + extend `_newduck_theme_family` to detect cause terms (breast cancer, awareness, ribbon, survivor); replace `f"{theme_phrase} fans"`; stop pasting `visual_summary` verbatim as the opener.
-4. **Golden fixture + gated eval** — `tests/fixtures/newduck_description_golden.json` (incl. a cause/sensitive duck) + `scripts/eval_newduck_description.py` (real LLM, ≥90% gate, exit 0/1, not in default pytest — mirror `eval_shopify_seo.py`).
-5. **Docs** — MASTER_IMPLEMENTATION_PLAN + this surface.
+**Build — SHIPPED 2026-07-16 (simplified per operator "are we over complicating this?"):** the operator endorsed the SIMPLE best-practice version — one voice-driven LLM call + a thin deterministic validator routing failures to the EXISTING human email review — over the full versioned-config/gated-eval recipe. A human already reviews every newduck listing, so the golden-fixture + gated-CI-eval (original P4) was **intentionally dropped**; the mocked prompt-construction tests + validator unit tests carry the coverage.
+
+1. ✅ **Deterministic quality gate** `helpers/seo_rules.py::newduck_description_quality(...)` + `NEWDUCK_DESCRIPTION_BLOCK_CODES` (mirrors `_seo_title_quality`/Surface 61). Block codes: `naive_fans_slot` (gated on `newduck_is_sensitive_theme` — hobby "{theme} fans" stays allowed), `raw_caption_opener`, `operator_direction_echo`. Advisory: `keyword_not_frontloaded`, `too_short/long`, `empty`. (`subject_missing`/`color_missing` already covered by the audit's existing visible-colors + listing-name-in-sentence-1 checks.) Folded into `_audit_newduck_copy_package` → `copy_review` blockers/warnings (reuses the 2-step email gate). Commit e9ecfed.
+2. ✅ **Fallback parity** — `_newduck_theme_family` gains an `awareness` family (via `newduck_is_sensitive_theme`, checked first); `_fallback_newduck_ingredients` gets respectful awareness audiences/gifts/occasions/tags and drops the `f"{theme_phrase} fans"` lead for sensitive themes (kept for hobby). Commit 8ff49d4.
+3. ✅ **Voice-driven prompt** — `newduck_generate_ingredients` now carries 3 operator-approved voice exemplars (persona/plain/sensitive) + explicit SEO rules (front-load duck name in sentence 1, ~150-250-word body, tags ≤20 chars) + `operator_direction` as steer-don't-echo + cause-sensitivity guardrails (no "fans", no medical/charity claims). Commit e847348.
+4. **Docs** — this surface. MASTER_IMPLEMENTATION_PLAN pointer pending.
+
+**Deliberately deferred (not blocking):** (a) golden fixture + gated real-LLM eval — dropped; the human email review + validator is the gate for a human-reviewed surface; (b) `occasion_copy_tone_line()` into the body prose — the occasion nod already flows through tags/meme/jeepfact consumers; folding it into newduck prose is an incremental enhancement, revisit if descriptions read occasion-blind.
 
 ## Use case × failure mode
 
 |                                    | Happy (grounded, keyword-led) | Cause/sensitive theme | Operator-direction | Fallback wins |
 |---|---|---|---|---|
-| Body prose quality                 | 🔴 keyword+color in sentence 1 | 🔴 no "{theme} fans"; respectful tone | 🔴 steers tone, NEVER echoed (`operator_direction_echo` blocks) | 🔴 fallback isn't tone-deaf (parity) |
-| needs-review routing               | n/a | 🔴 tone-deaf slot → block email | 🔴 echo → block | 🔴 naive-fans → block |
-| Deterministic quality fn           | 🔴 unit: each code | 🔴 cause fixture | 🔴 echo detection | n/a |
+| Body prose quality                 | ✅ mocked: front-load rule in prompt | ✅ mocked: sensitive guardrails in prompt | ✅ mocked: steers, NEVER echoed | ✅ unit: fallback not tone-deaf (parity) |
+| needs-review routing               | n/a | ✅ unit: naive-fans → block | ✅ unit: echo → block | ✅ unit: naive-fans → block |
+| Deterministic quality fn           | ✅ unit: each code | ✅ unit: cause case | ✅ unit: echo detection | n/a |
 
-**Phase map:** P1 (quality fn + wire to audit, pure-Python unit tests) → P2 (prompt steering+occasion) → P3 (fallback parity) → P4 (golden + gated eval) → P5 (docs). All in duckAgent (Codex repo — respect AGENTS.md); intra-duckAgent (occasion `angle` avoids the cross-repo calendar). **STATUS: SPEC-ONLY 2026-07-16, Plan done.** Operator to confirm the 5 decisions (esp. #1 keep SEO-meta deterministic) before P2.
+Tests: `duckAgent/tests/test_newduck_description_quality.py` (12: validator codes, fallback parity, prompt construction) + the corrected `test_newduck_publish_seo.py` audit tests. **STATUS: SHIPPED 2026-07-16** (e9ecfed → 8ff49d4 → e847348). Original 5-decision confirmation moot — operator picked the simple version live.
 
 ---
 
