@@ -479,3 +479,46 @@ class Surface61SeoTitleQualityTests(unittest.TestCase):
 
     def test_placeholder(self):
         self.assertIn("placeholder", self.q("Astronaut Duck collectible flock favorite for space fans gift", "Astronaut"))
+
+
+class Surface61LiveGuardTests(unittest.TestCase):
+    """The scorer wired as a live guard: a low-quality proposal must route to
+    needs-review + not auto-apply, never ship a plausible-but-bad title."""
+
+    def _audit(self):
+        return {
+            "generated_at": "2026-07-16T09:00:00-04:00",
+            "shopify_domain": "example.myshopify.com",
+            "top_actions": [
+                {"id": "gid://shopify/Product/9", "kind": "product", "title": "Astronaut Duck",
+                 "resource_url": "/products/astronaut-duck", "seo_title": "Astronaut Duck", "seo_description": "",
+                 "issues": [{"code": "weak_seo_title"}]},
+            ],
+        }
+
+    def _run(self, proposal_title):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(shopify_seo_review, "REVIEW_STATE_DIR", root / "s"), \
+                 patch.object(shopify_seo_review, "REVIEW_RUN_DIR", root / "s" / "runs"), \
+                 patch.object(shopify_seo_review, "REVIEW_OUTPUT_MD", root / "out.md"), \
+                 patch.object(shopify_seo_review, "build_shopify_seo_audit", return_value=self._audit()), \
+                 patch.object(shopify_seo_review, "_generate_proposals", return_value=[
+                     {"id": "gid://shopify/Product/9", "seo_title": proposal_title,
+                      "seo_description": "Astronaut Duck collectible for space fans and gift shoppers, quick-ship from MyJeepDuck with dashboard-ready flair.",
+                      "rationale": "x"}]):
+                payload = shopify_seo_review.build_shopify_seo_review(limit=10, force_audit=True)
+            return payload["items"][0], (root / "out.md").read_text()
+
+    def test_stuffed_proposal_routes_to_needs_review_not_applied(self):
+        item, md = self._run("Duck Duck Duck Duck Duck Astronaut Collectible Gift Idea Set")
+        self.assertTrue(item.get("title_needs_review"), item)
+        self.assertIn("duck_stuffing", item.get("title_quality_issues", []))
+        self.assertFalse(item.get("apply_seo_title", True))  # fail closed
+        self.assertIn("NEEDS REVIEW", md)
+
+    def test_good_proposal_applies_normally(self):
+        item, md = self._run("Astronaut Duck Collectible Space Gift for Desk and Dashboard")
+        self.assertFalse(item.get("title_needs_review", False), item)
+        self.assertTrue(item.get("apply_seo_title", True))
+        self.assertNotIn("NEEDS REVIEW", md)

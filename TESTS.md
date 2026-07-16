@@ -1661,7 +1661,7 @@ Sibling of the 11-day `pacing_cooldown` wedge (Fix A, 73f2096): that added throt
 - **Gated eval** `scripts/eval_shopify_seo.py` — runs the REAL LLM on the golden set, scores with `_seo_title_quality` + a dup-differentiation check, gates at **≥90% quality pass AND 100% dup-group distinctness**, exit 0/1, NOT in default pytest.
 - Unit tests pin the scorer (good/short/off-subject/stuffed/placeholder).
 
-**By dimension:** unit (deterministic scorer, 5 cases); gated eval (real API, manual). **STATUS: SHIPPED 2026-07-14** — full suite green (1080). **Follow-up (P2):** wire `_seo_title_quality` as a live guard (route failing generations to needs_review, not silent fallback) and close the OUTCOME loop (per-page GSC clicks before/after an apply) — the open-loop gap from the roadmap audit.
+**By dimension:** unit (deterministic scorer, 5 cases); gated eval (real API, manual). **STATUS: SHIPPED 2026-07-14.** **Live guard SHIPPED 2026-07-16:** `_flag_low_quality_titles` runs `_seo_title_quality` on the FINAL proposed title (post-fallback) and routes clear-cut failures (`_LIVE_QUALITY_ISSUE_CODES` — length/placeholder/stuffing/brand-repeat/multi-separator; excludes the heuristic `subject_missing` to avoid false-positives) to `title_needs_review` + `apply_seo_title=False`; email shows "NEEDS REVIEW (…issues)" instead of shipping a plausible-but-bad title or a silent canned fallback. 2 build tests (stuffed→needs_review+not-applied; good→applies). Suite green (1082). **Remaining follow-up (P2):** close the OUTCOME loop — per-page GSC clicks before/after an apply (open-loop gap from the roadmap audit).
 
 ---
 

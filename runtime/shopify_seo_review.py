@@ -499,6 +499,31 @@ def _seo_title_quality(title: str, *, subject: str = "", min_len: int = 45, max_
     return issues
 
 
+# Surface 61 live guard: which quality issues route a generation to needs-review
+# rather than silently shipping/falling-back. Excludes the heuristic
+# `subject_missing` (kept eval-only, advisory) to avoid noisy false-positives on
+# legitimately reworded titles; keeps the clear-cut, high-precision failures.
+_LIVE_QUALITY_ISSUE_CODES = {"too_short", "too_long", "placeholder", "duck_stuffing", "brand_repeat", "multi_separator"}
+
+
+def _flag_low_quality_titles(items: list[dict[str, Any]]) -> None:
+    """Surface 61: fail closed when the FINAL proposed title (after fallback)
+    still fails the deterministic quality cross-check — route it to needs-review
+    instead of shipping a plausible-but-bad title or a silent canned fallback."""
+    for item in items:
+        if not item.get("apply_seo_title", True) or item.get("title_needs_differentiation"):
+            continue
+        issues = [
+            code for code in _seo_title_quality(
+                item.get("proposed_seo_title") or "", subject=item.get("title") or "")
+            if code in _LIVE_QUALITY_ISSUE_CODES
+        ]
+        if issues:
+            item["title_needs_review"] = True
+            item["title_quality_issues"] = issues
+            item["apply_seo_title"] = False  # fail closed: don't ship a low-quality title
+
+
 # ---- Surface 60: near-duplicate SEO title differentiation --------------------
 _DUP_TITLE_ISSUE_CODES = {"near_duplicate_seo_title", "duplicate_seo_title"}
 
@@ -875,6 +900,7 @@ def build_shopify_seo_review(
         )
 
     _flag_title_differentiation(items)  # Surface 60: fail closed on undifferentiated near-dup titles
+    _flag_low_quality_titles(items)     # Surface 61: fail closed on low-quality proposed titles
 
     preview_limit = 15 if review_type == "missing_only_bulk" and len(items) > 15 else 0
     if review_type == "issue_category_batch" and len(items) > 15:
@@ -954,6 +980,8 @@ def render_shopify_seo_review_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Current SEO title: `{item.get('current_seo_title', '')}`")
         if item.get("title_needs_differentiation"):
             lines.append("- SEO title action: `NEEDS MANUAL DIFFERENTIATION` — the auto-proposal echoed the current title; this page is a near-duplicate of another. Give it a distinct title, or consolidate + 301-redirect one page.")
+        elif item.get("title_needs_review"):
+            lines.append(f"- SEO title action: `NEEDS REVIEW` — the auto-proposal failed quality checks ({', '.join(item.get('title_quality_issues', []))}); write a stronger title before applying.")
         elif item.get("apply_seo_title", True):
             lines.append(f"- Proposed SEO title: `{item.get('proposed_seo_title', '')}`")
         else:
@@ -1040,6 +1068,9 @@ def render_shopify_seo_review_email(payload: dict[str, Any]) -> tuple[str, str, 
         if item.get("title_needs_differentiation"):
             title_action = ("NEEDS MANUAL DIFFERENTIATION — auto-proposal echoed the current title; "
                             "near-duplicate of another page. Give it a distinct title, or consolidate + 301-redirect one.")
+        elif item.get("title_needs_review"):
+            title_action = ("NEEDS REVIEW — auto-proposal failed quality checks ("
+                            + ", ".join(item.get("title_quality_issues", [])) + "); write a stronger title before applying.")
         else:
             title_action = item.get("proposed_seo_title", "") if item.get("apply_seo_title", True) else "(keep current)"
         description_action = item.get("proposed_seo_description", "") if item.get("apply_seo_description", True) else "(keep current)"
