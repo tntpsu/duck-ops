@@ -1501,7 +1501,7 @@ Also: daily collect uses `get_etsy_shop_reviews(days_back=1)` — no catch-up (m
 | Handoff → feed (`publish_candidates`) | 🔴 `duck-ops test_review_reply_handoff_4star_feed::4star_lands` | n/a | 🔴 backlog handoff all land | 🔴 existing tx not re-added | 🔴 re-run = no dup rows | 🔴 conftest both repos |
 | Auto-enqueue positive → exec queue | 🔴 `test_auto_enqueue_independence::queues_standalone` | n/a | n/a | 🔴 already-queued tx skipped | 🔴 idempotent | 🔴 pollution audit |
 | Backfill ~36 (one-shot) | 🔴 `test_review_reply_backfill::N_queued_0_double` | 🔴 auth-fail aborts clean | n/a | 🔴 **already-replied tx → skipped, not re-queued** | 🔴 **run twice → same queue** | 🔴 3-layer (if receipt file) |
-| Input-sanity OS card | 🔴 `creative_agent test_review_reply_ingestion_gap::red_when_absent` | 🔴 API-snapshot missing → yellow (not green) | 🔴 gap → red | 🔴 replied tx excluded | n/a | 🔴 registration + empty-payload |
+| Input-sanity OS card (✅ shipped 2026-07-26 as `review_reply_source_canary`) | ✅ `test_review_reply_source_canary::test_unhandled_past_grace_is_red_with_txn_list` | ✅ `::test_missing_receipt_is_yellow_not_green` | ✅ `::test_window_days_below_7_is_red` (the days_back=1 canary) | ✅ ledgered txns excluded (`::test_all_ledgered_is_green`, incl. low-rating) | n/a | ✅ `test_os_card_registration` ×2 |
 | Drain posts backfill (paced) | ✅ Surface (drain-stall + throttle tests, shipped) | n/a | n/a | manual: real read-back | n/a | ✅ shipped |
 
 **Phase map** (P0 tests red first, per this skill):
@@ -1510,11 +1510,11 @@ Also: daily collect uses `get_etsy_shop_reviews(days_back=1)` — no catch-up (m
 - **P2** — duckAgent: watermark catch-up window across the 3 `days_back=1` call-sites + pagination.
 - **P3** — duck-ops: **verify riskiest-unknown from logs first**, then decouple `auto_enqueue_publish_ready` from the pacing-wedge-prone `drain_queue` in `etsy_browser_batch._run_review_reply_batch` (enqueue result must persist even if drain defers); ensure enqueue runs before any archival sweep. **Tier-3 (launchd + browser).**
 - **P4** — duck-ops: idempotent one-shot backfill (`scripts/backfill_review_replies.py`), dedup by tx, queues-not-posts (paced drain clears over ~a week).
-- **P5** — creative_agent viewer: `_load_review_reply_ingestion_gap_health` + register next to `review_reply_drain_stall` — RED when API-recent tx absent from feed ∪ queue ∪ posted; data via a snapshot the daily flow writes (no live API from the viewer). Completes the two-card bracket.
+- **P5 — ✅ SHIPPED 2026-07-26** as `review_reply_source_canary` (name keeps the `review_reply_` grouping prefix; spec name was `review_reply_ingestion_gap`). Comparison target is the replied-txn LEDGER (`state/reviews_replied_transactions.json`) — the first "handled" checkpoint — because feed-freshness/drain-stall/throughput already cover each downstream hop (one-hop blame radius per card). Data via `state/reviews_source_receipt.json` written at every fetch (per-txn `first_seen` carried across nightly rewrites so the 48h grace clock works; no live API from the viewer). RED on: unhandled txn >48h, `window_days<7` regression, receipt >50h stale, ledger missing. Completes the two-card bracket at the SOURCE. Producer: `flows/reviews/steps.py::_write_reviews_source_receipt` (3-layer isolated). Known blind spot (documented): a per-review silent drop INSIDE generate_daily_review_summary ledgers without drafting — covered by the P1 rating tests, not this card.
 
 **By dimension:** unit (rating gate, watermark math, card count, dedup key); integration (mocked Etsy API + tmp state, collect→draft→feed→queue chain); e2e (backfill fixture, idempotent, no double-post); manual/Tier-3 (paced real posting, real read-back). **Golden fixture** `reviews_backfill_golden.json` (~10 reviews: 5★/4★/3★, one already-replied, one dup tx). **Regression canary:** "a 4★ review must appear in `publish_candidates.json` within one ingest run." **Tier-3:** P3 only (launchd/browser); backfill-queue + card are not.
 
-**STATUS: P0+P1 SHIPPED 2026-07-08** (duckAgent `42fbae9` — 4★ now drafted). P2-P5 pending. Riskiest unknown (P3: did the 07-07 drain fix un-wedge 5★ enqueue?) unresolved pending next browser window.
+**STATUS: P0+P1 SHIPPED 2026-07-08** (duckAgent `42fbae9` — 4★ now drafted); **P5 SHIPPED 2026-07-26** (source canary; the 14d-window+ledger fix of 50c24c1 also superseded P2's watermark concern). P2-P4 pending. Riskiest unknown (P3: did the 07-07 drain fix un-wedge 5★ enqueue?) unresolved pending next browser window.
 
 ---
 
