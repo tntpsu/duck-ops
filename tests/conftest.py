@@ -171,6 +171,16 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         monkeypatch.setattr(_gsc, "GSC_SEARCH_DEMAND_PATH", tmp_path / "gsc_search_demand.json")
     except ImportError:
         pass
+    # 2026-07-26: seo_outcome_intel (Surface 63) — redirect BOTH the write path
+    # (3-layer isolation: this + DUCK_TEST_MODE guard in write_seo_outcome_intel
+    # + no-pollution audit test) AND the receipts read dir (hygiene: tests never
+    # see prod writeback receipts).
+    try:
+        import seo_outcome_intel as _soi
+        monkeypatch.setattr(_soi, "SEO_OUTCOME_INTEL_PATH", tmp_path / "seo_outcome_intel.json")
+        monkeypatch.setattr(_soi, "SEO_WRITEBACK_RECEIPT_DIR", tmp_path / "seo_receipts")
+    except ImportError:
+        pass
     # 2026-06-28: competitor reports dir (Surface 47) — build_next_engine READS
     # it for the demand signal + staleness check. Read-only (duckAgent writes it),
     # so this is test-hygiene (hermetic staleness path), NOT the 3-layer write

@@ -1709,6 +1709,24 @@ Tests: `duckAgent/tests/test_newduck_description_quality.py` (12: validator code
 
 ---
 
+## Surface 63 — SEO outcome loop: per-page GSC before/after for Shopify SEO applies (SPEC-FIRST 2026-07-26)
+
+**Background:** writeback receipts prove edits STUCK (`shopify_seo_writeback/receipts/`); `shopify_seo_outcomes.py` proves they STAYED (audit re-check) but every item carries a hardcoded `traffic_signal: available=false` stub. Nothing proves the edits *worked*. This surface fills that stub: `runtime/seo_outcome_intel.py` joins each receipt's page to GSC per-page data in 28d windows anchored to the receipt's `verified_at` (+3d settle gap, +3d GSC lag). **Shopify domain only — Etsy is invisible to GSC (GA4's job).** Verdicts are deterministic: impressions % + position drive them, clicks never do (~8 clicks/day sitewide = noise); incomplete windows are `pending` with days_remaining, never "no effect"; thin volume is `low_data`, honest. Cohort batching = ≤2 GSC calls per apply-date cohort (~33 calls/weekly run). Dead-token mode writes `available:false` + the FULL roster as `unmeasured` with live countdowns — page useful before re-auth; verdicts light up on the first authenticated run (Apr–Jun cohorts' windows are already complete).
+
+| Use case | Happy | Token dead | Zero GSC rows | Window incomplete | Bad receipt |
+|---|---|---|---|---|---|
+| receipt roster (latest-per-resource, superseded, unjoinable) | ✅ unit | n/a | n/a | n/a | ✅ missing resource_url → unjoinable |
+| window math anchored to verified_at (28/3/3) | ✅ frozen-today unit | n/a | n/a | ✅ pending + days_remaining, never flat | ✅ unparseable date skipped |
+| cohort batching ≤2 GSC calls/cohort | ✅ call-recording mock | n/a | n/a | ✅ after-call skipped pre-window | n/a |
+| join GSC page rows ↔ receipt paths | ✅ mocked per-window rows | n/a | ✅ zeros → no_data/low_data | n/a | n/a |
+| verdicts (impr%/position; clicks never drive) | ✅ table-driven unit | ✅ unmeasured | ✅ low_data honesty | ✅ pending | n/a |
+| collect() degrade | ✅ available:true | ✅ available:false + full roster, exit 0 | ✅ | ✅ | ✅ |
+| write guard (3-layer) | ✅ tmp write | n/a | n/a | n/a | ✅ FROZEN TestModeRefusalError + pollution audit |
+| /portal/intel/seo-outcome page | ✅ full fixture | ✅ re-auth-pending roster state | ✅ empty-state | ✅ pending section | ✅ malformed state |
+| /api/seo-outcome-intel + Desk tile | manual: smoke curl after deploy | n/a | n/a | n/a | n/a |
+
+**Phase 2 (gated on real verdicts existing after re-auth):** fill `shopify_seo_outcomes.py` traffic_signal stub from this intel by resource_id; splice a fail-soft track-record line into `shopify_seo_review._generate_proposals`. Cadence: weekly launchd Sun 07:20 (Tier-3 install).
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
