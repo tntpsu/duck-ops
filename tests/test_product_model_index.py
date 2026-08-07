@@ -116,7 +116,7 @@ class TestScanAndJoin:
         assert item["model"]["kind"] == "glb"
         assert item["model"]["glb"].endswith("3dai_single_model.glb")
 
-    def test_obj_mtl_beats_glb_for_same_product(self, tmp_path, catalog):
+    def test_textured_glb_beats_print_conversion_for_same_product(self, tmp_path, catalog):
         paint = tmp_path / "paint_outputs"
         studio = tmp_path / "studio_lab"
         _studio_dir(studio, "highland-cow-duck")
@@ -126,7 +126,7 @@ class TestScanAndJoin:
             catalog_index_path=catalog, aliases_path=tmp_path / "no_aliases.json",
             index_path=tmp_path / "index_out.json",
         )
-        assert payload["items"]["999900000001"]["model"]["kind"] == "obj_mtl"
+        assert payload["items"]["999900000001"]["model"]["kind"] == "glb"
 
     def test_unmatched_model_lands_in_bucket_not_a_guess(self, tmp_path, catalog):
         paint = tmp_path / "paint_outputs"

@@ -272,9 +272,12 @@ def match_models_to_catalog(
 
 
 def _model_beats(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """obj_mtl (print-production geometry) beats glb; then handoff-ready
-    beats not; then newest."""
-    rank = {"obj_mtl": 1, "glb": 0}
+    """glb (textured Studio delivery) beats obj_mtl for this index's one
+    consumer, the duckvideo lane: the 5-region print conversion renders
+    lumpy/flat while the textured GLB carries the sculpted detail (operator
+    comparison 2026-08-08 — Highland Cow side by side). Then handoff-ready,
+    then newest."""
+    rank = {"glb": 1, "obj_mtl": 0}
     key_a = (rank.get(a["kind"], -1), int(bool(a.get("handoff_ready"))), a.get("mtime") or 0)
     key_b = (rank.get(b["kind"], -1), int(bool(b.get("handoff_ready"))), b.get("mtime") or 0)
     return key_a > key_b
