@@ -276,4 +276,15 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         monkeypatch.setattr(_ecg, "EMAIL_CADENCE_OVERRIDES_PATH", tmp_path / "email_cadence_overrides.json")
     except ImportError:
         pass
+
+    # 2026-08-07: product_model_index.PRODUCT_MODEL_INDEX_PATH (Surface 64) —
+    # new module-level prod-path constant, isolated on arrival per the
+    # three-layer policy (this fixture + the source-level DUCK_TEST_MODE guard
+    # in write_product_model_index + tests/test_no_test_pollution_in_product_model_index.py).
+    # duckAgent's conftest patches it too — flows/duckvideo reads it cross-repo.
+    try:
+        import product_model_index as _pmi
+        monkeypatch.setattr(_pmi, "PRODUCT_MODEL_INDEX_PATH", tmp_path / "product_model_index.json")
+    except ImportError:
+        pass
     yield
