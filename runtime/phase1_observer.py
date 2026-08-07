@@ -107,7 +107,7 @@ SCHEDULER_HEALTH_PATH = STATE_DIR / "scheduler_health.json"
 SCHEDULER_HEALTH_OPERATOR_JSON_PATH = OUTPUT_DIR / "operator" / "scheduler_health.json"
 SCHEDULER_HEALTH_OPERATOR_MD_PATH = OUTPUT_DIR / "operator" / "scheduler_health.md"
 
-PILOT_PUBLISH_FLOWS = {"newduck", "weekly_sale", "meme", "jeepfact", "thursday"}
+PILOT_PUBLISH_FLOWS = {"newduck", "weekly_sale", "meme", "jeepfact", "thursday", "duckvideo"}
 INITIAL_MAILBOX_BOOTSTRAP_LIMIT = 75
 SECONDARY_FOLDER_BOOTSTRAP_LIMIT = 25
 

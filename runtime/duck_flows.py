@@ -205,6 +205,17 @@ FLOWS: dict[str, FlowSpec] = {
         handoff_actions={"approve": "approve"},
         approval_meaning="Approves a proposed concept brief so DuckAgent can generate the concept image.",
     ),
+    "duckvideo": FlowSpec(
+        name="duckvideo",
+        state_file="state_duckvideo.json",
+        publish_status_key="duckvideo_publish_status",
+        publish_truthy_keys=("duckvideo_cdn_url",),
+        scheduled_at_keys=("duckvideo_scheduled_at",),
+        reconciliation_note="Reconciled automatically because DuckAgent already shows this duck video as scheduled or published.",
+        reply_actions=(ReplyAction("Reply Duck Video Publish", "duckvideo publish", "publish"),),
+        handoff_actions={"approve": "publish", "needs_changes": "revise"},
+        approval_meaning="Approving publishes this product Reel to Instagram at the weekly window.",
+    ),
     "gtdf": FlowSpec(
         name="gtdf",
         state_file="state_gtdf.json",
