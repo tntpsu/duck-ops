@@ -30,6 +30,14 @@ Companion docs:
 
 ## Completed Major Work
 
+### 0. Duck Video Promotion Lane (Surface 64, shipped 2026-08-08)
+- First video lane: weekly `duckvideo` flow renders a 7s vertical Reel per duck — Blender turntable of the real 3D model (textured Studio GLB preferred) or ken-burns over product photos — with AI backdrop compositing (Jeep dashboard / trail rock / workbench + generated studio card), contact shadow, hook overlay, and a rotating royalty-free music bed (`duckAgent_runtime/duckvideo_audio|_backdrops`).
+- Publishes as an IG Reel through the shared social publish queue + sidecar (`media_type=reel`); approval-gated BY CONSTRUCTION (email reply only — the scheduled runner cannot publish).
+- New producer: `duck-ops/runtime/product_model_index.py` (daily) joins paint-to-print/Studio models to catalog products deterministically with a needs_review escape.
+- Two-card bracket (`duckvideo_input_sanity` + `duckvideo_throughput`), workflow-control transitions, FlowSpec registry entry, TESTS.md Surface 64.
+- NOT yet live: Tier-3 bundle pending (Shopify video live eval, 2 launchd installs, supervised first Reel).
+- Queued next (video track): Track B AI lifestyle clips (photo-seeded image-to-video, ~$1-3/clip) once reel engagement data accumulates; TikTok Content Posting API as phase 2.
+
 ### 1. Workflow Control Plane
 - Shared workflow state/receipt model is live across key lanes.
 - Health now prefers explicit blocker reasons over weak inference.
