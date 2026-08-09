@@ -1764,6 +1764,8 @@ Tests: `duckAgent/tests/test_newduck_description_quality.py` (12: validator code
 | cards/throughput | unit: montage run = one run/one receipt → cards unchanged | n/a | n/a | n/a | n/a | n/a | n/a |
 | first live montage + first live cutout reel | manual:supervised (Tier-3), dated entry | n/a | n/a | n/a | n/a | n/a | n/a |
 
+**Build status (2026-08-09):** P1 ✅ e5340ea (cutout+gate+compose, 20 tests; real wrestler-duck cutout passed visually, coverage 0.417). P2 ✅ 6e6d4a4 (selection ladder, 12 tests). P3 ✅ 6346a3f (montage renderer+labels+hooks, 8 tests). P4 ✅ 9801f5d (flow wiring, 6 tests; existing Surface 64 tests untouched = contract proof). Real-generation run (trending top-5, led by Texas Longhorn 25 sold/7d) caught 2 bugs units missed — tz-naive observed_at crash + scrim truncating a valid 6-word hook — both fixed+regression-pinned in db2c97c; final montage_cutout video passed visual review (full hook, labels, dashboard cutouts). Preview run dir deleted so preview ducks stay in rotation. REMAINING: supervised live montage + cutout reels through email→sidecar (next even ISO week ≈ 2026-08-10 run window), dated entries here.
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
