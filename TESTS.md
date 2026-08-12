@@ -1780,6 +1780,8 @@ Tests: `duckAgent/tests/test_newduck_description_quality.py` (12: validator code
 | /portal/intel/social page | loader+page+route+tile tests per inspector recipe incl. empty-state | loader never raises; yellow unavailable | raw table sorted by engagement desc | n/a | reads only; no writes |
 | poster first-frame | unit: poster written from frames[0] | n/a | n/a | n/a | n/a |
 
+**Build status (2026-08-12): SHIPPED same day.** T1 ✅ 8745994 (collector: top_viral_posts w/ links, median+max per dimension, markdown section; 5 tests; live run verified — reel median 43.9 vs mean 807, the 12k outlier now visible instead of hidden). T2 ✅ b25c4b2 (social_priors median-ranked + fail-soft prompt line into meme + duckvideo hooks; 5 tests; priors currently statement_showcase/reel). Page ✅ 66d4232 (/portal/intel/social per inspector recipe, 10 page tests + 241 viewer regression; intel directory gains social AND the previously-missing seo-outcome entry). **Live-surface verified:** viewer bounced, real /portal/intel/social served 54KB w/ viral posts + .table-scroll containers, /api/social-intel live, operator markdown carries the viral section. Poster-first-frame fix in b25c4b2 w/ unit pin.
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
