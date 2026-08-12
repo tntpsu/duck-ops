@@ -1768,6 +1768,18 @@ Tests: `duckAgent/tests/test_newduck_description_quality.py` (12: validator code
 
 **Build status (2026-08-09):** P1 ✅ e5340ea (cutout+gate+compose, 20 tests; real wrestler-duck cutout passed visually, coverage 0.417). P2 ✅ 6e6d4a4 (selection ladder, 12 tests). P3 ✅ 6346a3f (montage renderer+labels+hooks, 8 tests). P4 ✅ 9801f5d (flow wiring, 6 tests; existing Surface 64 tests untouched = contract proof). Real-generation run (trending top-5, led by Texas Longhorn 25 sold/7d) caught 2 bugs units missed — tz-naive observed_at crash + scrim truncating a valid 6-word hook — both fixed+regression-pinned in db2c97c; final montage_cutout video passed visual review (full hook, labels, dashboard cutouts). Preview run dir deleted so preview ducks stay in rotation. REMAINING: supervised live montage + cutout reels through email→sidecar (next even ISO week ≈ 2026-08-10 run window), dated entries here.
 
+## Surface 65 — competitor social intel: viral-post surfacing + generation priors + /portal/intel/social (SPEC-FIRST 2026-08-12, operator: "post types that go more viral… we haven't gathered as much intel as we could" / "wire it in and include tier 2" / "a clean duck ops page… raw data")
+
+**Design:** the per-post competitor data (84 posts, 7 accounts: format/hook_family/theme/caption/engagement/url) existed but only averaged into aggregates. Three additions: (T1) `competitor_social_benchmark_collector` gains `top_viral_posts` (top 8 w/ links) + median/max per format (means hid the 272× reel outlier) + markdown section; (T2) a `social_priors` block {winning_format, winning_hook_family, sample_hooks, basis_post_count} consumed FAIL-SOFT by meme + duckvideo caption/hook prompts (human-reviewed lanes → light gate per convention 5 calibration; priors are one steering line, never a hard rule); (Page) `/portal/intel/social` per the inspector recipe over the EXISTING snapshots/benchmark state (no new producer). Poster fix (same day): video poster = FIRST frame (mid-frame was 180° into rotation — duck facing away; operator caught it).
+
+| Use case | Happy | Empty/missing data | Outlier honesty | Priors absent | Test pollution |
+|---|---|---|---|---|---|
+| top_viral_posts + medians (collector) | unit: fixture posts → top-N ranked w/ url/hook, by_format carries median+max | unit: zero posts → empty lists, no crash | unit: median ≠ mean asserted on skewed fixture | n/a | collector tests already isolated (existing conftest) |
+| social_priors block | unit: winning format/hook derived from MEDIAN, sample_hooks non-empty | unit: <10 posts → priors omitted (too thin to steer) | n/a | n/a | n/a |
+| prompt consumption (meme + duckvideo) | unit: prompt contains prior line when priors exist | unit: priors file missing → prompt identical to today (fail-soft) | n/a | unit: malformed priors → ignored | n/a |
+| /portal/intel/social page | loader+page+route+tile tests per inspector recipe incl. empty-state | loader never raises; yellow unavailable | raw table sorted by engagement desc | n/a | reads only; no writes |
+| poster first-frame | unit: poster written from frames[0] | n/a | n/a | n/a | n/a |
+
 ## Process note (this is the first matrix; previous work shipped without one)
 
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"

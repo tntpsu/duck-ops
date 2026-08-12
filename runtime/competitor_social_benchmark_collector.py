@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import statistics
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -98,23 +99,77 @@ def _top_accounts(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _top_dimensions(posts: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     counter: Counter[str] = Counter()
-    score_totals: dict[str, float] = {}
+    scores_by_label: dict[str, list[float]] = {}
     for row in posts:
         label = _compact_text(row.get(key)).lower()
         if not label:
             continue
         counter[label] += 1
-        score_totals[label] = score_totals.get(label, 0.0) + float(row.get("engagement_score") or 0.0)
+        scores_by_label.setdefault(label, []).append(float(row.get("engagement_score") or 0.0))
     rows = []
     for label, count in counter.most_common(8):
+        scores = scores_by_label.get(label) or [0.0]
+        # Median + max alongside mean: one 12k-score viral reel dragged the
+        # reel MEAN to 807 while the median was ~44 — the mean alone both
+        # overstated typical performance and hid that outliers ARE the intel
+        # (operator audit 2026-08-12).
         rows.append(
             {
                 "label": label,
                 "post_count": count,
-                "avg_engagement_score": round(score_totals.get(label, 0.0) / max(1, count), 2),
+                "avg_engagement_score": round(sum(scores) / max(1, count), 2),
+                "median_engagement_score": round(statistics.median(scores), 2),
+                "max_engagement_score": round(max(scores), 2),
             }
         )
     return rows
+
+
+def _top_viral_posts(posts: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
+    """The individual outlier posts, with links — the watchable intel that
+    aggregates were hiding."""
+    scored = [p for p in posts if isinstance(p, dict) and (p.get("engagement_score") or 0) > 0]
+    scored.sort(key=lambda p: -float(p.get("engagement_score") or 0.0))
+    rows = []
+    for p in scored[:limit]:
+        rows.append({
+            "engagement_score": round(float(p.get("engagement_score") or 0.0), 1),
+            "post_format": _compact_text(p.get("post_format")).lower() or None,
+            "hook_family": _compact_text(p.get("hook_family")).lower() or None,
+            "account_handle": _compact_text(p.get("account_handle")),
+            "visible_hook": _compact_text(p.get("visible_hook"))[:120],
+            "caption_excerpt": _compact_text(p.get("caption_excerpt"))[:120],
+            "theme": _compact_text(p.get("theme")).lower() or None,
+            "post_url": _compact_text(p.get("post_url")) or None,
+            "post_date": _compact_text(p.get("post_date")) or None,
+        })
+    return rows
+
+
+_PRIORS_MIN_POSTS = 10
+
+
+def _social_priors(posts: list[dict[str, Any]],
+                   by_format: list[dict[str, Any]],
+                   by_hook: list[dict[str, Any]],
+                   viral: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Steering block for the generation lanes (meme/duckvideo caption and
+    hook prompts). MEDIAN-ranked so one viral outlier can't flip the prior;
+    omitted entirely when the sample is too thin to steer with."""
+    if len(posts) < _PRIORS_MIN_POSTS:
+        return None
+    def _best(rows: list[dict[str, Any]]) -> str | None:
+        ranked = sorted((r for r in rows if r.get("post_count", 0) >= 3),
+                        key=lambda r: -float(r.get("median_engagement_score") or 0.0))
+        return ranked[0]["label"] if ranked else None
+    sample_hooks = [v["visible_hook"] for v in viral[:3] if v.get("visible_hook")]
+    return {
+        "winning_format": _best(by_format),
+        "winning_hook_family": _best(by_hook),
+        "sample_hooks": sample_hooks,
+        "basis_post_count": len(posts),
+        "updated_at": now_local_iso(),
+    }
 
 
 def _current_learnings(posts: list[dict[str, Any]], own_dimensions: dict[str, set[str]]) -> list[dict[str, Any]]:
@@ -228,6 +283,7 @@ def build_competitor_social_benchmark() -> dict[str, Any]:
     by_format = _top_dimensions(posts, "post_format")
     by_hook = _top_dimensions(posts, "hook_family")
     by_time = _top_dimensions(posts, "hour_bucket")
+    top_viral = _top_viral_posts(posts)
 
     payload = {
         "generated_at": now_local_iso(),
@@ -242,6 +298,8 @@ def build_competitor_social_benchmark() -> dict[str, Any]:
         "by_format": by_format,
         "by_hook_family": by_hook,
         "by_time_window": by_time,
+        "top_viral_posts": top_viral,
+        "social_priors": _social_priors(posts, by_format, by_hook, top_viral),
         "current_learnings": _current_learnings(posts, own_dimensions),
         "ideas_to_test": _ideas_to_test(posts, own_dimensions),
         "paths": {
@@ -284,6 +342,18 @@ def render_competitor_social_benchmark_markdown(payload: dict[str, Any]) -> str:
         str(summary.get("data_quality_note") or ""),
         "",
     ]
+
+    viral = payload.get("top_viral_posts") or []
+    if viral:
+        lines.extend(["## Top Viral Posts (watch these)", ""])
+        for i, v in enumerate(viral, 1):
+            lines.append(
+                f"{i}. **{v.get('engagement_score')}** | {v.get('post_format')} | "
+                f"@{v.get('account_handle')} — {v.get('visible_hook') or v.get('caption_excerpt') or ''}"
+            )
+            if v.get("post_url"):
+                lines.append(f"   {v['post_url']}")
+        lines.append("")
 
     for heading, rows_key in [
         ("Top Accounts", "top_accounts"),
