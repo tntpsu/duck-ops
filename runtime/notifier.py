@@ -407,9 +407,11 @@ def _render_decision_card(item: dict[str, Any]) -> str:
             f"<strong>{_html_text(preview.get('proposed_label') or 'Proposed')}:</strong><br>{_html_text(proposed_text[:280])}"
             "</div>"
         )
-    suggestions = item.get("improvement_suggestions") or []
-    if suggestions:
-        details.append(f"<div><strong>Next improvement:</strong> {_html_text(suggestions[0])}</div>")
+    # improvement_suggestions are STATIC per-flow coaching strings from
+    # quality_gate_pilot, not per-item analysis — rendering them as "Next
+    # improvement" read as false criticism of drafts that already followed
+    # the guidance (operator caught it in the 2026-08-13 digest). They stay
+    # available to the quality gate internally; the digest drops them.
     return _notifier_card(str(item.get("title") or item.get("artifact_id") or "Review item"), "".join(details))
 
 
