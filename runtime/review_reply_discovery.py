@@ -587,18 +587,45 @@ def locate_review_block(
     return parsed if isinstance(parsed, dict) else {"found": False, "raw_result": parsed}
 
 
-def capture_target_review_screenshot(session: str, destination_dir: Path) -> str | None:
+def capture_target_review_screenshot(
+    session: str, destination_dir: Path, transaction_id: str | None = None
+) -> str | None:
+    # Evidence capture must never fail the attempt it documents. The injected
+    # data-openclaw-target-review marker is ephemeral — Etsy's React re-render
+    # after the fill's input/change events can rebuild the row and drop it
+    # (2026-08-14: a green dry-run fill was marked failed by exactly this).
+    # Ladder: marker → stable data-review-region row → full viewport.
     destination = destination_dir / f"target-review-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%S-%fZ')}.png"
-    run_pw_command(
-        session,
-        "run-code",
-        (
-            "const locator = page.locator('[data-openclaw-target-review=\"1\"]').first(); "
-            "await locator.waitFor({ state: 'visible', timeout: 3000 }); "
-            f"await locator.screenshot({{ path: {json.dumps(str(destination))} }}); "
-            f"return {json.dumps(str(destination))};"
-        ),
-    )
+    selectors = ["[data-openclaw-target-review=\"1\"]"]
+    if transaction_id:
+        selectors.append(f'li[data-review-region="{transaction_id}"]')
+    for selector in selectors:
+        try:
+            run_pw_command(
+                session,
+                "run-code",
+                (
+                    f"const locator = page.locator({json.dumps(selector)}).first(); "
+                    "await locator.waitFor({ state: 'visible', timeout: 3000 }); "
+                    f"await locator.screenshot({{ path: {json.dumps(str(destination))} }}); "
+                    f"return {json.dumps(str(destination))};"
+                ),
+            )
+        except Exception:
+            continue
+        if destination.exists():
+            return str(destination)
+    try:
+        run_pw_command(
+            session,
+            "run-code",
+            (
+                f"await page.screenshot({{ path: {json.dumps(str(destination))} }}); "
+                f"return {json.dumps(str(destination))};"
+            ),
+        )
+    except Exception:
+        pass
     return str(destination) if destination.exists() else None
 
 

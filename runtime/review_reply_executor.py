@@ -2745,7 +2745,9 @@ def run_dry_run_fill(
 
         destination_dir = ROOT / "output" / "execution" / "assets" / slugify(artifact_id)
         destination_dir.mkdir(parents=True, exist_ok=True)
-        screenshot_path = capture_target_review_screenshot(session_name, destination_dir)
+        screenshot_path = capture_target_review_screenshot(
+            session_name, destination_dir, transaction_id=expected_transaction_id
+        )
         attempt["screenshot_path"] = screenshot_path
         attempt["finished_at"] = now_iso()
         attempt["outcome"] = "dry_run_filled"
@@ -3113,7 +3115,9 @@ def run_live_submit(artifact_id: str, *, keep_browser_open: bool = False) -> dic
         try:
             destination_dir = ROOT / "output" / "execution" / "assets" / slugify(artifact_id)
             destination_dir.mkdir(parents=True, exist_ok=True)
-            attempt["screenshot_path"] = capture_target_review_screenshot(session_name, destination_dir)
+            attempt["screenshot_path"] = capture_target_review_screenshot(
+                session_name, destination_dir, transaction_id=expected_transaction_id
+            )
         except Exception as shot_exc:  # noqa: BLE001
             attempt["screenshot_path"] = None
             attempt["screenshot_error"] = f"{type(shot_exc).__name__}: {shot_exc}"
