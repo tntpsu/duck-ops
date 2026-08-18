@@ -313,7 +313,10 @@ def _fetch_instagram_metrics(post: dict[str, Any], token_manager) -> dict[str, A
     media_type = str(metrics.get("media_type") or "").upper()
     metrics_to_try = ["reach", "saved"]
     if media_type in {"VIDEO", "REELS"}:
-        metrics_to_try.append("video_views")
+        # "views" is Meta's unified view metric; "video_views" is rejected for
+        # REELS media with a metric-enum 400 (live-probed 2026-08-18 on the
+        # first Reel — views returned 262 while video_views errored).
+        metrics_to_try.append("views")
     for metric in metrics_to_try:
         insight_response = token_manager.make_request(
             "GET",

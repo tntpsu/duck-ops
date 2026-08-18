@@ -175,5 +175,49 @@ class SocialPerformanceCollectorTests(unittest.TestCase):
         self.assertIn("Cowgirl Duck", markdown)
 
 
+class FetchInstagramMetricsTests(unittest.TestCase):
+    """2026-08-18: the collector requested `video_views`, which Instagram
+    rejects for REELS media with a metric-enum 400 — the first Reel's view
+    counts were silently lost. `views` is Meta's unified metric (live-probed:
+    262 views returned where video_views errored)."""
+
+    class _FakeResponse:
+        def __init__(self, payload: dict, status_code: int = 200) -> None:
+            self._payload = payload
+            self.status_code = status_code
+            self.text = json.dumps(payload)
+
+        def json(self) -> dict:
+            return self._payload
+
+    def test_reels_requests_unified_views_metric_not_video_views(self) -> None:
+        calls: list[tuple[str, dict]] = []
+        fake_response = self._FakeResponse
+
+        class FakeTokenManager:
+            def make_request(self, method, url, *, params=None, **kwargs):
+                calls.append((url, dict(params or {})))
+                if url.endswith("/insights"):
+                    metric = (params or {}).get("metric")
+                    return fake_response(
+                        {"data": [{"name": metric, "values": [{"value": 7}]}]}
+                    )
+                return fake_response({
+                    "id": "123", "media_type": "VIDEO",
+                    "media_product_type": "REELS", "permalink": "p",
+                    "timestamp": "2026-08-14T21:00:38+0000",
+                    "comments_count": 1, "like_count": 4,
+                })
+
+        result = social_performance_collector._fetch_instagram_metrics(
+            {"post_id": "123"}, FakeTokenManager()
+        )
+        requested = [p.get("metric") for url, p in calls if url.endswith("/insights")]
+        self.assertIn("views", requested)
+        self.assertNotIn("video_views", requested)
+        self.assertEqual(result["metrics"].get("views"), 7)
+        self.assertEqual(result["errors"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
