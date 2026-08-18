@@ -1,0 +1,21 @@
+{
+  "overrides_version": 1,
+  "overrides": {
+    "generalization_spa_duck_cleanup_v1": {
+      "action": "reject",
+      "decided_at": "2026-08-17",
+      "reason": "Operator: spa-duck cleanup model is not the Baby Yoda Duck product"
+    },
+    "generalization_spa_duck_v1": {
+      "action": "reject",
+      "decided_at": "2026-08-17",
+      "reason": "Sibling pre-cleanup dir of the same spa duck; rejecting only the cleanup dir let this one re-match Baby Yoda on the next scan"
+    },
+    "captain_duck_smooth_duck_intent_v9": {
+      "action": "confirm",
+      "product_id": "8103296860343",
+      "decided_at": "2026-08-17",
+      "reason": "Operator: captain model is the Pilot Duck product"
+    }
+  }
+}

@@ -46,6 +46,7 @@ STUDIO_3D_LAB_DIR = (
     / "studio_assets" / "3d_lab"
 )
 PRODUCT_MODEL_INDEX_PATH = DUCK_OPS_ROOT / "state" / "product_model_index.json"
+PRODUCT_MODEL_OVERRIDES_PATH = DUCK_OPS_ROOT / "config" / "product_model_overrides.json"
 
 # Frozen at import: layer 2 of the 3-layer isolation policy. A test that
 # reaches this path under DUCK_TEST_MODE has escaped the conftest redirect.
@@ -156,6 +157,24 @@ def scan_model_sources(
     )
 
 
+def _load_overrides(path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Operator match decisions, keyed by model source dir NAME (stable across
+    rescans; absolute paths are not). Never raises — a broken config degrades
+    to no overrides, and the flagged matches just stay needs_review."""
+    target = Path(path or PRODUCT_MODEL_OVERRIDES_PATH)
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    overrides = payload.get("overrides")
+    if not isinstance(overrides, dict):
+        return {}
+    return {
+        str(k): v for k, v in overrides.items()
+        if isinstance(v, dict) and v.get("action") in ("reject", "confirm")
+    }
+
+
 def _match_one(
     model: dict[str, Any],
     catalog: dict[str, dict[str, Any]],
@@ -228,12 +247,46 @@ def match_models_to_catalog(
     models: list[dict[str, Any]],
     catalog: dict[str, dict[str, Any]],
     aliases: list[dict[str, Any]],
+    overrides: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     alias_by_key = catalog_match._alias_text_by_product_key(aliases)
+    overrides = overrides or {}
     items: dict[str, dict[str, Any]] = {}
     unmatched: list[dict[str, Any]] = []
+    overrides_applied = 0
     for model in models:
-        verdict = _match_one(model, catalog, alias_by_key)
+        override = overrides.get(Path(model["dir"]).name)
+        if override and override["action"] == "reject":
+            overrides_applied += 1
+            unmatched.append({
+                "dir": model["dir"], "kind": model["kind"],
+                "slug_text": model["slug_text"], "reason": "operator_rejected",
+            })
+            continue
+        if override and override["action"] == "confirm":
+            pid = str(override.get("product_id") or "")
+            if pid in catalog:
+                overrides_applied += 1
+                tokens = _model_tokens(model["slug_text"])
+                verdict = {
+                    "product_id": pid,
+                    "matched_by": "operator_confirmed",
+                    "match_score": len(tokens),
+                    "matched_tokens": tokens,
+                    "needs_review": False,
+                    "reason": "operator_confirmed",
+                }
+            else:
+                # Fail closed: a confirm pointing at a product that left the
+                # catalog is surfaced, never silently re-matched elsewhere.
+                unmatched.append({
+                    "dir": model["dir"], "kind": model["kind"],
+                    "slug_text": model["slug_text"],
+                    "reason": "operator_confirm_target_missing",
+                })
+                continue
+        else:
+            verdict = _match_one(model, catalog, alias_by_key)
         pid = verdict.get("product_id")
         if not pid:
             unmatched.append({
@@ -268,6 +321,7 @@ def match_models_to_catalog(
         "items": items,
         "unmatched_models": unmatched,
         "products_without_model": without_model,
+        "operator_overrides_applied": overrides_applied,
     }
 
 
@@ -318,13 +372,15 @@ def run_once(
     catalog_index_path: Path | None = None,
     aliases_path: Path | None = None,
     index_path: Path | None = None,
+    overrides_path: Path | None = None,
 ) -> dict[str, Any]:
     models = scan_model_sources(
         paint_outputs_dir=paint_outputs_dir, studio_lab_dir=studio_lab_dir,
     )
     catalog = catalog_match._load_catalog_index(catalog_index_path)
     aliases = catalog_match._load_aliases(aliases_path)
-    result = match_models_to_catalog(models, catalog, aliases)
+    overrides = _load_overrides(overrides_path)
+    result = match_models_to_catalog(models, catalog, aliases, overrides=overrides)
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "model_sources_scanned": len(models),

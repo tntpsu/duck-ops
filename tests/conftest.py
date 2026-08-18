@@ -285,6 +285,9 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
     try:
         import product_model_index as _pmi
         monkeypatch.setattr(_pmi, "PRODUCT_MODEL_INDEX_PATH", tmp_path / "product_model_index.json")
+        # Overrides config is a read, not a write, but the production file
+        # carries real operator decisions — tests must not see them.
+        monkeypatch.setattr(_pmi, "PRODUCT_MODEL_OVERRIDES_PATH", tmp_path / "product_model_overrides.json")
     except ImportError:
         pass
     yield

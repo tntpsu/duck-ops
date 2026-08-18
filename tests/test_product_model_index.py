@@ -177,6 +177,79 @@ class TestScanAndJoin:
         assert payload["items"]["999900000001"]["model"]["handoff_ready"] is False
 
 
+class TestOperatorOverrides:
+    """2026-08-17: operator decisions on needs_review matches must survive the
+    daily rescan — recorded in config/product_model_overrides.json, keyed by
+    model source dir name, applied by the producer before token matching."""
+
+    def _overrides(self, tmp_path, payload) -> Path:
+        path = tmp_path / "overrides.json"
+        path.write_text(json.dumps({"overrides_version": 1, "overrides": payload}))
+        return path
+
+    def test_reject_moves_model_to_unmatched(self, tmp_path, catalog):
+        paint = tmp_path / "paint_outputs"
+        _paint_job(paint, "captain_duck_fixed_conversion", with_manifest=False)
+        overrides = self._overrides(tmp_path, {
+            "captain_duck_fixed_conversion": {"action": "reject"},
+        })
+        payload = pmi.run_once(
+            paint_outputs_dir=paint, studio_lab_dir=tmp_path / "none",
+            catalog_index_path=catalog, aliases_path=tmp_path / "no_aliases.json",
+            index_path=tmp_path / "index_out.json", overrides_path=overrides,
+        )
+        assert payload["items"] == {}
+        assert payload["unmatched_models"][0]["reason"] == "operator_rejected"
+        assert payload["operator_overrides_applied"] == 1
+
+    def test_confirm_clears_needs_review(self, tmp_path, catalog):
+        paint = tmp_path / "paint_outputs"
+        _paint_job(paint, "captain_duck_fixed_conversion", with_manifest=False)
+        overrides = self._overrides(tmp_path, {
+            "captain_duck_fixed_conversion": {
+                "action": "confirm", "product_id": "999900000002",
+            },
+        })
+        payload = pmi.run_once(
+            paint_outputs_dir=paint, studio_lab_dir=tmp_path / "none",
+            catalog_index_path=catalog, aliases_path=tmp_path / "no_aliases.json",
+            index_path=tmp_path / "index_out.json", overrides_path=overrides,
+        )
+        item = payload["items"]["999900000002"]
+        assert item["needs_review"] is False
+        assert item["matched_by"] == "operator_confirmed"
+        assert payload["operator_overrides_applied"] == 1
+
+    def test_confirm_target_missing_fails_closed(self, tmp_path, catalog):
+        paint = tmp_path / "paint_outputs"
+        _paint_job(paint, "captain_duck_fixed_conversion", with_manifest=False)
+        overrides = self._overrides(tmp_path, {
+            "captain_duck_fixed_conversion": {
+                "action": "confirm", "product_id": "000000000000",
+            },
+        })
+        payload = pmi.run_once(
+            paint_outputs_dir=paint, studio_lab_dir=tmp_path / "none",
+            catalog_index_path=catalog, aliases_path=tmp_path / "no_aliases.json",
+            index_path=tmp_path / "index_out.json", overrides_path=overrides,
+        )
+        assert payload["items"] == {}
+        assert payload["unmatched_models"][0]["reason"] == "operator_confirm_target_missing"
+
+    def test_broken_overrides_file_degrades_to_none(self, tmp_path, catalog):
+        paint = tmp_path / "paint_outputs"
+        _paint_job(paint, "captain_duck_fixed_conversion", with_manifest=False)
+        broken = tmp_path / "overrides.json"
+        broken.write_text("{not json")
+        payload = pmi.run_once(
+            paint_outputs_dir=paint, studio_lab_dir=tmp_path / "none",
+            catalog_index_path=catalog, aliases_path=tmp_path / "no_aliases.json",
+            index_path=tmp_path / "index_out.json", overrides_path=broken,
+        )
+        # Falls back to normal matching: the low-confidence flag survives.
+        assert payload["items"]["999900000002"]["needs_review"] is True
+
+
 class TestWriteGuardAndOutput:
     def test_dry_run_writes_nothing(self, tmp_path, catalog):
         out = tmp_path / "index_out.json"
