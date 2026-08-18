@@ -877,6 +877,7 @@ These join the existing `test_page_inline_scripts_are_valid_js` (node `--check` 
 |---|---|---|---|
 | no-clobber | ✅ `test_competitor_snapshot_split.py::test_snapshot_does_not_clobber_full_analysis` | ✅ `::test_existing_report_is_full_analysis_classifier` (full vs snapshot vs missing) | manual: regen wrote full analysis (50 trending / 7 rising / 20 ducks_to_build / my_shop_velocity `building · 65 actual`); Build-Next rebuilt off 06-22, all top-10 recs TRENDING |
 | still writes normally | ✅ `::test_snapshot_writes_when_no_report_exists` (Mon–Sat snapshot) | ✅ `::test_snapshot_refreshes_an_existing_snapshot` | n/a |
+| OS card sees the daily run (2026-08-18: THIRD sibling of the snapshot-vs-full confusion — the hollow daily `state_competitor.json` shadowed Sunday's rich state in `_load_competitors_intel`, card "stale" yellow 6 days/7; fix = daily step stamps `competitor_snapshot_summary` into run state + loader scans back for the latest rich report) | ✅ `test_competitors_intel_loader.py::test_hollow_daily_state_does_not_shadow_weekly_report` | ✅ `::test_prestamp_daily_state_falls_back_to_report_timestamp`, `::test_no_runs_is_unavailable` | live: card green on the board after the stamped rerun, 2026-08-18 |
 
 **Tier:** read-only (report generation). Same "a 2-minute cron timing collision silently emptied a daily-read surface" family as the producer/reader cadence bugs; the daily snapshot's job is velocity lookback (snapshots dir), not owning the analysis report.
 
