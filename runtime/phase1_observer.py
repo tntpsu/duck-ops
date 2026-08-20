@@ -813,6 +813,9 @@ def load_weekly_insights() -> dict[str, Any]:
     return {}
 
 
+CATALOG_MATCH_MAX = 10
+
+
 def match_catalog(
     theme: str,
     products: dict[str, dict[str, Any]],
@@ -850,7 +853,19 @@ def match_catalog(
         elif len(present) >= max(1, min(2, len(theme_tokens))):
             partial_matches.append({"product_id": pid, **item})
 
-    chosen = exact_matches[:5] or partial_matches[:5]
+    # Cap at 10, sorted by title for determinism. The old `[:5]` in dict
+    # order silently cut fully-matching products with an ARBITRARY tie-break:
+    # "football team duck" matched 8 college ducks but stored only 5, so Penn
+    # State + both Florida Gators could never appear in a football-trend
+    # montage (operator caught it 2026-08-19).
+    exact_matches.sort(key=lambda m: str(m.get("title") or ""))
+    partial_matches.sort(key=lambda m: str(m.get("title") or ""))
+    if len(exact_matches) > CATALOG_MATCH_MAX or len(partial_matches) > CATALOG_MATCH_MAX:
+        print(
+            f"[phase1] catalog match for {theme!r} truncated to "
+            f"{CATALOG_MATCH_MAX} of {max(len(exact_matches), len(partial_matches))}"
+        )
+    chosen = exact_matches[:CATALOG_MATCH_MAX] or partial_matches[:CATALOG_MATCH_MAX]
     coverage = [
         {
             "product_id": item["product_id"],
