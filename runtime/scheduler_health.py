@@ -446,11 +446,21 @@ def _evaluate_job(
         summary = "No scheduler history has been observed yet."
         recommended_action = "Let the next scheduled window run or smoke-test the wrapper manually."
 
+    # 2026-09-07: a missed_run verdict is only true until the job's NEXT
+    # window (plus grace) has passed. The sidecar grades at 06:xx against
+    # yesterday's 07:xx window, and the cached verdict used to stay red all
+    # morning after the job recovered at 07:xx. Readers must recompute or
+    # downgrade once this stamp is in the past.
+    verdict_valid_until = None
+    if status == "missed_run" and next_expected_at:
+        verdict_valid_until = next_expected_at + timedelta(seconds=grace_seconds)
+
     return {
         "job_name": job_name,
         "label": job.get("label"),
         "status": status,
         "severity": severity,
+        "verdict_valid_until": verdict_valid_until.isoformat() if verdict_valid_until else None,
         "attention_needed": status in ATTENTION_STATUSES and status not in NON_ACTIONABLE_ATTENTION_STATUSES,
         "summary": summary,
         "recommended_action": recommended_action,
@@ -553,10 +563,16 @@ def build_scheduler_health(
         "running_count": sum(1 for item in items if item.get("status") == "running"),
         "fixed_pending_count": sum(1 for item in items if item.get("status") == "fixed_pending_next_run"),
     }
+    verdict_deadlines = sorted(
+        str(item.get("verdict_valid_until"))
+        for item in items
+        if item.get("verdict_valid_until") and item.get("severity") == "bad"
+    )
     payload = {
         "generated_at": current.isoformat(),
         "source": "duckagent_launchd_scheduler",
         "status": status,
+        "verdict_valid_until": verdict_deadlines[0] if verdict_deadlines else None,
         "headline": _headline(status, counts),
         "recommended_action": "Resolve the top scheduler item before trusting downstream workflow freshness." if status != "ok" else "No action needed.",
         "summary": counts,

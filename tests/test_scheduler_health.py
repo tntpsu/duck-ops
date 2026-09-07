@@ -95,6 +95,37 @@ class SchedulerHealthTests(unittest.TestCase):
             self.assertEqual(payload["status"], "bad")
             self.assertEqual(payload["summary"]["missed_count"], 1)
             self.assertEqual(payload["items"][0]["status"], "missed_run")
+            # Surface 67: the miss is only a valid verdict until the next
+            # window (09:00 tomorrow) plus grace has passed.
+            self.assertEqual(payload["items"][0]["verdict_valid_until"], "2026-04-24T09:30:00-04:00")
+            self.assertEqual(payload["verdict_valid_until"], "2026-04-24T09:30:00-04:00")
+
+    def test_healthy_job_has_no_verdict_deadline(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            launch_agents.mkdir()
+            _write_plist(
+                launch_agents / "com.philtullai.duckagent.reviews.daily.plist",
+                label="com.philtullai.duckagent.reviews.daily",
+                job_name="reviews_daily",
+                schedule={"Hour": 9, "Minute": 0},
+            )
+            log_path = root / "scheduler.log"
+            log_path.write_text(
+                "[2026-04-23 09:00:01 EDT] START reviews_daily\n[2026-04-23 09:00:09 EDT] END   reviews_daily :: exit=0\n",
+                encoding="utf-8",
+            )
+            payload = scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat("2026-04-23T11:00:00-04:00"),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=log_path,
+                receipt_dir=root / "receipts",
+                write_outputs=False,
+            )
+            self.assertEqual(payload["items"][0]["status"], "healthy")
+            self.assertIsNone(payload["items"][0]["verdict_valid_until"])
+            self.assertIsNone(payload["verdict_valid_until"])
 
     def test_running_receipt_over_budget_detects_hung_process(self) -> None:
         with TemporaryDirectory() as tmp:
