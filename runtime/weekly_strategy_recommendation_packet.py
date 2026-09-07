@@ -854,6 +854,35 @@ def _slot_day_offset(slot_label: str) -> int:
     }.get(slot_label, 0)
 
 
+# 2026-09-07: a slot is graded only after its WINDOW closes, not when its
+# date arrives. The 07:20 Monday packet used to grade the Monday-evening
+# meme slot as no_post_observed before the 18:00 post could exist, and a
+# fresh week opened as "drifting" every Monday. Close hours mirror the
+# social_performance_collector time_window buckets.
+_SLOT_WINDOW_CLOSE_HOUR = {
+    "early_morning": 8,
+    "morning": 11,
+    "midday": 14,
+    "afternoon": 17,
+    "evening": 21,
+    "late_night": 24,
+}
+
+
+def _slot_window_close_hour(target_window: str) -> int:
+    return _SLOT_WINDOW_CLOSE_HOUR.get(_compact_text(target_window).lower().replace(" ", "_"), 24)
+
+
+def _slot_window_closed(target_date: datetime.date, target_window: str, *, packet_now: datetime) -> bool:
+    local_now = packet_now if packet_now.tzinfo is None else packet_now.astimezone()
+    if target_date != local_now.date():
+        return target_date < local_now.date()
+    close_hour = _slot_window_close_hour(target_window)
+    if close_hour >= 24:
+        return False
+    return local_now.hour >= close_hour
+
+
 def _slot_target_date(slot_label: str, *, packet_now: datetime) -> datetime.date:
     week_start = (packet_now - timedelta(days=packet_now.weekday())).date()
     return week_start + timedelta(days=_slot_day_offset(slot_label))
@@ -1197,6 +1226,27 @@ def _slot_execution_feedback(
         for item in posts
         if str(item.get("published_date") or "").strip() == target_date_text and not bool(item.get("is_future_post"))
     ]
+    if not observed_same_day and not _slot_window_closed(
+        target_date, str(slot.get("target_window") or ""), packet_now=packet_now
+    ):
+        return {
+            "calendar_date": target_date_text,
+            "tracking_status": "awaiting_slot",
+            "tracking_note": (
+                f"This slot is due today in the `{slot.get('target_window') or 'best available'}` window, "
+                "which has not closed yet, so there is no post outcome to evaluate."
+            ),
+            "actual_lane": None,
+            "actual_platforms": [],
+            "actual_post_id": None,
+            "actual_published_at": None,
+            "actual_time_window": None,
+            "actual_post_url": None,
+            "performance_label": None,
+            "performance_note": None,
+            "performance_rank": None,
+            "performance_sample_size": 0,
+        }
     if not observed_same_day:
         return {
             "calendar_date": target_date_text,

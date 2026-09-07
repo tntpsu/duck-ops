@@ -1,6 +1,6 @@
 # TESTS — Coverage Matrix (Duck Ops + DuckAgent)
 
-Last updated: 2026-07-08 (Surface 55 — review-reply ingestion repair, SPEC-first)
+Last updated: 2026-09-07 (Surface 67 — weekly-strategy slot window grading)
 
 Built by running `/coverage-matrix` against the 2026-05-25 → 2026-05-26 shipped work after the operator surfaced that some integration-boundary tests had been skipped. This matrix lives next to [master_roadmap.md](output/operator/master_roadmap.md) per the skill's convention.
 
@@ -1843,6 +1843,22 @@ Residual (tracked, not fixed here): Phase Readiness has no portal surface (email
 The skill discipline is **invoke `/coverage-matrix` BEFORE the feature, not after.** Today's matrix is backfill — the three integration-boundary tests it surfaced (widget_api email, main_agent dispatch, observer end-to-end) were caught only because the operator asked "did you test your last changes?"
 
 Memorized for future sessions: [feedback_invoke_coverage_matrix.md](file:///Users/philtullai/.claude/projects/-Users-philtullai-ai-agents/memory/feedback_invoke_coverage_matrix.md).
+
+## Surface 67 — Weekly-strategy slot grading waits for the window to close (2026-09-07, operator: "What is with this" on the Monday learnings email "Slot 1 has no observed post yet… execution truth shifted from mixed to drifting")
+
+Origin: the 07:20 Monday packet graded Slot 1 (meme, Monday evening, FB scheduled + IG queued for 18:00) as `no_post_observed` because `_slot_execution_feedback` only held `awaiting_slot` when `target_date > today` (date-only). A fresh week has exactly one gradable slot, and it cannot have fired yet, so the week opened as `drifting` every Monday and the 07:10 learnings email told the operator "do not scale this plan yet"; Tuesday it silently corrected. The June 4 live-feed re-check (current_learnings) cannot rescue this case because it looks for a post that already exists. Third pre-window grader in the stack (jeepfact 06-04, scheduler_health 06:18 — still open) → memory [[feedback_never_grade_an_open_window]].
+
+Fix: `_slot_window_closed(target_date, target_window, packet_now)` + `_SLOT_WINDOW_CLOSE_HOUR` (mirrors `social_performance_collector._time_window` buckets: evening closes 21:00, unknown/review windows close at end of day). Same-day slot before close → `awaiting_slot` with a "has not closed" note (renders "due today"); observed same-day post still wins. `test_build_packet_combines_own_and_competitor_signals` had pinned the bug (Thursday 09:00 evening slot asserted `no_post_observed`) and was corrected.
+
+## Use case × failure mode
+
+|  | Happy | Premature grade (same day, window open) | Late grade (window closed / past day) | Contract drift | Clock edge |
+|---|---|---|---|---|---|
+| Slot execution feedback | `tests/test_weekly_strategy_slot_window.py::SameDaySlotGradingTests::test_same_day_post_already_observed_wins_over_awaiting`, `::test_future_day_is_awaiting` | `::test_same_day_evening_slot_is_awaiting_before_window_closes`; `test_weekly_strategy_recommendation_packet.py::test_build_packet_combines_own_and_competitor_signals` (Thu 09:00 → awaiting 2 / missed 0 / validated) | `::test_same_day_evening_slot_is_missed_after_window_closes`, `::test_past_day_without_post_is_still_missed` | `::test_window_close_table_matches_collector_buckets` (close hours = collector buckets) | `::test_unknown_window_closes_at_end_of_day`, `::test_naive_packet_clock_is_treated_as_local` |
+| Execution truth label | `ExecutionTruthTests::test_fresh_week_before_first_window_is_pending_not_drifting` | same | `ExecutionTruthTests::test_missed_after_close_still_drifts` | n/a | n/a |
+| At-a-glance status label | `StatusLabelTests::test_same_day_awaiting_reads_due_today` | same | existing `_slot_status_label` "missed" branch | n/a | n/a |
+| Learnings email emission | existing `test_current_learnings.py` slot-missed emission tests | covered upstream: awaiting is not an emitted status | 🟡 manual: watch Tue 2026-09-08 07:10 email — expect "Slot 1 landed" + label `mixed_on_plan`/`validated`, no "drifting" | n/a | n/a |
+| scheduler_health 06:18 pre-window grade | — | 🔴 OPEN (same defect class, separate producer; tracked in memory open-items) | — | — | — |
 
 Acceptance criteria for next ship:
 - [ ] This file is current — every new code path has a row

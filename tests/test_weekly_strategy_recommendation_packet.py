@@ -212,11 +212,15 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 # of alternate. See _apply_day_locked_lane.
                 self.assertEqual(payload["social_plan"]["execution_feedback"]["recommended_lane_executed"], 2)
                 self.assertEqual(payload["social_plan"]["execution_feedback"]["alternate_lane_executed"], 0)
-                self.assertEqual(payload["social_plan"]["execution_feedback"]["awaiting_slot"], 1)
-                self.assertEqual(payload["social_plan"]["execution_feedback"]["no_post_observed"], 1)
+                # 2026-09-07: packet_now is Thursday 09:00 and Slot 3 is a
+                # Thursday EVENING slot — its window has not closed, so it
+                # is awaiting (due today), not missed. Previously this test
+                # pinned the premature-grading bug (Surface 67).
+                self.assertEqual(payload["social_plan"]["execution_feedback"]["awaiting_slot"], 2)
+                self.assertEqual(payload["social_plan"]["execution_feedback"]["no_post_observed"], 0)
                 self.assertEqual(payload["social_plan"]["execution_feedback"]["review_slot"], 1)
-                self.assertEqual(payload["social_plan"]["execution_truth"]["label"], "mixed")
-                self.assertIn("mixed execution truth", payload["social_plan"]["execution_truth"]["headline"].lower())
+                self.assertEqual(payload["social_plan"]["execution_truth"]["label"], "validated")
+                self.assertIn("holding on executed slots", payload["social_plan"]["execution_truth"]["headline"].lower())
                 self.assertTrue(payload["social_plan"]["lane_guidance"])
                 # 2026-06-04: with Slot 2 day-locked to jeepfact, the
                 # Wednesday jeepfact post counts as a recommended-lane
@@ -230,7 +234,7 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertIn("Today", payload["social_plan"]["current_focus"]["headline"])
                 self.assertTrue(payload["social_plan"]["at_a_glance"])
                 self.assertEqual(payload["social_plan"]["at_a_glance"][0]["calendar_label"], "Monday evening")
-                self.assertEqual(payload["social_plan"]["at_a_glance"][2]["status_label"], "waiting today")
+                self.assertEqual(payload["social_plan"]["at_a_glance"][2]["status_label"], "due today")
                 self.assertTrue(payload["social_plan"]["ready_this_week"])
                 self.assertTrue(payload["recommendations"])
                 self.assertEqual(payload["social_plan"]["anchor_window"], "evening")
@@ -257,7 +261,8 @@ class WeeklyStrategyRecommendationPacketTests(unittest.TestCase):
                 self.assertEqual(payload["social_plan"]["slots"][1]["tracking_status"], "recommended_lane_executed")
                 self.assertEqual(payload["social_plan"]["slots"][1]["actual_lane"], "jeepfact")
                 self.assertEqual(payload["social_plan"]["slots"][1]["performance_label"], "watch")
-                self.assertEqual(payload["social_plan"]["slots"][2]["tracking_status"], "no_post_observed")
+                self.assertEqual(payload["social_plan"]["slots"][2]["tracking_status"], "awaiting_slot")
+                self.assertIn("has not closed", payload["social_plan"]["slots"][2]["tracking_note"])
                 self.assertEqual(payload["social_plan"]["slots"][4]["tracking_status"], "review_slot")
                 self.assertEqual(payload["social_plan"]["slots"][0]["operator_action_label"], "Run Meme Flow")
                 self.assertIn("Reply `publish`", payload["social_plan"]["slots"][0]["approval_followthrough"])
