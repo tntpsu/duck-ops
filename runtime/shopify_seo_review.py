@@ -1120,6 +1120,14 @@ def send_shopify_seo_review_email(
         issue_category=issue_category,
         auto_send_next_category=auto_send_next_category,
     )
+    return _gate_and_send_review_payload(payload)
+
+
+def _gate_and_send_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    # Load duckAgent/.env BEFORE the gate. The gate reads DUCK_EMAIL_DIGEST_MODE
+    # from the environment, and loading it only at send time made the same
+    # batch fold in the reply-handler process but send from the launchd job.
+    _, send_email = _ensure_duckagent_imports()
     high_severity = _count_high_severity_issues(payload)
     decision = should_send_email(
         "shopify_seo",
@@ -1135,11 +1143,11 @@ def send_shopify_seo_review_email(
         "reason": decision.reason,
         "next_send_iso": decision.next_send_iso,
     }
-    _, send_email = _ensure_duckagent_imports()
     subject, text_body, html_body = render_shopify_seo_review_email(payload)
     payload["email_subject"] = subject
     if not decision.should_send:
         payload["status"] = "deferred_by_cadence"
+        payload.setdefault("deferred_since", payload.get("generated_at"))
         print(
             f"[shopify_seo_review] Cadence gate deferred today's email "
             f"— {decision.reason}",
@@ -1150,15 +1158,26 @@ def send_shopify_seo_review_email(
         return payload
     send_email(subject, html_body, text_body)
     payload["status"] = "awaiting_review"
+    payload["emailed_at"] = datetime.now().astimezone().isoformat()
+    payload.pop("deferred_since", None)
     _review_run_path(payload["run_id"]).write_text(json.dumps(payload, indent=2), encoding="utf-8")
     _latest_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
 
 
+def resend_deferred_shopify_seo_review(run_id: str) -> dict[str, Any] | None:
+    """Re-gate and send a batch that was deferred by cadence, instead of
+    rebuilding a new one. Returns None when the run is not in that state."""
+    payload = _load_json(_review_run_path(str(run_id or "").strip()), {})
+    if not isinstance(payload, dict) or str(payload.get("status") or "") != "deferred_by_cadence":
+        return None
+    return _gate_and_send_review_payload(payload)
+
+
 def _count_high_severity_issues(payload: dict[str, Any]) -> int:
     """Sum of severity=high issues across all candidates in this run.
     Feeds the cadence gate's bypass: real urgency = same-day send."""
-    candidates = payload.get("candidates") or payload.get("top_actions") or []
+    candidates = payload.get("items") or payload.get("candidates") or payload.get("top_actions") or []
     if not isinstance(candidates, list):
         return 0
     total = 0

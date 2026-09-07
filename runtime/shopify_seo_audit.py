@@ -299,6 +299,11 @@ def _near_duplicate_title_key(value: Any) -> str:
     return " ".join(_meaningful_title_tokens(value))
 
 
+def _product_is_live(node: dict[str, Any]) -> bool:
+    status = str(node.get("status") or "").strip().upper()
+    return status in {"", "ACTIVE"}
+
+
 def _seo_values(kind: str, node: dict[str, Any]) -> tuple[str, str, bool, bool]:
     if kind in {"product", "collection"}:
         seo = node.get("seo") if isinstance(node.get("seo"), dict) else {}
@@ -507,8 +512,15 @@ def build_shopify_seo_audit() -> dict[str, Any]:
     }
 
     resources: list[dict[str, Any]] = []
+    skipped_by_status: dict[str, int] = {}
     for kind, nodes in raw_resources.items():
         for node in nodes:
+            # Draft/archived products are not on the storefront; auditing them
+            # emailed the operator fixes for pages Google cannot see.
+            if kind == "product" and not _product_is_live(node):
+                status_label = str(node.get("status") or "unknown").lower()
+                skipped_by_status[status_label] = skipped_by_status.get(status_label, 0) + 1
+                continue
             seo_title, seo_description, _, _ = _seo_values(kind, node)
             resource = {
                 "id": str(node.get("id") or ""),
@@ -555,6 +567,7 @@ def build_shopify_seo_audit() -> dict[str, Any]:
         "shopify_domain": str(os.getenv("SHOPIFY_DOMAIN") or ""),
         "summary": {
             "total_resources": len(resources),
+            "skipped_products_by_status": skipped_by_status,
             "actionable_resources": len(actionable),
             "high_severity_resources": sum(
                 1

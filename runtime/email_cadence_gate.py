@@ -232,12 +232,42 @@ POLICIES: dict[str, CadencePolicy] = {
         bypass_keys=(),
         deferred_note="Monday business digest scheduled for Monday rollup day.",
     ),
+    # 2026-09-07 (Surface 66.5): the three OpenClaw machine-log emails. Their
+    # content is fully on the portal (/portal/decisions, /portal/os), so they
+    # default OFF; the operator can turn any of them back on from
+    # /portal/workflows. No bypass keys — nothing in them is same-day urgent
+    # (urgent alerts are a separate, ungated artifact kind).
+    "quality_gate_digest": CadencePolicy(
+        surface_name="quality_gate_digest",
+        cadence="off",
+        bypass_keys=(),
+        deferred_note="Quality-gate digest email is off; pending items live on /portal/decisions.",
+    ),
+    "trend_digest": CadencePolicy(
+        surface_name="trend_digest",
+        cadence="off",
+        bypass_keys=(),
+        deferred_note="Trend digest email is off; surfaced trends live on /portal/decisions and the Monday digest.",
+    ),
+    "phase_readiness": CadencePolicy(
+        surface_name="phase_readiness",
+        cadence="off",
+        bypass_keys=(),
+        deferred_note="Phase readiness email is off; the weekly artifact is still written to output/digests.",
+    ),
 }
 
 # Surfaces that fold into the Monday business_digest when DUCK_EMAIL_DIGEST_MODE=1.
+# Contract: every surface here MUST have a section builder registered in
+# business_monday_digest.DIGEST_SECTION_BUILDERS (test_business_monday_digest
+# pins it). A fold reason that names a destination with no consumer is a silent
+# drop — shopify_seo lost the same 23-item batch twice that way (2026-07-06,
+# 2026-08-31) and is deliberately NOT here: it is an approval lane with its own
+# reply verb, so it always sends its own Monday email and the digest only
+# lists it under "Decisions waiting".
 DIGEST_FOLDED_SURFACES: frozenset[str] = frozenset({
     "profit", "recommendations", "reviews", "learnings", "competitors",
-    "business_intelligence", "engineering_governance", "shopify_seo",
+    "business_intelligence", "engineering_governance",
 })
 
 

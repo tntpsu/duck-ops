@@ -30,7 +30,7 @@ def _at(date_iso: str) -> datetime:
 class CadenceGateArtifactRoutingTests(unittest.TestCase):
     def test_unmapped_kind_returns_none(self) -> None:
         artifact = {
-            "kind": "digest",  # not in _CADENCE_SURFACE_BY_ARTIFACT_KIND
+            "kind": "urgent",  # not in _CADENCE_SURFACE_BY_ARTIFACT_KIND (digest is, since Surface 66.5)
             "payload": {},
             "json_path": Path("/tmp/x.json"),
         }

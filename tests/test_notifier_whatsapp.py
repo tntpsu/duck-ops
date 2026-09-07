@@ -607,6 +607,9 @@ class NotifierWhatsAppTests(unittest.TestCase):
                 mock.patch.object(notifier, "hydrate_promotion_readiness_signature", return_value=False),
                 mock.patch.object(notifier, "hydrate_learning_change_signature", return_value=False),
                 mock.patch.object(notifier, "load_sendable_artifacts", side_effect=[[artifact], []]),
+                # The digest kind is cadence-gated (off by default) since Surface 66.5;
+                # this test is about state persistence, not the gate.
+                mock.patch.object(notifier, "cadence_gate_decision_for_artifact", return_value=None),
                 mock.patch.object(
                     notifier,
                     "build_operator_whatsapp_summary",

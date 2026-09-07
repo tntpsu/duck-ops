@@ -537,6 +537,29 @@ def _strategy_idea_items(current_learnings: dict[str, Any], benchmark: dict[str,
     return items
 
 
+def _merge_rank(item: dict[str, Any]) -> tuple[float, float, float]:
+    """Higher wins. Score first; on a tie prefer the FRESHER observation
+    (lower staleness_days), then confidence. Strict score comparison alone
+    kept the first-seen — oldest — row of a theme, whose 175-day staleness
+    demoted a live, brief-ready 'nurse duck' signal to watch (2026-09-07)."""
+    gate = item.get("trend_quality_gate") if isinstance(item.get("trend_quality_gate"), dict) else {}
+    staleness = gate.get("staleness_days")
+    try:
+        staleness_value = float(staleness) if staleness is not None else 10_000.0
+    except (TypeError, ValueError):
+        staleness_value = 10_000.0
+    return (
+        float(item.get("score") or 0.0),
+        -staleness_value,
+        float(item.get("confidence") or 0.0),
+    )
+
+
+def _merge_evidence(primary: list[Any], secondary: list[Any]) -> list[str]:
+    combined = [str(value) for value in list(primary or []) + list(secondary or []) if str(value).strip()]
+    return list(dict.fromkeys(combined))[:8]
+
+
 def _merge_duplicate_themes(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     for item in items:
@@ -545,12 +568,12 @@ def _merge_duplicate_themes(items: list[dict[str, Any]]) -> list[dict[str, Any]]
         if not existing:
             merged[key] = item
             continue
-        if float(item.get("score") or 0.0) > float(existing.get("score") or 0.0):
-            item["evidence"] = list(existing.get("evidence") or [])[:3] + list(item.get("evidence") or [])[:4]
-            item["guardrails"] = list(dict.fromkeys(list(existing.get("guardrails") or []) + list(item.get("guardrails") or [])))
+        if _merge_rank(item) > _merge_rank(existing):
+            item["evidence"] = _merge_evidence(item.get("evidence"), existing.get("evidence"))
+            item["guardrails"] = list(dict.fromkeys(list(item.get("guardrails") or []) + list(existing.get("guardrails") or [])))
             merged[key] = item
         else:
-            existing["evidence"] = list(existing.get("evidence") or [])[:4] + list(item.get("evidence") or [])[:3]
+            existing["evidence"] = _merge_evidence(existing.get("evidence"), item.get("evidence"))
             existing["guardrails"] = list(dict.fromkeys(list(existing.get("guardrails") or []) + list(item.get("guardrails") or [])))
     return list(merged.values())
 
@@ -571,7 +594,7 @@ def _design_brief_signal(item: dict[str, Any]) -> dict[str, Any]:
         "source": "duck-ops.product_concept_queue",
         "signal_type": str(item.get("source_type") or "product_concept"),
         "theme": str(item.get("theme") or "Fresh Duck Concept"),
-        "evidence": [str(value) for value in list(item.get("evidence") or []) if str(value).strip()][:5],
+        "evidence": list(dict.fromkeys(str(value) for value in list(item.get("evidence") or []) if str(value).strip()))[:8],
         "confidence": float(item.get("confidence") or 0.0),
         "score": float(item.get("score") or 0.0),
         "guardrails": [str(value) for value in list(item.get("guardrails") or []) if str(value).strip()][:8],

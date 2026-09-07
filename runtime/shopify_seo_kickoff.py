@@ -8,8 +8,10 @@ from typing import Any
 
 from shopify_seo_review import (
     DUCK_OPS_ROOT,
+    SEO_REVIEW_CATEGORY_ORDER,
     _next_issue_category,
     build_shopify_seo_audit,
+    resend_deferred_shopify_seo_review,
     send_shopify_seo_review_email,
 )
 
@@ -20,8 +22,10 @@ SEO_REVIEW_LATEST_PATH = DUCK_OPS_ROOT / "state" / "shopify_seo_review" / "lates
 # The daily kickoff reuses a CACHED audit and only rebuilds it when forced,
 # so without a cadence the snapshot silently drifts (it hit 37 days). Refresh
 # weekly: fresh enough to reflect recent listing edits, infrequent enough to
-# not hit the Shopify API for a near-identical analysis every day.
-SEO_AUDIT_MAX_AGE_DAYS = 7.0
+# not hit the Shopify API for a near-identical analysis every day. 6.5 rather
+# than 7.0 because the kickoff (07:35) runs BEFORE the stamp it compares
+# against (07:53) — a 7.0 threshold missed by 18 minutes every single week.
+SEO_AUDIT_MAX_AGE_DAYS = 6.5
 
 
 def _audit_age_days() -> float | None:
@@ -62,6 +66,24 @@ def _load_audit_payload(*, force_audit: bool) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _choose_next_category(after_category: str | None, audit_payload: dict[str, Any]) -> str | None:
+    """Advance past the category the lane last worked on, wrapping to the
+    front once the tail is empty. Always restarting at index 0 let a 1-item
+    `long_title` batch block 92 items in `weak_title`/`weak_description`
+    for weeks (2026-09-07)."""
+    if after_category in SEO_REVIEW_CATEGORY_ORDER:
+        following = _next_issue_category(after_category, audit_payload)
+        if following:
+            return following
+    return _next_issue_category(None, audit_payload)
+
+
+def _kickoff_status_for(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return "no_remaining_categories"
+    return "deferred_by_cadence" if str(payload.get("status") or "") == "deferred_by_cadence" else "emailed"
+
+
 def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
     # Keep the audit fresh on a weekly cadence regardless of review state.
     # Done at the top (before the parked-review early returns) so a
@@ -76,6 +98,7 @@ def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
     latest_review = _load_latest_review()
     latest_status = str(latest_review.get("status") or "").strip().lower()
     latest_run_id = str(latest_review.get("run_id") or "").strip() or None
+    latest_category = str(latest_review.get("seo_category") or "").strip() or None
     latest_label = str(latest_review.get("category_label") or latest_review.get("seo_category") or "Shopify SEO review").strip()
 
     if latest_status == "awaiting_review":
@@ -94,9 +117,26 @@ def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
             "category_label": latest_label,
         }
 
+    if latest_status == "deferred_by_cadence" and latest_run_id:
+        # A deferred batch is still the open batch: re-gate and send the SAME
+        # run rather than rebuilding a new one every morning (the rebuild loop
+        # is what orphaned the 2026-07-06 and 2026-08-31 weak_title batches).
+        payload = resend_deferred_shopify_seo_review(latest_run_id)
+        if payload is not None:
+            status = _kickoff_status_for(payload)
+            verb = "Sent" if status == "emailed" else "Still deferred by cadence:"
+            return {
+                "status": status,
+                "summary": f"{verb} the deferred Shopify SEO category review email for {payload.get('category_label') or latest_label}.",
+                "run_id": payload.get("run_id"),
+                "category_label": payload.get("category_label") or latest_label,
+                "item_count": int(payload.get("item_count") or 0),
+                "deferred_since": payload.get("deferred_since"),
+            }
+
     # Audit already (re)built above when forced/stale, so read the cache.
     audit_payload = _load_audit_payload(force_audit=False)
-    next_category = _next_issue_category(None, audit_payload)
+    next_category = _choose_next_category(latest_category, audit_payload)
     if not next_category:
         return {
             "status": "no_remaining_categories",
@@ -111,12 +151,15 @@ def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
         issue_category=next_category,
         auto_send_next_category=True,
     )
+    status = _kickoff_status_for(payload)
+    verb = "Sent" if status == "emailed" else "Built (deferred by cadence)"
     return {
-        "status": "emailed",
-        "summary": f"Sent the next Shopify SEO category review email for {payload.get('category_label') or next_category}.",
+        "status": status,
+        "summary": f"{verb} the next Shopify SEO category review email for {payload.get('category_label') or next_category}.",
         "run_id": payload.get("run_id"),
         "category_label": payload.get("category_label") or next_category,
         "item_count": int(payload.get("item_count") or 0),
+        "audit_refreshed": audit_refreshed,
     }
 
 

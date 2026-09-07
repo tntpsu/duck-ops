@@ -1076,6 +1076,26 @@ def sync_trend_ranker_control(state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def trend_digest_item_line(item: dict[str, Any]) -> str:
+    """Confidence is hidden on purpose: it saturates at the single-source cap
+    (0.58 on every item in the 2026-09-06 digest) and is not calibrated against
+    outcomes, so it reads as information and carries none."""
+    metadata = item.get("trend_metadata") if isinstance(item.get("trend_metadata"), dict) else {}
+    observed = metadata.get("distinct_days")
+    observed_text = f" | observed `{int(observed)}` day(s)" if isinstance(observed, (int, float)) and observed else ""
+    return (
+        f"- `{item['decision']}` | `{item.get('action_frame')}` | score `{item['score']}`"
+        f"{observed_text} | `{item['theme']}`"
+    )
+
+
+def carried_over_items(new_items: list[dict[str, Any]], pending_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pending items NOT already listed as new this run. Printing pending
+    unfiltered repeated the same 10 rows twice (2026-09-06 digest)."""
+    new_artifact_ids = {str(item.get("artifact_id")) for item in new_items}
+    return [item for item in pending_items if str(item.get("artifact_id")) not in new_artifact_ids]
+
+
 def write_daily_digest(latest_records: dict[str, dict[str, Any]], new_decisions: list[dict[str, Any]]) -> dict[str, str] | None:
     concepts = build_trend_concepts(latest_records, new_artifact_ids={str(item.get("artifact_id")) for item in new_decisions})
     active_decisions = [concept.get("decision") for concept in concepts]
@@ -1132,19 +1152,16 @@ def write_daily_digest(latest_records: dict[str, dict[str, Any]], new_decisions:
         lines.append("No new operator-facing trend decisions this run.")
     else:
         for item in new_items[:10]:
-            lines.append(
-                f"- `{item['decision']}` | `{item.get('action_frame')}` | score `{item['score']}` | confidence `{item['confidence']}` | `{item['theme']}`"
-            )
+            lines.append(trend_digest_item_line(item))
             reason = (item.get("reasoning") or ["No reasoning captured."])[0]
             lines.append(f"  Reason: {reason}")
-    lines.extend(["", "## Still Pending Operator Review", ""])
-    if not pending_items:
-        lines.append("No pending operator-facing trend review items.")
+    carried_items = carried_over_items(new_items, pending_items)
+    lines.extend(["", "## Still Pending Operator Review (carried over from earlier runs)", ""])
+    if not carried_items:
+        lines.append("Nothing carried over — every pending item is listed above.")
     else:
-        for item in pending_items[:10]:
-            lines.append(
-                f"- `{item['decision']}` | `{item.get('action_frame')}` | score `{item['score']}` | confidence `{item['confidence']}` | `{item['theme']}`"
-            )
+        for item in carried_items[:10]:
+            lines.append(trend_digest_item_line(item))
             reason = (item.get("reasoning") or ["No reasoning captured."])[0]
             lines.append(f"  Reason: {reason}")
     lines.extend(["", "## Silent Background Watches", ""])

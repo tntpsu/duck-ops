@@ -121,6 +121,15 @@ COLOR_TOKENS = {
 }
 
 SPORT_TOKENS = {"baseball", "basketball", "football", "hockey"}
+# Fraternity/sorority names are licensed marks (Affinity/Greek Licensing);
+# "chi omega duck" passed the IP gate on 2026-09-07 because nothing here knew
+# Greek letters. Two letters, or one letter + an org word, is a mark.
+GREEK_LETTER_TOKENS = {
+    "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota",
+    "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi", "rho", "sigma", "tau",
+    "upsilon", "phi", "chi", "psi", "omega",
+}
+GREEK_ORG_TOKENS = {"sorority", "fraternity", "greek", "frat"}
 
 TEAM_ADJACENT_MODIFIERS = {
     "alabama",
@@ -336,6 +345,9 @@ def evaluate_trend_quality(
             blockers.append(message)
     if any(token in SPORT_TOKENS for token in meaningful) and any(token in TEAM_ADJACENT_MODIFIERS for token in meaningful):
         blockers.append("City, school, mascot, or region-plus-sport themes need a public-safe abstraction before concepting.")
+    greek_letters = [token for token in tokens if token in GREEK_LETTER_TOKENS]
+    if len(greek_letters) >= 2 or (greek_letters and any(token in GREEK_ORG_TOKENS for token in tokens)):
+        blockers.append("Fraternity/sorority names are licensed Greek-letter marks; needs a public-safe abstraction before concepting.")
 
     if any(_contains_phrase(text, phrase) for phrase in MARKETPLACE_RESIDUE_PHRASES):
         warnings.append("Theme contains marketplace keyword residue; use the cleaned concept title before generation.")

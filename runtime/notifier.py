@@ -453,7 +453,7 @@ def _render_trend_card(item: dict[str, Any]) -> str:
             "<div style=\"display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;\">"
             f"<span style=\"background:#ecfeff;color:#155e75;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">{_html_text(item.get('decision') or 'watch')}</span>"
             f"<span style=\"background:#f8fafc;color:#374151;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">score {_html_text(item.get('score') or 0)}</span>"
-            f"<span style=\"background:#f8fafc;color:#374151;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">confidence {_html_text(item.get('confidence') or 0)}</span>"
+            f"<span style=\"background:#f8fafc;color:#374151;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">observed {_html_text(metadata.get('distinct_days') or 0)} day(s)</span>"
             f"<span style=\"background:#f8fafc;color:#374151;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:600;\">catalog {_html_text(metadata.get('catalog_status') or 'unknown')}</span>"
             "</div>"
         ),
@@ -471,19 +471,25 @@ def _render_trend_card(item: dict[str, Any]) -> str:
 
 def _render_trend_digest_html(subject: str, payload: dict[str, Any]) -> str:
     active = payload.get("active_counts") or {}
+    action_items = list(payload.get("items") or [])
+    # The stat and the section it sits beside must count the SAME population:
+    # "worth_acting_on" is a decision label over all concepts, while the cards
+    # are the operator-surfaced subset — labelling the cards with the other
+    # number left a silent 7-item gap (2026-09-06 digest).
     stats = "".join(
         [
-            _notifier_stat("Worth acting on", active.get("worth_acting_on", 0)),
+            _notifier_stat("Surfaced for review", payload.get("pending_review_count", len(action_items))),
+            _notifier_stat("Worth acting on (all)", active.get("worth_acting_on", 0)),
             _notifier_stat("Background watch", payload.get("background_watch_count", 0)),
-            _notifier_stat("New background watch", payload.get("new_background_watch_count", 0)),
             _notifier_stat("Ignored", active.get("ignore", 0)),
         ]
     )
-    action_items = list(payload.get("items") or [])
     background_items = list(payload.get("background_watch_items") or [])
     sections: list[str] = []
     if action_items:
-        sections.append("<div style=\"font-size:20px;font-weight:800;margin:8px 0 12px 0;\">Worth acting on</div>")
+        sections.append(
+            f"<div style=\"font-size:20px;font-weight:800;margin:8px 0 12px 0;\">Surfaced for review ({len(action_items)})</div>"
+        )
         sections.extend(_render_trend_card(item) for item in action_items[:8])
     if background_items:
         sections.append("<div style=\"font-size:20px;font-weight:800;margin:18px 0 12px 0;\">Background watch</div>")
@@ -918,17 +924,34 @@ def observer_phase_readiness_window_open(now_local: datetime) -> bool:
     return now_local.hour >= target_hour
 
 
+QUALITY_GATE_DECISION_LABELS = frozenset({"publish_ready", "needs_revision", "discard"})
+
+
+def is_quality_gate_decision_row(row: dict[str, Any]) -> bool:
+    """decision_history.jsonl is shared with trend_ranker (evaluator=trend_ranker,
+    decisions watch/ignore/worth_acting_on) — ~99% of rows. Readiness must only
+    count the quality-gate population or its headline is off by 400x."""
+    if str(row.get("evaluator") or "") == "trend_ranker":
+        return False
+    return str(row.get("decision") or "") in QUALITY_GATE_DECISION_LABELS
+
+
+def _row_in_window(row: dict[str, Any], key: str, window_start: datetime) -> bool:
+    stamp = parse_iso_datetime(row.get(key))
+    return stamp is not None and stamp >= window_start
+
+
 def summarize_phase_readiness(now_local: datetime) -> dict[str, Any]:
     window_start = now_local - timedelta(days=7)
     decision_rows = [
         row
         for row in load_jsonl(ROOT / "state" / "decision_history.jsonl")
-        if (parse_iso_datetime(row.get("evaluated_at")) or now_local) >= window_start
+        if is_quality_gate_decision_row(row) and _row_in_window(row, "evaluated_at", window_start)
     ]
     override_rows = [
         row
         for row in load_jsonl(ROOT / "state" / "overrides.jsonl")
-        if (parse_iso_datetime(row.get("recorded_at")) or now_local) >= window_start
+        if _row_in_window(row, "recorded_at", window_start)
     ]
     quality_gate = load_json(QUALITY_GATE_STATE_PATH, {"artifacts": {}})
     artifacts = (quality_gate.get("artifacts") or {}).values()
@@ -2189,10 +2212,14 @@ def build_message(settings: dict[str, Any], artifact: dict[str, Any]) -> EmailMe
     subjects = settings.get("subjects", {})
     kind = artifact["kind"]
     payload = artifact.get("payload", {})
+    stem = str(artifact["json_path"].stem)
+    # The artifact is named with the ISO week token; %W is a different week
+    # numbering and labelled every readiness email one week behind its content.
+    week_token = stem.split("__", 1)[1] if "__" in stem else iso_week_token(datetime.now().astimezone())
     replacements = {
         "date": datetime.now().strftime("%Y-%m-%d"),
-        "artifact_id": ((payload.get("decision") or {}).get("artifact_id")) or artifact["json_path"].stem,
-        "week": datetime.now().strftime("%Y-%W"),
+        "artifact_id": ((payload.get("decision") or {}).get("artifact_id")) or stem,
+        "week": week_token,
     }
     subject_template = subjects.get(kind, "[OpenClaw] Notification")
     subject = render_subject(subject_template, replacements)
@@ -2223,6 +2250,9 @@ def send_message(settings: dict[str, Any], msg: EmailMessage) -> None:
 # corresponding CadencePolicy.
 _CADENCE_SURFACE_BY_ARTIFACT_KIND: dict[str, str] = {
     "learning_change_digest": "learnings",
+    "digest": "quality_gate_digest",
+    "trend_digest": "trend_digest",
+    "phase_readiness": "phase_readiness",
 }
 
 

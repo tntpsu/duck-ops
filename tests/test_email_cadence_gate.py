@@ -42,6 +42,8 @@ class PolicyRegistryTests(unittest.TestCase):
     def test_all_surfaces_registered(self) -> None:
         # business_digest added 2026-06-12 (Surface 15.5) — the Monday rollup
         # the other eight fold into when DUCK_EMAIL_DIGEST_MODE=1.
+        # phase_readiness / quality_gate_digest / trend_digest added 2026-09-07
+        # (Surface 66.5) — the OpenClaw log emails, default off.
         self.assertEqual(
             known_surfaces(),
             (
@@ -50,10 +52,13 @@ class PolicyRegistryTests(unittest.TestCase):
                 "competitors",
                 "engineering_governance",
                 "learnings",
+                "phase_readiness",
                 "profit",
+                "quality_gate_digest",
                 "recommendations",
                 "reviews",
                 "shopify_seo",
+                "trend_digest",
             ),
         )
 
