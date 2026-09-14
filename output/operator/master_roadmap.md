@@ -265,8 +265,8 @@ Why this is high value:
 - Directly drives retire/promote/restock decisions.
 - ~4-6 hours if the underlying COGS data already exists; longer if joining Etsy + Shopify per-SKU history needs new collectors.
 
-### Priority 0.7: Repeat-Buyer Automation (high-ROI #4, queued)
-First-purchase thank-you + 30-day repurchase nudge email/DM. Known D2C revenue lever.
+### Priority 0.7: Customer Email Layer — subscriber campaigns + repeat-buyer automation (high-ROI #4, queued; expanded 2026-09-13)
+Operator 2026-09-13: "we should be able to do email campaigns in Shopify. A lot of people have subscribed." Slices: (1) read-only subscriber count + what sends today; (2) draft-campaign lane (system drafts subject/copy/featured ducks from demand + profit + occasion calendar, operator approves, send through Shopify Email or an ESP API, never unsupervised); (3) first-purchase thank-you + 30-day repurchase nudge on the same lane. Known D2C revenue lever.
 
 Why this is high value:
 - Higher revenue upside than the other three but more moving parts (template design, deliverability, unsubscribe handling).
@@ -441,6 +441,21 @@ The pattern has been extended past the original 5 surfaces — business_intellig
 - A ChatGPT PNG enters the pipeline at the 3D step; `concept_to_print_status.json` revived; cards for printable bundles per 30 days and provider outages.
 
 > ~~Demand-rank Build-Next on the competitor demand signal~~ — **SHIPPED 2026-06-28 (Surface 47):** `score_demand` reads the competitor `demand_7d` score first; kept here only so the old step is not rebuilt.
+
+### 2. Measure the September title refresh (due ~2026-10-09) — the first outcome-ledger entry
+- 61 Etsy titles/tag sets were rewritten 2026-09-07/09 (state in `duck-ops/state/etsy_title_refresh/`, baseline `baseline_2026-09-07.json`, ledger `etsy_title_refresh_ledger.jsonl`). Thirty days on, compare views, favorites, and sales per listing against the baseline and write the result where the weekly strategy packet and learnings can read it. #20 Tennessee Volunteers is still on its old title (sold out at apply time; `apply_titles.py --apply --ranks 20` once restocked).
+
+### 3. Customer email layer (Priority 0.7, expanded 2026-09-13): subscriber campaigns + repeat-buyer automation
+- Operator 2026-09-13: "we should be able to do email campaigns in Shopify. A lot of people have subscribed." First slice is read-only: count subscribed customers through the Admin API and see what sends today (Shopify Email vs an ESP). Then a draft-campaign lane: the system writes the campaign (subject, copy, featured ducks picked from demand + profit + the occasion calendar), the operator approves, the send goes through Shopify Email or an ESP API; never an unsupervised send. Repeat-buyer automation (first-purchase thank-you, 30-day nudge) rides on the same lane.
+- Prerequisite: the spending guardrails below, so AI-written customer copy cannot run away.
+
+### 4. Spending guardrails: cost ceiling (Surface 59, spec'd, unbuilt) + provider-outage card
+- Two failure modes lived through in September: nothing went red when OpenAI credits ran out (2026-09-09, 72 failed calls), and nothing would stop a runaway lane. The outage card is Priority 3 slice 3; the ceiling is the stop, not just the log.
+
+### 5. Per-listing conversion + public-reply quality (carried from the 2026-09-07 priorities and Priority 5)
+- Which listings get views but no sales, so listing-clarity work goes where it pays; then the review-reply rewriter to structured output (the one prompt that writes publicly to Etsy, still mishandling mixed reviews).
+
+> Verified shipped, do not rebuild: per-product profit drill-down (Surface 11), demand-ranked Build-Next (Surface 47), customer-ask scout (Surface 58).
 
 > ~~Promote Weekly Sale Into The Autonomy Gate~~ — **largely moot (2026-06-22):** the operator turned OFF the sale *posts* and the recurring "pick the final weekly sale post" decision; the weekly Shopify SALE already auto-applies and is never gated. The decision this step wanted to automate no longer exists. Independent `sale_posts` toggle lives on `/portal/workflows-status`.
 
