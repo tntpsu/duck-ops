@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-06-28
+Last updated: 2026-09-13
 
 ## Document Ownership
 
@@ -35,8 +35,9 @@ Companion docs:
 - Publishes as an IG Reel through the shared social publish queue + sidecar (`media_type=reel`); approval-gated BY CONSTRUCTION (email reply only — the scheduled runner cannot publish).
 - New producer: `duck-ops/runtime/product_model_index.py` (daily) joins paint-to-print/Studio models to catalog products deterministically with a needs_review escape.
 - Two-card bracket (`duckvideo_input_sanity` + `duckvideo_throughput`), workflow-control transitions, FlowSpec registry entry, TESTS.md Surface 64.
-- NOT yet live: Tier-3 bundle pending (Shopify video live eval, 2 launchd installs, supervised first Reel).
-- Queued next (video track): Track B AI lifestyle clips (photo-seeded image-to-video, ~$1-3/clip) once reel engagement data accumulates; TikTok Content Posting API as phase 2.
+- First live Reel posted 2026-08-14 (Knitted Duck, ken-burns); lane fully autonomous through the email→sidecar path.
+- **Track B SHIPPED 2026-08-18 (Surface 64c):** third mode `ai_motion` — Veo 3.1 Fast image-to-video from the real product photo + a curated motion-concept library (`duckAgent/config/duckvideo_motion_concepts.json`, versioned, concept×product dedup). ISO-week mod-3 rotation keeps all three tracks active; failures fall back to ken-burns with a recorded reason; spot frames attach to the review email. Gated eval passed live same day (~$1/clip, `GEMINI_KEY`). First live ai_motion Reel: next rotation week, supervised.
+- Queued next (video track): concept-library iteration from reel engagement data; TikTok Content Posting API as phase 2.
 
 ### 1. Workflow Control Plane
 - Shared workflow state/receipt model is live across key lanes.
@@ -324,13 +325,16 @@ Why this is high value:
 - It creates a reusable path from "interesting signal" to "printable duck" with human approval checkpoints.
 - It gives the AI system a safer way to propose new products without silently copying IP-heavy competitor motifs.
 
-Next slices:
-1. connect Duck Ops Product Concept Queue review to DuckAgent `design_brief_queue` email generation
-2. continue Product Concept Brief Contract Phase 4: add an observe-only regeneration planner for fixable semantic QA failures before allowing any automatic image-credit retry
-3. run one local-only concept-to-print pilot proof against a real approved concept run
-4. add approval receipts and promotion-readiness history for recurring product concept queue runs
-5. add model-quality checks for flat bottom, smoothness, color intent, and Bambu import readiness
-6. when ready, run the DuckAgent [Local Image-To-3D Provider Evaluation Plan](/Users/philtullai/ai-agents/duckAgent/docs/current_system/LOCAL_IMAGE_TO_3D_PROVIDER_PLAN.md) to benchmark self-hosted providers before reducing 3D AI Studio dependency
+**Status 2026-09-13 — the image stage is done (Surfaces 68/68b/68c):** concept images render on GPT Image only (`gpt-image-2`, edits on `gpt-image-1.5`) with the operator's own ChatGPT recipe: `"<subject> as a rubber duck"` + ChatGPT's account of the operator's duck constraints + one rendering sentence (recipe v7, `duckAgent/creative_agent/tools/src/duck_tools/concept_recipe.json`). No reference photos, no Gemini fallback (an outage fails closed), no forced beak; a judge (gpt-4o, literal fields) looks at turn 1 and a second edit runs only for a named logo or thin part (`concept_image_gate.py`). Wired into the concept lane, Studio regenerate, Studio text-only concepts, and Thursday (no style photos attached any more). Eval 2026-09-11/13: gated recipe 19/20 on the golden set, six operator ducks 6/6, two hardest cases 2/2 on v7; the operator's bare words alone scored 2/5 (logos, scene backgrounds). Eight operator-approved GPT Image ducks recorded as `operator_pick` style memory. Eval page: https://claude.ai/code/artifact/d13f0587-3d0b-4377-8308-2f04354a9d23
+
+**Next slices (ordered 2026-09-13 with the operator, "so we do not forget"):**
+1. **The printable bundle** (the big one): approved image → 3D AI Studio model (provider `tripo`, works, unused since May) → `paint-to-print-3d` color-region split → sized to 57 mm (2.25 in) → each region mapped to a filament slot in the operator's AMS palette → one folder per duck: the 3MF, a three-angle render of the colored model, and a receipt. Two operator approvals: the image (exists) and the colored-model render before anything prints (new). **Test article: re-run the Highland Cow** (the last duck that went all the way through, 2026-05-22; `paint-to-print-3d` has been dormant 95+ days and has never done scale or slot mapping), then the Power Ranger from the 2026-09-11 run. Add a golden regression on the Highland Cow GLB.
+2. **Studio "import concept image" entry point:** the operator makes ducks in ChatGPT daily; a dropped-in PNG should enter the pipeline at the 3D step.
+3. **Instrumentation:** revive `concept_to_print_status.json` (frozen since 2026-06-13) and add two OS cards: printable bundles per 30 days, and provider outages (quota/429 over the tail of `llm_call_log.jsonl`; nothing went red when OpenAI credits ran out on 2026-09-09).
+4. **Turnaround sheet on GPT Image** (`generate_duck_character_sheet`): consistent front/side/rear views are what the 3D step consumes; ChatGPT's list already states the view rules.
+5. **Thursday onto the recipe:** the first GPT Image Thursday batch lands the week of 2026-09-14 for the operator to review; Thursday still uses its own contract prompt, migrate it to the recipe after that review.
+6. Small: golden case `headless_horseman` needs "yellow duck body showing under the coat" as a keep-trait; a unit test that drives `_run_concept_bundle` through the gate with a fake registry.
+7. Carried forward from before: approval receipts and promotion-readiness history for recurring product concept queue runs; model-quality checks for flat bottom, smoothness, color intent, and Bambu import readiness; when ready, the [Local Image-To-3D Provider Evaluation Plan](/Users/philtullai/ai-agents/duckAgent/docs/current_system/LOCAL_IMAGE_TO_3D_PROVIDER_PLAN.md) before reducing 3D AI Studio dependency.
 
 ### Priority 4: Social Strategy Hardening
 - Improve cross-channel post coverage so Instagram and Facebook outcomes stay comparable when both publish.
@@ -427,12 +431,16 @@ Slice status:
 
 The pattern has been extended past the original 5 surfaces — business_intelligence, engineering_governance, and shopify_seo were added to the cadence registry in the same shape. Any future report-style email follows the same recipe: portal page + cadence policy + OS card + tests.
 
-## Recommended Next 3 Steps (refreshed 2026-06-28)
+## Recommended Next 3 Steps (refreshed 2026-09-13)
 
-### 1. Demand-rank Build-Next on the competitor demand signal (Surface 47 — spec'd, matrix in TESTS.md)
-- The execution lever for the demand intelligence just shipped: turn the demand-ranked competitor gap ducks into actual production decisions instead of a report you read.
-- Precise + small: fix the one silent drop in `build_next_engine.py::_demand_basis` (read `demand_7d` as a third pool class) + a 21-day staleness guard. ~half a day, read-only, no new isolation. Matrix written first (Surface 47).
-- Then pairs with Per-Product Profit Drill-Down (Priority 0.6): demand says what to BUILD, profit says what to KEEP/RETIRE.
+### 1. The printable bundle (Priority 3, slice 1) — start with the Highland Cow
+- Approved image → 3D AI Studio → `paint-to-print-3d` color split → 57 mm → AMS filament-slot mapping → one folder (3MF + three-angle colored render + receipt), with the operator approving the colored render before any print.
+- The Highland Cow is the test article (last proven duck, 2026-05-22); then the Power Ranger from the 2026-09-11 run. Golden regression on the Highland Cow GLB.
+
+### 1b. Studio "import concept image" + the two instrumentation cards (Priority 3, slices 2–3)
+- A ChatGPT PNG enters the pipeline at the 3D step; `concept_to_print_status.json` revived; cards for printable bundles per 30 days and provider outages.
+
+> ~~Demand-rank Build-Next on the competitor demand signal~~ — **SHIPPED 2026-06-28 (Surface 47):** `score_demand` reads the competitor `demand_7d` score first; kept here only so the old step is not rebuilt.
 
 > ~~Promote Weekly Sale Into The Autonomy Gate~~ — **largely moot (2026-06-22):** the operator turned OFF the sale *posts* and the recurring "pick the final weekly sale post" decision; the weekly Shopify SALE already auto-applies and is never gated. The decision this step wanted to automate no longer exists. Independent `sale_posts` toggle lives on `/portal/workflows-status`.
 
