@@ -1971,9 +1971,16 @@ That file alone, before `tests/test_thursday_funnel_fixes.py`, reproduces the fa
 share the pattern. Working hypothesis: a path cached (lru_cache / module global) while the cwd was
 temporary, not the cwd itself. Fix to try first: `monkeypatch.chdir`, which pytest restores.
 
-**Polluter 2** is independent, lives in `creative_agent/runtime/tests`, and breaks
-`test_cadence_override_bridge` / `test_profit_email_cadence` / `test_competitor_email_cadence`. Narrowed
-past the first 33 of 66 files; bisection unfinished.
+**Polluter 2 is NOT yet located.** It affects `test_cadence_override_bridge` /
+`test_profit_email_cadence` / `test_competitor_email_cadence`, which pass alone AND pass when `tests/`
+runs without the other two directories, so it only appears in the full three-directory run. Two
+bisection attempts on 2026-09-22 were INVALID and their answers must be ignored: both omitted the guard
+that checks the failure reproduces before searching, so they simply converged on the last file in the
+list. A claim that it lives in `creative_agent/runtime/tests` came from misreading a "5 failed" count
+as cadence failures; a direct re-check shows `creative_agent/runtime/tests` + cadence produces ZERO
+cadence failures. **Method note for whoever picks this up:** bisect by `--deselect` over the full
+three-directory command, which is the only configuration that reproduces, and assert reproduction
+before searching. Prefix-of-files bisection does not model this failure.
 
 Until both are fixed the suite cannot report a regression: one new failure masked by one fixed leaves the
 count at 19. Fix before the next credit-spending run. ([[feedback_alive_status_is_not_progress]] family.)
