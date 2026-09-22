@@ -1953,43 +1953,50 @@ The Monday meme posted with the golf cart's windshield filled solid white. **Not
 | Live correction | ✅ RESOLVED 2026-09-21 12:15 (operator: "Run replace path"): `scripts/meme_replace.py --run-id 2026-09-21 --regenerate` deleted scheduled FB post `…122261740742757684`, quarantined IG entry `…-911228`, re-rendered with the cutout fix and rescheduled for the same 18:00 slot (FB `…122261748740757684`, IG `…-665a60`, page's only scheduled post) | — | — | — | ⚠️ regenerate re-runs `step_meme_prepare`, so the caption and AI background change too — it is not a pure image swap. Acceptable here; note it before using `--regenerate` on a meme whose copy was already approved |
 | `--regenerate` mode (`flows/meme/replace.py::replace_meme_duck(regenerate=True)`, `scripts/meme_replace.py --regenerate`) | `tests/test_meme_replace.py::test_regenerate_keeps_this_weeks_duck_and_re_renders` (same handle kept, prepare/render/resolve/email in order, stale FB post still cancelled, publish keys reset, `mode == "regenerate"`) | `::test_regenerate_needs_a_product_on_the_run` (no product handle on the run → refused) | dry-run preview resolves the regenerate target and labels it (a silent `replacement: None` preview on a Tier-3 tool was fixed before the live run) | `::test_regenerate_still_honours_the_grace_window_and_published_refusals` (already published, and inside the 30-minute window, both refused) | the plain replace path still refuses a same-duck swap: `::test_replace_refusals` unchanged |
 
-## Suite baseline — the duckAgent "19 pre-existing failures", diagnosed and being fixed (2026-09-22)
+## Suite baseline — RESOLVED 2026-09-22: 19 failures → 0 (operator: "Please resolve failures robustly")
 
-Measured, not inherited. Of 19: **2 were real bugs, 17 were cross-test pollution** (each passed when its
-own file ran alone, which is exactly why they were dismissed as noise for months instead of fixed).
+The 19 had been carried as an unexplained baseline for months. **2 were real bugs, 17 were cross-test
+pollution** — every one passed when its own file ran alone, which is exactly why they were written off
+as noise instead of fixed.
 
-**The cause of the pollution is a working-directory leak, and it is real.** Several tests call a bare
-`os.chdir(tmp_path)` with no restore (`tests/test_competitor_exact_sales.py` ×6,
-`test_competitor_report_hygiene.py` ×2, `test_competitor_my_shop_row.py` ×1). Many other tests read repo
-files by relative path (`open("flows/thursday/steps.py")`). Alone each style passes; together the first
-leaks its directory into the second and the reader dies on `FileNotFoundError`.
+**Four leaks, all the same shape: a global mutated without restore.**
 
-**The gotcha that hid it, and cost two wrong diagnoses in one session:**
-`creative_agent/runtime/pyproject.toml` is an inifile, so the real command
-(`pytest creative_agent/runtime/tests creative_agent/tools/tests tests`) sets pytest's **rootdir to
-`creative_agent/runtime`, not the repo root**. Consequences: (a) a `conftest.py` placed at the repo root
-is ABOVE rootdir and is silently never loaded — it appears to work when you test it with
-`pytest tests/...` alone, because that invocation puts rootdir back at the repo root; (b) reported node
-IDs are relative to that rootdir, so failures print paths like
-`creative_agent/runtime/test_profit_email_cadence.py` for a file that actually lives at
-`tests/test_profit_email_cadence.py`. Chasing those non-existent paths is what produced two invalid
-bisections (both also omitted a guard asserting the failure reproduces, so they merely converged on the
-last filename).
+| Leak | Where | Broke |
+|---|---|---|
+| bare `os.chdir(tmp_path)` | `test_competitor_exact_sales.py` ×6, `test_competitor_report_hygiene.py` ×2, `test_competitor_my_shop_row.py` ×1 | 4 Thursday tests that read repo files by relative path → `FileNotFoundError` |
+| `os.environ["DUCK_OPS_ROOT"]` set in `setUp`, no cleanup | `creative_agent/runtime/tests/test_design_brief_catalog_enrichment.py` | 11 tests in `test_cadence_override_bridge` / `test_profit_email_cadence` / `test_competitor_email_cadence`, all reading duck-ops state through a deleted temp tree |
+| `duck_creative_agent.artifacts` reloaded against that temp root, never reloaded back | same file | same 11 |
+| `steps._record_reviews_transition = lambda: None` assigned raw instead of monkeypatched | `tests/test_reviews_dedup_ledger.py` | 2 tests in `test_workflow_freshness_controls` that count recorded transitions |
 
-**Fix shipped:** `duckagent_test_cwd_guard.py` at the repo root defines one autouse fixture that resets
-the cwd to the repo root after every test, imported by all three test-root conftests (a conftest is
-always loaded for its own directory whatever rootdir is). It resets to the repo root rather than
-save/restore, because save/restore only undoes a test's own leak and faithfully preserves an inherited one.
+**Two real bugs found underneath:** `test_cost_intel_page` asserted the link text "Back to Desk", which
+changed in July, instead of the link target (now `href="/portal/desk"`, verified against the live page at
+`/portal/intel/cost`: http 200, footer present, no traceback). And
+`flows/weekly/steps.py::_load_external_python_module` let a sibling import
+(`from workflow_control import VALUE`) bind to an already-imported module of the same name, so it could
+return a module wired to the wrong code; it now shadows same-named siblings for the duration of a load.
+**That fix needed a second pass**: the first version also evicted legitimately pre-imported siblings, which
+only showed up when driven against the real duck-ops tree rather than the test fixture.
 
-| Fix | Result |
-|---|---|
-| cwd guard wired into all three conftests | 19 → 15 failures (Thursday cluster fixed) |
-| `test_cost_intel_page` asserted `href="/portal/desk"` instead of the link text "Back to Desk" | real bug: the label changed in July, the assertion told us nothing about whether the footer worked |
-| `flows/weekly/steps.py::_load_external_python_module` shadows same-named sibling modules during the load | real bug: `from workflow_control import VALUE` bound to the already-imported duck-ops module instead of the directory being loaded, so the loader could silently return a module wired to the wrong code |
+**The gotcha that hid all of it, and produced two wrong diagnoses in one session:**
+`creative_agent/runtime/pyproject.toml` is an inifile, so the real command sets pytest's **rootdir to
+`creative_agent/runtime`, not the repo root**. Therefore (a) a `conftest.py` at the repo root is above
+rootdir and is **silently never loaded**, while appearing to work if you verify it with `pytest tests/...`
+alone; (b) node IDs print relative to that rootdir, so failures name paths like
+`creative_agent/runtime/test_profit_email_cadence.py` for a file that lives at `tests/`. The safety net
+therefore lives in `duckagent_test_cwd_guard.py` and is imported by all three test-root conftests, since a
+conftest always loads for its own directory whatever rootdir is. It **resets** cwd to the repo root rather
+than save/restore, because save/restore only undoes a test's own leak and preserves an inherited one.
 
-**Still open:** 11 failures across `test_cadence_override_bridge`, `test_profit_email_cadence`,
-`test_competitor_email_cadence` that appear only when `creative_agent/runtime/tests` runs before `tests/`
-(reproduced reliably: `tests` alone = 2, `runtime/tests + tests` = 13). Guarded bisection in progress.
+**Method rules earned here (two bisections were invalid before these):**
+1. Never bisect without first asserting the condition reproduces with everything included. Without that
+   guard a binary search whose every probe says "ok" just walks to the end and reports the last filename.
+2. Never trust a reported test path without checking a file exists there.
+3. Prefix-of-files bisection cannot model a failure that needs several test roots; bisect with `--deselect`
+   over the real command.
+
+**Verification:** green twice in a row, green with the three roots in reverse order, duck-ops 1172 passed,
+secret scan clean, and — the point of the exercise — **red again (2 failures) when the ledger leak is
+deliberately reintroduced**, so the suite now actually reports regressions instead of a constant 19.
 
 
 Acceptance criteria for next ship:
