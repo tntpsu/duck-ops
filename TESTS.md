@@ -1953,6 +1953,31 @@ The Monday meme posted with the golf cart's windshield filled solid white. **Not
 | Live correction | ✅ RESOLVED 2026-09-21 12:15 (operator: "Run replace path"): `scripts/meme_replace.py --run-id 2026-09-21 --regenerate` deleted scheduled FB post `…122261740742757684`, quarantined IG entry `…-911228`, re-rendered with the cutout fix and rescheduled for the same 18:00 slot (FB `…122261748740757684`, IG `…-665a60`, page's only scheduled post) | — | — | — | ⚠️ regenerate re-runs `step_meme_prepare`, so the caption and AI background change too — it is not a pure image swap. Acceptable here; note it before using `--regenerate` on a meme whose copy was already approved |
 | `--regenerate` mode (`flows/meme/replace.py::replace_meme_duck(regenerate=True)`, `scripts/meme_replace.py --regenerate`) | `tests/test_meme_replace.py::test_regenerate_keeps_this_weeks_duck_and_re_renders` (same handle kept, prepare/render/resolve/email in order, stale FB post still cancelled, publish keys reset, `mode == "regenerate"`) | `::test_regenerate_needs_a_product_on_the_run` (no product handle on the run → refused) | dry-run preview resolves the regenerate target and labels it (a silent `replacement: None` preview on a Tier-3 tool was fixed before the live run) | `::test_regenerate_still_honours_the_grace_window_and_published_refusals` (already published, and inside the 30-minute window, both refused) | the plain replace path still refuses a same-duck swap: `::test_replace_refusals` unchanged |
 
+## Suite baseline note — the duckAgent "19 pre-existing failures" (re-measured 2026-09-22)
+
+Do not treat the count as the signal. Measured breakdown:
+
+| Bucket | Count | Detail |
+|---|---|---|
+| Genuine | 2 | `tests/test_weekly_sale_history_summary.py::test_load_external_python_module_supports_sibling_runtime_imports` (duck-ops `workflow_control.VALUE` import) and `creative_agent/runtime/tests/test_cost_intel_page.py::…::test_full_summary_renders_all_sections` (stale "Back to Desk", red since July). Both fail when run alone. |
+| Cross-test pollution | 17 | Every one passes when its own file runs alone. Not regressions. |
+
+**The long-standing "cwd leak" explanation is wrong.** A teardown hook watching `os.getcwd()` across the
+whole suite saw zero changes, and the cwd is verifiably unchanged after the suspect file's session ends.
+
+**Polluter 1** (binary search over the 115 files collected before it): `tests/test_competitor_exact_sales.py`.
+That file alone, before `tests/test_thursday_funnel_fixes.py`, reproduces the failures. It calls bare
+`os.chdir(tmp_path)` six times; siblings `test_competitor_report_hygiene.py` and `test_competitor_my_shop_row.py`
+share the pattern. Working hypothesis: a path cached (lru_cache / module global) while the cwd was
+temporary, not the cwd itself. Fix to try first: `monkeypatch.chdir`, which pytest restores.
+
+**Polluter 2** is independent, lives in `creative_agent/runtime/tests`, and breaks
+`test_cadence_override_bridge` / `test_profit_email_cadence` / `test_competitor_email_cadence`. Narrowed
+past the first 33 of 66 files; bisection unfinished.
+
+Until both are fixed the suite cannot report a regression: one new failure masked by one fixed leaves the
+count at 19. Fix before the next credit-spending run. ([[feedback_alive_status_is_not_progress]] family.)
+
 Acceptance criteria for next ship:
 - [ ] This file is current — every new code path has a row
 - [ ] No `🔴 MISSING` cells without a `manual:` or `skip:` decision and a one-line reason
