@@ -2001,6 +2001,19 @@ secret scan clean, and — the point of the exercise — **red again (2 failures
 deliberately reintroduced**, so the suite now actually reports regressions instead of a constant 19.
 
 
+## Surface 73 — Etsy listing video upload (2026-09-23, operator: "Can we also use chrome to upload the video to the new listing since api can't do it")
+
+**The premise was wrong in our favour: Etsy's API DOES support video, so no browser automation is needed** (which matters — the Etsy browser lane is capped at 3 jittered windows/day and is Tier 3). The newduck flow had rendered a listing video since April and never had an upload path; it sat on disk. Our token already carried the required `listings_r` + `listings_w`.
+
+**Routes are asymmetric and the rendered docs are JS-only (403 to a fetch), so they were confirmed against the live API:** write `POST /v3/application/shops/{shop_id}/listings/{listing_id}/videos`, read `GET /v3/application/listings/{listing_id}/videos` (no shop segment). POSTing an empty body answers `"Either a valid video_id or video file must be provided"` — that is the source of the multipart field name `video`. Etsy limits: MP4/H.264, no audio, 5–15 s, <100 MB, **one video per listing**.
+
+|  | Happy | Provider/turn failure | Prompt contract drift | Wrong inputs reach the model | Regression |
+|---|---|---|---|---|---|
+| Upload + verify (`helpers/etsy_helper.py::etsy_upload_listing_video`, `etsy_get_listing_videos`) | `tests/test_etsy_listing_video_upload.py::test_uploads_then_reads_back_to_confirm_it_stuck` (shop-scoped URL, field `video`, `video/mp4`, id + url returned) | `::test_accepted_but_missing_is_reported_not_celebrated` → status `accepted_but_missing`; 401 refreshes the token once and retries | `::test_a_video_still_processing_is_not_counted_as_verified` — **verified means an ACTIVE video on read-back, not a 201** (Etsy accepts media then drops it async, same as listing images, Surface 25) | `::test_refuses_empty_and_oversize_before_calling_etsy` (empty bytes, >100 MB) | `::test_existing_video_is_left_alone` (one video per listing; never re-POST) |
+| Duration band (`helpers/listing_video_helper.py`) | `tests/test_listing_video_helper.py::test_video_duration_always_lands_in_etsys_5_to_15_second_band` across 2–5 images | — | — | **real defect found**: length falls out of the IMAGE COUNT, so 2 photos gave 2.9 s and 3 gave 4.5 s, both under Etsy's 5 s minimum, with nothing in the flow to notice. Stills now stretch to hit the band | `ETSY_VIDEO_MIN_SECONDS`/`MAX` named in the helper |
+| Flow wiring (`flows/newduck/steps.py`, `etsy_create_listing(..., video_path=)`) | `::test_etsy_create_listing_accepts_a_video_path` (optional, default None) | `::test_a_failed_video_never_sinks_the_listing` — a video failure is recorded and the listing publishes regardless | the lookup is `data["listing_video"]` inside the `newduck` state blob, **not** top-level `st.get("listing_video")` — the first wiring used the latter and would have silently uploaded nothing | result stored as `newduck_etsy_video_upload` for the activation email / OS card | — |
+| Live proof | ✅ 2026-09-23 against the Country Queen **draft** (4580807337, unpublished): built 7.75 s MP4/H.264 1080×1080 0.8 MB → uploaded → read back `video_state: active`, `video_id` 843875105 → second attempt correctly declined as `already_present` | — | — | — | — |
+
 Acceptance criteria for next ship:
 - [ ] This file is current — every new code path has a row
 - [ ] No `🔴 MISSING` cells without a `manual:` or `skip:` decision and a one-line reason
