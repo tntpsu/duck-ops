@@ -248,18 +248,35 @@ def _load_normalized_posts(*, window_days: int, now: datetime | None = None) -> 
     return posts, summary
 
 
-def _facebook_object_fields() -> str:
-    return ",".join(
+def _facebook_object_fields(include_optional: bool = True) -> str:
+    # permalink_url is not supported on every page-post object type, and Graph
+    # rejects the WHOLE request with "(#100) Tried accessing nonexisting field"
+    # when one field is bad -- taking the reaction and comment counts down with
+    # it. Kept separate so the fetch can retry on the core set.
+    fields = ["id", "created_time"]
+    if include_optional:
+        fields.append("permalink_url")
+    fields.extend(
         [
-            "id",
-            "created_time",
-            "permalink_url",
             "message",
             "shares",
             "reactions.summary(total_count).limit(0)",
             "comments.summary(total_count).limit(0)",
         ]
     )
+    return ",".join(fields)
+
+
+def _facebook_object_id_candidates(post_id: str) -> list[str]:
+    """Bare page-post ids are not addressable on their own; Graph wants
+    {page_id}_{post_id}. Posts published through some lanes record only the
+    bare id, so try the qualified form as a fallback."""
+    candidates = [post_id]
+    if "_" not in post_id:
+        page_id = _compact_text(os.environ.get("META_PAGE_ID"))
+        if page_id:
+            candidates.append(f"{page_id}_{post_id}")
+    return candidates
 
 
 def _parse_insights_payload(payload: dict[str, Any]) -> dict[str, int]:
@@ -342,20 +359,32 @@ def _fetch_facebook_metrics(post: dict[str, Any], token_manager) -> dict[str, An
         return {"status": "missing_id", "metrics": {}, "errors": ["Missing Facebook post id."]}
 
     token_override = token_manager.get_facebook_page_token()
-    object_response = token_manager.make_request(
-        "GET",
-        f"https://graph.facebook.com/v19.0/{post_id}",
-        params={"fields": _facebook_object_fields()},
-        token_override=token_override,
-    )
-    if object_response.status_code >= 400:
+    object_payload: dict[str, Any] | None = None
+    resolved_id = post_id
+    fetch_errors: list[str] = []
+    for candidate_id in _facebook_object_id_candidates(post_id):
+        for include_optional in (True, False):
+            object_response = token_manager.make_request(
+                "GET",
+                f"https://graph.facebook.com/v19.0/{candidate_id}",
+                params={"fields": _facebook_object_fields(include_optional)},
+                token_override=token_override,
+            )
+            if object_response.status_code < 400:
+                object_payload = object_response.json()
+                resolved_id = candidate_id
+                break
+            fetch_errors.append(object_response.text[:300])
+        if object_payload is not None:
+            break
+
+    if object_payload is None:
         return {
             "status": "fetch_failed",
             "metrics": {},
-            "errors": [object_response.text[:300]],
+            "errors": fetch_errors[:4],
         }
-
-    object_payload = object_response.json()
+    post_id = resolved_id
     reactions = object_payload.get("reactions") if isinstance(object_payload.get("reactions"), dict) else {}
     comments = object_payload.get("comments") if isinstance(object_payload.get("comments"), dict) else {}
     metrics: dict[str, Any] = {
@@ -366,7 +395,7 @@ def _fetch_facebook_metrics(post: dict[str, Any], token_manager) -> dict[str, An
         "timestamp": _compact_text(object_payload.get("created_time")) or None,
     }
 
-    errors: list[str] = []
+    errors: list[str] = list(fetch_errors[:2])
     insight_metrics: dict[str, int] = {}
     for metric in ["post_impressions", "post_impressions_unique", "post_engaged_users"]:
         insight_response = token_manager.make_request(
@@ -546,6 +575,18 @@ def writeback_outcome_to_creative_quality_receipt(
     return {"action": "wrote_outcome", "window": window, "age_hours": round(age_hours, 1)}
 
 
+MEASURED_METRIC_STATUSES = {"ok", "partial"}
+
+
+def _is_measured(post: dict[str, Any]) -> bool:
+    """Whether this post's metrics were actually retrieved. A fetch_failed or
+    scheduled_future post has no metrics, and summing an empty dict yields 0.0 --
+    indistinguishable from a post that was measured and genuinely got zero. That
+    silent conflation dragged the meme lane to 1.60 when its measured average was
+    4.00. The writeback path has guarded on this status since June."""
+    return str(post.get("metric_status") or "").lower() in MEASURED_METRIC_STATUSES
+
+
 def _engagement_score(post: dict[str, Any]) -> float:
     metrics = post.get("metrics") if isinstance(post.get("metrics"), dict) else {}
     if str(post.get("platform") or "").lower() == "facebook":
@@ -553,6 +594,20 @@ def _engagement_score(post: dict[str, Any]) -> float:
     else:
         values = [metrics.get("like_count"), metrics.get("comments_count"), metrics.get("saved")]
     return float(sum(_safe_float(value) or 0.0 for value in values))
+
+
+def _engagement_score_or_none(post: dict[str, Any]) -> float | None:
+    """The score to publish and to average. None means "not measured", which is
+    what every aggregate must skip rather than treat as a zero."""
+    return _engagement_score(post) if _is_measured(post) else None
+
+
+def _post_reach(post: dict[str, Any]) -> float | None:
+    if not _is_measured(post):
+        return None
+    metrics = post.get("metrics") if isinstance(post.get("metrics"), dict) else {}
+    reach = _safe_float(metrics.get("reach") or metrics.get("post_impressions_unique"))
+    return reach if reach and reach > 0 else None
 
 
 def _engagement_rate(post: dict[str, Any]) -> float | None:
@@ -571,20 +626,58 @@ def _rollup_rows(posts: list[dict[str, Any]], field: str) -> list[dict[str, Any]
 
     rows: list[dict[str, Any]] = []
     for key, items in grouped.items():
-        scores = [_engagement_score(item) for item in items]
-        avg_score = round(sum(scores) / len(scores), 2) if scores else 0.0
-        avg_rate_values = [rate for rate in (_engagement_rate(item) for item in items) if rate is not None]
+        measured = [item for item in items if _is_measured(item)]
+        scores = [_engagement_score(item) for item in measured]
+        avg_score = round(sum(scores) / len(scores), 2) if scores else None
+        avg_rate_values = [rate for rate in (_engagement_rate(item) for item in measured) if rate is not None]
         avg_rate = round(sum(avg_rate_values) / len(avg_rate_values), 4) if avg_rate_values else None
         rows.append(
             {
                 "label": key,
                 "post_count": len(items),
+                "measured_post_count": len(measured),
                 "avg_engagement_score": avg_score,
                 "avg_engagement_rate": avg_rate,
-                "top_post_id": max(items, key=_engagement_score).get("post_id"),
+                "top_post_id": max(measured, key=_engagement_score).get("post_id") if measured else None,
             }
         )
-    rows.sort(key=lambda item: (-float(item.get("avg_engagement_score") or 0), -int(item.get("post_count") or 0), str(item.get("label") or "")))
+    # A lane with nothing measured sorts last rather than winning on a 0.0 it
+    # never earned; -1 keeps it below a genuine measured zero.
+    rows.sort(
+        key=lambda item: (
+            -(item.get("avg_engagement_score") if item.get("avg_engagement_score") is not None else -1.0),
+            -int(item.get("measured_post_count") or 0),
+            str(item.get("label") or ""),
+        )
+    )
+    return rows
+
+
+def _reach_rollup_rows(posts: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    """Reach carries far more signal than the like count here (across 30 live
+    posts there were 0 comments and 2 saves), but it only exists on Instagram,
+    so rows stay grouped WITHIN a platform -- otherwise ranking lanes on reach
+    just ranks them on how much they post to Facebook."""
+    grouped: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for post in posts:
+        reach = _post_reach(post)
+        if reach is None:
+            continue
+        platform = _compact_text(post.get("platform")) or "(unknown)"
+        label = _compact_text(post.get(field)) or "(unknown)"
+        grouped[(platform, label)].append(reach)
+
+    rows = [
+        {
+            "platform": platform,
+            "label": label,
+            "measured_post_count": len(values),
+            "avg_reach": round(sum(values) / len(values), 1),
+            "max_reach": round(max(values), 1),
+        }
+        for (platform, label), values in grouped.items()
+    ]
+    rows.sort(key=lambda item: (str(item["platform"]), -float(item["avg_reach"]), str(item["label"])))
     return rows
 
 
@@ -692,60 +785,95 @@ def _derive_learnings(posts: list[dict[str, Any]], rollups: dict[str, list[dict[
     if not posts:
         return learnings
 
-    workflow_rows = rollups.get("by_workflow") or []
+    def _scored(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [row for row in rows if row.get("avg_engagement_score") is not None]
+
+    def _evidence(row: dict[str, Any]) -> str:
+        return (
+            f"{row.get('measured_post_count')} of {row.get('post_count')} posts measured, "
+            f"average engagement score {row.get('avg_engagement_score')}."
+        )
+
+    def _confidence(row: dict[str, Any], floor: int) -> str:
+        return "medium" if int(row.get("measured_post_count") or 0) >= floor else "low"
+
+    workflow_rows = _scored(rollups.get("by_workflow") or [])
     if workflow_rows:
         top = workflow_rows[0]
-        confidence = "medium" if int(top.get("post_count") or 0) >= 3 else "low"
         learnings.append(
             Learning(
                 key="top_workflow",
                 headline=f"{top.get('label')} is the current strongest workflow in the observed window.",
-                confidence=confidence,
-                evidence=f"{top.get('post_count')} posts with average engagement score {top.get('avg_engagement_score')}.",
+                confidence=_confidence(top, 3),
+                evidence=_evidence(top),
                 recommendation="Keep this workflow in the weekly content mix while receipt coverage grows.",
             )
         )
 
-    window_rows = [row for row in (rollups.get("by_time_window") or []) if row.get("label") != "(unknown)"]
+    window_rows = [row for row in _scored(rollups.get("by_time_window") or []) if row.get("label") != "(unknown)"]
     if window_rows:
         top = window_rows[0]
-        confidence = "medium" if int(top.get("post_count") or 0) >= 2 else "low"
         learnings.append(
             Learning(
                 key="best_time_window",
                 headline=f"{top.get('label').replace('_', ' ').title()} is the current best-performing posting window.",
-                confidence=confidence,
-                evidence=f"{top.get('post_count')} observed posts with average engagement score {top.get('avg_engagement_score')}.",
+                confidence=_confidence(top, 2),
+                evidence=_evidence(top),
                 recommendation="Use this as the default test window until we have enough weekly data to split by weekday.",
             )
         )
 
-    theme_rows = [row for row in (rollups.get("by_theme") or []) if row.get("label") != "(unknown)"]
+    theme_rows = [row for row in _scored(rollups.get("by_theme") or []) if row.get("label") != "(unknown)"]
     if theme_rows:
         top = theme_rows[0]
-        confidence = "medium" if int(top.get("post_count") or 0) >= 2 else "low"
         learnings.append(
             Learning(
                 key="top_theme",
                 headline=f"{top.get('label')} is the strongest current social theme.",
-                confidence=confidence,
-                evidence=f"{top.get('post_count')} posts with average engagement score {top.get('avg_engagement_score')}.",
+                confidence=_confidence(top, 2),
+                evidence=_evidence(top),
                 recommendation="Reuse this visual/caption family in new content tests before broadening into lower-signal themes.",
             )
         )
 
-    top_post = max(posts, key=_engagement_score)
+    reach_rows = [row for row in (rollups.get("by_workflow_reach") or []) if row.get("label") != "(unknown)"]
+    if len(reach_rows) >= 2:
+        best, worst = reach_rows[0], reach_rows[-1]
+        if best.get("platform") == worst.get("platform") and best.get("label") != worst.get("label"):
+            learnings.append(
+                Learning(
+                    key="reach_spread_by_workflow",
+                    headline=(
+                        f"On {best.get('platform')}, {best.get('label')} reaches far more people than {worst.get('label')}."
+                    ),
+                    confidence=_confidence(best, 3),
+                    evidence=(
+                        f"{best.get('label')} averages {best.get('avg_reach')} reach across "
+                        f"{best.get('measured_post_count')} post(s) versus {worst.get('avg_reach')} across "
+                        f"{worst.get('measured_post_count')} for {worst.get('label')}."
+                    ),
+                    recommendation=(
+                        "Reach separates lanes far more cleanly than likes here; treat the low-reach lane as a "
+                        "distribution problem before reworking its creative."
+                    ),
+                )
+            )
+
+    measured_posts = [post for post in posts if _is_measured(post)]
+    if not measured_posts:
+        return learnings[:5]
+    top_post = max(measured_posts, key=_engagement_score)
     top_title = _compact_text(top_post.get("title")) or _compact_text(top_post.get("theme")) or f"{top_post.get('workflow')} post"
     learnings.append(
         Learning(
             key="top_post",
             headline=f"{top_title} is the current top observed post.",
-            confidence="low" if len(posts) < 5 else "medium",
+            confidence="low" if len(measured_posts) < 5 else "medium",
             evidence=f"{top_post.get('platform')} post {top_post.get('post_id')} has engagement score {round(_engagement_score(top_post), 2)}.",
             recommendation="Review its caption, asset choice, and time slot as a template for the next iteration.",
         )
     )
-    return learnings[:4]
+    return learnings[:5]
 
 
 def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bool = True) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -759,8 +887,9 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
         post["metric_status"] = fetch_result.get("status")
         post["metrics"] = fetch_result.get("metrics") or {}
         post["metric_errors"] = fetch_result.get("errors") or []
-        post["engagement_score"] = round(_engagement_score(post), 2)
-        post["engagement_rate"] = _engagement_rate(post)
+        raw_score = _engagement_score_or_none(post)
+        post["engagement_score"] = round(raw_score, 2) if raw_score is not None else None
+        post["engagement_rate"] = _engagement_rate(post) if _is_measured(post) else None
         statuses[str(post.get("metric_status") or "unknown")] += 1
 
         # Phase 5 Step 4: writeback engagement to the creative_quality_
@@ -797,6 +926,8 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
         "by_time_window": _rollup_rows(posts, "time_window"),
         "by_theme": _rollup_rows(posts, "theme"),
         "by_duck_family": _rollup_rows(posts, "duck_family"),
+        "by_workflow_reach": _reach_rollup_rows(posts, "workflow"),
+        "by_theme_reach": _reach_rollup_rows(posts, "theme"),
     }
     learnings = _derive_learnings(posts, rollups)
     top_posts = [
@@ -819,8 +950,9 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
             "post_count": len(posts),
             "platforms_observed": len({str(item.get("platform") or "") for item in posts}),
             "workflows_observed": len({str(item.get("workflow") or "") for item in posts}),
+            "measured_post_count": sum(1 for item in posts if _is_measured(item)),
             "metrics_coverage_pct": round(
-                (sum(1 for item in posts if str(item.get("metric_status") or "") in {"ok", "partial"}) / len(posts)) * 100,
+                (sum(1 for item in posts if _is_measured(item)) / len(posts)) * 100,
                 1,
             )
             if posts
@@ -847,6 +979,12 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
         "recent_snapshots": history[-8:],
     }
     return post_payload, rollup_payload
+
+
+def _fmt_measured(value: Any, suffix: str = "") -> str:
+    """An unmeasured aggregate prints as a word, never as a bare `None` or a 0
+    an operator would read as real."""
+    return "not measured" if value is None else f"`{value}{suffix}`"
 
 
 def render_social_insights_markdown(post_payload: dict[str, Any], rollup_payload: dict[str, Any]) -> str:
@@ -908,7 +1046,7 @@ def render_social_insights_markdown(post_payload: dict[str, Any], rollup_payload
             lines.extend(
                 [
                     f"- `{item.get('workflow')}` / `{item.get('platform')}`: {label}",
-                    f"  score `{item.get('engagement_score')}` | rate `{item.get('engagement_rate')}` | post `{item.get('post_id')}`",
+                    f"  score {_fmt_measured(item.get('engagement_score'))} | rate {_fmt_measured(item.get('engagement_rate'))} | post `{item.get('post_id')}`",
                     f"  {item.get('url') or '(no url)'}",
                 ]
             )
@@ -928,7 +1066,18 @@ def render_social_insights_markdown(post_payload: dict[str, Any], rollup_payload
             continue
         for row in rows[:8]:
             lines.append(
-                f"- `{row.get('label')}`: `{row.get('post_count')}` posts | avg score `{row.get('avg_engagement_score')}` | avg rate `{row.get('avg_engagement_rate')}`"
+                f"- `{row.get('label')}`: `{row.get('measured_post_count')}` of `{row.get('post_count')}` measured "
+                f"| avg score {_fmt_measured(row.get('avg_engagement_score'))} | avg rate {_fmt_measured(row.get('avg_engagement_rate'))}"
+            )
+        lines.append("")
+
+    reach_rows = ((rollup_payload.get("rollups") or {}).get("by_workflow_reach")) or []
+    if reach_rows:
+        lines.extend(["## Workflow Reach (within platform)", ""])
+        for row in reach_rows[:8]:
+            lines.append(
+                f"- `{row.get('platform')}` / `{row.get('label')}`: avg reach `{row.get('avg_reach')}` "
+                f"| max `{row.get('max_reach')}` | `{row.get('measured_post_count')}` measured post(s)"
             )
         lines.append("")
 

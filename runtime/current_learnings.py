@@ -1277,14 +1277,22 @@ def render_current_learnings_markdown(payload: dict[str, Any]) -> str:
 
     lines.extend(["## Best Windows", ""])
     for item in payload.get("best_windows") or []:
-        lines.append(f"- `{item.get('label')}`: `{item.get('post_count')}` posts | avg score `{item.get('avg_engagement_score')}`")
+        _score = item.get('avg_engagement_score')
+        lines.append(
+            f"- `{item.get('label')}`: `{item.get('post_count')}` posts | avg score "
+            + ("not measured" if _score is None else f"`{_score}`")
+        )
     if not (payload.get("best_windows") or []):
         lines.append("No posting-window learnings are available yet.")
     lines.append("")
 
     lines.extend(["## Strongest Workflows", ""])
     for item in payload.get("strongest_workflows") or []:
-        lines.append(f"- `{item.get('label')}`: `{item.get('post_count')}` posts | avg score `{item.get('avg_engagement_score')}`")
+        _score = item.get('avg_engagement_score')
+        lines.append(
+            f"- `{item.get('label')}`: `{item.get('post_count')}` posts | avg score "
+            + ("not measured" if _score is None else f"`{_score}`")
+        )
     if not (payload.get("strongest_workflows") or []):
         lines.append("No workflow learnings are available yet.")
     lines.append("")

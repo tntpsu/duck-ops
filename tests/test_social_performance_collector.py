@@ -219,5 +219,198 @@ class FetchInstagramMetricsTests(unittest.TestCase):
         self.assertEqual(result["errors"], [])
 
 
+def _post(workflow, *, platform="instagram", status="ok", like=0, reach=None, post_id="p"):
+    """A normalized post as build_social_performance_payload leaves it."""
+    metrics = {}
+    if status in {"ok", "partial"}:
+        metrics = {"like_count": like, "comments_count": 0, "saved": 0}
+        if reach is not None:
+            metrics["reach"] = reach
+    return {
+        "workflow": workflow,
+        "platform": platform,
+        "post_id": post_id,
+        "theme": "t",
+        "time_window": "evening",
+        "duck_family": "d",
+        "metric_status": status,
+        "metrics": metrics,
+    }
+
+
+class UnmeasuredPostsAreNotZeroTests(unittest.TestCase):
+    """2026-09-24 field bug: 9 Facebook posts whose metrics fetch failed were
+    scored 0.0 and averaged into the meme lane, which reported 1.60 instead of
+    its true 4.00 and ranked last instead of tied second. The collector already
+    recorded metric_status=fetch_failed per post and counted it in the summary;
+    _engagement_score simply never read it. The writeback path had had the same
+    guard since June (test_skips_on_fetch_failed_metric_status) -- the rollups
+    never got it."""
+
+    def test_failed_fetches_do_not_drag_the_lane_mean(self) -> None:
+        posts = [
+            _post("meme", like=6, post_id="m1"),
+            _post("meme", platform="facebook", status="fetch_failed", post_id="m2"),
+            _post("meme", platform="facebook", status="fetch_failed", post_id="m3"),
+        ]
+        row = social_performance_collector._rollup_rows(posts, "workflow")[0]
+        self.assertEqual(row["avg_engagement_score"], 6.0)
+        self.assertEqual(row["post_count"], 3)
+        self.assertEqual(row["measured_post_count"], 1)
+
+    def test_a_measured_zero_still_counts(self) -> None:
+        """Only UNMEASURED posts are excluded; a real zero is real data."""
+        posts = [_post("meme", like=6, post_id="m1"), _post("meme", like=0, post_id="m2")]
+        row = social_performance_collector._rollup_rows(posts, "workflow")[0]
+        self.assertEqual(row["avg_engagement_score"], 3.0)
+        self.assertEqual(row["measured_post_count"], 2)
+
+    def test_lane_with_nothing_measured_reports_none_not_zero(self) -> None:
+        posts = [_post("meme", status="fetch_failed", post_id="m1")]
+        row = social_performance_collector._rollup_rows(posts, "workflow")[0]
+        self.assertIsNone(row["avg_engagement_score"])
+        self.assertEqual(row["measured_post_count"], 0)
+
+    def test_unmeasured_lanes_never_outrank_measured_ones(self) -> None:
+        posts = [
+            _post("meme", like=6, post_id="m1"),
+            _post("jeepfact", status="fetch_failed", post_id="j1"),
+        ]
+        rows = social_performance_collector._rollup_rows(posts, "workflow")
+        self.assertEqual(rows[0]["label"], "meme")
+
+    def test_per_post_score_is_none_when_never_measured(self) -> None:
+        """0.0 is a measurement; absence must not look like one."""
+        self.assertIsNone(
+            social_performance_collector._engagement_score_or_none(_post("meme", status="fetch_failed"))
+        )
+        self.assertEqual(
+            social_performance_collector._engagement_score_or_none(_post("meme", like=4)), 4.0
+        )
+
+    def test_top_workflow_belief_ignores_unmeasured_posts(self) -> None:
+        """The belief that actually shipped wrong."""
+        posts = [
+            _post("duckvideo", like=4, post_id="d1"),
+            _post("meme", like=7, post_id="m1"),
+            _post("meme", like=5, post_id="m2"),
+        ] + [
+            _post("meme", platform="facebook", status="fetch_failed", post_id=f"m{i}")
+            for i in range(3, 12)
+        ]
+        rollups = {"by_workflow": social_performance_collector._rollup_rows(posts, "workflow")}
+        learnings = social_performance_collector._derive_learnings(posts, rollups)
+        top = next(item for item in learnings if item.key == "top_workflow")
+        self.assertIn("meme", top.headline)
+        self.assertIn("2 of 11 posts measured", top.evidence)
+
+
+class ReachRollupTests(unittest.TestCase):
+    """Reach is the only metric here with real dynamic range (0 comments and 2
+    saves across 30 live posts), but it is Instagram-only, so ranking on it has
+    to stay inside one platform or it just compares platform mix."""
+
+    def test_reach_rows_are_grouped_within_platform(self) -> None:
+        posts = [
+            _post("duckvideo", reach=180, post_id="d1"),
+            _post("review_carousel", reach=26, post_id="r1"),
+            _post("meme", platform="facebook", status="ok", like=1, post_id="f1"),
+        ]
+        rows = social_performance_collector._reach_rollup_rows(posts, "workflow")
+        self.assertTrue(all(row["platform"] == "instagram" for row in rows))
+        self.assertEqual(rows[0]["label"], "duckvideo")
+        self.assertEqual(rows[0]["avg_reach"], 180.0)
+
+    def test_posts_without_reach_are_skipped_not_zeroed(self) -> None:
+        posts = [
+            _post("meme", reach=100, post_id="m1"),
+            _post("meme", like=3, post_id="m2"),
+        ]
+        rows = social_performance_collector._reach_rollup_rows(posts, "workflow")
+        self.assertEqual(rows[0]["avg_reach"], 100.0)
+        self.assertEqual(rows[0]["measured_post_count"], 1)
+
+
+class FacebookFetchRecoveryTests(unittest.TestCase):
+    """Both live Graph failures, from state/social_performance_posts.json:
+    6 posts -> (#100) Tried accessing nonexisting field (permalink_url)
+    3 posts -> Unsupported get request. Object with ID '1222...' does not exist
+    The first threw away reaction/comment counts the object would have returned;
+    the second needs the {page_id}_{post_id} form the working posts already use."""
+
+    def _manager(self, responses):
+        calls = []
+
+        class _Resp:
+            def __init__(self, status_code, payload, text=""):
+                self.status_code = status_code
+                self._payload = payload
+                self.text = text
+
+            def json(self):
+                return self._payload
+
+        class _Manager:
+            def get_facebook_page_token(self):
+                return "tok"
+
+            def make_request(self, method, url, params=None, token_override=None):
+                calls.append({"url": url, "params": params or {}})
+                return responses(url, params or {}, _Resp)
+
+        return _Manager(), calls
+
+    def test_retries_without_permalink_url_on_field_error(self) -> None:
+        field_error = {"error": {"message": "(#100) Tried accessing nonexisting field (permalink_url)", "code": 100}}
+
+        def responses(url, params, Resp):
+            if url.endswith("/insights"):
+                return Resp(400, {}, "no insights")
+            if "permalink_url" in (params.get("fields") or ""):
+                return Resp(400, field_error, json.dumps(field_error))
+            return Resp(200, {"id": "1", "reactions": {"summary": {"total_count": 5}}, "comments": {"summary": {"total_count": 1}}})
+
+        manager, calls = self._manager(responses)
+        result = social_performance_collector._fetch_facebook_metrics({"post_id": "554_1222"}, manager)
+
+        self.assertEqual(result["metrics"]["reaction_count"], 5)
+        self.assertEqual(result["metrics"]["comment_count"], 1)
+        self.assertNotEqual(result["status"], "fetch_failed")
+        self.assertTrue(any("permalink_url" not in (c["params"].get("fields") or "") for c in calls))
+
+    def test_retries_with_page_qualified_id_when_bare_id_is_unknown(self) -> None:
+        missing = {"error": {"message": "Unsupported get request. Object with ID '122253963512757684' does not exist", "code": 100}}
+
+        def responses(url, params, Resp):
+            if url.endswith("/insights"):
+                return Resp(400, {}, "no insights")
+            if "/554937081033679_122253963512757684" in url:
+                return Resp(200, {"id": "x", "reactions": {"summary": {"total_count": 3}}})
+            return Resp(400, missing, json.dumps(missing))
+
+        manager, calls = self._manager(responses)
+        with patch.dict("os.environ", {"META_PAGE_ID": "554937081033679"}):
+            result = social_performance_collector._fetch_facebook_metrics(
+                {"post_id": "122253963512757684"}, manager
+            )
+
+        self.assertEqual(result["metrics"]["reaction_count"], 3)
+        self.assertNotEqual(result["status"], "fetch_failed")
+
+    def test_gives_up_cleanly_when_every_candidate_fails(self) -> None:
+        err = {"error": {"message": "nope", "code": 100}}
+
+        def responses(url, params, Resp):
+            return Resp(400, err, json.dumps(err))
+
+        manager, _ = self._manager(responses)
+        with patch.dict("os.environ", {"META_PAGE_ID": "554937081033679"}):
+            result = social_performance_collector._fetch_facebook_metrics({"post_id": "1222"}, manager)
+
+        self.assertEqual(result["status"], "fetch_failed")
+        self.assertEqual(result["metrics"], {})
+        self.assertTrue(result["errors"])
+
+
 if __name__ == "__main__":
     unittest.main()
