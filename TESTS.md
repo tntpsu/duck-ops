@@ -2103,3 +2103,25 @@ Added tests: `tests/test_model_registry.py::TestPerRoleReasoningEffort` (5), `::
 **Still on inline literals after this pass:** thursday ×2 remaining (replacement-concept generation, post generation), weekly ×3 (one `gpt-4o`), ops ×2, jeepfact ×3, blog, competitor_engine, profit, meme_helper, duck_image_helper, theme_classifier, main_agent. `social_copy` stays on gpt-4o-mini by choice.
 
 **Operator decision on env params (2026-09-25):** models stay declared in `config/models.json`, NOT in `.env`. The config is in git, so every model decision has a dated diff and a `purpose`/`notes` field; env vars have no history and launchd silently falls back on a typo. `DUCK_MODEL_<ROLE>` / `_EFFORT` are the escape hatch for an A/B or an emergency rollback, not the home.
+## Surface 76 — Outbound email escaped the test suite (2026-09-25, operator: "why do I keep getting this or that Thursday emails with no ducks? Is this from a test?")
+
+**Yes, from my own tests.** Four real `MJD: [THURSDAY] SKIPPED — no printable option` emails landed in the operator's inbox during pytest runs, every one stamped `RUN:r` (a test's fake run id) with fake QA errors in the body ("qa fail", "style QA"). Confirmed against Gmail: 15:28:11, 15:28:13, 15:46:28, 15:46:29 UTC — two pairs, one pair per full-suite run.
+
+**Mechanism.** `step_thursday_batch_prepare` notifies by email when every option fails printability QA (`_record_thursday_skipped`, the 2026-06-29 graceful-degrade). Two Surface 74 tests deliberately fail QA to prove a bad render gets pulled and that a pulled override is not retired. `helpers/email_helper.send_email` had **no test-mode guard at all**, so the notification went straight to SMTP.
+
+This is architectural convention #4 (production writes under test) applied to outbound mail, and it is worse than the state-file case: a polluted state file is invisible and fixable, an email reaches a human and cannot be recalled. Any test touching any email path had this exposure, not just the two new ones.
+
+**Fix, three layers like the state-write convention:**
+1. **Source guard** — `send_email` returns `{"status": "blocked_test_mode"}` under `DUCK_TEST_MODE`, captures the message in `_TEST_MODE_OUTBOX` (so a test can still assert what WOULD have gone out), and prints a loud `BLOCKED by DUCK_TEST_MODE` line rather than no-opping silently ([[feedback_swallowed_errors_lie]]).
+2. **Autouse conftest fixture** `_no_outbound_email` sets `DUCK_TEST_MODE=1` for every test and clears the outbox. Without this, a bare `pytest` invocation (no env) would sail past the source guard — which is exactly the shape of the original hole.
+3. **Audit tests** in `tests/test_no_email_escapes_in_test_mode.py`, including a replay of the precise flow path that leaked.
+
+|  | Happy | Guard bypassed | Silent failure | Production unaffected | Regression |
+|---|---|---|---|---|---|
+| `send_email` under test | `tests/test_no_email_escapes_in_test_mode.py::TestGuard::test_test_mode_blocks_the_send` | ✅ `::test_smtp_is_never_touched_under_test_mode` (patches `smtplib.SMTP` to raise) | ✅ `::test_it_is_loud_not_silent` | ✅ `::test_without_test_mode_the_normal_path_still_runs` (the guard must not disable real email) | `::test_the_blocked_message_is_captured_for_assertions` |
+| The flow path that leaked | ✅ `::TestTheFlowPathThatLeaked::test_thursday_all_options_failed_does_not_email_under_test` (all-options-fail → notification built, captured, never sent) | n/a | n/a | n/a | `::TestNoLeakedTestMailInTheRealInbox::test_no_test_run_ids_appear_in_thursday_email_subjects_we_build` |
+
+Verified by running the full suite with **no** `DUCK_TEST_MODE` in the environment: 2102 passed, conftest armed the guard on its own.
+
+**Residual:** the guard keys on `DUCK_TEST_MODE`, so a script run outside pytest that imports a flow still emails normally — correct for production, but it means an ad-hoc `python -c` against a flow step can still notify the operator. Worth remembering before probing an email-adjacent step by hand.
+
