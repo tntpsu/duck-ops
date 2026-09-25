@@ -2125,3 +2125,21 @@ Verified by running the full suite with **no** `DUCK_TEST_MODE` in the environme
 
 **Residual:** the guard keys on `DUCK_TEST_MODE`, so a script run outside pytest that imports a flow still emails normally — correct for production, but it means an ad-hoc `python -c` against a flow step can still notify the operator. Worth remembering before probing an email-adjacent step by hand.
 
+**2026-09-25 — migration complete, zero inline model literals remain (operator: "Do u have choices to update all flows?" → "Yes").** All 20 remaining call sites moved to roles in one pass. Three new roles were needed because the existing ones were all listing- or social-shaped:
+
+| New role | Model | Covers |
+|---|---|---|
+| `business_analysis` | gpt-5.5 / medium | profit insights, weekly sale playbook, content strategy, competitor section insights — these steer what gets discounted and what gets built |
+| `long_form_content` | gpt-5.5 | blog posts, weekly email — length is where the cheap model drifts, repeats and pads in a way short captions never expose |
+| `factual_content` | gpt-5.5 / medium | Jeep facts. A wrong "fact" on the shop's social account is a brand problem, not a copy problem |
+
+**Thursday turned out to have six sites, not the two previously reported here.** Classifying them properly: `generate_replacement_concept`, `evaluate_concept_market_appeal`, `select_theme`'s fallback pool and `generate_concepts` all **produce or judge the duck concepts themselves** → `concept_naming`. Only the two caption builders (`batch_prepare`, `generate_post`) are `social_copy`. That completes the lane the operator called "bad as of late" — concept generation AND concept evaluation now run on the upgraded role, not just the qualifier fixed in the previous pass.
+
+`meme_helper` and `duck_image_helper` moved to `social_copy`, which resolves to the same gpt-4o-mini they already used: behaviourally a no-op, but they are now visible in `describe_roles()` and swappable without a commit. `parts_labeler` resolves through the registry with its hard-coded `gpt-5.5` as fallback, so the 3D labeler moves with everything else.
+
+**Anti-regression guard** (`::TestNoModelLiteralsCreepBack`): one test greps `flows/`, `helpers/` and `src/` for any inline `"model": "gpt-..."` and fails with file:line, because a new flow hard-coding a model is exactly how the registry silently stops being the answer. A second test asserts every role named in code exists in `models.json` — a typo'd role falls back to gpt-4o-mini and looks like nothing is wrong. That second test caught two false positives on its first run (`role="cover"` / `role="fact"` are jeepfact *image* roles, an unrelated kwarg of the same name), so it now matches `role=` only in the context of an `openai_json*` call.
+
+**Still outside the registry, deliberately:** `helpers/theme_classifier.py::DEFAULT_MODEL`. Its cached classifications are graded by an OS card, so moving it invalidates that cache and wants a `taxonomy_version`-style bump plus a re-run — a separate change, not a swap. `model_registry._FALLBACK_MODEL` is the registry's own floor.
+
+Full suite after migration: 2104 passed.
+
