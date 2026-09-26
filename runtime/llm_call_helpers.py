@@ -39,6 +39,16 @@ DEFAULT_TIMEOUT_SECONDS = 12.0
 # model defaults change.
 MODEL_PRICING_USD_PER_1M_TOKENS = {
     # OpenAI
+    # gpt-5 family added 2026-09-25 when the model registry moved ~12 roles onto
+    # gpt-5.5. Until then these were absent, so every upgraded call priced at
+    # None -> $0 and the cost card showed spend FALLING as it rose.
+    # !! THESE TWO FIGURES ARE UNVERIFIED ESTIMATES !! Nobody confirmed them
+    # against the provider's price list. They are listed in ESTIMATED_PRICING_MODELS
+    # below so the operator surface can say so out loud rather than presenting a
+    # guess as a measurement. Replace with real numbers and drop them from that
+    # set when confirmed.
+    "gpt-5.5": {"prompt": 1.250, "completion": 10.000},
+    "gpt-5": {"prompt": 1.250, "completion": 10.000},
     "gpt-4o-mini": {"prompt": 0.150, "completion": 0.600},
     "gpt-4o": {"prompt": 2.500, "completion": 10.000},
     "gpt-4.1-mini": {"prompt": 0.400, "completion": 1.600},
@@ -54,6 +64,11 @@ MODEL_PRICING_USD_PER_1M_TOKENS = {
     # pathway (Phase B). Listed here for discoverability.
     # "dall-e-3", "gpt-image-1" → see _PER_CALL_IMAGE_COST_USD below.
 }
+
+
+# Models whose pricing above is an unverified estimate. Surfaced on the cost
+# card so an estimate is never mistaken for a measurement.
+ESTIMATED_PRICING_MODELS = {"gpt-5.5", "gpt-5"}
 
 # Image-generation pricing per call. Operators care about images
 # specifically because a single 1024x1024 gpt-image-1 call ≈ $0.04

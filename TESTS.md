@@ -2143,3 +2143,42 @@ Verified by running the full suite with **no** `DUCK_TEST_MODE` in the environme
 
 Full suite after migration: 2104 passed.
 
+## Surface 77 — Cost blindness, the newduck stalled-job card, and a role eval harness (2026-09-25, operator: "Can we do all three and use skills as necessary?")
+
+Three items from one recommendation, all consequences of the Surface 75 model migration.
+
+### 77a — The cost card reported $0 for every upgraded call
+
+**Self-inflicted, one hour old when found.** Surface 75 moved ~12 roles onto `gpt-5.5`; **neither** pricing table knew that model. `estimate_cost_usd` returns `None` for an unknown model and the aggregator books that as $0, so the operator's LLM spend surface would have shown cost FALLING as it actually rose. Worse, the tile already printed "N calls uncosted" in its copy but returned `status: "ok"` — so it read **GREEN** while being wrong. Textbook [[feedback_plausible_fallbacks_mask_failure]].
+
+The durable fix is not the price entries (those go stale again) — it is that an unpriced model is now **named** and **drives the card's status**. `pricing_coverage` reports `unpriced_models` with per-model call counts (a bare count cannot be acted on; the name says what to add), plus `estimated_pricing_call_count` so a *guessed* price is distinguishable from a *known* one. **The gpt-5 figures are explicitly UNVERIFIED estimates**, declared in `ESTIMATED_PRICING_MODELS` and surfaced on the card as such, rather than presenting a guess as a measurement.
+
+|  | Happy | Unknown model | Estimated price | Card behaviour | Cross-repo drift |
+|---|---|---|---|---|---|
+| Pricing (`llm_call_helpers`) | `tests/test_llm_pricing_coverage.py::TestPricingTable::test_the_upgraded_models_are_priced` | ✅ `::test_a_genuinely_unknown_model_still_returns_none` (the None path is what the counter keys on) | ✅ `::test_estimated_prices_are_declared_as_estimates` | n/a | ✅ `::test_both_repos_agree_on_the_gpt5_price` (viewer holds a documented-in-sync mirror) |
+| Producer (`llm_cost_summary`) | `::TestUnpricedModelsAreNamed::test_a_fully_priced_log_reports_clean_coverage` | ✅ `::test_an_unpriced_model_is_reported_by_name`, `::test_unpriced_models_are_ranked_by_call_count` | ✅ `::test_estimated_pricing_calls_are_counted_separately` | n/a | `::test_an_empty_log_does_not_raise` |
+| Card (`costIntelSummary`) | n/a | ✅ `::TestTheCardActuallyChangesColour::test_uncosted_calls_drive_the_status_not_just_the_copy` — **the actual bug was status, not information** | `::test_the_tile_flags_estimated_pricing_as_unverified` | `::test_the_tile_names_the_unpriced_models` | ✅ `::test_the_tile_reads_the_payload_variable_that_exists` |
+
+That last test earned itself immediately: the first draft referenced `cost.pricing_coverage` when the tile's payload variable is `c`. `node --check` passed (valid syntax), but at runtime a ReferenceError kills the entire inline `<script>` and renders a blank page while the server still returns 200 — [[feedback_python_triple_quote_corrupts_embedded_js]]. Syntax checking is not enough for embedded JS; the identifier has to exist.
+
+### 77b — Newduck stalled-jobs card (the output-throughput half of the bracket)
+
+Built to /new-flow Part 2 standards. The existing `newduck_quality_gate` card only sees jobs that REACHED a quality gate and failed one; a job that dies before writing its `newduck` payload has no gates and is invisible. On 2026-09-24 a Headless Horseman job was killed mid-flight by a viewer restart after its photo work and before its review email — the gate card said *"No newduck jobs blocked at a quality gate"* and stayed GREEN while a real listing sat dead. The operator found out by asking. That is the definition of an unmonitored lane, and it is exactly the second failure mode [[feedback_two_card_observability_bracket]] exists to catch.
+
+Grace windows: YELLOW past 2h quiet, RED past 6h (a prepare run is ~10–20 min, so 2h clears a healthy run and 6h means nobody is coming). Jobs past the 7d lookback drop out, or every historical job accumulates into a permanent red. A gate-blocked job is explicitly excluded so one problem is not reported as two. Idle is GREEN with that exact reason.
+
+`_find_failed_gates` was **lifted from nested to module scope** so both cards share one definition of "failed gate" — duplicating it would let the two drift into double-reporting or a gap between them.
+
+|  | Happy | Excluded correctly | Threshold | Degraded input | Registration |
+|---|---|---|---|---|---|
+| Loader | ✅ `creative_agent/runtime/tests/test_newduck_stalled_jobs_card.py::TestLoader::test_the_headless_horseman_case_is_caught` (**the real shape that was invisible**) | `::test_a_published_job_is_not_stalled`, `::test_an_emailed_job_is_not_stalled`, `::test_a_gate_blocked_job_belongs_to_the_sibling_card`, `::test_a_fresh_job_is_left_alone` | `::test_yellow_between_the_grace_windows`, `::test_worst_offender_drives_the_status`, `::test_jobs_older_than_the_lookback_drop_out` | `::test_missing_runs_dir_is_yellow_not_a_crash`, `::test_corrupt_state_file_is_skipped_not_fatal`, ✅ `::test_the_loader_never_raises` | see right |
+| Card | `::TestRegistration::test_the_card_is_registered` | `::test_a_green_card_asks_for_nothing` | n/a | ✅ `::test_registered_even_with_an_empty_payload` (the case that bites — card vanishes instead of going yellow) | ✅ `::test_both_halves_of_the_bracket_are_present`, `::test_a_red_card_tells_the_operator_what_to_do` (names the recovery command) |
+
+**Verified by replay against the real dead job's state file** with the email flag reverted: gate card green, new card yellow naming "Headless Horseman Duck". At 7h it goes red.
+
+### 77c — `scripts/eval_model_roles.py` (gated eval, manual trigger, not in pytest)
+
+Surface 75 moved ~12 roles to gpt-5.5 on ONE A/B, on ONE duck, on ONE step. That justified the vision role and nothing else; the rest was a bet. This settles it per role against **real archived inputs** ([[feedback_real_generation_test_beats_mocks]]), and deliberately emits **no automatic verdict** — an LLM judging LLM output is just another unmeasured bet ([[feedback_llm_stated_confidence_is_weak]]). It prints the side-by-side plus exact measured cost and writes a receipt.
+
+**First run overturned an assumption.** On the Headless Horseman photos, gpt-5.5 produced 8 visible features to gpt-4o-mini's 4 — at **1.2x the cost, not the ~8x expected**. Cause: gpt-4o-mini billed **204,328** prompt tokens for the same images where gpt-5.5 billed **24,319**. Image tokenisation, not text, dominates this role, and the "cheap" model is barely cheaper here while returning half the detail. Roles where the cost multiple is real remain unmeasured — only `listing_vision` has a runner so far, and the script says "no" for the rest rather than inventing inputs.
+

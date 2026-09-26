@@ -41,6 +41,7 @@ from llm_call_helpers import (
     LLM_CALL_LOG_PATH,
     MODEL_PRICING_USD_PER_1M_TOKENS,
     PER_CALL_IMAGE_COST_USD,
+    ESTIMATED_PRICING_MODELS,
     estimate_cost_usd,
 )
 from governance_review_common import DUCK_OPS_ROOT, now_local_iso, write_json
@@ -200,6 +201,11 @@ def aggregate_llm_costs(
 
     malformed_lines = 0
     entries_without_at = 0
+    # 2026-09-25: a count alone ("3 calls uncosted") does not say WHICH model is
+    # missing from the price table, so nobody can act on it. gpt-5.5 sat
+    # unpriced across ~12 roles and the card stayed green.
+    unpriced_models: dict[str, int] = defaultdict(int)
+    estimated_pricing_calls = 0
 
     if log.exists():
         with log.open("r", encoding="utf-8") as fh:
@@ -229,6 +235,10 @@ def aggregate_llm_costs(
                 cost, source = _entry_cost_usd(entry)
                 _, flow = parse_artifact_id(entry.get("artifact_id"))
                 model = str(entry.get("model") or "unknown").strip() or "unknown"
+                if source == "unknown_model":
+                    unpriced_models[model] += 1
+                elif source == "token_priced" and model in ESTIMATED_PRICING_MODELS:
+                    estimated_pricing_calls += 1
                 provider = str(entry.get("provider") or "unknown").strip() or "unknown"
 
                 _add_to_bucket(by_day[date_str], entry, cost, source)
@@ -256,6 +266,15 @@ def aggregate_llm_costs(
         "by_flow": _sort_desc([{"flow": f, **_bucket_to_dict(b)} for f, b in by_flow.items()]),
         "by_model": _sort_desc([{"model": m, **_bucket_to_dict(b)} for m, b in by_model.items()]),
         "by_provider": _sort_desc([{"provider": p, **_bucket_to_dict(b)} for p, b in by_provider.items()]),
+        "pricing_coverage": {
+            "unpriced_models": [
+                {"model": m, "call_count": c}
+                for m, c in sorted(unpriced_models.items(), key=lambda kv: -kv[1])
+            ],
+            "unpriced_model_count": len(unpriced_models),
+            "estimated_pricing_call_count": estimated_pricing_calls,
+            "estimated_pricing_models": sorted(ESTIMATED_PRICING_MODELS),
+        },
         "data_quality": {
             "malformed_lines": malformed_lines,
             "entries_without_at": entries_without_at,
