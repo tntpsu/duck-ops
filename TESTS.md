@@ -2182,3 +2182,23 @@ Surface 75 moved ~12 roles to gpt-5.5 on ONE A/B, on ONE duck, on ONE step. That
 
 **First run overturned an assumption.** On the Headless Horseman photos, gpt-5.5 produced 8 visible features to gpt-4o-mini's 4 — at **1.2x the cost, not the ~8x expected**. Cause: gpt-4o-mini billed **204,328** prompt tokens for the same images where gpt-5.5 billed **24,319**. Image tokenisation, not text, dominates this role, and the "cheap" model is barely cheaper here while returning half the detail. Roles where the cost multiple is real remain unmeasured — only `listing_vision` has a runner so far, and the script says "no" for the rest rather than inventing inputs.
 
+## Surface 78 — Licensed-claim opt-in for listing copy (2026-09-27, operator: "Maybe if I pass the name licensed into a new duck then it's ok?")
+
+**The system's own guardrail contradicted the live catalog.** `flows/newduck/steps.py` blocks `official|licensed|trademark|logo|mascot` in generated listing copy, treating the claim as a risk — while **8 live products assert exactly that in their titles**, including three of the best sellers: *"The Only Officially Licensed Alabama Duck"* (1,715 sales), *"Officially Licensed Florida Gators Mascot Duck"*, *"Penn State Duck — PSU Officially Licensed Collectible"* (854). New listings were silently blocked from saying what the catalog already says.
+
+**Operator's design, and the right shape: an explicit per-listing opt-in.** Their follow-up asked whether the rule should be title-only. It should not — the same claim in a description is the same claim, and a licensor challenging it would not care where on the page it sat; title-only just moves the claim down the page. **The permission hangs off the PRODUCT, not the field.**
+
+`--licensed` takes **the rights-holder, never a boolean** (`--licensed "Collegiate Licensing Company, agreement #1234"`). A boolean decays into folklore; "licensed by whom" is the question a challenge actually asks, and the reason has to outlive the shell command that granted it. The licensor is recorded on the review, so the catalog can answer *which products claim a licence and on what basis*.
+
+Scope is deliberately narrow: a licence permits the **official/logo claim only**. Unsupported material claims (`rubber duck`) and unlicensed third-party references still block — it is not a skeleton key.
+
+|  | Happy | Blocked by default | Scope | Recorded | Plumbing |
+|---|---|---|---|---|---|
+| Claim gate (`_audit_newduck_copy_package`) | `tests/test_newduck_licensed_claim.py::TestLicensorPermitsTheClaim::test_a_named_licensor_unblocks_the_claim` | ✅ `::TestBlockedByDefault::test_an_official_claim_blocks_without_a_licensor`, `::test_a_blank_licensor_does_not_count_as_permission` (empty/whitespace/None) | ✅ `::TestItUnlocksNothingElse::test_unsupported_material_claims_still_block`, `::test_other_risky_terms_still_block` | ✅ `::test_the_permission_is_recorded_not_just_granted`, `::test_the_permission_is_visible_as_a_warning_not_silent` | see right |
+| Not title-only | `::TestLicensorPermitsTheClaim::test_it_applies_across_fields_not_just_the_title` | ✅ `::TestBlockedByDefault::test_it_blocks_in_the_description_too_not_just_the_title` (**the operator's question, answered in a test**) | `::test_a_clean_listing_is_unaffected` | n/a | n/a |
+| CLI → state → audit | n/a | n/a | n/a | n/a | ✅ `::TestPlumbing::test_the_cli_carries_a_licensor_string_not_a_flag` (asserts NOT `store_true`), `::test_the_cli_value_reaches_state`, `::test_the_resolver_reads_state_and_falls_back_to_env`, `::test_every_scorer_call_site_passes_it` (3 call sites — miss one and a listing silently loses its permission on that path) |
+
+**Open, and it needs the operator not the code:** the 8 existing listings have no recorded licensor. If a licence exists for each, back-fill it so old and new agree; if any cannot be back-filled, that title wants rewording. The mechanism is built; the list is a business question.
+
+**Test-suite note:** `creative_agent/runtime/tests/test_portal_smoke.py` failed twice under full-suite load on 2026-09-27 (`/portal/desk`, `/portal/decisions`) and passed both in isolation (60s) and on a full re-run (2178 passed). They are the slowest tests in the suite and appear timing-sensitive rather than broken — worth a real look before trusting a single red run from them.
+
