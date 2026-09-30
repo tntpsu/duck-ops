@@ -2257,3 +2257,27 @@ The card is the other half: state now knows a publish was partial, and `newduck_
 **Verified live**, not just in fixtures: 4 published runs in the 30d window, all reaching both channels, card green on `/api/system-health` after a viewer bounce + `system_health_refresh.py`.
 
 **Open from this surface:** LLM tag candidates are still not constrained to the duck's own theme (4 of 13 on Camp Slasher were office-humour before the policy pass caught them — the policy is the net, not the fix). Camp Slasher and Custom Flag Ducks are live on Etsy but sit DRAFT on Shopify.
+
+### 79e — The back-fill matched the mistake instead of catching it (2026-09-30, operator: "Height 2.5, width 1.75, length is about 2")
+
+79a moved size out of 15 Etsy titles on the argument that Etsy's faceted search reads the ATTRIBUTES, and back-filled the 36 listings whose `item_length/width/height` were empty. The values it filled them with were **4x4x2, because 250 listings already carried it** — and the whole catalog was wrong. Etsy's `item_*` fields describe the ITEM; package size belongs to the shipping profile. Those 286 listings held five different **shipping boxes** (4x4x2 ×190, 4x4x4 ×86, 6x4x4 ×8, 6x4x3, 6x4x2), which is itself the tell: one product does not have five sizes.
+
+The commit comment even said *"Shipping-box dimensions, not the duck"* — the error was seen, written down, and shipped anyway, because matching the majority felt like the conservative move. **Consistency with existing data is not evidence that the data is right**; a back-fill that copies the incumbent value inherits whatever is wrong with it, and it converts a visible gap (empty) into an invisible error (plausible). The script's docstring had even argued for caution — against *guessing*, which was the wrong risk to guard.
+
+The operator measured the duck: **2 long × 1.75 wide × 2.5 tall**. 277 listings corrected; 9 excluded because the catalog is not one object (5 mugs, a hitch cover, a fidget egg, a 4-duck pack, a plug holder).
+
+Three defects in the tooling that only this run exposed:
+
+|  | Defect | Why it mattered |
+|---|---|---|
+| `--only-empty` | `action="store_true"` with `default=True` | Always true, impossible to switch off — the one run that mattered (correcting a listing that already holds a WRONG value) could not be expressed at all |
+| read-back | verified `item_height` only | A 4x4x2 → 2x1.75x2.5 correction would be reported as success on a half-applied write, since only one axis was checked |
+| selection | no exclusion list | Would have told Etsy a ceramic mug is 2 × 1.75 × 2.5 |
+
+|  | Happy | Wrong-but-plausible value | Not a duck | Verification |
+|---|---|---|---|---|
+| Defaults | ✅ `duckAgent/tests/test_etsy_tag_policy.py::TestNewListingsGetDimensions::test_the_defaults_describe_the_duck_not_its_box` | ✅ `::test_no_dimension_is_a_known_box_size` (names all five boxes — **no range check would have caught these; they are plausible numbers**) | n/a | `::test_the_create_payload_carries_them` |
+| Override | `::test_they_are_env_overridable` | n/a | n/a | n/a |
+| Back-fill script | `--dry-run` prints `current -> new` per listing | `--only-empty` now opt-in | `--exclude` | all three axes read back |
+
+**Open:** the titles still say "2.25 Inch" on 15 listings, which matches none of the three measured axes. Whether 2.25 was ever right is unknown; the attributes are now measured, so the title text is the remaining unverified claim.
