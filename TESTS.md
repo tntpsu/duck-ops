@@ -2202,3 +2202,58 @@ Scope is deliberately narrow: a licence permits the **official/logo claim only**
 
 **Test-suite note:** `creative_agent/runtime/tests/test_portal_smoke.py` failed twice under full-suite load on 2026-09-27 (`/portal/desk`, `/portal/decisions`) and passed both in isolation (60s) and on a full re-run (2178 passed). They are the slowest tests in the suite and appear timing-sensitive rather than broken — worth a real look before trusting a single red run from them.
 
+
+## Surface 79 — The newduck publish path: four silent-failure holes found by putting one duck through it (2026-09-29, operator: "i just ran a new duck listing but didn't see an email. is it still going or did it fail silently?" then "why did new duck publish fail on shopify")
+
+One real listing (Camp Slasher Duck) went end-to-end and hit **four separate failures, three of them silent**. That is the [[feedback_real_generation_test_beats_mocks]] argument in a single run: the whole suite was green through all four.
+
+### 79a — Etsy titles carried size text; Etsy's own size FIELDS were empty
+
+Operator policy (2026-09-07, [[feedback_etsy_title_tag_policy]]) pulled Jeep/rubber out of titles. The follow-up question — *"Doesn't Etsy also want the height and or the material on the title as well?"* — has a better answer than adding words: Etsy's faceted search reads `item_length` / `item_width` / `item_height`, and **every active listing had all three empty** while 15 titles spent words on "2.25 Inch". 36 listings back-filled via `scripts/set_etsy_dimensions.py` (read-back verified, because Etsy accepts-then-drops — [[feedback_etsy_image_upload_accept_then_async_drop]]); new listings now carry the dimensions at create time so the back-fill never needs repeating.
+
+15 titles rewritten 20–23 words → 9–11 and verified live. **Deliberately a test, not a sweep**: the operator pushed back with *"I thought the wonderkind shop on Etsy has huge titles to maximize SEO. Are they not getting flagged?"* — and they are right that another shop's flag state is unobservable from here. 15 of 66 candidates keeps a control group. Before-state saved to the scratchpad; reads due 3–4 weeks out.
+
+|  | Happy | Absent | Override | Verified live |
+|---|---|---|---|---|
+| Listing defaults | ✅ `duckAgent/tests/test_etsy_tag_policy.py::TestNewListingsGetDimensions::test_dimensions_are_part_of_the_listing_defaults` | n/a | ✅ `::test_they_are_env_overridable` | 36/36 read back |
+| Create payload | ✅ `::test_the_create_payload_carries_them` | n/a | n/a | Etsy 4585304136 |
+
+### 79b — Photos, seasons and the required Jeep tag were all being dropped
+
+`ETSY_IMAGE_MAX` was 10 — **ours, never Etsy's** (Etsy raised to 20; 17 images verified sticking live). The visual brief looked at 4 photos of a 17-photo set at `detail: "low"`, so the copy described a duck the operator had not photographed. `coerce_etsy_tags` was imported but **never invoked** on the storage path, so 10 of 13 tags shipped unpoliced for months — the second time "imported ≠ invoked" has cost real listings. And a slasher duck drew office-humour tags because the seasonal trigger list knew "halloween" but not "slasher", "machete", or "hockey mask".
+
+The tag prompt fix matters more than the trigger list: it now states what tags are FOR and passes `avoid_terms`. An earlier diagnosis of mine — that tag *repetition* was the fault — was wrong, and banning repetition made the model invent "Locker Decor" and drop "Dashboard". The fault was bloat.
+
+|  | Happy | Cap | Wrong season | Policy survives a swap |
+|---|---|---|---|---|
+| Image cap | `duckAgent/tests/test_etsy_image_verify.py::test_all_stick_first_pass_no_retry` | ✅ `::test_caps_at_the_configured_maximum`, `::test_the_cap_is_higher_than_the_old_hard_coded_ten` (asserts the cap is APPLIED, not its literal value) | n/a | n/a |
+| Seasonal tags | `duckAgent/tests/test_etsy_tag_policy.py::TestHorrorIsHalloween::test_horror_ducks_get_the_halloween_tag` (parametrised over slasher/machete/hockey-mask) | n/a | ✅ `::test_a_non_horror_duck_is_unaffected`, `::test_christmas_still_wins_for_christmas_ducks` | n/a |
+| Coerce at the chokepoint | ✅ `::TestPolicySurvivesPackageSwaps::test_coerce_runs_after_the_package_can_be_swapped` (**the never-invoked bug**) | n/a | n/a | ✅ `::test_coerce_is_idempotent_on_a_compliant_package`, `::test_it_restores_a_missing_jeep_tag` |
+| Length repair | ✅ `duckAgent/tests/test_newduck_licensed_claim.py::TestLengthErrorsDoNotDiscardTheRun::test_fit_to_range_no_longer_leaves_a_dangling_word` | n/a | n/a | n/a |
+
+### 79c — Shopify 413, and a publish that failed without saying so
+
+Raising the image cap to 20 the same morning made the Shopify create payload exceed the request limit: **413 Payload Too Large**, self-inflicted, hours old. Images are now attached one request each, so one bad image loses one image instead of the product.
+
+The worse half is that **`published` was set true while Shopify had failed**. Etsy succeeded, Shopify 413'd, the exception was printed and swallowed, and the run recorded itself as published — [[feedback_swallowed_errors_lie]] on the highest-stakes step in the repo. Per-channel status is now persisted in state and logged, which is what makes 79d possible at all.
+
+|  | Happy | One bad image | Both fail | Recorded |
+|---|---|---|---|---|
+| Image attach | ✅ `duckAgent/tests/test_newduck_licensed_claim.py::TestShopifyPublishFailuresAreVisible::test_images_are_attached_one_request_each` | ✅ `::test_one_bad_image_does_not_lose_the_product` | n/a | ✅ `::test_images_are_not_sent_inline_in_the_create_post` (the 413 cause, pinned) |
+| Publish truth | `::test_a_partial_publish_is_logged_as_partial` | ✅ `::test_a_shopify_failure_is_recorded_in_state_not_just_printed` | ✅ `::test_published_is_not_true_when_both_channels_fail` | see 79d |
+
+### 79d — The duplicate-listing foot-gun, and surfacing partial publishes
+
+79c leaves a trap: the natural recovery from a half-failed publish is `--force`, and the Etsy block had **no `etsy_listing_id` check**, so recovering from a Shopify failure would have created a second live Etsy listing. Guarded. Shopify is deliberately *not* guarded the same way — its create is idempotent-by-handle in a way Etsy's is not — and that asymmetry is pinned by a test so nobody "fixes" the inconsistency.
+
+The card is the other half: state now knows a publish was partial, and `newduck_partial_publish` is what tells the operator. RED when a published run reached only one of the two channels in the last 30d, naming the recorded error and the recovery — including that the recovery is now safe, which it was not before the guard.
+
+|  | Happy | Excluded correctly | Window | Degraded input | Registration |
+|---|---|---|---|---|---|
+| Loader | ✅ `duckAgent/creative_agent/runtime/tests/test_newduck_partial_publish_card.py::TestLoader::test_the_camp_slasher_case_is_caught`, `::test_a_missing_etsy_listing_is_caught_too` (both directions) | `::test_a_fully_published_listing_is_green`, `::test_an_unpublished_run_is_not_this_card_s_business` | `::test_old_runs_drop_out_of_the_window` | `::test_no_runs_dir_is_yellow_not_a_crash`, `::test_corrupt_state_is_skipped`, ✅ `::test_the_loader_never_raises` | see right |
+| Card | `::TestRegistration::test_the_card_is_registered` | `::test_a_green_card_asks_for_nothing` | n/a | ✅ `::test_registered_even_with_an_empty_payload` | ✅ `::test_a_red_card_names_the_recovery_and_its_safety` |
+| Etsy duplicate guard | `duckAgent/tests/test_newduck_licensed_claim.py::TestEtsyDuplicateGuard::test_the_guard_exists` | ✅ `::test_the_create_call_is_inside_the_else_branch` (the guard is worthless if the create sits outside it) | n/a | n/a | ✅ `::test_shopify_is_deliberately_not_guarded_the_same_way` |
+
+**Verified live**, not just in fixtures: 4 published runs in the 30d window, all reaching both channels, card green on `/api/system-health` after a viewer bounce + `system_health_refresh.py`.
+
+**Open from this surface:** LLM tag candidates are still not constrained to the duck's own theme (4 of 13 on Camp Slasher were office-humour before the policy pass caught them — the policy is the net, not the fix). Camp Slasher and Custom Flag Ducks are live on Etsy but sit DRAFT on Shopify.
