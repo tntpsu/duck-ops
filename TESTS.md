@@ -2284,3 +2284,24 @@ Three defects in the tooling that only this run exposed:
 | Back-fill script | `--dry-run` prints `current -> new` per listing | `--only-empty` now opt-in | `--exclude` | all three axes read back |
 
 **Open:** the titles still say "2.25 Inch" on 15 listings, which matches none of the three measured axes. Whether 2.25 was ever right is unknown; the attributes are now measured, so the title text is the remaining unverified claim.
+
+## Surface 80 — The CI red-streak alarm (2026-10-09)
+
+**Background:** duckAgent CI failed on **seven consecutive commits** between 2026-09-29 and 10-09 on an F821 `NameError` that `ruff --select F821` caught in ten seconds on the very first push (four `logger.error` calls with no logger in `flows/newduck/steps.py`, inside the publish-failure branches they were written to report). Nothing read the light, so the test suite did not run at all for ten days and five real defects slept behind it: the undefined logger, three undeclared dependencies (`rapidfuzz`, `numpy`, `imageio`), six tests hardcoding machine paths, a sibling-repo path assumption, and a dead `except` branch that meant captions would ship with **no hashtags** if `MEME_BASE_HASHTAGS` were unset. Separately, CI had been running **9 of 213 test files** — a hand-listed set of filenames — until the same day.
+
+Every OS card watches the duck business. None watched the thing that is supposed to watch everything else.
+
+**Design decision — grade the STREAK, not the last run.** One red commit is ordinary and the next push is usually the fix; alarming on it would train the operator to ignore the card ([[feedback_cadence_bypass_keys_must_be_rare]] in reverse — an alarm that is almost always firing says nothing). It alarms at **2 consecutive failures or 24h red**, so a single commit left red over a weekend still alarms on age. An **in-flight run cannot clear it**, or pushing anything at all would silence a streak for as long as the new run takes.
+
+**Producer/reader** (architectural convention #1): `duckAgent/scripts/ci_health_refresh.py` → `state/ci_health.json`, hourly via `duckAgent_runtime/prepared_plists/com.philtullai.duckagent.ci_health_refresh.plist` (Tier-3 install, **prepared not installed**). Watches all three repos; `gh` auth failure is reported per repo and surfaces YELLOW naming the reason rather than going quiet ([[feedback_swallowed_errors_lie.md]]).
+
+|  | Happy | Single failure | Long streak | Unreadable | Regression |
+|---|---|---|---|---|---|
+| Streak arithmetic | ✅ `duckAgent/tests/test_ci_health_card.py::StreakArithmeticTests::test_a_green_latest_run_is_not_alarming` | ✅ `::test_one_failure_is_not_yet_an_alarm` | ✅ `::test_two_consecutive_failures_alarm`, `::test_a_single_failure_older_than_a_day_alarms_on_age` | ✅ `::test_an_unreadable_repo_reports_the_reason` | ✅ `::test_an_in_flight_run_cannot_clear_the_alarm`, `::test_a_cancelled_run_does_not_inflate_the_streak` |
+| Loader (`_load_ci_health`) | ✅ `::LoaderTests::test_all_green_is_green` | ✅ `::test_one_fresh_failure_is_yellow` | ✅ `::test_a_streak_is_red_and_names_the_first_bad_commit` | ✅ `::test_missing_state_is_yellow_not_a_crash`, `::test_corrupt_state_is_yellow_not_a_crash`, `::test_unreadable_everywhere_is_yellow_with_the_reason` | ✅ `::test_a_real_red_streak_outranks_an_unreadable_sibling` (an auth problem in one repo must not downgrade a genuine alarm in another) |
+| Card registration | ✅ `::RegistrationTests::test_card_is_registered` | n/a | n/a | ✅ `::test_card_is_registered_even_with_no_payload` | ✅ `::test_green_card_asks_nothing_of_the_operator` |
+| Producer/reader join | ✅ `::ProducerWiringTests::test_the_producer_writes_where_the_loader_reads` | n/a | n/a | ✅ `::test_the_write_is_atomic` (`os.replace`) | ✅ `::test_every_watched_repo_has_a_workflow` |
+
+**First live run:** duckAgent RED for 7.0h across 3 runs; duck-ops and paint-to-print-3d green. After the Thursday override fix the duckAgent run went green — the first full-suite pass since 2026-09-29.
+
+**Not covered (deliberate):** no test asserts the hourly cadence actually fires, which is the [[feedback_verify_the_job_is_firing_first]] gap this card itself has. The card's own staleness is covered by the generic `scheduler_health` rollup once the plist is installed; until then `last_proof_at` is the only signal, and an absent state file reads YELLOW rather than green. The wrapper script was syntax-checked but not executed (sandbox refused), so its first real proof is the install.
