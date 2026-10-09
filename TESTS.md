@@ -2392,3 +2392,17 @@ Both open judgments were put to the operator and both came back resolved, so the
 **Surface 80 gap closed.** `duckAgent_runtime/run_ci_health_refresh.sh` had only ever been syntax-checked (the sandbox refused to execute it), so the install was its first real proof. It ran clean by hand, then `launchctl bootstrap` + the `RunAtLoad` fire returned `last exit code = 0` with all three repos reported green and an empty stderr log — which also answered the one open unknown, whether a gui launchd agent can reach `gh`'s keychain token. Hourly at minute 7.
 
 **Verified live:** drift 16 → **1** (`taxonomy_id = 130` on Dachshund Duck, the merchandising call left deliberately open), card yellow/`operator_unblock` naming only what it found, `ci_health` green on a scheduled producer. duckAgent suite **2477 passed**, 1 xfailed, 31 subtests.
+
+### Surface 82c — the CI alarm's first real catch, and the flake it caught (2026-10-09)
+
+The push went red, and the alarm installed an hour earlier read it correctly: **yellow**, not red — *"duckAgent CI failed on its latest run. One failure is ordinary; it becomes an alarm at two in a row or 24h red."* That is the Surface 80 threshold working on live data for the first time.
+
+**The failure was innocent of the commit it landed on.** `tests/test_jeepfact_new_duck_slots.py::test_new_ducks_actually_get_picked` asserted `len(fresh) == 2` where CI saw 3. Three is correct: `JEEPFACT_NEW_DUCK_SLOTS` **reserves** two, and the other four picks come from the general lottery — `select_jeepfact_products` adds `random.random() * 0.01` and calls `random.shuffle`, deliberately, because the tiebreaker is meant to be a lottery. A third new duck can win one of those four. Measured against the same fixture over **200 draws: 177 gave 2, 23 gave 3** — an 11.5% flake that had been waiting since 10-07 for any commit to land on.
+
+So the lesson is sharper than "assert the rule, not the reading" ([[feedback_pin_the_rule_not_the_reading]], third instance this week after the 4x4x2 item dimensions and the `len(out_of_season) == 10` queue): **an exact count over a randomised draw is not a weak test, it is a timed flake**, and it costs a red-CI investigation of code that did nothing wrong. The class docstring compounded it by claiming the fixture made the test deterministic — a fixed cache fixes the *inputs*, not the draw.
+
+| | Guarantee | Lottery | Determinism claim |
+|---|---|---|---|
+| New-duck slots | ✅ `duckAgent/tests/test_jeepfact_new_duck_slots.py::TestEndToEndSelection::test_the_reserved_slots_are_the_guarantee_and_they_lead` — the first N picks are new ducks AND `len(picks) == count`, asserted across 40 draws because one draw proves nothing about a guarantee | ✅ `::test_new_ducks_actually_get_picked` now `>= 2`, which is what reserving two means | ✅ class docstring corrected to say the selector is random on purpose |
+
+**Verified:** 10 consecutive local runs of the file green (≈410 draws), full suite 2478 passed / 1 xfailed / 31 subtests, pushed as `b1782ac`.
