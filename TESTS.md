@@ -2406,3 +2406,24 @@ So the lesson is sharper than "assert the rule, not the reading" ([[feedback_pin
 | New-duck slots | ✅ `duckAgent/tests/test_jeepfact_new_duck_slots.py::TestEndToEndSelection::test_the_reserved_slots_are_the_guarantee_and_they_lead` — the first N picks are new ducks AND `len(picks) == count`, asserted across 40 draws because one draw proves nothing about a guarantee | ✅ `::test_new_ducks_actually_get_picked` now `>= 2`, which is what reserving two means | ✅ class docstring corrected to say the selector is random on purpose |
 
 **Verified:** 10 consecutive local runs of the file green (≈410 draws), full suite 2478 passed / 1 xfailed / 31 subtests, pushed as `b1782ac`.
+
+### Surface 82d — the two merchandising moves, and a count taken from titles instead of Etsy (2026-10-09, operator: "move them, move 11 of the 16 ducks to the non custom one like u mentioned, go")
+
+**Both corrections landed, and my own number was wrong before they did.** I had said "only 5 of the 16 listings on the Custom Duck profile are actually custom", counted by reading titles. Etsy records it: `is_personalizable` is true on exactly **3** (Build Your Own, Custom Soccer Team, Personalized Bowling), so the move was **12 ducks, not 11**. The rule that keeps being re-learned here — [[feedback_call_the_function_not_grep_state]] in field form: **when the marketplace stores the fact, ask it; a title is a description of intent, not a record of configuration.**
+
+- **taxonomy_id 130 → 69** on Dachshund, Lemon and Red Race Car Duck. All three verified by read-back.
+- **shipping_profile_id 269086190375 → 264560170186** on 12 listings, 12/12 verified. The profile now holds exactly the three `is_personalizable` ducks, plus the fidget egg — which is not a duck and was deliberately left alone rather than swept in on an instruction about ducks.
+
+**A category change can silently drop listing properties**, because Holiday, Occasion, Primary color, Height and Art medium are taxonomy-scoped PROPERTIES rather than fields, and the new category need not define them. Red Race Car Duck carried `Art medium` and `Height`/`Width` from the Sculpture tree — exactly the ones at risk. So the write captures properties before, re-reads after, and names any that disappeared. Nothing was lost on any of the three, but that is now a measured fact rather than an assumption.
+
+**Targeted by construction.** `--taxonomy-id` and `--shipping-profile-id` **refuse to run without `--only`**. A bare `--taxonomy-id 69` sweep would have erased the deliberate taxonomy 73 on all 23 licensed team ducks — the very choice sanctioned two commits earlier. A catalogue default and a merchandising decision about named listings are different operations and the flags now say so.
+
+| | Happy | Targeted | Silent loss | Guard |
+|---|---|---|---|---|
+| Taxonomy move | ✅ 3/3 verified by read-back | ✅ `duckAgent/tests/test_etsy_listing_drift.py::TestTargetedMovesAreNotCatalogueSweeps::test_a_bare_taxonomy_sweep_is_refused` | ✅ properties captured before and re-read after; none dropped | ✅ `::test_taxonomy_130_is_no_longer_in_the_policy_because_it_was_corrected` (corrected, not sanctioned) |
+| Shipping-profile move | ✅ 12/12 verified | ✅ `::test_a_bare_shipping_profile_sweep_is_refused` | n/a | ✅ `::test_the_policy_file_still_sanctions_the_custom_duck_profile` |
+| Neither flag | n/a | n/a | n/a | ✅ `::test_setting_nothing_is_refused` |
+
+**Still open, and now a sharper question than before:** four listings Etsy flags `is_personalizable` sit on the DEFAULT profile — Personalized Teacher Rubber Duck, Swim Team Ducks, Personalized Wedding Ducks, and the Custom Hitch Cover. The assignment is wrong in both directions. Once that is decided, the Custom Duck profile stops needing to be **sanctioned** and becomes a checkable **rule**: a listing on it should be `is_personalizable`, and one that is not is real drift. A sanctioned value is permanently blind; a rule is not. (Noted in `config/etsy_category_policy.json::_still_open`, v2026-10-09b.)
+
+**Verified live:** `etsy_listing_drift` **GREEN** — *"Every one of the 20 most recent Etsy listings matches our configured defaults"* — first time since the card was built, after a viewer bounce + `system_health_refresh.py`. duckAgent suite **2483 passed**, 1 xfailed, 31 subtests. Secret scan 0 across all three repos.
