@@ -66,11 +66,43 @@ def _load_audit_payload(*, force_audit: bool) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _high_severity_category(after_category: str | None, audit_payload: dict[str, Any]) -> str | None:
+    """The earliest category in ORDER holding a HIGH-severity resource, if any.
+
+    The round-robin cursor below is anti-starvation, but on its own it inverts
+    priority: a product with NO SEO title at all is high severity and sits in
+    `missing_title`, at the FRONT of the order — so once the cursor has walked
+    past it, those products queue behind every cosmetic category for a full
+    cycle (on 2026-10-11, 9 high-severity missing titles behind 93 weak-copy
+    items). High severity is already this lane's urgency signal: it is what
+    bypasses the email cadence gate for a same-day send. Honour it here too.
+    """
+    for category in SEO_REVIEW_CATEGORY_ORDER:
+        if category == after_category:
+            # Never re-pick the batch just worked, or a dismissed-but-still-
+            # failing category would be re-sent forever.
+            continue
+        for resource in _select_issue_category_candidates_for(audit_payload, category):
+            issues = resource.get("issues") if isinstance(resource.get("issues"), list) else []
+            if any(isinstance(i, dict) and str(i.get("severity") or "").lower() == "high" for i in issues):
+                return category
+    return None
+
+
+def _select_issue_category_candidates_for(audit_payload: dict[str, Any], category: str) -> list[dict[str, Any]]:
+    from shopify_seo_review import _select_issue_category_candidates
+
+    return _select_issue_category_candidates(audit_payload, issue_category=category)
+
+
 def _choose_next_category(after_category: str | None, audit_payload: dict[str, Any]) -> str | None:
     """Advance past the category the lane last worked on, wrapping to the
     front once the tail is empty. Always restarting at index 0 let a 1-item
     `long_title` batch block 92 items in `weak_title`/`weak_description`
-    for weeks (2026-09-07)."""
+    for weeks (2026-09-07). High-severity work jumps the queue."""
+    urgent = _high_severity_category(after_category, audit_payload)
+    if urgent:
+        return urgent
     if after_category in SEO_REVIEW_CATEGORY_ORDER:
         following = _next_issue_category(after_category, audit_payload)
         if following:
@@ -144,13 +176,43 @@ def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
             "run_id": latest_run_id,
         }
 
-    payload = send_shopify_seo_review_email(
-        limit=0,
-        force_audit=False,
-        review_type="issue_category_batch",
-        issue_category=next_category,
-        auto_send_next_category=True,
-    )
+    # Walk forward past categories that build into a no-op batch instead of
+    # burning a day per dead category. `near_duplicate_title` is dead by
+    # construction (the deterministic title generator derives a title from the
+    # resource's own name, so two near-identically named resources can never be
+    # differentiated that way), and without this the lane advances one step a
+    # day and re-parks the moment it reaches one.
+    skipped: list[str] = []
+    payload = None
+    for _ in range(len(SEO_REVIEW_CATEGORY_ORDER)):
+        payload = send_shopify_seo_review_email(
+            limit=0,
+            force_audit=False,
+            review_type="issue_category_batch",
+            issue_category=next_category,
+            auto_send_next_category=True,
+        )
+        if str(payload.get("status") or "") != "not_reviewable":
+            break
+        skipped.append(str(payload.get("category_label") or next_category))
+        following = _choose_next_category(next_category, audit_payload)
+        if not following or following == next_category:
+            payload = None
+            break
+        next_category = following
+
+    if payload is None or str(payload.get("status") or "") == "not_reviewable":
+        summary = "No Shopify SEO category has anything applyable right now."
+        if skipped:
+            summary = f"{summary[:-1]}; skipped {', '.join(skipped)}."
+        return {
+            "status": "no_reviewable_categories",
+            "summary": summary,
+            "run_id": (payload or {}).get("run_id"),
+            "skipped_categories": skipped,
+            "audit_refreshed": audit_refreshed,
+        }
+
     status = _kickoff_status_for(payload)
     verb = "Sent" if status == "emailed" else "Built (deferred by cadence)"
     return {
@@ -159,6 +221,7 @@ def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
         "run_id": payload.get("run_id"),
         "category_label": payload.get("category_label") or next_category,
         "item_count": int(payload.get("item_count") or 0),
+        "skipped_categories": skipped,
         "audit_refreshed": audit_refreshed,
     }
 

@@ -576,6 +576,76 @@ def _flag_title_differentiation(items: list[dict[str, Any]]) -> None:
             item["consolidation_candidate"] = True
 
 
+def _item_is_applyable(item: dict[str, Any]) -> bool:
+    """Does this item still have a field we would actually write to Shopify?
+    Surfaces 60/61 fail closed by turning `apply_seo_*` off when a proposal is
+    a non-fix, which is right -- but an item with BOTH flags off is not a
+    recommendation, it is a no-op, and must never be counted as review work."""
+    apply_title = bool(item.get("apply_seo_title", True))
+    apply_description = bool(item.get("apply_seo_description", True))
+    if not (apply_title or apply_description):
+        return False
+    if apply_title and _normalize_text(item.get("proposed_seo_title")) == _normalize_text(item.get("current_seo_title")):
+        apply_title = False
+    if apply_description and _normalize_text(item.get("proposed_seo_description")) == _normalize_text(item.get("current_seo_description")):
+        apply_description = False
+    return apply_title or apply_description
+
+
+def _applyable_item_count(items: list[dict[str, Any]]) -> int:
+    return sum(1 for item in items if isinstance(item, dict) and _item_is_applyable(item))
+
+
+def _not_reviewable_reason(items: list[dict[str, Any]], *, category_label: str) -> str:
+    """Operator-facing copy that names what the code actually found, not a
+    worked example -- the batch is dead for a reason the operator can act on."""
+    needs_differentiation = [i for i in items if i.get("title_needs_differentiation")]
+    consolidation = [i for i in items if i.get("consolidation_candidate")]
+    needs_review = [i for i in items if i.get("title_needs_review")]
+    parts = [f"Every item in the {category_label} batch is a no-op -- there is nothing to apply."]
+    if needs_differentiation:
+        parts.append(
+            f"{len(needs_differentiation)} proposed title(s) did not differentiate from the "
+            "current title, so Surface 60 withheld them."
+        )
+    if needs_review:
+        parts.append(f"{len(needs_review)} proposed title(s) failed the deterministic quality check.")
+    if consolidation:
+        names = ", ".join(sorted(str(i.get("title") or i.get("resource_url") or i.get("id")) for i in consolidation))
+        parts.append(
+            f"{len(consolidation)} of these are near-identical PAGES ({names}) -- the real fix is a "
+            "301 redirect or consolidation, which is an operator decision, not an SEO title rewrite."
+        )
+    return " ".join(parts)
+
+
+def dismiss_shopify_seo_review_run(run_id: str, *, reason: str, actor: str = "operator") -> dict[str, Any]:
+    """Retire an open SEO review in the AUTHORITATIVE store (the run file and
+    latest.json, which the kickoff guard and the freshness card both read), so
+    the lane stops being parked. Idempotent; raises only on an unknown run."""
+    normalized = str(run_id or "").strip()
+    path = _review_run_path(normalized)
+    payload = _load_json(path, {})
+    if not isinstance(payload, dict) or not payload:
+        raise RuntimeError(f"Unknown Shopify SEO review run `{normalized}`.")
+    current = _normalize_text(payload.get("status")).lower()
+    if current == "dismissed":
+        return payload
+    if current not in {"awaiting_review", "apply_attempted", "deferred_by_cadence", "not_reviewable"}:
+        raise RuntimeError(f"Shopify SEO review run is not dismissable in status `{current}`.")
+    payload["status"] = "dismissed"
+    payload["dismissed_at"] = datetime.now().astimezone().isoformat()
+    payload["dismiss_reason"] = _normalize_text(reason) or "Dismissed by the operator."
+    payload["dismissed_by"] = _normalize_text(actor) or "operator"
+    payload["previous_status"] = current
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    latest = _load_json(_latest_path(), {})
+    if isinstance(latest, dict) and str(latest.get("run_id") or "").strip() == normalized:
+        latest.update(payload)
+        _latest_path().write_text(json.dumps(latest, indent=2), encoding="utf-8")
+    return payload
+
+
 def _priority_sort_key(resource: dict[str, Any]) -> tuple[int, int, str]:
     issues = resource.get("issues") if isinstance(resource.get("issues"), list) else []
     high = sum(1 for issue in issues if isinstance(issue, dict) and issue.get("severity") == "high")
@@ -901,6 +971,7 @@ def build_shopify_seo_review(
 
     _flag_title_differentiation(items)  # Surface 60: fail closed on undifferentiated near-dup titles
     _flag_low_quality_titles(items)     # Surface 61: fail closed on low-quality proposed titles
+    applyable = _applyable_item_count(items)
 
     preview_limit = 15 if review_type == "missing_only_bulk" and len(items) > 15 else 0
     if review_type == "issue_category_batch" and len(items) > 15:
@@ -924,8 +995,23 @@ def build_shopify_seo_review(
             auto_send_next_category=auto_send_next_category,
         ),
         "items": items,
-        "status": "awaiting_review",
+        "applyable_item_count": applyable,
+        # Surface 82e: asking the operator to approve a batch in which every
+        # field was withheld parks the whole lane on a reply that could only
+        # ever be a lie. `near_duplicate_title` does this by construction --
+        # the deterministic title generator derives the title from the
+        # resource's own name, and two near-identically named resources can
+        # never be differentiated that way.
+        "status": "awaiting_review" if (not items or applyable) else "not_reviewable",
     }
+    if payload["status"] == "not_reviewable":
+        payload["not_reviewable_reason"] = _not_reviewable_reason(
+            items, category_label=str(payload.get("category_label") or "this")
+        )
+        payload["approval_action"] = (
+            "No reply needed -- there is nothing in this batch to apply. "
+            + payload["not_reviewable_reason"]
+        )
 
     REVIEW_RUN_DIR.mkdir(parents=True, exist_ok=True)
     _review_run_path(run_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1124,6 +1210,15 @@ def send_shopify_seo_review_email(
 
 
 def _gate_and_send_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if _normalize_text(payload.get("status")).lower() == "not_reviewable":
+        # build_* already persisted the run and latest.json; there is no
+        # approval to ask for, so skip the cadence gate and the email.
+        print(
+            f"[shopify_seo_review] Not emailing {payload.get('category_label') or payload.get('seo_category')}"
+            f" -- {payload.get('not_reviewable_reason')}",
+            file=sys.stderr,
+        )
+        return payload
     # Load duckAgent/.env BEFORE the gate. The gate reads DUCK_EMAIL_DIGEST_MODE
     # from the environment, and loading it only at send time made the same
     # batch fold in the reply-handler process but send from the launchd job.

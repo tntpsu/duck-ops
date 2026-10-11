@@ -273,7 +273,13 @@ FLOWS: dict[str, FlowSpec] = {
     "shopify_seo": FlowSpec(
         name="shopify_seo",
         # Mutates Shopify directly; no per-run state file.
-        reply_actions=(ReplyAction("Reply Apply", "apply", "apply"),),
+        # Dismiss is not cosmetic: a review with no dismiss affordance parks
+        # the whole SEO lane until the operator replies apply, and the
+        # freshness card has always told them to "action or dismiss" it.
+        reply_actions=(
+            ReplyAction("Reply Apply", "apply", "apply"),
+            ReplyAction("Reply Dismiss", "dismiss", "dismiss"),
+        ),
     ),
     "thursday": FlowSpec(
         name="thursday",
