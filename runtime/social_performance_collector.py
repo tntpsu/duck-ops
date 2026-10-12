@@ -502,6 +502,67 @@ def _outcome_window_for_age(age_hours: float) -> str | None:
     return "7d"
 
 
+def writeback_published_status(
+    post: dict[str, Any], *, now: datetime,
+) -> dict[str, Any]:
+    """Flip a receipt from `scheduled` to `published` once we have proof.
+
+    Added 2026-10-12. Receipts were written at SCHEDULE time and never updated,
+    so a post three weeks old still read "scheduled". That made receipt status
+    a record of intent only: there was no local answer to "did this actually
+    go out?", and reconciliation had to re-ask Meta every time.
+
+    The proof is the metric fetch that just happened -- the object was
+    addressable and carried a creation timestamp -- so this costs no extra API
+    call. Positive evidence only: a failed fetch leaves the receipt alone,
+    because "we could not reach Meta" and "it never published" are different
+    things and collapsing them would relabel a healthy post during an outage
+    ([[feedback_plausible_fallbacks_mask_failure]]).
+
+    Never raises; returns an action dict for observability.
+    """
+    if str(post.get("status") or "").lower() != "scheduled":
+        return {"action": "skipped", "reason": "receipt_not_scheduled"}
+    if str(post.get("metric_status") or "") not in {"ok", "partial"}:
+        return {"action": "skipped", "reason": "no_positive_evidence"}
+
+    metrics = post.get("metrics") if isinstance(post.get("metrics"), dict) else {}
+    observed_at = _compact_text(metrics.get("timestamp")) or ""
+    if not observed_at:
+        return {"action": "skipped", "reason": "no_observed_timestamp"}
+
+    scheduled_at = _parse_iso(post.get("scheduled_time"))
+    if scheduled_at is not None and now < scheduled_at:
+        return {"action": "skipped", "reason": "slot_has_not_passed"}
+
+    receipt_path = Path(str(post.get("receipt_path") or ""))
+    if not receipt_path.is_file():
+        return {"action": "no_receipt"}
+    try:
+        payload = json.loads(receipt_path.read_text())
+    except Exception:  # noqa: BLE001
+        return {"action": "skipped", "reason": "unreadable_receipt"}
+
+    post_id = str(post.get("post_id") or "").strip()
+    changed = False
+    for entry in payload.get("posts") or []:
+        if str(entry.get("post_id") or "").strip() != post_id:
+            continue
+        if entry.get("status") != "scheduled":
+            continue
+        entry["status"] = "published"
+        entry["published_at"] = observed_at
+        entry["published_confirmed_by"] = "social_performance_collector"
+        changed = True
+    if not changed:
+        return {"action": "post_id_mismatch"}
+    try:
+        receipt_path.write_text(json.dumps(payload, indent=2) + "\n")
+    except Exception:  # noqa: BLE001
+        return {"action": "skipped", "reason": "receipt_not_writable"}
+    return {"action": "marked_published", "published_at": observed_at}
+
+
 def writeback_outcome_to_creative_quality_receipt(
     post: dict[str, Any], *, now: datetime,
     receipts_dir: Path | None = None,
@@ -1044,6 +1105,10 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
         # receipt so the Creative Quality Loop learns which ranked
         # variant actually performed. No-op for posts without a
         # matching Phase 4 receipt; idempotent on same-window replay.
+        published_wb = writeback_published_status(post, now=now)
+        post["published_writeback"] = published_wb
+        writeback_actions[f"published:{published_wb.get('action')}"] += 1
+
         try:
             wb = writeback_outcome_to_creative_quality_receipt(post, now=now)
             writeback_actions[str(wb.get("action") or "unknown")] += 1

@@ -2659,3 +2659,17 @@ the absence of evidence.
   page, or dropping it and spending the slot on Instagram, are the two real options.
 - Facebook receipts still never flip from `scheduled` to `published`, so receipt status is not
   evidence of publication — only of intent.
+
+**Addendum — receipts now record outcome, not just intent.** Facebook receipts were written at
+schedule time and never updated, so a post three weeks old still read `scheduled` and there was
+no local answer to "did this actually go out?".
+`writeback_published_status` flips `scheduled` → `published` using the metric fetch that just
+happened, so it costs no extra API call. Positive evidence only: a failed fetch leaves the
+receipt alone, because "we could not reach Meta" and "it never published" are different things
+and collapsing them would relabel healthy posts during an outage. Live result: 8 receipts flipped
+on the first run, and status now reads 14 published / 10 scheduled / 9 cancelled.
+
+| | Happy | No evidence | Too early | Already done | Cancelled |
+|---|---|---|---|---|---|
+| Published writeback | ✅ `duck-ops/tests/test_published_status_writeback.py::test_a_confirmed_post_is_marked_published` — siblings untouched | ✅ `::test_a_failed_fetch_leaves_the_receipt_alone` + `::test_a_post_with_no_observed_timestamp_is_not_proof` | ✅ `::test_a_post_whose_slot_has_not_passed_is_left_alone` | ✅ `::test_it_is_idempotent` | ✅ `::test_a_cancelled_receipt_is_never_resurrected` |
+| Lane fit | ✅ `::test_a_partial_fetch_still_counts_as_proof` — Facebook is `partial` by nature now, so requiring `ok` would mean its receipts never flip | ✅ `::test_a_missing_receipt_file_never_raises` | n/a | n/a | n/a |
