@@ -587,13 +587,35 @@ def _is_measured(post: dict[str, Any]) -> bool:
     return str(post.get("metric_status") or "").lower() in MEASURED_METRIC_STATUSES
 
 
-def _engagement_score(post: dict[str, Any]) -> float:
+def _passive_engagement(post: dict[str, Any]) -> float:
+    """A tap. The cheapest signal a viewer can give, and the only one our memes
+    have ever earned."""
     metrics = post.get("metrics") if isinstance(post.get("metrics"), dict) else {}
     if str(post.get("platform") or "").lower() == "facebook":
-        values = [metrics.get("reaction_count"), metrics.get("comment_count"), metrics.get("share_count")]
+        return _safe_float(metrics.get("reaction_count")) or 0.0
+    return _safe_float(metrics.get("like_count")) or 0.0
+
+
+def _active_engagement(post: dict[str, Any]) -> float:
+    """A comment, a save, a share -- the viewer did something that costs them
+    effort or files the post away to come back to.
+
+    Split out 2026-10-12. The combined score hid a flat zero: across every meme
+    the collector had measured, comments and saves were exactly 0 and likes were
+    the entire score, while carousel lanes earned both nearly every week. Summed
+    together that reads as "memes are a bit weaker"; split apart it reads as
+    "memes have never once earned the two signals that matter", which is a
+    different problem with a different fix."""
+    metrics = post.get("metrics") if isinstance(post.get("metrics"), dict) else {}
+    if str(post.get("platform") or "").lower() == "facebook":
+        values = [metrics.get("comment_count"), metrics.get("share_count")]
     else:
-        values = [metrics.get("like_count"), metrics.get("comments_count"), metrics.get("saved")]
+        values = [metrics.get("comments_count"), metrics.get("saved")]
     return float(sum(_safe_float(value) or 0.0 for value in values))
+
+
+def _engagement_score(post: dict[str, Any]) -> float:
+    return _passive_engagement(post) + _active_engagement(post)
 
 
 def _engagement_score_or_none(post: dict[str, Any]) -> float | None:
@@ -618,10 +640,22 @@ def _engagement_rate(post: dict[str, Any]) -> float | None:
     return round(_engagement_score(post) / reach, 4)
 
 
-def _rollup_rows(posts: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+def _rollup_rows(posts: list[dict[str, Any]], field: str, *, split_platform: bool = True) -> list[dict[str, Any]]:
+    """Rows grouped within a platform by default.
+
+    Facebook and Instagram are not comparable and never were: across the posts
+    measured to 2026-10-12, every Facebook post scored an engagement RATE of
+    exactly 0.000 while Instagram carried every interaction we have. Averaging
+    them together ranked lanes partly on how often each posts to Facebook, so a
+    lane that cross-posts looked worse than one that does not, for reasons that
+    have nothing to do with its creative."""
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for post in posts:
         key = _compact_text(post.get(field)) or "(unknown)"
+        # Grouping the platform rollup by platform would label a row
+        # "instagram / instagram"; the field is already the platform there.
+        if split_platform and field != "platform":
+            key = f"{_compact_text(post.get('platform')) or '(unknown)'} / {key}"
         grouped[key].append(post)
 
     rows: list[dict[str, Any]] = []
@@ -638,6 +672,13 @@ def _rollup_rows(posts: list[dict[str, Any]], field: str) -> list[dict[str, Any]
                 "measured_post_count": len(measured),
                 "avg_engagement_score": avg_score,
                 "avg_engagement_rate": avg_rate,
+                "avg_passive_engagement": (
+                    round(sum(_passive_engagement(i) for i in measured) / len(measured), 2) if measured else None
+                ),
+                "avg_active_engagement": (
+                    round(sum(_active_engagement(i) for i in measured) / len(measured), 2) if measured else None
+                ),
+                "active_post_count": sum(1 for i in measured if _active_engagement(i) > 0),
                 "top_post_id": max(measured, key=_engagement_score).get("post_id") if measured else None,
             }
         )
@@ -797,6 +838,81 @@ def _derive_learnings(posts: list[dict[str, Any]], rollups: dict[str, list[dict[
     def _confidence(row: dict[str, Any], floor: int) -> str:
         return "medium" if int(row.get("measured_post_count") or 0) >= floor else "low"
 
+    # --- platform first: a lane's average is meaningless across two platforms
+    # that do not behave alike, so say so before ranking anything. ---
+    measured_all = [post for post in posts if _is_measured(post)]
+    by_platform: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for post in measured_all:
+        by_platform[str(post.get("platform") or "unknown").lower()].append(post)
+
+    if len(by_platform) >= 2:
+        platform_avg = {
+            name: round(sum(_engagement_score(i) for i in items) / len(items), 2)
+            for name, items in by_platform.items()
+            if len(items) >= 3
+        }
+        if len(platform_avg) >= 2:
+            best = max(platform_avg, key=platform_avg.get)
+            worst = min(platform_avg, key=platform_avg.get)
+            # A platform pulling under a fifth of the other is not a weaker
+            # audience, it is a different problem. Averaging the two together
+            # was hiding it inside every lane's score.
+            if platform_avg[worst] * 5 <= platform_avg[best]:
+                learnings.append(
+                    Learning(
+                        key="platform_gap",
+                        headline=(
+                            f"{best.title()} carries essentially all engagement; "
+                            f"{worst.title()} returns almost none."
+                        ),
+                        confidence="medium",
+                        evidence=(
+                            f"average engagement score {platform_avg[best]} on {best} "
+                            f"({len(by_platform[best])} measured posts) versus "
+                            f"{platform_avg[worst]} on {worst} ({len(by_platform[worst])})."
+                        ),
+                        recommendation=(
+                            f"Judge creative on {best} only -- a lane that cross-posts to {worst} "
+                            f"was scoring worse for posting more, not for posting worse. Treat "
+                            f"{worst} as a separate question: audience, format or reach, not copy."
+                        ),
+                    )
+                )
+
+    # --- the split that a single engagement number hides ---
+    for platform, items in sorted(by_platform.items()):
+        if len(items) < 3:
+            continue
+        lanes: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for item in items:
+            lanes[str(item.get("workflow") or "unknown")].append(item)
+        silent = sorted(
+            name for name, rows in lanes.items()
+            if len(rows) >= 3 and sum(_active_engagement(r) for r in rows) == 0
+            and sum(_passive_engagement(r) for r in rows) > 0
+        )
+        if not silent:
+            continue
+        learnings.append(
+            Learning(
+                key=f"no_active_engagement_{platform}",
+                headline=(
+                    f"On {platform}, {', '.join(silent)} earns likes but has never earned a "
+                    "comment or a save."
+                ),
+                confidence="medium",
+                evidence=(
+                    "Engagement score is likes + comments + saves; these lanes scored on the like "
+                    "term alone in every measured post, so two of the three levers are untouched."
+                ),
+                recommendation=(
+                    "A like is a tap; a save or a comment needs a reason to stop. Give the post "
+                    "something to come back to or reply to rather than asking for engagement -- "
+                    "captions that asked outright earned zero comments."
+                ),
+            )
+        )
+
     workflow_rows = _scored(rollups.get("by_workflow") or [])
     if workflow_rows:
         top = workflow_rows[0]
@@ -861,7 +977,7 @@ def _derive_learnings(posts: list[dict[str, Any]], rollups: dict[str, list[dict[
 
     measured_posts = [post for post in posts if _is_measured(post)]
     if not measured_posts:
-        return learnings[:5]
+        return learnings[:7]
     top_post = max(measured_posts, key=_engagement_score)
     top_title = _compact_text(top_post.get("title")) or _compact_text(top_post.get("theme")) or f"{top_post.get('workflow')} post"
     learnings.append(
@@ -873,7 +989,7 @@ def _derive_learnings(posts: list[dict[str, Any]], rollups: dict[str, list[dict[
             recommendation="Review its caption, asset choice, and time slot as a template for the next iteration.",
         )
     )
-    return learnings[:5]
+    return learnings[:7]
 
 
 def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bool = True) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -890,6 +1006,8 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
         raw_score = _engagement_score_or_none(post)
         post["engagement_score"] = round(raw_score, 2) if raw_score is not None else None
         post["engagement_rate"] = _engagement_rate(post) if _is_measured(post) else None
+        post["passive_engagement"] = _passive_engagement(post) if _is_measured(post) else None
+        post["active_engagement"] = _active_engagement(post) if _is_measured(post) else None
         statuses[str(post.get("metric_status") or "unknown")] += 1
 
         # Phase 5 Step 4: writeback engagement to the creative_quality_
@@ -922,7 +1040,7 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
 
     rollups = {
         "by_workflow": _rollup_rows(posts, "workflow"),
-        "by_platform": _rollup_rows(posts, "platform"),
+        "by_platform": _rollup_rows(posts, "platform", split_platform=False),
         "by_time_window": _rollup_rows(posts, "time_window"),
         "by_theme": _rollup_rows(posts, "theme"),
         "by_duck_family": _rollup_rows(posts, "duck_family"),

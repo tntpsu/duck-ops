@@ -2496,3 +2496,90 @@ Dismissing in the view and leaving the store is the zombie of [[feedback_retire_
 - **The plist weekday is still `3` (Wednesday).** Fixing it is the only thing that makes the ≥3 Tuesday valve real, and it needs a Tier-3 launchd write: `/usr/libexec/PlistBuddy -c "Set :StartCalendarInterval:Weekday 2" ~/Library/LaunchAgents/com.philtullai.duckagent.review-carousel.tuesday.plist` then `launchctl bootout`/`bootstrap`. Until then the lane builds on the ≥5 threshold only, and the new input card is the thing that catches a stall.
 - **The scheduled day is hardcoded in two places** — the plist and `review_social_pool.py`'s `weekday == "Tuesday"`. That duplication is what let them disagree silently for months; one of them should derive from the other.
 - `_load_review_carousel_health` ages off last **scheduled** rather than last **posted**, so it read 18d while the real social gap was 12d. Cosmetic, but it overstates the outage.
+
+---
+
+## Surface 84 — Meme Monday: the AI two-panel carousel, and an engagement number that hid a flat zero
+
+**2026-10-12.** The operator asked whether a meme's text was "viral-able". Reading our own
+collector instead of guessing produced a better answer than the question expected.
+
+**What the data said.** Across every Instagram meme the collector had ever measured — Quackwise
+7.0, Bigfoot 5.0, Headless Horseman 5.0, Golf Cart 3.0 — **comments were 0 and saves were 0 on
+every single one.** The engagement score is `likes + comments + saves`, so memes were competing
+on one lever out of three, while jeepfact carousels earned a comment AND a save nearly every
+week. Summed into one number this reads as "memes are a bit weaker"; split apart it reads as
+"memes have never once earned the two signals that matter", which is a different problem with a
+different fix. Captions that asked outright for interaction ("Share your duck tales below!",
+"Tag your golfing partner") earned **zero** comments — asking is not the lever.
+
+**Three changes, in the order the evidence pointed.**
+
+**1. The copy prompt was instructing the weak shape.** `flows/meme/prompts.py` told the model
+`reality_text: the funny actual ducking/dashboard moment` — which is where "Just a Dashboard
+Companion" and "Just a duck in a costume" both came from: punchlines whose joke is that the
+product underdelivers. The prompt now forbids that shape by name, asks for the duck to
+ILLUSTRATE a universal feeling (the construction behind the one genuinely shareable meme we
+have, "ME LEAVING WORK FRIDAY / MY BRAIN: ALREADY GONE"), prefers universal over niche (our one
+niche-reference meme is also our worst measured post), and stops begging for comments. The
+8-word cap rose to 12 in both the prompt and `meme_helper`'s truncation — the relatable-situation
+shape did not fit in 8, and the clip amputated punchlines silently rather than rejecting them.
+
+**2. The renderer moved to the one-shot AI path, with the gate it always needed.**
+`config/creative_kinds.json` had kept that path MANUAL since it was written, because automating
+it "would first need a text-verification pass that reads the rendered text back off the image".
+`helpers/rendered_text_check.py` is that pass, and it is what makes the automation legitimate
+rather than a shortcut around the config's own stated precondition. Per
+[[feedback_vision_judge_literal_fields]] the model is asked for ONE literal thing — transcribe
+every piece of text — and code decides. It catches both directions: a word we asked for coming
+back misspelt (a dead domain on a live post), and text nobody asked for (2026-10-05: the first
+Quackwise poster invented a sign reading COME FLOAT WITH ME — an IT reference the brief never
+contained, and a float claim that product's own `avoid_terms` forbid).
+
+**3. Two panels, because one image could never earn a save.** Panel 1 is the joke and sells
+nothing — that is what keeps it a meme rather than an advert, and `creative_kinds.json`'s `meme`
+kind enforces it. Panel 2 (`meme_cta`, new) is `GRAB YOUR OWN` / the duck's name / `MYJEEPDUCK.COM`
+/ `DUCKS FOR EVERY ADVENTURE`. Explicitly **not** a spec sheet: the operator's words were that
+"4\" tall, prints in PLA" is dumb. The split also resolves a real tension — the joke stays
+unsullied by the ask, and the ask gets a whole panel.
+
+**4. Engagement split, and never averaged across platforms.** `_passive_engagement` (likes /
+reactions) and `_active_engagement` (comments, saves, shares) are now separate, carried per post
+and per rollup row with an `active_post_count`. Rollups group WITHIN a platform: every measured
+Facebook post returns reactions of 0–1, so averaging it with Instagram ranked a lane partly on
+how often it cross-posts, which has nothing to do with its creative. Two new learnings fire off
+this: `platform_gap` and `no_active_engagement_<platform>`.
+
+| | Happy | Misspelt text | Invented text | Verifier down | Platform skew |
+|---|---|---|---|---|---|
+| Rendered-text check | ✅ `duckAgent/tests/test_rendered_text_check.py::test_wrapped_caption_is_not_a_failure` — 3-line wrap is the normal good case | ✅ `::test_a_misspelt_domain_is_caught` — reports what it DID render, not just what is missing | ✅ `::test_invented_signage_is_caught` — the real COME FLOAT WITH ME failure replayed | ✅ `::test_an_analyzer_failure_is_unknown_not_ok` | n/a |
+| Check tolerance | ✅ `::test_case_and_punctuation_drift_is_tolerated` — en dash, title case ([[feedback_pin_the_rule_not_the_reading]]) | ✅ `::test_an_image_with_no_text_fails_when_text_was_expected` | ✅ `::test_allowed_extra_text_is_not_flagged` | n/a | n/a |
+| Panel build | ✅ `tests/test_meme_ai_panels.py::test_both_panels_are_built_in_carousel_order` — panel 1 carries no CTA, panel 2 does | ✅ `::test_a_failed_text_check_is_retried_once_then_refused` | ✅ `::test_a_retry_that_passes_is_accepted` | ✅ `::test_an_unknown_verdict_is_refused_like_a_failure` | n/a |
+| Panel contract | ✅ `::test_the_joke_panel_renders_the_caption_we_gave_it` | ✅ `::test_the_cta_panel_asserts_its_own_fixed_strings` | ✅ `::test_a_receipt_records_what_was_built` | ✅ `::test_a_missing_source_photo_is_refused` | n/a |
+| Carousel publish | ✅ `tests/test_meme_carousel_publish.py::test_two_panels_make_a_carousel` | ✅ `::test_panel_order_is_preserved` — opening on the CTA would make it an advert | ✅ `::test_a_single_panel_is_not_a_carousel` — template fallback still publishes | ✅ `::test_blank_entries_do_not_pad_a_carousel` | ✅ `::test_no_panels_is_not_a_carousel` |
+| Engagement split | ✅ `duck-ops/tests/test_social_performance_split.py::test_likes_are_passive_and_comments_and_saves_are_active` | ✅ `::test_facebook_counts_reactions_and_shares_on_the_right_sides` | ✅ `::test_a_lane_with_only_likes_reports_zero_active` — the exact shape of every meme | n/a | ✅ `::test_rollups_do_not_average_across_platforms` |
+| Learnings | ✅ `::test_a_learning_names_the_platform_gap` | ✅ `::test_a_learning_names_the_lane_that_never_earns_a_comment_or_save` | ✅ `::test_a_lane_that_earns_saves_is_not_flagged` — quiet when a lane works | ✅ `::test_a_platform_with_too_few_posts_is_not_judged` | ✅ `::test_the_platform_rollup_itself_is_not_double_grouped` |
+
+**Verified live** ([[feedback_real_generation_test_beats_mocks]], and
+[[feedback_visual_output_needs_eyes]] — both panels were looked at, not just probed): today's
+Meme Monday ran end to end through the new path. Two panels generated, both passed the automated
+text check, both uploaded, Facebook published as a multi-photo post (2 attached photo ids) and
+Instagram queued as a **carousel** entry for the same 18:00 slot. `meme_render_provider` reads
+`ai_one_shot`.
+
+**Still open:**
+- **Facebook insights have never worked.** Every FB post is `metric_status: partial` or
+  `fetch_failed`. `post_impressions`, `post_impressions_unique` and `post_engaged_users` all
+  return `(#100) The value must be a valid insights metric` — Meta retired those names — so **we
+  have never measured Facebook reach at all**. Some calls additionally fail with `(#10) ...
+  requires the 'pages_read_engagement' permission`, `permalink_url` is requested on photo objects
+  that do not have it, and `share_count` is null on every post. Reactions (0–1) are the only
+  Facebook number we have ever successfully read. Until this is repaired we cannot tell whether
+  Facebook is a reach problem or an audience problem, and those have opposite fixes.
+- **Facebook receipts never flip from `scheduled` to `published`.** Posts weeks old still read
+  `scheduled`, so the receipt status is not evidence of publication.
+- **The panels are square (1024×1024).** Instagram gives a 4:5 post more feed height, and reach
+  is currently our ceiling. Changing it means changing `aspect` for both kinds together — a
+  carousel crops to its first slide's shape.
+- The AI path has no cost ceiling: a retry doubles the call for that panel. Two panels × up to
+  two attempts is the worst case per week, which is small, but nothing enforces it.

@@ -253,10 +253,18 @@ class UnmeasuredPostsAreNotZeroTests(unittest.TestCase):
             _post("meme", platform="facebook", status="fetch_failed", post_id="m2"),
             _post("meme", platform="facebook", status="fetch_failed", post_id="m3"),
         ]
-        row = social_performance_collector._rollup_rows(posts, "workflow")[0]
-        self.assertEqual(row["avg_engagement_score"], 6.0)
-        self.assertEqual(row["post_count"], 3)
-        self.assertEqual(row["measured_post_count"], 1)
+        rows = {row["label"]: row for row in social_performance_collector._rollup_rows(posts, "workflow")}
+        # Since the 2026-10-12 platform split these are two rows, not one: the
+        # Facebook posts can no longer drag the Instagram lane at all, which is
+        # a stronger version of the guarantee this test was written for.
+        instagram = rows["instagram / meme"]
+        self.assertEqual(instagram["avg_engagement_score"], 6.0)
+        self.assertEqual(instagram["post_count"], 1)
+        self.assertEqual(instagram["measured_post_count"], 1)
+        facebook = rows["facebook / meme"]
+        self.assertIsNone(facebook["avg_engagement_score"])
+        self.assertEqual(facebook["post_count"], 2)
+        self.assertEqual(facebook["measured_post_count"], 0)
 
     def test_a_measured_zero_still_counts(self) -> None:
         """Only UNMEASURED posts are excluded; a real zero is real data."""
@@ -277,7 +285,7 @@ class UnmeasuredPostsAreNotZeroTests(unittest.TestCase):
             _post("jeepfact", status="fetch_failed", post_id="j1"),
         ]
         rows = social_performance_collector._rollup_rows(posts, "workflow")
-        self.assertEqual(rows[0]["label"], "meme")
+        self.assertEqual(rows[0]["label"], "instagram / meme")
 
     def test_per_post_score_is_none_when_never_measured(self) -> None:
         """0.0 is a measurement; absence must not look like one."""
@@ -302,7 +310,12 @@ class UnmeasuredPostsAreNotZeroTests(unittest.TestCase):
         learnings = social_performance_collector._derive_learnings(posts, rollups)
         top = next(item for item in learnings if item.key == "top_workflow")
         self.assertIn("meme", top.headline)
-        self.assertIn("2 of 11 posts measured", top.evidence)
+        # The 9 unmeasured posts are Facebook and now sit in their own row, so
+        # the Instagram lane reports only the posts it actually owns. The bug
+        # this guards -- unmeasured posts scored as zeros -- stays fixed either
+        # way: the mean is still 6.0 and not 1.09.
+        self.assertIn("2 of 2 posts measured", top.evidence)
+        self.assertIn("6.0", top.evidence)
 
 
 class ReachRollupTests(unittest.TestCase):
