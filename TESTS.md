@@ -2601,3 +2601,61 @@ before Instagram is touched, so the two platforms can never end up carrying diff
 **Verified live:** tonight's caption was rewritten and read back off the Facebook scheduled-post
 list and the Instagram queue entry — both carry the new words, the carousel still has 2 slides,
 and the 18:00 slot is unchanged.
+
+---
+
+## Surface 85 — Facebook was never measurable, and the page has 27 followers
+
+**2026-10-12.** Chasing "why does Facebook get absolutely nothing" produced a different answer
+than the question assumed.
+
+**Probed live, not guessed.** Against a real published post, identically on **v19, v21 and v23**:
+`post_impressions`, `post_impressions_unique`, `post_engaged_users`, `post_impressions_organic`,
+`post_impressions_paid`, `post_activity` and `post_negative_feedback` are **all** rejected with
+`(#100) The value must be a valid insights metric`. So is the page-level `page_impressions_unique`.
+What *does* work: `post_clicks`, `post_reactions_by_type_total`, `post_reactions_like_total`,
+`post_video_views`.
+
+**It is not the token.** `debug_token` shows `read_insights` AND `pages_read_engagement` present,
+type PAGE, valid, non-expiring. The likeliest cause is the page sitting under Meta's follower
+threshold for serving insights at all, which resolves itself if it crosses.
+
+**And the number that actually explains the engagement.** The Facebook page
+(`Thejeepducklife`) has **27 followers**. Instagram (`thejeepducklife`) has **2,382** — 88×. A
+post shown to a fraction of 27 people earning 0–1 reactions is not a creative result; it is an
+audience-size result. Every per-lane Facebook comparison we have ever drawn was measuring that.
+
+**What was ours to fix, and is fixed.**
+- We stopped requesting the seven metrics that are rejected on every API version. Asking anyway
+  cost three guaranteed errors per post, which pinned every Facebook post at `partial` forever
+  and made a genuine fetch failure indistinguishable from the normal case. Three posts now
+  report `ok` for the first time.
+- `post_impressions_unique` was removed from the "is this measured?" test. A page that cannot
+  serve reach could otherwise never report `ok`, so everything looked half-broken.
+- `flows/meme/replace.py` now marks the Facebook receipt it just deleted as `cancelled`.
+  `scripts/meme_replace.py` had done this since it was written; the module the mail watcher and
+  every programmatic replace actually use never did, so duck-ops kept fetching deleted post ids
+  forever. The collector now skips `cancelled` receipts rather than reporting them failed.
+- Net: Facebook metric errors **30 → 8**, `fetch_failed` **7 → 0**.
+
+**A mistake worth recording.** The first backfill inferred "cancelled" from a post being absent
+from the Facebook *scheduled* list. A post that **published** is also absent from that list, so
+the rule relabelled **39 healthy posts** as cancelled — including the best-measured post we have
+(the 15.0 jeepfact carousel). Caught by reading the result back, repaired by probing each object
+directly (alive → restore, gone → cancel), and the helper now matches only the id it just
+deleted so the inference cannot be made again. Absence is not evidence of what happened; it is
+the absence of evidence.
+
+| | Happy | Wrong sibling | Empty input | Deleted object |
+|---|---|---|---|---|
+| Superseded receipts | ✅ `duckAgent/tests/test_meme_caption_edit.py::TestSupersededReceipts::test_only_the_deleted_post_is_cancelled` — asserts the sibling post and the Instagram row are untouched | ✅ same test | ✅ `::test_an_empty_deleted_id_changes_nothing` | ✅ collector returns `cancelled`, not `fetch_failed` |
+
+**Still open:**
+- **Reach on Facebook stays unmeasurable** until the page clears Meta's follower threshold. Until
+  then no Facebook engagement RATE can be computed, and the only honest Facebook numbers are
+  reactions, comments and clicks.
+- **The real decision is whether Facebook earns a posting slot at all.** 27 followers against
+  2,382 is not a creative problem, and no amount of caption or format work moves it. Growing the
+  page, or dropping it and spending the slot on Instagram, are the two real options.
+- Facebook receipts still never flip from `scheduled` to `published`, so receipt status is not
+  evidence of publication — only of intent.

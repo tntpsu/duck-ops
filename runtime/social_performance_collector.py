@@ -248,6 +248,11 @@ def _load_normalized_posts(*, window_days: int, now: datetime | None = None) -> 
     return posts, summary
 
 
+#: The only post-level insight metrics this page's Graph API actually accepts.
+#: Reach is absent on purpose -- see the comment at the fetch site.
+FACEBOOK_POST_INSIGHT_METRICS = ("post_clicks", "post_reactions_by_type_total")
+
+
 def _facebook_object_fields(include_optional: bool = True) -> str:
     # permalink_url is not supported on every page-post object type, and Graph
     # rejects the WHOLE request with "(#100) Tried accessing nonexisting field"
@@ -397,7 +402,20 @@ def _fetch_facebook_metrics(post: dict[str, Any], token_manager) -> dict[str, An
 
     errors: list[str] = list(fetch_errors[:2])
     insight_metrics: dict[str, int] = {}
-    for metric in ["post_impressions", "post_impressions_unique", "post_engaged_users"]:
+    # Probed live against this page on 2026-10-12, identically on v19/v21/v23:
+    # post_impressions, post_impressions_unique, post_engaged_users,
+    # post_impressions_organic, post_impressions_paid, post_activity and
+    # post_negative_feedback are ALL rejected with "(#100) The value must be a
+    # valid insights metric". So is the page-level page_impressions_unique.
+    # The token is not the problem -- it carries read_insights and
+    # pages_read_engagement. The page had 27 followers, under Meta's threshold
+    # for serving page insights at all, which is the most likely cause and
+    # resolves itself if the page crosses it.
+    #
+    # Asking anyway cost nothing but noise: three guaranteed errors per post,
+    # which pinned every Facebook post at metric_status "partial" forever and
+    # made a real fetch failure indistinguishable from the normal case.
+    for metric in FACEBOOK_POST_INSIGHT_METRICS:
         insight_response = token_manager.make_request(
             "GET",
             f"https://graph.facebook.com/v19.0/{post_id}/insights",
@@ -410,16 +428,28 @@ def _fetch_facebook_metrics(post: dict[str, Any], token_manager) -> dict[str, An
         insight_metrics.update(_parse_insights_payload(insight_response.json()))
 
     metrics.update(insight_metrics)
-    metric_values = [metrics.get(key) for key in ("reaction_count", "comment_count", "share_count", "post_impressions_unique")]
+    # Reach is deliberately NOT in this list any more. Including it meant a page
+    # that cannot serve reach at all could never report "ok", so every Facebook
+    # post looked half-broken and nobody could see which ones actually were.
+    metric_values = [metrics.get(key) for key in ("reaction_count", "comment_count", "share_count")]
     status = "ok" if any(value not in (None, 0) for value in metric_values) else ("partial" if metrics else "empty")
     if errors and status == "ok":
         status = "partial"
+    metrics["reach_available"] = False
     return {"status": status, "metrics": metrics, "errors": errors}
 
 
 def fetch_post_metrics(post: dict[str, Any]) -> dict[str, Any]:
     if post.get("is_future_post"):
         return {"status": "scheduled_future", "metrics": {}, "errors": []}
+
+    # A receipt the replace path cancelled describes a post we deleted on
+    # purpose. Fetching it returns "Object ... does not exist" forever, which
+    # counted as fetch_failed and made a real failure impossible to spot among
+    # the noise. The receipt stays -- it is the record of what we attempted --
+    # but we stop asking Meta about something we know we removed.
+    if str(post.get("status") or "").lower() == "cancelled":
+        return {"status": "cancelled", "metrics": {}, "errors": []}
 
     get_meta_token_manager = _ensure_duckagent_imports()
     token_manager = get_meta_token_manager()
