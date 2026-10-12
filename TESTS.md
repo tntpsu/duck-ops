@@ -2583,3 +2583,21 @@ Instagram queued as a **carousel** entry for the same 18:00 slot. `meme_render_p
   carousel crops to its first slide's shape.
 - The AI path has no cost ceiling: a retry doubles the call for that panel. Two panels × up to
   two attempts is the worst case per week, which is small, but nothing enforces it.
+
+**Addendum, same day — editing only the words.** Fixing a caption used to mean
+`replace_meme_duck`: delete the scheduled post, re-render both panels, re-upload, re-send the
+review email. A sledgehammer for a sentence, and expensive enough to discourage fixing copy at
+all. `flows/meme/replace.py::update_scheduled_caption` edits in place instead — the Facebook
+scheduled post's message, and the pending Instagram queue entry via the new
+`helpers/social_publish_queue.py::update_pending_caption` — leaving the images, the slot and the
+carousel untouched. Same refusals as a replace, plus one more: a Facebook rejection refuses
+before Instagram is touched, so the two platforms can never end up carrying different words.
+
+| | Happy | Already posted | Inside grace | Unknown FB state | Partial failure |
+|---|---|---|---|---|---|
+| Caption edit | ✅ `duckAgent/tests/test_meme_caption_edit.py::test_the_caption_is_edited_on_both_platforms` | ✅ `::test_an_already_published_meme_is_refused` | ✅ `::test_an_edit_inside_the_grace_window_is_refused` | ✅ `::test_a_post_missing_from_the_scheduled_list_is_refused` | ✅ `::test_a_facebook_error_refuses_rather_than_half_applying` |
+| Edit is surgical | ✅ `::test_the_images_and_slot_are_not_touched` | ✅ `::test_hashtags_are_reattached_so_the_edit_does_not_drop_them` | ✅ `::test_an_empty_caption_is_refused` | ✅ `::test_the_edit_is_recorded_in_history` | ✅ `tests/test_social_publish_queue.py` — a non-pending entry refuses the caption rewrite |
+
+**Verified live:** tonight's caption was rewritten and read back off the Facebook scheduled-post
+list and the Instagram queue entry — both carry the new words, the carousel still has 2 slides,
+and the 18:00 slot is unchanged.
