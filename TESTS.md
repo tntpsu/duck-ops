@@ -2247,7 +2247,13 @@ The worse half is that **`published` was set true while Shopify had failed**. Et
 
 ### 79d — The duplicate-listing foot-gun, and surfacing partial publishes
 
-79c leaves a trap: the natural recovery from a half-failed publish is `--force`, and the Etsy block had **no `etsy_listing_id` check**, so recovering from a Shopify failure would have created a second live Etsy listing. Guarded. Shopify is deliberately *not* guarded the same way — its create is idempotent-by-handle in a way Etsy's is not — and that asymmetry is pinned by a test so nobody "fixes" the inconsistency.
+79c leaves a trap: the natural recovery from a half-failed publish is `--force`, and the Etsy block had **no `etsy_listing_id` check**, so recovering from a Shopify failure would have created a second live Etsy listing. Guarded.
+
+**Corrected 2026-10-13 — the asymmetry was a second instance of the same bug, and a test was defending it.** 79d left Shopify unguarded on the stated grounds that "its create is idempotent-by-handle in a way Etsy's is not", pinned by `test_shopify_is_deliberately_not_guarded_the_same_way`. Both halves of that are wrong. `POST products.json` is not idempotent by handle — Shopify accepts the duplicate and suffixes the handle `-1` — and the fallback rationale in the test ("blocking it would prevent exactly the repair that fixed Camp Slasher") misreads the mechanism: the guard keys on `shopify_product_id`, which is written only *after* a successful create, so a run whose create failed has no id and retries freely. The guard can only ever refuse to duplicate a product that demonstrably already exists.
+
+Found by the mirror case. Candy Corn Quacker published to Shopify and died on Etsy with the Surface 90 dead token, so the recovery had to re-run `--force` with `shopify_product_id` already set — and under 79d that would have created a second Shopify product for it. Shopify now carries the same create-once guard as Etsy, and the test asserts the pair together (`src.count("not creating another") == 2`) rather than each half separately, because separate assertions are what let the asymmetry read as intentional for two weeks ([[feedback_incomplete_fix_enumerate_all_branches]], [[feedback_pin_the_rule_not_the_reading]] — a test that asserts today's defect defends it).
+
+Residual, accepted: when the Shopify create succeeds but a *later* Shopify step fails (images, SEO, inventory, collection), a `--force` re-run now skips the whole Shopify block instead of redoing those steps. Skipping beats duplicating, and each sub-step already records its own error in state, but completing a half-built Shopify product still has no automated path.
 
 The card is the other half: state now knows a publish was partial, and `newduck_partial_publish` is what tells the operator. RED when a published run reached only one of the two channels in the last 30d, naming the recorded error and the recovery — including that the recovery is now safe, which it was not before the guard.
 
@@ -2255,7 +2261,8 @@ The card is the other half: state now knows a publish was partial, and `newduck_
 |---|---|---|---|---|---|
 | Loader | ✅ `duckAgent/creative_agent/runtime/tests/test_newduck_partial_publish_card.py::TestLoader::test_the_camp_slasher_case_is_caught`, `::test_a_missing_etsy_listing_is_caught_too` (both directions) | `::test_a_fully_published_listing_is_green`, `::test_an_unpublished_run_is_not_this_card_s_business` | `::test_old_runs_drop_out_of_the_window` | `::test_no_runs_dir_is_yellow_not_a_crash`, `::test_corrupt_state_is_skipped`, ✅ `::test_the_loader_never_raises` | see right |
 | Card | `::TestRegistration::test_the_card_is_registered` | `::test_a_green_card_asks_for_nothing` | n/a | ✅ `::test_registered_even_with_an_empty_payload` | ✅ `::test_a_red_card_names_the_recovery_and_its_safety` |
-| Etsy duplicate guard | `duckAgent/tests/test_newduck_licensed_claim.py::TestEtsyDuplicateGuard::test_the_guard_exists` | ✅ `::test_the_create_call_is_inside_the_else_branch` (the guard is worthless if the create sits outside it) | n/a | n/a | ✅ `::test_shopify_is_deliberately_not_guarded_the_same_way` |
+| Etsy duplicate guard | `duckAgent/tests/test_newduck_licensed_claim.py::TestEtsyDuplicateGuard::test_the_guard_exists` | ✅ `::test_the_create_call_is_inside_the_else_branch` (the guard is worthless if the create sits outside it) | n/a | n/a | ✅ `::test_neither_channel_can_be_recreated_blindly` asserts BOTH guards in one count |
+| Shopify duplicate guard | ✅ `::test_shopify_is_guarded_the_same_way` (replaced the test that asserted the gap) | ✅ `::test_a_failed_shopify_create_still_retries` — the id is set only after a successful create, so the repair path stays open | n/a | n/a | see above |
 
 **Verified live**, not just in fixtures: 4 published runs in the 30d window, all reaching both channels, card green on `/api/system-health` after a viewer bounce + `system_health_refresh.py`.
 
