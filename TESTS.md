@@ -2978,6 +2978,14 @@ Two further defects in the same seven lines, both found by writing the tests:
   Now tempfile + `os.replace`, mode 0600, and **no `.bak`** — a copy of `.env` is exactly the
   file that must not exist on disk.
 
+**A third defect, found by CI the same night (run 38341625318).** The layer-2 refusal sat *below*
+`if not os.path.exists(env_file): return`. CI checks out no `.env`, so the function returned early
+and `test_a_test_mode_write_to_the_real_env_raises` failed with `DID NOT RAISE` — green locally,
+red in CI, and on any machine without a `.env` the one layer that catches a forgotten monkeypatch
+was silently unreachable. The guard is about what a write is **aimed at**, not what happens to be
+on disk, so it now runs first. Ordering, not logic: the same class as checking a precondition
+after the short-circuit that skips it.
+
 **Three-layer isolation**, because `.env` is now a write target on a test-reachable path
 ([[feedback_test_runs_reach_the_outside_world]]): the autouse `_no_env_file_writes` fixture in
 `duckAgent/tests/conftest.py` redirects `EtsyAPIWrapper.ENV_FILE` to a tmp path; the source
@@ -2991,16 +2999,28 @@ Etsy was never set up.
 |---|---|---|---|---|---|
 | Rotation persisted | ✅ `duckAgent/tests/test_etsy_refresh_token_rotation.py::TestTheRotatedTokenIsPersisted::test_a_new_refresh_token_is_written_to_env` | ✅ `::test_the_instance_uses_the_new_one_for_the_next_refresh` — two refreshes in one process, asserts the second SENDS the rotated token | ✅ `::TestWhenTheResponseIsIncomplete::test_no_refresh_token_keeps_the_stored_one` + loud warning | ✅ `::test_no_access_token_is_a_failed_refresh` writes nothing | ✅ `::test_an_invalid_grant_leaves_env_untouched` — the exact failure, which must not also corrupt .env |
 | Surgical write | ✅ `::TestNothingElseIsDisturbed::test_unrelated_credentials_survive` | ✅ `::test_a_file_with_no_trailing_newline_does_not_merge_lines` | ✅ `::test_a_missing_key_is_appended_rather_than_dropped` | ✅ `::test_no_backup_file_is_left_behind` | ✅ `::test_a_token_containing_a_regex_escape_is_written_literally` pins the `re.sub` defect |
-| Test isolation | ✅ `tests/conftest.py::_no_env_file_writes` (layer 1, autouse) | ✅ `::TestTheProductionEnvIsRefusedInTests::test_the_frozen_path_is_the_repo_env` | n/a | ✅ `::test_a_test_mode_write_to_the_real_env_raises` (layer 2) | ✅ `tests/test_no_env_pollution_from_token_refresh.py` (layer 3, 4 checks incl. `DUCK_TEST_MODE` armed) |
+| Test isolation | ✅ `tests/conftest.py::_no_env_file_writes` (layer 1, autouse) | ✅ `::TestTheProductionEnvIsRefusedInTests::test_the_frozen_path_is_the_repo_env` | ✅ `::test_it_raises_even_when_no_env_file_is_present` — pins the guard above the existence check (the CI failure) | ✅ `::test_a_test_mode_write_to_the_real_env_raises` (layer 2) | ✅ `tests/test_no_env_pollution_from_token_refresh.py` (layer 3, 4 checks incl. `DUCK_TEST_MODE` armed) |
 
-**What this does NOT fix.** The current refresh token is already dead and no code can revive it —
-rotation means the valid one was issued to a process that threw it away. One operator re-auth is
-needed (`scripts/etsy_oauth_setup.py`, or `duck-ops/runtime/reauth_etsy_from_chrome.py` for the
-browser session, which is a *different* credential). After that the fix holds and the 90-day
-window should actually run its course for the first time.
+**What this does NOT fix.** The refresh token that was live when this was found was already dead
+and no code could revive it — rotation means the valid one had been issued to a process that threw
+it away. One operator re-auth was needed and **was run 2026-10-13 19:36** (`.env` rewritten, both
+keys present). The fix now holds and the 90-day window should run its course for the first time.
+The first unattended proof is the next natural refresh: under the old code the second refresh in a
+token's life always died, so Etsy-dependent cards coming up green the following morning is the
+signal.
 
-**Blocked on that re-auth:** the approved title edit to listing `4594167557` (88 → 125
-characters, Surface 89). The new title is computed; the write is one `etsy_update_listing` call.
+**Unblocked and done.** The approved title edit to listing `4594167557` shipped right after the
+re-auth: 88 → **125 characters**, read back from Etsy and byte-compared, not trusted to the 200
+([[feedback_verify_against_the_marketplace]]).
+
+```
+Good Guy Quackers Duck, 3D Printed PLA Horror Doll Inspired Figure, 2.25 Inch Desk Decor,
+Good Guy Figurine, Collectible Duck
+```
+
+Note the run's `commerce_keyword_strategy.master_keywords` was **empty** for this listing, so both
+appended segments came from the tag fallback — which is the path that makes the `jeep`/`rubber`
+title ban load-bearing, since `jeep rubber duck` is a required *tag* and sits in that same list.
 
 **Not available at all: installing GA4 on the Shopify store without the operator.** Checked
 rather than assumed —
