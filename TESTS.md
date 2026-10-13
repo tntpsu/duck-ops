@@ -2797,3 +2797,76 @@ Store → Preferences → Google Analytics, or the Google & YouTube channel app)
 Shopify traffic and every social referral to the store stay invisible, GSC search data is the
 only first-party read on the store, and the UTM links are read only by Shopify's own admin
 reporting.
+
+## Surface 88 — Good Guy Quackers died on one character (2026-10-12, operator: "the new character i was building a listing for failed towards the end")
+
+```
+[newduck] Stage 4/5: hardening generated copy...
+RuntimeError: [newduck] deterministic SEO validation failed:
+  ['shopify.seo_description length must be 150-160 characters']
+```
+
+Four defects had to line up. Each one alone was survivable; together they ended a listing run
+whose copy and images were already generated.
+
+**1. The formatter was allowed to emit what the validator rejects.** `_drop_partial_sentence`
+carries a deliberate 15-character tolerance, added 2026-09-29 to stop `...Made in the USA. Gift`
+shipping on Camp Slasher Duck. `validate_newduck_payload` enforces 150–160 with no tolerance at
+all. So the formatter could legally return 135–149 characters and the validator would reject it
+every time. Worse, the steps ran in sequence: `_grow_to_minimum_with_fragments` got the text to a
+valid **154**, and the clean-sentence pass immediately took it back to **149** — one character
+short. The passes undid each other. `fit_to_range` now *ranks* candidates instead: clean and in
+range, then in range, then cleanest under the ceiling.
+
+**2. No extra could land in the window.** After `Made in the USA.` the text sat at 149 with 11
+characters free, and the shortest remaining extra (`Gift ready.`) needed 12. Every extra either
+overshot the ceiling or could not reach the floor, so no clean sentence could end in range for
+this name. Short fillers (`Fun gift.`, `USA made.`) were added as fine-grained padding. Swept
+across name lengths 3–45: previously 5 lengths produced an invalid description, now none do.
+
+**3. `_trim_to_boundary` could exceed its own ceiling.** It slices `text[: max_len + 1]` so a
+space at the boundary still splits cleanly, then `rsplit(" ", 1)[0]`. For a run with no space in
+it — a URL, a long code — that rsplits to itself: **max_len + 1 characters**, one over what the
+caller asked for. Found by a test written for the length bug, not by the bug itself.
+
+**4. An optional comparison candidate could abort the run.** The deterministic package exists
+only to be *scored* against the model's copy; it is used when it scores higher or policy demands
+a rebuild. Raising from it discarded a model package that was already generated, hardened and
+ready for the operator email. The copy hardener on the line directly above it had been wrapped in
+try/except for exactly this reason since it was written. It is now built through
+`_build_deterministic_newduck_copy_package_safe`, which reports instead of raising — with one
+deliberate exception: when policy *required* the rebuild, the model copy was judged unsafe, so
+the listing goes to the operator marked `block_publish` with a
+`deterministic_rebuild_unavailable` blocker rather than being published from copy the policy
+rejected.
+
+**The crash was not deterministic, which is why it had not been seen.** The branch only runs when
+`_newduck_theme_family` resolves, and that reads the vision model's `visual_summary` and
+`visible_features`. A creepy-doll duck reads as `creature` → `fantasy` on one pass and as nothing
+on the next. The re-run that fixed this duck took the *other* branch, so the previously-crashing
+path was forced explicitly to confirm it: `fantasy` and `offroad` both now build, validate with
+no errors, and return 159 characters.
+
+| | Happy | Boundary | Degenerate | Cannot build | Regression guarded |
+|---|---|---|---|---|---|
+| Description length | ✅ `duckAgent/tests/test_newduck_seo_description_fit.py::TestTheDuckThatCrashed::test_good_guy_quackers_now_fits` | ✅ `::TestEveryNameLandsInRange` — name lengths 3–45, parametrised, length AND sentence ending | ✅ `::test_text_that_cannot_reach_the_minimum_is_returned_not_padded` — the validator complains, the formatter does not invent copy | n/a | ✅ `::test_camp_slasher_duck_still_does_not_dangle` keeps the 2026-09-29 fix |
+| `fit_to_range` ranking | ✅ `::TestFitToRangeNeverReturnsOutOfRangeWhenItCould::test_a_clean_in_range_result_is_still_preferred` | ✅ `::test_an_in_range_result_beats_a_clean_but_short_one` | ✅ `::test_the_maximum_is_never_exceeded` — the `max_len + 1` slice | n/a | ✅ `test_newduck_licensed_claim.py::test_validity_wins_when_no_clean_sentence_can_land_in_range` states the trade-off outright |
+| Comparison candidate | ✅ `::TestAComparisonCandidateCannotKillTheRun::test_a_successful_build_passes_straight_through` | n/a | n/a | ✅ `::test_the_deterministic_builder_reports_instead_of_raising` + `::test_the_caller_no_longer_lets_it_propagate` | ✅ `::test_a_required_rebuild_that_fails_blocks_rather_than_shipping_model_copy` |
+
+**A test that defended a reading, not a rule.** `test_fit_to_range_no_longer_leaves_a_dangling_word`
+asserted the clean-sentence preference against a hand-made extras list with which *no* candidate
+is both clean and in range — so what it actually pinned was "prefer a clean 149 over a valid 154",
+and a clean 149 is precisely what killed this run. It now checks the rule through the production
+builder, where both properties hold, and a second test states the trade-off plainly: a slightly
+ragged description that passes validation beats a tidy one that aborts the run, because every
+newduck listing is read by the operator before it goes live and nothing is read at all if the run
+exits 1. ([[feedback_pin_the_rule_not_the_reading]])
+
+**The folder guard works.** Re-running from a staged copy was refused — *"Photo folder
+'ggq-sources' does not look like it belongs to 'Good Guy Quackers'"* — which is the same check
+that caught the operator's first attempt pointing at `bronco-buddy-duck`. Renamed rather than
+bypassed with `--allow-foreign-photos`.
+
+**Still open:** the Etsy title came out at **88 characters** against a 140 ceiling and the
+operator's stated 120–140 target, so roughly fifty characters of Etsy search space went unused.
+`NEWDUCK_ETSY_TITLE_MAX` exists; there is no minimum, and nothing warns when a title is short.
