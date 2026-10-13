@@ -2673,3 +2673,127 @@ on the first run, and status now reads 14 published / 10 scheduled / 9 cancelled
 |---|---|---|---|---|---|
 | Published writeback | ✅ `duck-ops/tests/test_published_status_writeback.py::test_a_confirmed_post_is_marked_published` — siblings untouched | ✅ `::test_a_failed_fetch_leaves_the_receipt_alone` + `::test_a_post_with_no_observed_timestamp_is_not_proof` | ✅ `::test_a_post_whose_slot_has_not_passed_is_left_alone` | ✅ `::test_it_is_idempotent` | ✅ `::test_a_cancelled_receipt_is_never_resurrected` |
 | Lane fit | ✅ `::test_a_partial_fetch_still_counts_as_proof` — Facebook is `partial` by nature now, so requiring `ok` would mean its receipts never flip | ✅ `::test_a_missing_receipt_file_never_raises` | n/a | n/a | n/a |
+
+## Surface 86 — Did the September title rewrite do anything? (SPEC-FIRST 2026-10-12, operator: "do 1 and 2")
+
+**The question.** On 2026-09-08/09, **60 Etsy listings** had their titles and tags rewritten
+(`state/etsy_title_refresh_ledger.jsonl`, 61 attempts, 60 `ok`). A baseline snapshot of **all 279
+active listings** was captured 2026-09-07 (`state/etsy_title_refresh/my_all_listings.json`) with
+lifetime `views` and `num_favorers` per listing. Thirty-five days later nothing has read it back.
+Etsy is **70% of revenue**, so whether listing copy moves anything is the single most valuable
+thing we can learn about that channel — and we currently do not know.
+
+**Why this needs a producer, not another script.** The rewrite itself ran as ad-hoc scripts under
+`state/etsy_title_refresh/`. `grep -r title_refresh runtime/ scripts/` returns **nothing**, which
+is exactly why the measurement was never taken. The result has to land where the weekly strategy
+packet and `current_learnings` can read it.
+
+**The measurement, and why it is shaped this way.**
+`views` and `num_favorers` from the Etsy API are **lifetime cumulative**, so `now − baseline` is
+exactly what the listing earned in the window — no rolling-window overlap to untangle.
+Three things would each produce a confident wrong answer, so each gets handled explicitly:
+
+1. **Seasonality.** The window is September→October for Jeep ducks, with Halloween ducks
+   launching inside it. A treated-group-only number would measure autumn. The **~218 listings
+   that were never touched** are the control arm, measured over the same window.
+2. **Selection bias.** The 61 treated listings were chosen as the **top performers**, so
+   regression to the mean pushes against the treatment. Raw treated-vs-control would understate
+   a real effect. So the comparison is also run **within baseline-view strata**, matching each
+   treated listing against controls of similar size.
+3. **Skew.** One listing holds 49,932 lifetime views; the median holds ~1,100. A mean is that one
+   listing's opinion. Every headline figure is a **median**.
+
+Each listing's own pre-period rate (`baseline_views / days_live_at_baseline`) gives a
+per-listing prior, so the headline is a difference of ratios, not of raw counts.
+
+**Sales.** `units_90d` in the baseline is a rolling 90-day window that overlaps the post period,
+so it cannot be differenced. Units come instead from shop transactions, which per
+`reference_etsy_transactions_ignores_date_window` **ignore `min_created`/`max_created` and return
+lifetime newest-first** — so they are paged with a client-side early stop and bucketed into equal
+pre and post windows per `listing_id`.
+
+| | Happy | Missing from one side | Degenerate input | API failure | Not enough data |
+|---|---|---|---|---|---|
+| Treated/control split | ✅ a listing whose apply `result` was not `ok` (rank 20, HTTP 400 `quantity cannot be empty`) is in **neither** arm | ✅ a baseline listing absent from the live fetch (sold out / expired) is excluded and counted, never read as zero views | ✅ `days_live_at_baseline == 0` → excluded from the ratio, not divided by zero | ✅ live fetch returns `None` → `available: false` + the error, never a plausible 0.0 lift | ✅ either arm below a minimum n → `verdict: "insufficient_data"`, never a number |
+| Views / favourites | ✅ median per-day gain per arm + the ratio against each listing's own pre-period rate | ✅ a listing created *after* the baseline is in neither arm | ✅ a **negative** delta (Etsy recount) is kept and flagged, never clamped to 0 | ✅ partial page → fail closed, no partial verdict written | ✅ strata with no control match are reported, not silently dropped |
+| Sales | ✅ units bucketed into equal-length pre and post windows per listing | ✅ a listing with no transactions in either window contributes 0 to both, which is real | ✅ early stop never reads past the pre-window start | ✅ transaction fetch raises → sales section marked unavailable, views/favourites still reported | ✅ n too small for sales alone → that section only says so |
+| Honesty | ✅ the payload states the confound (selection + season) in its own `caveats` field so a reader cannot quote the lift without them | ✅ | ✅ | ✅ | ✅ |
+
+**Result (2026-10-12, 35.9 days after the rewrite).** 58 treated vs 218 untouched listings
+(60 applied, 2 since delisted, 1 apply failed, 12 listings created after the baseline excluded).
+
+| | Treated | Control | Lift | Verdict |
+|---|---|---|---|---|
+| Views / day vs each listing's own prior rate | 0.619× | 0.549× | **+12.8%** (win rate 0.569) | improved, weakly |
+| Favourites | 0.411× | 0.0× | n/a — control median is zero | insufficient_data |
+| Units (comparable strata only) | +64% | +68.5% | **−4.4%** | no_effect |
+
+**The headline the aggregate wanted to give was wrong, and the guard that stops it is the real
+deliverable.** The first run reported `sales: worse, lift −0.78` — treated units 285→259 while
+control went 54→91. Quoted on its own that reads "the rewrite cost us sales, stop doing it."
+It does not survive the strata: **73% of the treated arm's pre-window units sit in the two
+largest size buckets, which hold 1 and 0 control listings.** Those are the shop's best sellers —
+the most mean-reverting listings we have, and the ones whose season (college football) ended
+inside the window. Where a control arm exists at all, treated *beat* control in two of three
+buckets (+34% in 0–250 views, +86% in 250–750) and lost only in the bucket whose control base is
+3 units. So the aggregate now returns `confounded_by_selection` with the share named, publishes
+no number, and carries `comparable_verdict` for the half that can be measured.
+
+**The honest answer to "did the title rewrite work?" is: views moved slightly, sales cannot be
+resolved, and the experiment was not designed to answer it.** The treated group was the top 61
+by performance, which is the one selection that makes a before/after unreadable. A matched A/B —
+pair each candidate with a similar untouched listing, rewrite one of each pair — would answer it
+in a month at the same cost.
+
+| | Happy | Confounded | Tail dropped | Channel blind | Refusal |
+|---|---|---|---|---|---|
+| Producer | ✅ `duck-ops/tests/test_title_refresh_outcome.py` (24 tests) | ✅ `::TestAnUnmeasurableAggregateSaysSo::test_an_aggregate_dominated_by_uncontrolled_strata_is_confounded` — and `::test_a_balanced_aggregate_is_judged_normally` keeps the guard from suppressing every future result | n/a | n/a | ✅ `::test_too_few_listings_refuses_to_give_a_number`, `::test_a_zero_length_window_refuses` |
+| Isolation | ✅ conftest redirect + `write_outcome` DUCK_TEST_MODE guard + `tests/test_no_test_pollution_in_title_refresh_outcome.py` | | | | |
+| Learnings wiring | ✅ `current_learnings._title_refresh_belief` surfaces first, cap raised 8→9 so no existing belief was evicted | | | | |
+
+## Surface 87 — The funnel's middle was never instrumented (2026-10-12, operator: "do 1 and 2")
+
+Chasing "can we see whether Instagram sends anyone to the store" found two defects and one
+configuration gap, in ascending order of how long they had been invisible.
+
+**1. The GA4 report was silently dropping its tail.** `ga4_listing_performance.run_report` asked
+for a flat `limit: 250`. The property holds **279** `pageTitle × hostName` rows, so 29 listings
+were dropped on every run since the producer shipped — and `listing_count` read exactly `250`,
+a number indistinguishable from a real total. The dropped rows are the low-traffic end, which is
+exactly the half a "views but no sales" read is about. Now paginated to `rowCount`, with
+`rows_available` and `rows_truncated` on the payload so a cap can never be silent again
+([[feedback_no_silent_caps]]). Live: `listing_count` 250 → **279**.
+
+**2. A fresh, available, fully-populated feed was blind to 30% of revenue.** GA4 has **never
+received a single `myjeepduck.com` pageview** — the only host in the property is `www.etsy.com`.
+Etsy injects our tag into its listing pages, which is why Etsy data flows; the Shopify store's
+own tag was never installed. And because the payload only ever listed the channels it *found*,
+`channels: {etsy: ...}` looked like coverage rather than absence. `channel_coverage` now names
+the missing channel explicitly and refuses to guess between "no traffic" and "no tag", since the
+API cannot tell them apart.
+
+**3. So the social→store funnel is unmeasurable by construction.** The meme carousel shipped
+2026-10-12 puts `MYJEEPDUCK.COM` on its second panel. A URL rendered into an image cannot carry a
+UTM, Instagram does not linkify caption text, and the one social caption that does emit a store
+URL (`jeepfact_helper`) emits a bare domain. `helpers/social_cta.py` therefore tags the links a
+human places by hand — bio link, page button, story link — and stands ready for any future
+clickable link, rather than pushing query strings into captions where they would be read by
+nobody and typed by no one.
+
+**Carried, not written down as prose.** The gap rides on the existing `first_party_demand_feeds`
+card: yellow with `attention_subtype: operator_unblock` while a channel is missing (one admin
+setting away — it will never clear on a cadence), red if a report truncates. Per
+[[feedback_residual_risk_needs_a_tracked_home]], this is the tracked home.
+
+| | Happy | Tail dropped | Page fails | Channel missing | Fixed |
+|---|---|---|---|---|---|
+| GA4 pagination | ✅ `duck-ops/tests/test_ga4_listing_performance.py::TestThePropertyIsReadWhole::test_every_row_is_fetched_across_pages` | ✅ `::test_hitting_the_page_ceiling_is_reported_as_truncated` | ✅ `::test_a_later_page_failing_does_not_return_a_partial_set` — half a property reported as whole is worse than no report | n/a | ✅ `::test_a_single_short_page_does_not_ask_for_another` |
+| Channel coverage | ✅ `::TestAChannelWithNoDataIsNamed::test_both_channels_present_is_complete_and_quiet` | n/a | n/a | ✅ `::test_a_missing_channel_is_listed_as_missing` + `::test_the_note_does_not_claim_to_know_which_cause_it_is` | ✅ same |
+| OS card | ✅ `duckAgent/tests/test_first_party_demand_health.py::TestAFeedCanBeFreshAndStillBlind::test_complete_coverage_stays_green` | ✅ `::test_a_truncated_report_is_red_and_outranks_a_missing_channel` | ✅ `::test_an_unavailable_feed_still_wins_over_the_coverage_warning` | ✅ `::test_a_missing_channel_turns_the_card_yellow` + `::test_the_card_asks_the_operator_to_install_the_tag` | ✅ registration pinned in-source |
+| UTM scheme | ✅ `duckAgent/tests/test_social_cta.py` (13 tests) | n/a | n/a | n/a | ✅ `::test_an_already_tagged_link_is_not_tagged_twice`, `::test_an_existing_query_parameter_survives`, `::test_the_campaign_names_do_not_drift` |
+
+**Still open:** the GA4 tag on the Shopify store is an operator action (Shopify admin → Online
+Store → Preferences → Google Analytics, or the Google & YouTube channel app). Until it is in,
+Shopify traffic and every social referral to the store stay invisible, GSC search data is the
+only first-party read on the store, and the UTM links are read only by Shopify's own admin
+reporting.

@@ -241,3 +241,119 @@ class TestWrite:
         monkeypatch.setenv("DUCK_TEST_MODE", "1")
         with pytest.raises(ga4.TestModeRefusalError):
             ga4.write_listing_performance({}, path=ga4._FROZEN_PRODUCTION_LISTING_PERFORMANCE_PATH)
+
+
+class TestThePropertyIsReadWhole:
+    """Until 2026-10-12 the report asked for a flat 250 rows.
+
+    The property held 278 pageTitle x hostName rows, so 28 listings were dropped
+    on every run and `listing_count` read exactly 250 -- a number that looks like
+    a total. The dropped tail is the low-traffic end, which is the half a "views
+    but no sales" read is actually about.
+    """
+
+    def _pages(self, total, *, page_size=None):
+        size = page_size or ga4.PAGE_SIZE
+        calls = {"n": 0}
+
+        def fake(req, timeout=30):
+            offset = calls["n"] * size
+            calls["n"] += 1
+            n = max(0, min(size, total - offset))
+            return {
+                "rowCount": total,
+                "rows": [{
+                    "dimensionValues": [{"value": f"Listing {offset + i} - Etsy"},
+                                        {"value": "www.etsy.com"}],
+                    "metricValues": [{"value": "10"}, {"value": "5"}, {"value": "4"},
+                                     {"value": "0.5"}, {"value": "0.5"}, {"value": "100"}],
+                } for i in range(n)],
+            }
+        return fake, calls
+
+    def test_every_row_is_fetched_across_pages(self, monkeypatch):
+        monkeypatch.setattr(ga4, "PAGE_SIZE", 100)
+        fake, calls = self._pages(278, page_size=100)
+        monkeypatch.setattr(ga4, "_request_json", fake)
+        rows, meta = ga4.run_report("AT", "123", "2026-09-01", "2026-10-01")
+        assert len(rows) == 278, "the tail was dropped again"
+        assert meta["truncated"] is False
+        assert meta["rows_available"] == 278
+        assert calls["n"] == 3
+
+    def test_a_single_short_page_does_not_ask_for_another(self, monkeypatch):
+        fake, calls = self._pages(12)
+        monkeypatch.setattr(ga4, "_request_json", fake)
+        rows, meta = ga4.run_report("AT", "123", "2026-09-01", "2026-10-01")
+        assert len(rows) == 12
+        assert calls["n"] == 1
+
+    def test_hitting_the_page_ceiling_is_reported_as_truncated(self, monkeypatch):
+        """A cap we cannot avoid must still be visible."""
+        monkeypatch.setattr(ga4, "PAGE_SIZE", 10)
+        monkeypatch.setattr(ga4, "MAX_REPORT_PAGES", 2)
+        fake, _ = self._pages(500, page_size=10)
+        monkeypatch.setattr(ga4, "_request_json", fake)
+        rows, meta = ga4.run_report("AT", "123", "2026-09-01", "2026-10-01")
+        assert meta["truncated"] is True
+        assert meta["rows_available"] == 500
+        assert meta["rows_fetched"] == 20
+
+    def test_a_later_page_failing_does_not_return_a_partial_set(self, monkeypatch):
+        """Half the property reported as whole is worse than no report."""
+        monkeypatch.setattr(ga4, "PAGE_SIZE", 10)
+        state = {"n": 0}
+
+        def fake(req, timeout=30):
+            state["n"] += 1
+            if state["n"] == 2:
+                raise urllib.error.HTTPError("u", 500, "boom", None, None)
+            return {"rowCount": 100, "rows": [{
+                "dimensionValues": [{"value": f"L{i} - Etsy"}, {"value": "www.etsy.com"}],
+                "metricValues": [{"value": "10"}, {"value": "5"}, {"value": "4"},
+                                 {"value": "0.5"}, {"value": "0.5"}, {"value": "100"}],
+            } for i in range(10)]}
+        monkeypatch.setattr(ga4, "_request_json", fake)
+        rows, meta = ga4.run_report("AT", "123", "2026-09-01", "2026-10-01")
+        assert rows == []
+        assert meta["ok"] is False
+
+
+class TestAChannelWithNoDataIsNamed:
+    """GA4 had never received one myjeepduck.com pageview, yet `channels` showed
+    a healthy etsy entry and nothing else -- so the Shopify store, 30% of
+    revenue and the only place social traffic can land, looked covered."""
+
+    def _row(self, host, title):
+        return {"title": title, "host": host, "channel": ga4._channel_for(host),
+                "page_views": 10.0, "active_users": 5.0, "new_users": 4.0,
+                "engagement_rate": 0.5, "bounce_rate": 0.5, "avg_engagement_time": 20.0}
+
+    def test_a_missing_channel_is_listed_as_missing(self):
+        cov = ga4.channel_coverage([self._row("www.etsy.com", "A - Etsy")])
+        assert cov["missing"] == ["shopify"]
+        assert cov["complete"] is False
+        assert "shopify" in cov["note"]
+
+    def test_both_channels_present_is_complete_and_quiet(self):
+        cov = ga4.channel_coverage([self._row("www.etsy.com", "A - Etsy"),
+                                    self._row("www.myjeepduck.com", "B")])
+        assert cov["missing"] == []
+        assert cov["complete"] is True
+        assert cov["note"] == ""
+
+    def test_the_note_does_not_claim_to_know_which_cause_it_is(self):
+        """No traffic and no tag are indistinguishable from the API, and saying
+        which one it is would be a guess presented as a finding."""
+        cov = ga4.channel_coverage([self._row("www.etsy.com", "A - Etsy")])
+        assert "no traffic" in cov["note"] and "tag" in cov["note"]
+
+    def test_coverage_rides_on_the_payload(self):
+        payload = ga4.build_payload(
+            {7: [self._row("www.etsy.com", f"L{i} - Etsy") for i in range(5)]},
+            windows=(7,), primary_window=7, property_id="1",
+            report_meta={"rows_available": 5, "truncated": False},
+        )
+        assert payload["channel_coverage"]["missing"] == ["shopify"]
+        assert payload["rows_available"] == 5
+        assert payload["rows_truncated"] is False

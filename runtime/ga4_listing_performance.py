@@ -61,6 +61,14 @@ TOP_LIST_LIMIT = 50
 # (myjeepduck.com) are attributed to the right CHANNEL — the property carries
 # both because Etsy injects our GA tag into its listing pages.
 _DIMENSIONS = ["pageTitle", "hostName"]
+# GA4's runReport maximum per request; pages are walked until rowCount is met.
+PAGE_SIZE = 250
+MAX_REPORT_PAGES = 12
+# Channels we actually sell on. A channel with no GA4 rows is reported as
+# absent rather than simply missing from the output -- 2026-10-12: the property
+# had never received a single myjeepduck.com pageview, and because the payload
+# only ever listed the channels it found, the Shopify store looked covered.
+EXPECTED_CHANNELS = ("etsy", "shopify")
 # userEngagementDuration is total engagement seconds (a valid Data API metric);
 # averageEngagementTimePerActiveUser is NOT a real metric — we derive the
 # average ourselves from total / activeUsers.
@@ -156,29 +164,62 @@ def fetch_ga4_access_token(config: dict[str, Any]) -> tuple[str | None, dict[str
     return (token or None), {"ok": bool(token)}
 
 
-def run_report(access_token: str, property_id: str, start_date: str, end_date: str,
-               ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Return (rows, meta). Each row: {title, page_views, active_users, new_users,
-    engagement_rate, bounce_rate, avg_engagement_time}."""
+def _report_page(access_token: str, property_id: str, start_date: str, end_date: str,
+                 *, offset: int) -> dict[str, Any]:
     url = GA4_RUN_REPORT_URL_TEMPLATE.format(property_id=urllib.parse.quote(property_id, safe=""))
     body = json.dumps({
         "dateRanges": [{"startDate": start_date, "endDate": end_date}],
         "dimensions": [{"name": d} for d in _DIMENSIONS],
         "metrics": [{"name": m} for m in _METRICS],
-        "limit": 250,
+        "limit": PAGE_SIZE,
+        "offset": offset,
     }).encode("utf-8")
     request = urllib.request.Request(url, data=body, method="POST", headers={
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     })
-    try:
-        payload = _request_json(request)
-    except urllib.error.HTTPError as exc:
-        return [], {"ok": False, "error": f"report_http_{exc.code}", "detail": _safe_http_detail(exc)}
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return [], {"ok": False, "error": "report_network", "detail": str(exc)[:200]}
+    return _request_json(request)
+
+
+def run_report(access_token: str, property_id: str, start_date: str, end_date: str,
+               ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return (rows, meta). Each row: {title, page_views, active_users, new_users,
+    engagement_rate, bounce_rate, avg_engagement_time}.
+
+    Paginated. Until 2026-10-12 this asked for a flat 250 rows and reported
+    whatever came back, and the property held 278 pageTitle x hostName rows --
+    so 28 listings were dropped on every run with nothing saying so, and
+    `listing_count` sat at exactly 250 looking like a real total. The dropped
+    tail is the low-traffic end, which is precisely what a "views but no sales"
+    read is about ([[feedback_no_silent_caps]]). meta now carries
+    `rows_available` and `truncated` so a future cap cannot be silent.
+    """
     rows: list[dict[str, Any]] = []
-    for r in payload.get("rows") or []:
+    raw: list[dict[str, Any]] = []
+    row_count = None
+    for page in range(MAX_REPORT_PAGES):
+        try:
+            payload = _report_page(access_token, property_id, start_date, end_date,
+                                   offset=page * PAGE_SIZE)
+        except urllib.error.HTTPError as exc:
+            if page == 0:
+                return [], {"ok": False, "error": f"report_http_{exc.code}",
+                            "detail": _safe_http_detail(exc)}
+            # A later page failing would leave a partial set that looks whole.
+            return [], {"ok": False, "error": f"report_http_{exc.code}",
+                        "detail": f"page {page}: {_safe_http_detail(exc)}"}
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            return [], {"ok": False, "error": "report_network", "detail": str(exc)[:200]}
+        batch = payload.get("rows") or []
+        raw.extend(batch)
+        if row_count is None:
+            row_count = payload.get("rowCount")
+        if len(batch) < PAGE_SIZE:
+            break
+        if isinstance(row_count, int) and len(raw) >= row_count:
+            break
+    truncated = bool(isinstance(row_count, int) and len(raw) < row_count)
+    for r in raw:
         dims = r.get("dimensionValues") or []
         mets = r.get("metricValues") or []
         title = str(dims[0].get("value")).strip() if len(dims) >= 1 else ""
@@ -200,7 +241,8 @@ def run_report(access_token: str, property_id: str, start_date: str, end_date: s
             "bounce_rate": round(vals[4], 4),
             "avg_engagement_time": avg_engagement,
         })
-    return rows, {"ok": True}
+    return rows, {"ok": True, "rows_available": row_count,
+                  "rows_fetched": len(raw), "truncated": truncated}
 
 
 # --------------------------------------------------------------------------
@@ -304,9 +346,36 @@ def _trend(views_by_window: dict[str, int], windows: tuple[int, ...]) -> str:
     return "steady"
 
 
+def channel_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Which channels GA4 actually has data for, including the ones it does not.
+
+    A payload that lists only the channels it found cannot distinguish "the
+    Shopify store had no traffic" from "the Shopify store has no analytics tag",
+    and the second is what was true: zero myjeepduck.com pageviews had ever
+    reached this property, while `channels` showed a healthy etsy entry and
+    nothing else. The absent channel has to be named to be noticed
+    ([[feedback_plausible_fallbacks_mask_failure]]).
+    """
+    seen: dict[str, int] = {}
+    for r in rows:
+        ch = r.get("channel") or "web"
+        seen[ch] = seen.get(ch, 0) + 1
+    missing = [c for c in EXPECTED_CHANNELS if not seen.get(c)]
+    return {
+        "present": {c: seen[c] for c in sorted(seen)},
+        "missing": missing,
+        "complete": not missing,
+        "note": ("" if not missing else
+                 f"No GA4 rows for: {', '.join(missing)}. Either the channel had "
+                 f"no traffic in the window or it has no analytics tag sending to "
+                 f"this property; the second cannot be ruled out from here."),
+    }
+
+
 def build_payload(per_window: dict[int, list[dict[str, Any]]], *,
                   windows: tuple[int, ...], primary_window: int, property_id: str,
-                  available: bool = True, error: str | None = None) -> dict[str, Any]:
+                  available: bool = True, error: str | None = None,
+                  report_meta: dict[str, Any] | None = None) -> dict[str, Any]:
     primary_rows = per_window.get(primary_window, [])
     classified = classify_listings(primary_rows)
     views_by_window = {w: {r["title"]: int(r["page_views"]) for r in per_window.get(w, [])}
@@ -331,6 +400,9 @@ def build_payload(per_window: dict[int, list[dict[str, Any]]], *,
             "new_users": int(sum(r["new_users"] for r in primary_rows)),
         },
         "channels": _channel_totals(primary_rows),
+        "channel_coverage": channel_coverage(primary_rows),
+        "rows_available": (report_meta or {}).get("rows_available"),
+        "rows_truncated": bool((report_meta or {}).get("truncated")),
         "fix": by("fix")[:TOP_LIST_LIMIT],
         "promote": by("promote")[:TOP_LIST_LIMIT],
         "watch": by("watch")[:TOP_LIST_LIMIT],
@@ -357,8 +429,11 @@ def collect(config: dict[str, Any], *, windows: tuple[int, ...] = WINDOWS,
         return empty(tok_meta.get("error") or "token_unavailable")
     end = today or _today_iso()
     per_window: dict[int, list[dict[str, Any]]] = {}
+    primary_meta: dict[str, Any] = {}
     for w in windows:
         rows, meta = run_report(token, pid, _days_before(end, w), end)
+        if w == primary_window:
+            primary_meta = meta
         if not meta.get("ok"):
             if w == primary_window:
                 return empty(meta.get("error") or "report_failed")
@@ -366,7 +441,7 @@ def collect(config: dict[str, Any], *, windows: tuple[int, ...] = WINDOWS,
         else:
             per_window[w] = rows
     return build_payload(per_window, windows=windows, primary_window=primary_window,
-                         property_id=pid, available=True)
+                         property_id=pid, available=True, report_meta=primary_meta)
 
 
 # --------------------------------------------------------------------------

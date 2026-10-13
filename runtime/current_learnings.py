@@ -147,6 +147,54 @@ def _competitor_social_freshness(snapshot_payload: dict[str, Any]) -> dict[str, 
     }
 
 
+def _title_refresh_belief() -> list[dict[str, Any]]:
+    """The September Etsy title rewrite's measured result (Surface 86).
+
+    A one-time experiment rather than a rolling signal, but it answers "does
+    listing copy pay on the channel that makes 70% of revenue", so it belongs
+    in front of the operator until it is superseded. Never raises: a missing or
+    unreadable file simply contributes no belief.
+    """
+    try:
+        from etsy_title_refresh_outcome import TITLE_REFRESH_OUTCOME_PATH
+    except ImportError:
+        return []
+    payload = load_json(Path(TITLE_REFRESH_OUTCOME_PATH), {})
+    if not isinstance(payload, dict) or not payload.get("available"):
+        return []
+    views = payload.get("views") or {}
+    sales = payload.get("sales") or {}
+    treated = payload.get("treated_count")
+    control = payload.get("control_count")
+    sales_read = sales.get("comparable_verdict") or sales.get("verdict")
+    confounded = sales.get("verdict") == "confounded_by_selection"
+    return [{
+        "key": "listing_copy_effect",
+        "headline": (
+            f"Rewriting {treated} Etsy titles moved views {views.get('lift_ratio')} "
+            f"against an untouched control arm; sales read {sales_read}."
+        ),
+        "confidence": "low_medium",
+        "evidence": (
+            f"{treated} rewritten vs {control} untouched listings over "
+            f"{payload.get('window_days')} days. Views lift "
+            f"{views.get('lift_ratio')} (win rate {views.get('treated_win_rate')}). "
+            + ("Aggregate sales are confounded: "
+               f"{sales.get('uncontrolled_units_share')} of treated units sit in "
+               "size strata with no control listings."
+               if confounded else
+               f"Sales lift {sales.get('lift_ratio')}.")
+        ),
+        "recommendation": (
+            "Treat listing-copy work as unproven rather than won: the views gain "
+            "is inside the re-measure band and sales could not be resolved. "
+            "Before rewriting more titles, run it as a matched A/B so the arms "
+            "are comparable."
+        ),
+        "paths": {"outcome": str(TITLE_REFRESH_OUTCOME_PATH)},
+    }]
+
+
 def _current_beliefs(
     social_payload: dict[str, Any],
     weekly_strategy_feedback: dict[str, Any],
@@ -154,6 +202,10 @@ def _current_beliefs(
     competitor_social_payload: dict[str, Any],
 ) -> list[dict[str, Any]]:
     beliefs: list[dict[str, Any]] = []
+    # Ahead of the rolling signals on purpose: it is the only measured answer we
+    # have about the channel that carries 70% of revenue.
+    for item in _title_refresh_belief():
+        beliefs.append({"source": "listing_experiment", **item})
     for item in social_payload.get("current_learnings") or []:
         if isinstance(item, dict):
             beliefs.append({"source": "own_social", **item})
@@ -165,7 +217,10 @@ def _current_beliefs(
     for item in competitor_social_payload.get("current_learnings") or []:
         if isinstance(item, dict):
             beliefs.append({"source": "competitor_social", **item})
-    return beliefs[:8]
+    # Raised from 8 when the listing-experiment slot was added, so adding a
+    # source does not silently evict a belief that was already surfacing
+    # ([[feedback_no_silent_caps]]).
+    return beliefs[:9]
 
 
 def _best_windows(social_payload: dict[str, Any]) -> list[dict[str, Any]]:

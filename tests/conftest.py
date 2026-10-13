@@ -231,6 +231,16 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         monkeypatch.setattr(_sst, "SALE_STEERING_PATH", tmp_path / "sale_steering.json")
     except ImportError:
         pass
+    # 2026-10-12: etsy_title_refresh_outcome (Surface 86) — new prod-WRITE path.
+    # Three-layer isolation: this redirect + the DUCK_TEST_MODE guard in
+    # write_outcome + tests/test_no_test_pollution_in_title_refresh_outcome.py.
+    # duckAgent-side fixture is n/a: nothing in duckAgent imports this module.
+    try:
+        import etsy_title_refresh_outcome as _etro
+        monkeypatch.setattr(_etro, "TITLE_REFRESH_OUTCOME_PATH",
+                            tmp_path / "etsy_title_refresh_outcome.json")
+    except ImportError:
+        pass
     # 2026-07-03: demand_intel (Demand page) — new prod-WRITE path (funnel action
     # buckets); three-layer isolation (this redirect + DUCK_TEST_MODE guard in
     # write_demand_intel + tests/test_no_test_pollution_in_demand_intel.py). Also
