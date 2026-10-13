@@ -2867,6 +2867,75 @@ exits 1. ([[feedback_pin_the_rule_not_the_reading]])
 that caught the operator's first attempt pointing at `bronco-buddy-duck`. Renamed rather than
 bypassed with `--allow-foreign-photos`.
 
-**Still open:** the Etsy title came out at **88 characters** against a 140 ceiling and the
-operator's stated 120–140 target, so roughly fifty characters of Etsy search space went unused.
-`NEWDUCK_ETSY_TITLE_MAX` exists; there is no minimum, and nothing warns when a title is short.
+**Closed by Surface 89:** the Etsy title came out at **88 characters** against a 140 ceiling and
+the operator's stated 120–140 target, so roughly fifty characters of Etsy search space went
+unused. `NEWDUCK_ETSY_TITLE_MAX` existed; there was no minimum, and nothing warned when a title
+came in short.
+
+
+## Surface 89 — Fifty characters of Etsy search space left empty (2026-10-12, operator: "do 2 and 3")
+
+Good Guy Quackers published with an **88-character** Etsy title against Etsy's 140-character
+ceiling and the operator's stated 120–140 target ([[feedback_etsy_title_tag_policy]]). Etsy title
+keywords are the shop's single biggest search lever on the channel that is **70% of revenue**, and
+roughly a third of the available surface was going unused on every listing. The code had
+`NEWDUCK_ETSY_TITLE_MAX = 140` and no minimum at all, so nothing was wrong by its own measure —
+the only reason this surfaced is that someone read the number.
+
+**The fix is append-only.** Etsy weights the front of a title most heavily, so extra keyword
+phrases are appended after the template, never inserted into it or reordered. Segments come from
+the run's own `commerce_keyword_strategy.master_keywords` (scored, best first) with the final Etsy
+tags as a fallback, so the title is filled with phrases the keyword layer already judged worth
+ranking for rather than invented filler.
+
+**Four rules decide what may be appended**, each of which exists because the obvious version is
+worse:
+
+1. **Banned in titles.** `jeep` and `rubber` are refused outright. The operator's policy requires
+   exactly one `jeep rubber duck` *tag* and bans those words from *titles*, so a keyword list
+   built for tags will reliably offer a segment the title must refuse.
+2. **It must say something new.** A segment whose every significant word already appears in the
+   title is skipped — `good guy quackers duck` adds nothing to a title that opens with it.
+3. **No word more than twice.** A long-tail title repeats its head noun naturally
+   (`... Horror Duck, Desk Duck Decor`), but six `duck`s is keyword spam that Etsy does not reward.
+4. **The caller's own policy scan gets a veto.** Widening runs *after* the copy audit has read the
+   title, so without `is_allowed` a segment could smuggle an unsupported or unlicensed claim past
+   the audit and into the marketplace. The flow passes `_newduck_find_policy_hits`, including the
+   visual brief's `avoid_terms`.
+
+A segment that does not fit does **not** stop the fill — the loop continues, because a shorter
+phrase further down the list can still land in the window. That is the same mistake as Surface 88
+defect 2, in a different file.
+
+**Where it runs.** One idempotent coercion, `coerce_newduck_etsy_title`, called at the last point
+before the package is stored — immediately after `coerce_etsy_tags`, for exactly the same reason:
+the hardener and the deterministic rebuild can each swap `pkg` after the audit has read it, and
+chasing which branch produced a short title is how the tag policy got missed twice
+([[feedback_incomplete_fix_enumerate_all_branches]]). `build_newduck_etsy_title` also accepts
+`keywords` so the deterministic package is correct in its own right; both paths are idempotent, so
+the second call is a no-op.
+
+**The short-title signal is a WARNING, not a blocker.** A title that no keyword could fill is lost
+search surface, not broken copy, and every newduck listing is read by the operator before it goes
+live. Raising — or adding a hard length check to `validate_newduck_payload` — would rebuild the
+exact formatter-versus-validator standoff that killed the run in Surface 88 one day earlier. The
+warning names the character count and the shortfall and rides the existing `copy_review.warnings`
+path onto the review email.
+
+| | Happy | Boundary | Degenerate | Refusals | Regression guarded |
+|---|---|---|---|---|---|
+| Title reaches the window | ✅ `duckAgent/tests/test_newduck_etsy_title_width.py::TestTheTitleThatShippedShort::test_it_now_lands_in_the_window` (88 → 125) | ✅ `::TestTheCeilingHolds::test_a_title_never_exceeds_the_maximum` (40 candidate phrases) | ✅ `::test_an_already_long_title_is_trimmed_not_extended` (200 chars in) | ✅ `::TestWhatItRefusesToAppend::test_a_jeep_keyword_never_reaches_a_title` | ✅ `::test_the_shipped_title_was_outside_the_target` pins the gap, not a chosen number |
+| Append-only | ✅ `::test_the_original_title_is_still_the_front_of_it` | ✅ `::test_a_segment_that_does_not_fit_does_not_stop_the_fill` | ✅ `::test_an_empty_title_stays_empty` — a title of keywords alone has no product name in it | ✅ `::test_a_segment_that_says_nothing_new_is_skipped` | ✅ `::test_a_word_is_not_repeated_more_than_twice` |
+| Idempotence | ✅ `::TestItIsIdempotent::test_running_twice_changes_nothing` | ✅ `::test_a_title_already_in_range_is_untouched` | n/a | n/a | ✅ `::TestTheLastPointCoercion::test_running_it_twice_is_a_no_op` |
+| Policy veto | ✅ `::test_the_callers_policy_scan_can_veto_a_segment` | n/a | n/a | ✅ `::TestTheLastPointCoercion::test_the_visual_briefs_avoid_terms_veto_a_segment` | ✅ `tests/test_etsy_tag_policy.py` unchanged and green — the tag rule is untouched |
+| Short-title warning | ✅ `::TestTheLastPointCoercion::test_it_warns_when_no_keyword_could_fill_the_window` | ✅ `::test_it_does_not_warn_once_the_title_is_in_range` — quiet for a good title or it is noise | ✅ `::test_it_never_raises_on_a_package_with_no_etsy_section` | n/a | ✅ Warning, never a blocker — see the Surface 88 standoff |
+| Keyword normalisation | ✅ `::TestSegmentNormalisation::test_phrases_become_title_cased_segments` | ✅ `::test_acronyms_are_left_alone` (`PLA`) | ✅ `::test_a_phrase_with_a_comma_is_dropped` — the separator is a comma | ✅ `::test_blank_entries_are_dropped` | ✅ `::test_duplicates_collapse` |
+| Builder | ✅ `::TestTheBuilderUsesTheWindow::test_the_deterministic_builder_reaches_the_target` (120) | ✅ `::test_every_name_stays_under_the_ceiling` — 5 name lengths, parametrised | ✅ `::test_without_keywords_the_template_is_unchanged` — no filler invented | n/a | ✅ `tests/test_seo_rules.py::test_newduck_titles_do_not_repeat_duck_or_existing_color` still green |
+
+A bug the new tests found on their first run: `extend_etsy_title("")` returned a title that opened
+with the separator and carried no product name at all. Fixed in source rather than asserted
+around.
+
+**Still open:** the already-published Good Guy Quackers listing (Etsy `4594167557`) still carries
+the 88-character title. Rewriting it is an Etsy write, so it waits on explicit approval; the
+widened title is computed and ready. The next listing gets the full window with no action.
