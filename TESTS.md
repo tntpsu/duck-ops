@@ -2939,3 +2939,84 @@ around.
 **Still open:** the already-published Good Guy Quackers listing (Etsy `4594167557`) still carries
 the 88-character title. Rewriting it is an Etsy write, so it waits on explicit approval; the
 widened title is computed and ready. The next listing gets the full window with no action.
+
+
+## Surface 90 — Why the Etsy API keeps dying (2026-10-13, found while trying to retitle one listing)
+
+Approved title edit to listing `4594167557`. The shop was unreachable:
+
+```
+❌ Failed to refresh Etsy token: 400
+Response: {"error":"invalid_grant","error_description":"refresh_token is invalid"}
+```
+
+A newduck publish had used the same credentials successfully **five and a half hours earlier** —
+`.env` carries its token write at 21:41:51 — with no code change in between and no other Etsy
+refresher anywhere in either repo. Something killed the credential between those two points.
+
+**Etsy rotates the refresh token on every refresh and invalidates the one just used.**
+`EtsyAPIWrapper._refresh_access_token` read `access_token` out of the response and called
+`_update_env_file(new_access_token)`, which rewrote only `ETSY_ACCESS_TOKEN`. The
+`refresh_token` the same response handed back was dropped on the floor, so `.env` was left
+holding a credential Etsy had already revoked. **Every refresh therefore worked exactly once**,
+and the next one — an hour later, when the access token expired — failed with `invalid_grant`.
+
+This is the recurring "Etsy API death" whose only known remedy was a manual browser re-auth
+([[reference_etsy_two_credentials]]): flows exit 0 with no artifacts, and profit / reviews /
+trend / occasion-tags all go stale together. It read as credentials rotting on a timer because
+`scripts/etsy_oauth_setup.py` — the *initial* exchange — always stored both tokens correctly. The
+bug lived only on the refresh path, so a fresh re-auth always worked and always died again within
+the hour.
+
+Two further defects in the same seven lines, both found by writing the tests:
+
+- **`re.sub` interpreted the replacement.** `re.sub(r'ETSY_ACCESS_TOKEN=.*', f'...={token}', ...)`
+  treats backslash sequences in the replacement as group references, so a token containing one
+  would be written mangled or raise. Now a line-based rewrite that writes the value literally.
+- **The write was not atomic.** `.env` holds every credential this system has and was rewritten
+  with a plain truncating `open(..., 'w')`; a process killed mid-write would leave it short.
+  Now tempfile + `os.replace`, mode 0600, and **no `.bak`** — a copy of `.env` is exactly the
+  file that must not exist on disk.
+
+**Three-layer isolation**, because `.env` is now a write target on a test-reachable path
+([[feedback_test_runs_reach_the_outside_world]]): the autouse `_no_env_file_writes` fixture in
+`duckAgent/tests/conftest.py` redirects `EtsyAPIWrapper.ENV_FILE` to a tmp path; the source
+refuses when `DUCK_TEST_MODE=1` and the path resolves to `_FROZEN_PRODUCTION_ENV_FILE` (captured
+at import, so a cwd change cannot disguise it); and a post-suite audit reads the live file looking
+for fixture values. The audit asserts the *absence* of pollution markers, never the presence of a
+real token, so it neither pulls a secret into an assertion message nor fails on a machine where
+Etsy was never set up.
+
+| | Happy | Boundary | Degenerate | Refusals | Regression guarded |
+|---|---|---|---|---|---|
+| Rotation persisted | ✅ `duckAgent/tests/test_etsy_refresh_token_rotation.py::TestTheRotatedTokenIsPersisted::test_a_new_refresh_token_is_written_to_env` | ✅ `::test_the_instance_uses_the_new_one_for_the_next_refresh` — two refreshes in one process, asserts the second SENDS the rotated token | ✅ `::TestWhenTheResponseIsIncomplete::test_no_refresh_token_keeps_the_stored_one` + loud warning | ✅ `::test_no_access_token_is_a_failed_refresh` writes nothing | ✅ `::test_an_invalid_grant_leaves_env_untouched` — the exact failure, which must not also corrupt .env |
+| Surgical write | ✅ `::TestNothingElseIsDisturbed::test_unrelated_credentials_survive` | ✅ `::test_a_file_with_no_trailing_newline_does_not_merge_lines` | ✅ `::test_a_missing_key_is_appended_rather_than_dropped` | ✅ `::test_no_backup_file_is_left_behind` | ✅ `::test_a_token_containing_a_regex_escape_is_written_literally` pins the `re.sub` defect |
+| Test isolation | ✅ `tests/conftest.py::_no_env_file_writes` (layer 1, autouse) | ✅ `::TestTheProductionEnvIsRefusedInTests::test_the_frozen_path_is_the_repo_env` | n/a | ✅ `::test_a_test_mode_write_to_the_real_env_raises` (layer 2) | ✅ `tests/test_no_env_pollution_from_token_refresh.py` (layer 3, 4 checks incl. `DUCK_TEST_MODE` armed) |
+
+**What this does NOT fix.** The current refresh token is already dead and no code can revive it —
+rotation means the valid one was issued to a process that threw it away. One operator re-auth is
+needed (`scripts/etsy_oauth_setup.py`, or `duck-ops/runtime/reauth_etsy_from_chrome.py` for the
+browser session, which is a *different* credential). After that the fix holds and the 90-day
+window should actually run its course for the first time.
+
+**Blocked on that re-auth:** the approved title edit to listing `4594167557` (88 → 125
+characters, Surface 89). The new title is computed; the write is one `etsy_update_listing` call.
+
+**Not available at all: installing GA4 on the Shopify store without the operator.** Checked
+rather than assumed —
+- **Browser:** the browser automation in this stack is four Etsy-only modules (`reauth_etsy_review`,
+  `review_reply_discovery`, `review_reply_executor`, `etsy_browser_guard`), rate-guarded to 3
+  windows/day. There is no Shopify-admin or Google session, and standing one up means routing
+  Shopify admin credentials plus 2FA through a brand-new automation path — the ad-hoc enablement
+  the safety rules forbid.
+- **Admin API:** the app's 29 granted scopes include `read_script_tags` but **not**
+  `write_script_tags`, and **neither** `read_themes` nor `write_themes` — so neither the legacy
+  script-tag route nor a `theme.liquid` gtag injection is reachable. `write_pixels` *is* granted,
+  but `webPixel` returns `No web pixel was found for this app` and creating one needs an app
+  pixel extension this custom app does not have; a sandboxed pixel would then need GA4
+  Measurement Protocol with an API secret minted in GA4 admin anyway.
+- **GA4 Admin API:** disabled on Cloud project `509295101365`, so the measurement ID cannot even
+  be read programmatically.
+- Confirmed the store currently has **zero** instrumentation: no web pixel, no script tags. That
+  matches GA4 having never received a single `myjeepduck.com` pageview (Surface 87).
+
