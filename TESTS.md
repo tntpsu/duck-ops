@@ -3051,3 +3051,57 @@ rather than assumed —
 - Confirmed the store currently has **zero** instrumentation: no web pixel, no script tags. That
   matches GA4 having never received a single `myjeepduck.com` pageview (Surface 87).
 
+## Surface 91 — The Shopify analytics we already had (2026-10-14)
+
+`first_party_demand_feeds` had been yellow for weeks on "GA4 listing performance: no rows for
+shopify — that channel has no analytics reaching this property", and that was read, by me, as
+*the Shopify store has no GA4 tag*. It had one the whole time.
+
+Shopify's **Google & YouTube** app was connected to `G-TEWTY33W75 (myJeepDuck)`, with Conversion
+measurement **On**. That measurement ID lives in GA4 property **468950523**. Every producer we
+have reads **471407647**, whose only data stream is "My Etsy Jeep Site".
+
+```
+471407647   stream "My Etsy Jeep Site"   www.etsy.com         2,787 views / 28d
+468950523   stream "My Website"          www.myjeepduck.com   4,281 views / 28d
+```
+
+The invisible channel was the **bigger** one: 3,478 active users against Etsy's 1,717.
+
+**GA4 cannot move a data stream between properties**, so this is not a tidy-up — a single-property
+read is *structurally* incapable of seeing both channels. `GA4_PROPERTY_ID` now accepts a list,
+`collect` reads each one and merges, and the payload carries `property_ids` + `property_errors`.
+
+Two merge details that are bugs if skipped:
+- **Rows key on (title, host), not title.** A duck's name appears on its Etsy listing *and* its
+  Shopify product page; a title-only key credits one channel's views to the other. This also fixes
+  `views_by_window`, which had the same latent collision within a single property.
+- **Rates re-weight by active users**, never average. Averaging lets a 3-user page outvote a
+  300-user one.
+
+**How the wrong conclusion survived.** Three compounding reads, each locally correct:
+1. The Shopify Admin API `webPixel` query returned `No web pixel was found for this app` — true,
+   and about *our custom app*, not the store. The store had seven app pixels. An app-scoped read
+   was generalised into a store-scoped claim ([[feedback_scoped_read_scoped_claim]]).
+2. `script_tags` was empty — also true, and irrelevant: app pixels are not script tags.
+3. `channel_coverage` said shopify missing. Its own note named the ambiguity correctly ("either
+   the channel had no traffic or it has no tag sending to *this property*") but not the third
+   case: a tag sending to a property nobody queried.
+
+The producer now distinguishes case 3 from the others — `property_errors` is populated when a
+property could not be read, so "missing" from a failed read never again looks like "missing"
+from a silent channel.
+
+| | Happy | Boundary | Degenerate | Refusals | Regression guarded |
+|---|---|---|---|---|---|
+| Config | ✅ `duck-ops/tests/test_ga4_multi_property.py::TestConfigTakesAList::test_a_comma_separated_pair_is_two_properties` | ✅ `::test_one_id_still_works` (existing `property_id` readers unaffected) | ✅ `::test_spaces_and_the_properties_prefix_are_tolerated` | ✅ `::test_no_property_is_not_ready` | ✅ `::test_a_repeated_id_is_not_read_twice` — a copy-paste in .env would double every metric |
+| Both read | ✅ `::TestBothPropertiesAreRead::test_every_configured_property_is_queried` | ✅ `::test_both_channels_land_in_one_payload` (coverage `complete`) | ✅ `::test_the_same_title_on_two_hosts_stays_two_rows` | n/a | ✅ `::test_views_by_window_does_not_cross_the_channels` |
+| One fails | ✅ `::TestWhenOnePropertyFails::test_the_surviving_property_still_reports` | ✅ `::test_all_properties_failing_is_unavailable` | n/a | ✅ `::test_the_failure_is_named_not_swallowed` | ✅ `::test_a_partial_read_does_not_claim_the_channel_is_absent` — the exact trap this surface came from |
+| Merge arithmetic | ✅ `::TestMergeArithmetic::test_additive_metrics_sum` | ✅ `::test_rates_are_weighted_by_users_not_averaged` | ✅ `::test_distinct_rows_are_left_alone` | n/a | ✅ `::test_truncation_anywhere_is_truncation` |
+
+**Verified live** (not mocked): both properties read in one call — 808 listings, 7,068 views,
+`channel_coverage.missing == []`.
+
+**Operator action outstanding.** `.env` still holds `GA4_PROPERTY_ID=471407647`. It needs
+`471407647,468950523`. An `.env` edit is Tier 3 and was not separately approved, so the producer
+is correct but still reading one property until that line changes.

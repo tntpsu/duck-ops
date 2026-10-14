@@ -123,6 +123,21 @@ def _first(env: dict[str, str], names: list[str]) -> str:
     return ""
 
 
+def _property_ids(env: dict[str, str]) -> list[str]:
+    """GA4_PROPERTY_ID accepts one id or several, comma- or space-separated.
+
+    Kept as one variable rather than adding GA4_PROPERTY_ID_2 so there is no
+    "which slot is Shopify" question and no silent ceiling at two.
+    """
+    raw = _first(env, ["GA4_PROPERTY_IDS", "GA4_PROPERTY_ID"])
+    out: list[str] = []
+    for chunk in raw.replace(",", " ").split():
+        pid = chunk.strip().removeprefix("properties/")
+        if pid and pid not in out:
+            out.append(pid)
+    return out
+
+
 def ga4_config(env: dict[str, str] | None = None) -> dict[str, Any]:
     env = env if env is not None else os.environ
     # Existing Google OAuth client lives under GOOGLE_TASKS_* in .env.
@@ -131,13 +146,24 @@ def ga4_config(env: dict[str, str] | None = None) -> dict[str, Any]:
     # Reuse the GSC refresh token if it was minted with both scopes; else a
     # dedicated GA4 token.
     refresh_token = _first(env, ["GA4_REFRESH_TOKEN", "GSC_REFRESH_TOKEN"])
-    property_id = _first(env, ["GA4_PROPERTY_ID"]).removeprefix("properties/")
+    # 2026-10-14: one property was never enough. The Shopify store reports to a
+    # SEPARATE GA4 property (468950523, stream "My Website") from Etsy
+    # (471407647, "My Etsy Jeep Site"), and GA4 cannot move a stream between
+    # properties -- so a single-property read structurally cannot see both
+    # channels. We read 471407647 only, so 4,281 myjeepduck.com pageviews in 28
+    # days were invisible while `channel_coverage` correctly reported shopify
+    # missing and we read that as "the store has no tag". It had a tag the whole
+    # time, pointed somewhere we never looked.
+    property_ids = _property_ids(env)
     return {
         "client_id": client_id,
         "client_secret": client_secret,
         "refresh_token": refresh_token,
-        "property_id": property_id,
-        "credentials_ready": bool(client_id and refresh_token and property_id),
+        # First one stays the headline value so existing readers of
+        # payload["property_id"] keep working.
+        "property_id": property_ids[0] if property_ids else "",
+        "property_ids": property_ids,
+        "credentials_ready": bool(client_id and refresh_token and property_ids),
     }
 
 
@@ -372,16 +398,74 @@ def channel_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _merge_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold rows from several properties into one set, keyed by (title, host).
+
+    Two properties can carry the same page title -- a duck's name appears on
+    both its Etsy listing and its Shopify product page -- and the host is what
+    separates them. Additive metrics sum; the rates are averages, so they are
+    re-weighted by active users rather than averaged, which would let a 3-user
+    page outvote a 300-user one.
+    """
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in rows:
+        key = (r.get("title") or "", r.get("host") or "")
+        cur = merged.get(key)
+        if cur is None:
+            merged[key] = dict(r)
+            continue
+        a, b = cur.get("active_users") or 0.0, r.get("active_users") or 0.0
+        total = a + b
+        for field in ("page_views", "active_users", "new_users"):
+            cur[field] = (cur.get(field) or 0.0) + (r.get(field) or 0.0)
+        for field in ("engagement_rate", "bounce_rate", "avg_engagement_time"):
+            if total:
+                cur[field] = round(
+                    ((cur.get(field) or 0.0) * a + (r.get(field) or 0.0) * b) / total,
+                    4 if field.endswith("_rate") else 1)
+    return list(merged.values())
+
+
+def _merge_report_meta(metas: list[dict[str, Any]]) -> dict[str, Any]:
+    """One meta across properties. Truncation anywhere is truncation."""
+    ok = [m for m in metas if m.get("ok")]
+    avail = [m.get("rows_available") for m in ok if isinstance(m.get("rows_available"), int)]
+    return {
+        "ok": bool(ok),
+        "rows_available": sum(avail) if avail else None,
+        "rows_fetched": sum(int(m.get("rows_fetched") or 0) for m in ok),
+        "truncated": any(bool(m.get("truncated")) for m in ok),
+        "properties": [{"property_id": m.get("property_id"), "ok": bool(m.get("ok")),
+                        "rows_fetched": m.get("rows_fetched"), "error": m.get("error")}
+                       for m in metas],
+    }
+
+
+def _first_error(metas: list[dict[str, Any]]) -> str:
+    for m in metas:
+        if not m.get("ok") and m.get("error"):
+            return str(m["error"])
+    return ""
+
+
 def build_payload(per_window: dict[int, list[dict[str, Any]]], *,
-                  windows: tuple[int, ...], primary_window: int, property_id: str,
+                  windows: tuple[int, ...], primary_window: int,
+                  property_ids: list[str] | None = None, property_id: str | None = None,
                   available: bool = True, error: str | None = None,
-                  report_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+                  report_meta: dict[str, Any] | None = None,
+                  property_errors: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    pids = list(property_ids) if property_ids else ([property_id] if property_id else [])
     primary_rows = per_window.get(primary_window, [])
     classified = classify_listings(primary_rows)
-    views_by_window = {w: {r["title"]: int(r["page_views"]) for r in per_window.get(w, [])}
+    # Keyed by (title, host), not title: the same duck name appears on its Etsy
+    # listing and its Shopify page, and with two properties merged a title-only
+    # key silently credits one channel's views to the other.
+    views_by_window = {w: {(r["title"], r.get("host") or ""): int(r["page_views"])
+                           for r in per_window.get(w, [])}
                        for w in windows}
     for r in classified:
-        wmap = {str(w): views_by_window.get(w, {}).get(r["title"], 0) for w in windows}
+        key = (r["title"], r.get("host") or "")
+        wmap = {str(w): views_by_window.get(w, {}).get(key, 0) for w in windows}
         r["views_by_window"] = wmap
         r["trend"] = _trend(wmap, windows)
     classified.sort(key=lambda r: r["page_views"], reverse=True)
@@ -390,7 +474,9 @@ def build_payload(per_window: dict[int, list[dict[str, Any]]], *,
         "generated_at": now_local_iso(),
         "available": available,
         "source": "google_analytics_4",
-        "property_id": property_id,
+        "property_id": pids[0] if pids else "",
+        "property_ids": pids,
+        "property_errors": property_errors or [],
         "windows": list(windows),
         "primary_window": primary_window,
         "listing_count": len(primary_rows),
@@ -416,11 +502,11 @@ def collect(config: dict[str, Any], *, windows: tuple[int, ...] = WINDOWS,
     """token -> per-window runReport -> classify primary. Always returns a payload;
     a primary-window failure degrades to available:false, a secondary window that
     fails is omitted. Never raises."""
-    pid = config.get("property_id") or ""
+    pids = list(config.get("property_ids") or ([config["property_id"]] if config.get("property_id") else []))
 
     def empty(err: str) -> dict[str, Any]:
         return build_payload({}, windows=windows, primary_window=primary_window,
-                             property_id=pid, available=False, error=err)
+                             property_ids=pids, available=False, error=err)
 
     if not config.get("credentials_ready"):
         return empty("credentials_not_ready")
@@ -430,18 +516,31 @@ def collect(config: dict[str, Any], *, windows: tuple[int, ...] = WINDOWS,
     end = today or _today_iso()
     per_window: dict[int, list[dict[str, Any]]] = {}
     primary_meta: dict[str, Any] = {}
+    failures: list[dict[str, Any]] = []
     for w in windows:
-        rows, meta = run_report(token, pid, _days_before(end, w), end)
+        collected: list[dict[str, Any]] = []
+        metas: list[dict[str, Any]] = []
+        ok_any = False
+        for pid in pids:
+            rows, meta = run_report(token, pid, _days_before(end, w), end)
+            meta = dict(meta, property_id=pid)
+            metas.append(meta)
+            if meta.get("ok"):
+                ok_any = True
+                collected.extend(rows)
+            elif w == primary_window:
+                # One property failing must not look like no data at all, and
+                # must not pass silently either ([[feedback_no_silent_caps]]).
+                failures.append({"property_id": pid, "error": meta.get("error"),
+                                 "detail": meta.get("detail")})
         if w == primary_window:
-            primary_meta = meta
-        if not meta.get("ok"):
-            if w == primary_window:
-                return empty(meta.get("error") or "report_failed")
-            per_window[w] = []
-        else:
-            per_window[w] = rows
+            primary_meta = _merge_report_meta(metas)
+            if not ok_any:
+                return empty(_first_error(metas) or "report_failed")
+        per_window[w] = _merge_rows(collected) if ok_any else []
     return build_payload(per_window, windows=windows, primary_window=primary_window,
-                         property_id=pid, available=True, report_meta=primary_meta)
+                         property_ids=pids, available=True, report_meta=primary_meta,
+                         property_errors=failures)
 
 
 # --------------------------------------------------------------------------
