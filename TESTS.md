@@ -3257,11 +3257,50 @@ Resolved is not "never happened": the mis-start stays in the payload with `super
 | Superseded | ✅ `duckAgent/creative_agent/runtime/tests/test_newduck_stalled_jobs_card.py::TestASupersededMisstartIsNotAStall::test_a_reun_of_the_same_duck_clears_the_misstart` | ✅ `::test_a_finished_run_outside_the_lookback_still_counts` | ✅ `::test_a_nameless_stalled_job_is_never_superseded` | n/a | ✅ `::test_the_superseded_job_is_still_reported_not_erased` |
 | Not over-matched | ✅ `::test_matching_ignores_case_and_padding_only` | ✅ `::test_a_partial_name_does_not_count_as_the_same_duck` | ✅ `::test_a_different_duck_finishing_does_not_clear_it` | n/a | ✅ all three — a false "resolved" hides a real stall |
 
-**Still open (named, not fixed).** A hard failure sends **nothing**. `console.py::_run_job` ends
-at `self._update(job_id, status="failed", ...)`; the status lands in the job JSON and the portal,
-and the only other detection is this card at the 6h threshold. An immediate operator email belongs
-in that branch, but it is a new notification lane and wants the `/new-flow` checklist (cadence
-gating so a burst of failures cannot spam) rather than a tail-end edit.
+### 93b.2 — a hard failure told nobody (closed 2026-10-15)
+
+The half 93b left open. `console.py::_run_job` ended at
+`self._update(job_id, status="failed", ...)`: the status landed in the job JSON and the portal, and
+the only other detection was 93b's card at its 6h quiet threshold — which by construction never
+sees a job that *finished* badly, only one that went silent. And neither covered the original
+2026-09-24 incident shape: `_load_existing_jobs` flips a `running` job to `interrupted` after a
+viewer restart, which was the exact Headless Horseman case and emitted nothing at all.
+
+`creative_agent/runtime/src/duck_creative_agent/job_failure_notify.py` now alerts from both
+places. The design questions worth recording:
+
+- **A notify-only lane must not create work.** The subject carries the `MJD:` marker (so duck-ops'
+  customer-signal detector does not read our own alert as a custom-design request —
+  [[feedback_mailbox_detectors_exclude_own_mail]]) but deliberately carries **no**
+  `FLOW:`/`RUN:`/`ACTION:` fields, which is what keeps `phase1_observer` from minting a
+  decision-queue artifact ([[feedback_auto_manual_queue_contract]]). Same shape as the
+  engineering-governance digest.
+- **Throttle, because a lane that can spam is a lane that gets muted.** One alert per `action_id`
+  per 6h; a hard ceiling of 6 alerts/day across all actions; suppressed failures counted and named
+  in the next alert that does go out ("+4 more suppressed") rather than dropped
+  ([[feedback_no_silent_caps]]).
+- **A success CLEARS the action's quiet window.** Without this, "broke → fixed → broke again inside
+  6h" — the single most informative failure there is — would be silenced by its own earlier alert.
+  The daily cap is deliberately *not* cleared, or any passing success would hand the budget back.
+- **The ledger lives under the caller's `jobs_root`**, not at a module-level production path, which
+  keeps the module clear of the three-layer prod-path obligation and gives tests isolation from a
+  tmp dir. It sits in an `_alerts/` subdirectory because `_load_existing_jobs` globs
+  `jobs_root/*.json` and would try to parse the ledger as a `JobRecord`.
+- The notifier is never load-bearing: a send that raises records nothing, so the retry is not
+  throttled by a mail that never arrived ([[feedback_receipts_never_load_bearing]]).
+
+| | Happy | Boundary | Degenerate | Refusals | Regression guarded |
+|---|---|---|---|---|---|
+| Failure alerts | ✅ `duckAgent/creative_agent/runtime/tests/test_job_failure_notify.py::TestAFailureReachesTheOperator::test_a_failed_job_sends_one_alert` | ✅ `::test_an_interrupted_job_also_alerts` | ✅ `::TestTheAlertIsNeverLoadBearing::test_a_record_with_nothing_in_it_does_not_crash` | ✅ `::test_a_succeeded_job_never_alerts` + `::test_a_running_job_never_alerts` | ✅ `::test_the_alert_carries_the_failure_tail` |
+| Throttle | ✅ `::TestTheThrottleStopsASpamBurst::test_a_second_failure_of_the_same_action_is_held` | ✅ `::test_the_quiet_window_expires` + `::test_the_cap_resets_the_next_day` | ✅ `::test_the_daily_cap_holds_across_actions` | ✅ `::test_a_different_action_is_not_throttled` | ✅ `::test_held_failures_are_counted_not_dropped` |
+| Success unmutes | ✅ `::TestASuccessUnmutesTheLane::test_a_good_run_clears_the_quiet_window` | ✅ `::test_a_good_run_does_not_reset_the_daily_cap` | ✅ `::test_clearing_an_unknown_action_is_harmless` | ✅ `::test_a_good_run_does_not_clear_a_different_action` | ✅ all four |
+| No new work created | ✅ `::TestTheSubjectDoesNotCreateWork::test_the_subject_carries_the_mjd_marker` | ✅ `::test_the_subject_has_no_decision_fields` | ✅ `::test_html_escapes_the_job_output` | n/a | ✅ `::TestTheLedgerStaysOutOfTheWay::test_the_ledger_is_not_in_the_job_glob` |
+| Runner is wired | ✅ `::TestTheRunnerIsWiredToIt::test_console_calls_the_notifier_on_failure` | ✅ `::test_console_notifies_on_the_interrupted_flip` | ✅ `::test_console_clears_the_throttle_on_success` | n/a | ✅ `::test_every_notify_call_in_console_is_wrapped` (AST walk, not a `try` grep) |
+
+**Gap, acknowledged with a home** ([[feedback_residual_risk_needs_a_tracked_home]]): there is no OS
+card on the notifier itself, so a lane that silently stops alerting (SMTP dies, the ledger wedges)
+is invisible. The honest mitigation today is that `send_email` raising is loud in the viewer log.
+A `job_alert_liveness` card belongs in the next card pass.
 
 ### 93c — `helpers/shopify_helper.py` has no DUCK_TEST_MODE guard at all
 
