@@ -3118,6 +3118,14 @@ every catalog decision actually turns on, and Surface 91 had just made the stake
 28 days to 2026-10-14 the Shopify site took **25% more traffic than Etsy and returned 39% of the
 net profit** (2,286 vs 1,827 sessions; $882 vs $2,282). Nothing in this payload could show it.
 
+> **Corrected by Surface 94, same day.** Every "Shopify" figure in this section
+> ($882 net, $9.59 per order, 74.2% margin, "the site") is a *blend of four sales
+> channels* — the website, TikTok Shop, eBay and Shopify Collective — because this
+> surface read the order's `platform` field and called it the channel. The website's
+> own numbers are 27 orders at a $16.02 basket and $11.77 net; eBay's are 24 at $9.79.
+> The blend belongs to no channel that exists. Read Surface 94 before quoting anything
+> here.
+
 **The channel is in the order, not in the file name.** The collector writes Shopify *and* Etsy
 orders into `<date>_shopify_orders.json` — 186 of 281 rows in the live 30-day window carry
 `platform: etsy` inside a shopify-named file. A split keyed on the file name hands Etsy's entire
@@ -3351,3 +3359,114 @@ The guard tests supply fake credentials specifically so they exercise the guard 
 missing-env accident.
 
 **Operator decision outstanding:** the two junk `FAILED` videos are still in the store.
+
+---
+
+## Surface 94 — A platform is not a channel, and an estimate is not a measurement (2026-10-15)
+
+**How it surfaced.** The operator asked a plain question — what else should we do to get more
+conversions — and every answer drawn from the profit cache was wrong in the same direction. Three
+separate figures were reported to them before the cause was found: a $12.92 average order value, a
+free-shipping threshold "55% above AOV", and a $1.43-per-order shipping loss. None of those
+describe the website. Two of them describe nothing at all.
+
+**Defect 1 — the platform was being read as the channel.** Surface 92 shipped a channel split six
+hours earlier that keyed on `order["platform"]`. That field answers "whose API did this come from",
+not "where did the customer buy it". The order rows have carried a true `channel` field all along
+(`web` / `tiktok` / `ebay` / `other`), written by the collector since before this window and read by
+nothing. So all four Shopify sales channels collapsed into one slice labelled `shopify`, and the
+average of a website, two marketplaces and a collective was presented as though it were a place:
+
+| channel | orders (28d) | AOV | net/order |
+|---|---|---|---|
+| web | 27 | **$16.02** | $11.77 |
+| tiktok | 35 | $13.47 | $9.49 |
+| ebay | 24 | $9.79 | $8.00 |
+| other | 3 | $7.63 | $5.82 |
+| *the blend, reported as "the site"* | *89* | *$13.05* | *$9.66* |
+
+The website is the **best** basket of any channel and was being judged on eBay's. The label is why
+it survived review: `shopify` is a real thing, just not a channel
+([[feedback_plausible_fallbacks_mask_failure]]).
+
+**Defect 2 — marketplace commission was hardcoded to zero.** `platform_fees` was
+`Decimal('0.00')` for every Shopify order regardless of channel, so TikTok Shop's and eBay's cut
+was simply absent from net profit on 59 of 89 orders. The same orders were charged a 2.9% + $0.30
+Shopify gateway fee they never paid, because `_resolve_shopify_gateway` falls back to `source_name`
+and an unknown gateway takes the default rate. The two errors point opposite ways and do not
+cancel: commission is the larger number, so net profit was overstated.
+
+**Defect 3 — the assumption that made the first two invisible.** `label_cost_source` was the
+literal string `"api"` on every order, which reads as "a shipping API quoted this". The value came
+from `_get_default_label_cost()` — one config constant, `$4.90`, on all 89 orders in the window,
+including a 6-unit basket, from a dataclass whose own docstring says *"label cost
+assumptions"*. The cache looked measured, so nobody checked it. This is the third defect in order
+of damage and the first in order of cause.
+
+**The fix refuses to repeat the sin.** Commission rates are config, not code, and are
+operator-overridable per channel (`PROFIT_<CHANNEL>_COMMISSION_RATE`) — but they are still
+*assumptions*, so every order now records `platform_fee_source` (`assumed_channel_rate` /
+`assumed_platform_rate` / `none`) and `label_cost_source` says `default_assumption` rather than
+`api`. The reader counts how much of a window rests on each, and counts rows with **no** fee source
+separately from rows that say "assumed", because a zero in the assumed column would otherwise read
+as reassurance when it actually means "written by the old collector, fees missing entirely"
+(261 of 261 cached rows today; they correct themselves as each day is re-collected).
+
+Rates ship at TikTok 8% and eBay 13.35% + $0.30. **Neither has been checked against a payout
+statement** — that is an operator task, and the only honest status for them until it happens.
+
+| | Happy | Boundary | Degenerate | Refusals | Regression guarded |
+|---|---|---|---|---|---|
+| Sales channel ≠ platform | ✅ `duck-ops/tests/test_profit_per_product.py::SalesChannelNotPlatformTests::test_the_three_shopify_channels_do_not_collapse` | ✅ `::test_an_unknown_marketplace_keeps_its_own_name` | ✅ `::test_a_shopify_order_with_no_channel_is_not_credited_to_the_website` | n/a | ✅ `::test_the_blend_no_longer_hides_a_better_website` — pins the arithmetic the operator was misled by |
+| Etsy stays one channel | ✅ `::test_etsy_stays_its_own_channel` | ✅ `::test_an_etsy_order_with_no_channel_is_still_etsy` | n/a | n/a | ✅ `::test_channels_still_partition_the_totals` — the Surface 92 invariant survives the re-keying |
+| Writer-side canary kept | ✅ `::test_the_platform_filename_canary_still_fires` | n/a | n/a | n/a | ✅ same — re-keying on the channel must not cost the Etsy-in-a-shopify-file signal |
+| Marketplace commission | ✅ `duckAgent/tests/test_profit_channel_fees.py::TestMarketplaceOrdersPayCommission::test_the_commission_is_rate_times_gross_plus_fixed` | ✅ `::test_ebay_uses_its_own_configured_rate` | ✅ `TestAnUnknownChannelInventsNothing::test_an_unseen_channel_gets_no_commission` | ✅ `::test_none_and_a_zero_rate_are_different_answers` | ✅ `::test_a_marketplace_order_is_not_also_charged_a_gateway_fee` — the double-charge half of the bug |
+| Own storefront untouched | ✅ `TestOurOwnStorefrontIsUnchanged::test_a_web_order_pays_no_platform_commission` | ✅ `::test_a_web_order_still_pays_the_gateway_fee` | n/a | n/a | ✅ same — stripping real costs from the one paying channel would swap one overstatement for another |
+| Assumptions are labelled | ✅ `TestNoAssumptionClaimsToBeMeasured::test_a_default_label_cost_is_not_labelled_api` | ✅ `::test_an_imported_label_is_the_only_measured_source` | ✅ `AssumedMoneyIsLabelledTests::test_a_row_with_no_fee_source_is_not_counted_as_assumed` | n/a | ✅ `::test_no_collector_stamps_the_string_api` — scans the module, so a third collector cannot reintroduce it |
+| Rates configurable | ✅ `TestTheRatesAreOperatorConfigurable::test_an_env_var_overrides_one_channel` | ✅ `::test_an_override_leaves_the_other_channels_alone` | ✅ `::test_a_non_numeric_override_is_ignored_not_crashed` | n/a | ✅ `::test_the_rates_reach_the_assumptions_hash` — two reports under different assumptions must not look identical |
+| Net profit arithmetic | ✅ `TestTheArithmeticReachesNetProfit::test_commission_reduces_net_profit_by_its_own_amount` | ✅ `::test_net_profit_still_subtracts_every_fee_bucket` | n/a | n/a | ✅ both — pins the formula, so a new fee bucket cannot be added to the model and ignored |
+
+**Files.** Collector + config: `duckAgent/flows/profit/profit_config.py` (the
+`marketplace_commission_rates` table and `get_marketplace_commission`),
+`duckAgent/flows/profit/profit_models.py` (`platform_fee_source`, and
+`label_cost_source` defaulting to `default_assumption`),
+`duckAgent/flows/profit/profit_helper.py` (the channel-aware fee branch in
+`_create_shopify_order_fact`, plus `process_orders`). Reader:
+`duck-ops/runtime/profit_per_product.py` (`_sales_channel` and the data-quality
+counters). Surface: `duckAgent/creative_agent/runtime/src/duck_creative_agent/profit_intel_page.py`
+(`_render_sales_channel_table`) — without it the only channel view on
+`/portal/intel/profit` was the blended one, so the fix would have been invisible
+to the operator ([[feedback_markdown_vs_portal_html]]). The platform-level
+"Channel breakdown" card above it is deliberately left in place rather than
+silently replaced: every other number on that page is computed from it.
+
+Note `duckAgent/helpers/profit_helper.py` is a dead March-2026 copy of the
+collector that nothing imports — the live module is `flows/profit/profit_helper.py`.
+It was left untouched; deleting it is a separate call.
+
+**Non-vacuous by construction.** Both suites were run against the defect restored: reverting
+`_sales_channel` to return the platform fails 9 of 54 duck-ops tests, and making
+`get_marketplace_commission` always return `None` fails 12 of 22 duckAgent tests.
+
+**Still open (named, not fixed):**
+
+- **The 261 cached rows carry no fee source and understate marketplace cost.** They correct on
+  re-collection, one day at a time. No backfill was run — a backfill would rewrite historical
+  profit records, which is an operator call, not a cleanup.
+- **The commission rates are unverified.** 8% and 13.35% are plausible published rates, not this
+  shop's statements. Until checked, `orders_with_assumed_fees` is the honest caveat on every net
+  profit number downstream.
+- **`platform_filename_mismatch` is still 172–186.** The collector still writes Etsy orders into
+  `<date>_shopify_orders.json` (`_save_orders` keys the filename off `orders[0].platform`). The
+  reader works around it; the writer is untouched. No OS card reads this counter.
+- **No OS card covers any of this.** A `profit_assumption_coverage` card — red when
+  `orders_without_fee_source` is a majority of the window — is the natural bracket and does not
+  exist. Recorded here so it is a tracked gap rather than prose
+  ([[feedback_residual_risk_needs_a_tracked_home]]).
+- **`profit_intel.py::_channel_mix_window` has the same defect**, keyed `shopify_orders` /
+  `etsy_orders` off daily receipt metadata, and it feeds the Monday business digest and
+  `/portal/intel/profit`. It was left alone deliberately: the fix needs the receipt producer to
+  carry per-channel data, and shipping a second, differently-wrong channel view beside the correct
+  one is worse than one known-wrong view with a note. This is the next piece of work, not an
+  oversight.
+

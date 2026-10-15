@@ -433,12 +433,17 @@ class ChannelSplitTests(unittest.TestCase):
     traffic than Etsy and returned 39% of the net profit, and nothing in this
     payload could show it.
 
-    The channel is read from the ORDER's `platform` field, never from the
-    file name -- `<date>_shopify_orders.json` holds Etsy orders too (181 of
-    273 rows in the 28 days to 2026-10-14), so a filename-keyed split credits
-    Etsy's money to Shopify. The disagreement is counted rather than
-    smoothed over, because a silent reconciliation is how it stayed invisible
+    The channel is read from the ORDER, never from the file name --
+    `<date>_shopify_orders.json` holds Etsy orders too (181 of 273 rows in
+    the 28 days to 2026-10-14), so a filename-keyed split credits Etsy's
+    money to Shopify. The disagreement is counted rather than smoothed over,
+    because a silent reconciliation is how it stayed invisible
     ([[feedback_swallowed_errors_lie]]).
+
+    Surface 92 shipped reading the `platform` field and calling it the
+    channel; Surface 94 corrected that to the `channel` field (see
+    SalesChannelNotPlatformTests). These tests therefore now describe a
+    website slice keyed "web" where they once said "shopify".
     """
 
     def setUp(self) -> None:
@@ -459,7 +464,7 @@ class ChannelSplitTests(unittest.TestCase):
         per-channel breakdown underneath it."""
         _write_cache(self.cache, "2026-06-05", [
             _order([_line_item(qty=2, revenue_ex_tax=20.0, cogs_unit=1.0)],
-                   order_id="shop-1") | {"platform": "shopify"},
+                   order_id="shop-1") | {"platform": "shopify", "channel": "web"},
         ], platform="shopify")
         _write_cache(self.cache, "2026-06-04", [
             _order([_line_item(qty=3, revenue_ex_tax=45.0, cogs_unit=1.0)],
@@ -469,10 +474,10 @@ class ChannelSplitTests(unittest.TestCase):
         self.assertEqual(len(s["products"]), 1)
         row = s["products"][0]
         self.assertEqual(row["units_sold"], 5)
-        self.assertEqual(sorted(row["by_channel"]), ["etsy", "shopify"])
+        self.assertEqual(sorted(row["by_channel"]), ["etsy", "web"])
         self.assertEqual(row["channel_count"], 2)
-        self.assertEqual(row["by_channel"]["shopify"]["units"], 2)
-        self.assertEqual(row["by_channel"]["shopify"]["revenue_total"], 20.0)
+        self.assertEqual(row["by_channel"]["web"]["units"], 2)
+        self.assertEqual(row["by_channel"]["web"]["revenue_total"], 20.0)
         self.assertEqual(row["by_channel"]["etsy"]["units"], 3)
         self.assertEqual(row["by_channel"]["etsy"]["revenue_total"], 45.0)
 
@@ -481,7 +486,7 @@ class ChannelSplitTests(unittest.TestCase):
         adds back up to the row the operator already trusts."""
         _write_cache(self.cache, "2026-06-05", [
             _order([_line_item(qty=1, revenue_ex_tax=12.0, cogs_unit=1.0)],
-                   order_id="s1") | {"platform": "shopify"},
+                   order_id="s1") | {"platform": "shopify", "channel": "web"},
             _order([_line_item(qty=1, revenue_ex_tax=15.0, cogs_unit=1.0)],
                    order_id="e1") | {"platform": "etsy"},
             _order([_line_item(qty=4, revenue_ex_tax=40.0, cogs_unit=1.0)],
@@ -502,7 +507,7 @@ class ChannelSplitTests(unittest.TestCase):
         never disagree on the same surface."""
         _write_cache(self.cache, "2026-06-05", [
             _order([_line_item(product_id="p1", qty=1, revenue_ex_tax=10.0)],
-                   order_id="s1") | {"platform": "shopify"},
+                   order_id="s1") | {"platform": "shopify", "channel": "web"},
             _order([_line_item(product_id="p2", qty=2, revenue_ex_tax=30.0)],
                    order_id="e1") | {"platform": "etsy"},
         ])
@@ -514,7 +519,7 @@ class ChannelSplitTests(unittest.TestCase):
                                s["totals"]["net_profit"], places=2)
         self.assertEqual(sum(c["units"] for c in ch.values()),
                          s["totals"]["units"])
-        self.assertEqual(ch["shopify"]["products"], 1)
+        self.assertEqual(ch["web"]["products"], 1)
         self.assertEqual(ch["etsy"]["products"], 1)
 
     def test_the_platform_field_beats_the_file_name(self) -> None:
@@ -536,7 +541,7 @@ class ChannelSplitTests(unittest.TestCase):
         _write_cache(self.cache, "2026-06-05", [
             _order([_line_item()], order_id="e1") | {"platform": "etsy"},
             _order([_line_item()], order_id="e2") | {"platform": "etsy"},
-            _order([_line_item()], order_id="s1") | {"platform": "shopify"},
+            _order([_line_item()], order_id="s1") | {"platform": "shopify", "channel": "web"},
         ], platform="shopify")
         dq = self._run()["data_quality"]
         self.assertEqual(dq["platform_filename_mismatch"], 2)
@@ -571,14 +576,14 @@ class ChannelSplitTests(unittest.TestCase):
         _write_cache(self.cache, "2026-06-05", [
             # Shopify: 10.0 revenue, 9.0 net -> 90%
             _order([_line_item(qty=1, revenue_ex_tax=10.0, cogs_unit=1.0)],
-                   order_id="s1") | {"platform": "shopify"},
+                   order_id="s1") | {"platform": "shopify", "channel": "web"},
             # Etsy: 10.0 revenue, 2.0 net -> 20%
             _order([_line_item(qty=1, revenue_ex_tax=10.0, cogs_unit=1.0,
                                net_profit=2.0)],
                    order_id="e1") | {"platform": "etsy"},
         ])
         row = self._run()["products"][0]
-        self.assertEqual(row["by_channel"]["shopify"]["margin_pct"], 90.0)
+        self.assertEqual(row["by_channel"]["web"]["margin_pct"], 90.0)
         self.assertEqual(row["by_channel"]["etsy"]["margin_pct"], 20.0)
         self.assertEqual(row["margin_pct"], 55.0)
 
@@ -592,11 +597,11 @@ class ChannelSplitTests(unittest.TestCase):
                    order_id="e1") | {"platform": "etsy"},
             _order([_line_item(qty=1, revenue_ex_tax=20.0, cogs_unit=1.0,
                                net_profit=18.0)],
-                   order_id="s1") | {"platform": "shopify"},
+                   order_id="s1") | {"platform": "shopify", "channel": "web"},
         ])
         row = self._run()["products"][0]
         self.assertEqual(row["by_channel"]["etsy"]["revenue_total"], 40.0)
-        self.assertEqual(row["primary_channel"], "shopify")
+        self.assertEqual(row["primary_channel"], "web")
 
     def test_single_channel_product_says_so(self) -> None:
         """An Etsy-only duck is the actionable case -- it is the candidate
@@ -721,7 +726,7 @@ class OrderCostAllocationTests(unittest.TestCase):
         _write_cache(self.cache, "2026-06-05", [
             _order([
                 _line_item(product_id="p1", qty=1, revenue_ex_tax=7.5, cogs_unit=0.75),
-            ], order_id="o1") | {"platform": "shopify", "platform_fees": 0.0,
+            ], order_id="o1") | {"platform": "shopify", "channel": "web", "platform_fees": 0.0,
                                  "payment_fees": 0.648, "ads_fees": 0.0,
                                  "shipping_label_cost": 4.9,
                                  "shipping_collected": 4.5,
@@ -768,16 +773,16 @@ class OrderCostAllocationTests(unittest.TestCase):
                    order_id="e1") | {"platform": "etsy", "payment_fees": 2.0},
             _order([_line_item(product_id="p1", qty=1, revenue_ex_tax=10.0,
                                cogs_unit=0.0)],
-                   order_id="s1") | {"platform": "shopify", "payment_fees": 0.0},
+                   order_id="s1") | {"platform": "shopify", "channel": "web", "payment_fees": 0.0},
         ])
         s = self._run()
         row = s["products"][0]
         self.assertEqual(row["by_channel"]["etsy"]["margin_pct"],
-                         row["by_channel"]["shopify"]["margin_pct"])
+                         row["by_channel"]["web"]["margin_pct"])
         self.assertEqual(row["by_channel"]["etsy"]["net_after_order_costs"], 8.0)
-        self.assertEqual(row["by_channel"]["shopify"]["net_after_order_costs"], 10.0)
+        self.assertEqual(row["by_channel"]["web"]["net_after_order_costs"], 10.0)
         self.assertEqual(s["channels"]["etsy"]["margin_after_costs_pct"], 80.0)
-        self.assertEqual(s["channels"]["shopify"]["margin_after_costs_pct"], 100.0)
+        self.assertEqual(s["channels"]["web"]["margin_after_costs_pct"], 100.0)
 
     def test_the_existing_net_is_left_alone(self) -> None:
         """Regression guard. Allocating costs must not move a number the
@@ -807,3 +812,240 @@ class OrderCostAllocationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SalesChannelNotPlatformTests(unittest.TestCase):
+    """Surface 94: a platform is not a channel.
+
+    Surface 92's split read each order's `platform` field, so all four
+    Shopify sales channels collapsed into one slice named "shopify" -- three
+    marketplaces and a website averaged together, with the average presented
+    as though it were a place. In the 28 days to 2026-10-14 that blend read
+    $13.05 per order, which belongs to no channel that exists: the website
+    did 27 orders at $16.02, eBay 24 at $9.79, TikTok 35 at $13.47. Every
+    conclusion drawn about "the site" from this payload was really a
+    conclusion about the mix.
+
+    The defect was invisible because the label was plausible -- "shopify" IS
+    a real thing, just not a channel ([[feedback_plausible_fallbacks_mask_failure]]).
+    """
+
+    def setUp(self) -> None:
+        self.tmp_ctx = TemporaryDirectory()
+        self.cache = Path(self.tmp_ctx.name)
+
+    def tearDown(self) -> None:
+        self.tmp_ctx.cleanup()
+
+    def _run(self):
+        return aggregate_per_product(
+            cache_dir=self.cache,
+            now_iso="2026-06-06T18:00:00-04:00",
+        )
+
+    def test_the_three_shopify_channels_do_not_collapse(self) -> None:
+        """THE defect. One Shopify-named file, three real channels, three
+        slices -- not one row labelled with the platform."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item(qty=1, revenue_ex_tax=16.0)],
+                   order_id="w1") | {"platform": "shopify", "channel": "web"},
+            _order([_line_item(qty=1, revenue_ex_tax=13.0)],
+                   order_id="t1") | {"platform": "shopify", "channel": "tiktok"},
+            _order([_line_item(qty=1, revenue_ex_tax=9.0)],
+                   order_id="b1") | {"platform": "shopify", "channel": "ebay"},
+        ], platform="shopify")
+        s = self._run()
+        self.assertEqual(sorted(s["channels"]), ["ebay", "tiktok", "web"])
+        self.assertNotIn("shopify", s["channels"],
+                         "the platform name must not appear as a channel")
+        self.assertEqual(s["channels"]["web"]["revenue"], 16.0)
+        self.assertEqual(s["channels"]["tiktok"]["revenue"], 13.0)
+        self.assertEqual(s["channels"]["ebay"]["revenue"], 9.0)
+
+    def test_the_blend_no_longer_hides_a_better_website(self) -> None:
+        """The operator-facing consequence, pinned as arithmetic: the
+        website's own basket is visible instead of the mix's average."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item(qty=1, revenue_ex_tax=16.0)],
+                   order_id="w1") | {"platform": "shopify", "channel": "web"},
+            _order([_line_item(qty=1, revenue_ex_tax=8.0)],
+                   order_id="b1") | {"platform": "shopify", "channel": "ebay"},
+            _order([_line_item(qty=1, revenue_ex_tax=8.0)],
+                   order_id="b2") | {"platform": "shopify", "channel": "ebay"},
+        ])
+        ch = self._run()["channels"]
+        web_aov = ch["web"]["revenue"] / ch["web"]["orders"]
+        ebay_aov = ch["ebay"]["revenue"] / ch["ebay"]["orders"]
+        self.assertEqual(web_aov, 16.0)
+        self.assertEqual(ebay_aov, 8.0)
+        # The blended number the old split reported, for the record.
+        blended = (16.0 + 8.0 + 8.0) / 3
+        self.assertNotEqual(web_aov, blended)
+
+    def test_etsy_stays_its_own_channel(self) -> None:
+        """Etsy's collector stamps channel="direct" on every order, which is
+        not a channel name the operator would recognise."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item(qty=1, revenue_ex_tax=10.0)],
+                   order_id="e1") | {"platform": "etsy", "channel": "direct"},
+        ], platform="etsy")
+        s = self._run()
+        self.assertEqual(list(s["channels"]), ["etsy"])
+        self.assertNotIn("direct", s["channels"])
+
+    def test_an_etsy_order_with_no_channel_is_still_etsy(self) -> None:
+        """1,280 cached Etsy rows carry channel="direct" and 1,535 carry
+        nothing; both are Etsy sales."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item(qty=1, revenue_ex_tax=10.0)],
+                   order_id="e1") | {"platform": "etsy"},
+        ], platform="etsy")
+        self.assertEqual(list(self._run()["channels"]), ["etsy"])
+
+    def test_a_shopify_order_with_no_channel_is_not_credited_to_the_website(self) -> None:
+        """1,055 cached Shopify rows predate the channel field. Defaulting
+        them to "web" would inflate the one number this surface exists to
+        report, so they get their own visible bucket."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item(qty=1, revenue_ex_tax=10.0)],
+                   order_id="old-1") | {"platform": "shopify"},
+        ], platform="shopify")
+        s = self._run()
+        self.assertEqual(list(s["channels"]), ["shopify_unspecified"])
+        self.assertNotIn("web", s["channels"])
+        self.assertEqual(s["data_quality"]["orders_without_channel"], 1)
+
+    def test_an_unknown_marketplace_keeps_its_own_name(self) -> None:
+        """A channel we have never seen is reported as itself rather than
+        folded into "other" by this reader -- the collector already has an
+        "other" bucket, and silently re-bucketing here would hide a new
+        sales channel the operator just turned on."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item(qty=1, revenue_ex_tax=10.0)],
+                   order_id="n1") | {"platform": "shopify", "channel": "walmart"},
+        ])
+        self.assertEqual(list(self._run()["channels"]), ["walmart"])
+
+    def test_the_platform_filename_canary_still_fires(self) -> None:
+        """Keying on the channel must not cost us the writer-side signal:
+        the Etsy-in-a-shopify-file bug is still counted."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item()], order_id="e1") | {"platform": "etsy"},
+            _order([_line_item()], order_id="w1") | {
+                "platform": "shopify", "channel": "web"},
+        ], platform="shopify")
+        dq = self._run()["data_quality"]
+        self.assertEqual(dq["platform_filename_mismatch"], 1)
+
+    def test_channels_still_partition_the_totals(self) -> None:
+        """The invariant Surface 92 shipped has to survive the re-keying."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item(product_id="p1", qty=1, revenue_ex_tax=16.0)],
+                   order_id="w1") | {"platform": "shopify", "channel": "web"},
+            _order([_line_item(product_id="p2", qty=2, revenue_ex_tax=26.0)],
+                   order_id="t1") | {"platform": "shopify", "channel": "tiktok"},
+            _order([_line_item(product_id="p3", qty=1, revenue_ex_tax=9.0)],
+                   order_id="e1") | {"platform": "etsy"},
+        ])
+        s = self._run()
+        ch = s["channels"]
+        self.assertAlmostEqual(sum(c["revenue"] for c in ch.values()),
+                               s["totals"]["revenue"], places=2)
+        self.assertAlmostEqual(sum(c["net_profit"] for c in ch.values()),
+                               s["totals"]["net_profit"], places=2)
+        self.assertEqual(sum(c["units"] for c in ch.values()),
+                         s["totals"]["units"])
+
+
+class AssumedMoneyIsLabelledTests(unittest.TestCase):
+    """Surface 94: an estimate must not be presentable as a measurement.
+
+    The reason the fee and channel defects survived so long is that the cache
+    looked measured: `label_cost_source` read "api" while the number was one
+    config constant ($4.90 on all 89 Shopify orders in the 28 days to
+    2026-10-14, including a 6-unit basket). So this reader now counts how
+    much of the window rests on an assumption, and -- the part that matters
+    -- distinguishes "assumed" from "we have no idea", because a zero in the
+    assumed column would otherwise read as reassurance.
+    """
+
+    def setUp(self) -> None:
+        self.tmp_ctx = TemporaryDirectory()
+        self.cache = Path(self.tmp_ctx.name)
+
+    def tearDown(self) -> None:
+        self.tmp_ctx.cleanup()
+
+    def _run(self):
+        return aggregate_per_product(
+            cache_dir=self.cache,
+            now_iso="2026-06-06T18:00:00-04:00",
+        )
+
+    def test_an_assumed_fee_rate_is_counted(self) -> None:
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item()], order_id="t1") | {
+                "platform": "shopify", "channel": "tiktok",
+                "platform_fee_source": "assumed_channel_rate"},
+        ])
+        dq = self._run()["data_quality"]
+        self.assertEqual(dq["orders_with_assumed_fees"], 1)
+        self.assertEqual(dq["orders_without_fee_source"], 0)
+
+    def test_a_row_with_no_fee_source_is_not_counted_as_assumed(self) -> None:
+        """The distinction this ships for. These rows carry $0.00 platform
+        fees on marketplace orders that really paid a commission, so their
+        net profit is overstated -- the opposite of reassuring."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item()], order_id="t1") | {
+                "platform": "shopify", "channel": "tiktok"},
+        ])
+        dq = self._run()["data_quality"]
+        self.assertEqual(dq["orders_with_assumed_fees"], 0)
+        self.assertEqual(dq["orders_without_fee_source"], 1)
+
+    def test_our_own_storefront_takes_no_commission_and_says_so(self) -> None:
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item()], order_id="w1") | {
+                "platform": "shopify", "channel": "web",
+                "platform_fee_source": "none"},
+        ])
+        dq = self._run()["data_quality"]
+        self.assertEqual(dq["orders_with_assumed_fees"], 0)
+        self.assertEqual(dq["orders_without_fee_source"], 0)
+
+    def test_an_estimated_label_cost_is_counted(self) -> None:
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item()], order_id="w1") | {
+                "platform": "shopify", "channel": "web",
+                "label_cost_source": "default_assumption"},
+            _order([_line_item()], order_id="w2") | {
+                "platform": "shopify", "channel": "web",
+                "label_cost_source": "manual_import"},
+        ])
+        self.assertEqual(
+            self._run()["data_quality"]["orders_with_assumed_label_cost"], 1)
+
+    def test_the_legacy_api_label_still_counts_as_an_assumption(self) -> None:
+        """Cached rows written before the rename say "api". They were never
+        API-sourced, so they must not be read as measured."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item()], order_id="w1") | {
+                "platform": "shopify", "channel": "web",
+                "label_cost_source": "api"},
+        ])
+        self.assertEqual(
+            self._run()["data_quality"]["orders_with_assumed_label_cost"], 1)
+
+    def test_the_payload_says_the_numbers_rest_on_assumptions(self) -> None:
+        """Operator-facing copy is an assertion too ([[feedback_pin_the_rule_not_the_reading]]):
+        a reader must be told, on the surface, that net profit here is only
+        as good as the configured rates."""
+        _write_cache(self.cache, "2026-06-05", [
+            _order([_line_item()], order_id="w1") | {
+                "platform": "shopify", "channel": "web"},
+        ])
+        note = self._run()["data_quality"]["assumption_note"]
+        self.assertIn("ASSUMPTION", note.upper())
+        self.assertIn("profit_config.py", note)
+

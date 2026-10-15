@@ -30,13 +30,26 @@ they just don't influence "is this duck currently profitable" decisions.
 Channel split (2026-10-15, Surface 92): every row also carries
 `by_channel`, and the payload carries top-level `channels`, because
 "which ducks make money" and "where do they make it" are different
-questions and only the first was answerable. The channel is read from
-each ORDER's `platform` field and never from the file name: the collector
-writes Etsy orders into `<date>_shopify_orders.json` (181 of 273 rows in
-the 28 days to 2026-10-14), so a filename-keyed split hands Etsy's
-revenue to Shopify. Where the two disagree the field wins and
-`data_quality.platform_filename_mismatch` counts it, so fixing the
-reader here does not quietly excuse the writer.
+questions and only the first was answerable. Never from the file name:
+the collector writes Etsy orders into `<date>_shopify_orders.json` (181
+of 273 rows in the 28 days to 2026-10-14), so a filename-keyed split
+hands Etsy's revenue to Shopify. Where the two disagree the order's own
+field wins and `data_quality.platform_filename_mismatch` counts it, so
+fixing the reader here does not quietly excuse the writer.
+
+Sales channel, not platform (Surface 94, same day): the split above read
+the order's `platform` field and called it the channel, so all four
+Shopify sales channels collapsed into one row named "shopify". That is
+not a channel -- it is three marketplaces and a website averaged
+together, and the average is what the operator was shown. In the 28 days
+to 2026-10-14 it hid a website doing 27 orders at a $16.02 basket behind
+eBay's 24 at $9.79 and TikTok's 35 at $13.47, and produced a blended
+"site" AOV of $13.05 that belongs to no channel that exists. The split is
+now keyed on the order's `channel` field (web / tiktok / ebay / other)
+with Etsy as its own channel, and `platform` is kept only for the
+filename canary. Older cache rows predate the field (1,055 of them, all
+outside the current window) and land in `shopify_unspecified` rather than
+being credited to the website.
 
 The producer is invoked manually for now (one-shot). A launchd plist
 to fire it daily alongside profit_intel.py would be a small Tier 3
@@ -70,6 +83,31 @@ MIN_UNITS_FOR_CONFIDENT_MARGIN = 3
 # rather than folded into a real one — unattributable money should be
 # visible, not quietly credited to whichever channel is larger.
 _CHANNEL_UNKNOWN = "unknown"
+
+# A Shopify order from before the collector recorded which channel sold it.
+# Separate from _CHANNEL_UNKNOWN because the platform IS known here; only
+# the channel is missing. Crediting these to "web" would inflate exactly
+# the number this surface exists to report.
+_CHANNEL_SHOPIFY_UNSPECIFIED = "shopify_unspecified"
+
+
+def _sales_channel(order: dict[str, Any], platform: str) -> str:
+    """The channel that actually sold it, not the platform it was booked on.
+
+    `platform` answers "whose API did this come from" (shopify / etsy);
+    `channel` answers "where did the customer buy it" (web / tiktok / ebay).
+    Only the second is a channel, and only the second can be acted on."""
+    raw = str(order.get("channel") or "").strip().lower()
+    if platform == "etsy":
+        # The Etsy collector stamps channel="direct" on every order (and
+        # older rows carry nothing at all), so the platform name is the
+        # only meaningful label on that side.
+        return "etsy"
+    if platform == "shopify":
+        if not raw or raw == "direct":
+            return _CHANNEL_SHOPIFY_UNSPECIFIED
+        return raw
+    return platform or _CHANNEL_UNKNOWN
 
 
 @dataclass
@@ -347,6 +385,10 @@ def aggregate_per_product(
     file_count = 0
     total_orders_seen = 0
     orders_without_platform = 0
+    orders_without_channel = 0
+    orders_with_assumed_fees = 0
+    orders_without_fee_source = 0
+    orders_with_assumed_label_cost = 0
     platform_filename_mismatch = 0
     # Channel-level order ids dedupe across products: a three-duck basket
     # is ONE Etsy order, not three.
@@ -377,12 +419,33 @@ def aggregate_per_product(
             # file. A disagreement is counted, not smoothed away.
             declared = str(order.get("platform") or "").strip().lower()
             if declared:
-                channel = declared
+                platform = declared
                 if file_channel and declared != file_channel:
                     platform_filename_mismatch += 1
             else:
                 orders_without_platform += 1
-                channel = file_channel or _CHANNEL_UNKNOWN
+                platform = file_channel or _CHANNEL_UNKNOWN
+            # ...and the platform is NOT the channel. See _sales_channel.
+            channel = _sales_channel(order, platform)
+            if channel == _CHANNEL_SHOPIFY_UNSPECIFIED:
+                orders_without_channel += 1
+            # How much of this window's money rests on a configured
+            # assumption rather than a measured cost. Counted per order so
+            # the reader can caveat a number instead of discovering later
+            # that the whole column was an estimate.
+            fee_source = str(order.get("platform_fee_source") or "")
+            if not fee_source:
+                # Written before the collector recorded a fee source. NOT the
+                # same as "no assumption was made" -- these rows carry
+                # platform_fees of exactly $0.00 on marketplace orders that
+                # really did pay a commission, which is the defect Surface 94
+                # fixed in the collector. Counted separately so a zero in
+                # orders_with_assumed_fees can never be read as reassurance.
+                orders_without_fee_source += 1
+            elif fee_source.startswith("assumed"):
+                orders_with_assumed_fees += 1
+            if str(order.get("label_cost_source") or "") != "manual_import":
+                orders_with_assumed_label_cost += 1
             order_ref = str(order.get("order_id") or "").strip() or (
                 f"__anon::{path.name}::{order_index}")
             line_items = order.get("line_items")
@@ -548,13 +611,31 @@ def aggregate_per_product(
             "line_items_without_revenue": items_without_revenue,
             "line_items_without_cogs": items_without_cogs,
             "orders_without_platform": orders_without_platform,
+            "orders_without_channel": orders_without_channel,
             "platform_filename_mismatch": platform_filename_mismatch,
             "platform_source_note": (
-                "Channel is read from each order's `platform` field. The "
-                "collector writes Etsy orders into <date>_shopify_orders.json "
-                "as well, so the file name is only a fallback for orders with "
-                "no platform field; platform_filename_mismatch counts how "
-                "often the two disagree."
+                "Channel is read from each order's `channel` field (web / "
+                "tiktok / ebay / other, or etsy), never from `platform` and "
+                "never from the file name. `platform` only feeds "
+                "platform_filename_mismatch, which counts how often the "
+                "order disagrees with the file it was written into. Shopify "
+                "orders with no channel field land in "
+                f"{_CHANNEL_SHOPIFY_UNSPECIFIED!r} and are counted by "
+                "orders_without_channel rather than credited to the website."
+            ),
+            "orders_with_assumed_fees": orders_with_assumed_fees,
+            "orders_without_fee_source": orders_without_fee_source,
+            "orders_with_assumed_label_cost": orders_with_assumed_label_cost,
+            "assumption_note": (
+                "platform fees on marketplace channels and every shipping "
+                "label cost without a manual import are CONFIGURED "
+                "ASSUMPTIONS, not amounts any platform reported. Net profit "
+                "here is only as good as those rates "
+                "(duckAgent/flows/profit/profit_config.py). "
+                "orders_without_fee_source counts rows cached before the "
+                "collector recorded one: those carry $0.00 platform fees even "
+                "on marketplace orders, so their net profit is overstated "
+                "until the day is re-collected."
             ),
             "confidence_floor_units": MIN_UNITS_FOR_CONFIDENT_MARGIN,
             "confidence_floor_note": (
