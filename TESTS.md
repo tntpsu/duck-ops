@@ -3277,12 +3277,38 @@ real `shopify_upload_video_bytes`, and left **two junk `FAILED` videos in the li
 the Shopify write paths. Any test that reaches a Shopify write reaches production
 ([[feedback_test_runs_reach_the_outside_world]] — the email incident, one API over).
 
-Immediate mitigation only: a module-level `_never_upload` helper that every test in the class
-installs, so a forgotten stub fails the test instead of the store. The real fix — a source-level
-refusal at the `shopify_post` / `shopify_put` / GraphQL-mutation chokepoints, leaving reads
-working — is **not done** and is the top follow-up. The two junk videos are still in the store
-pending an operator decision on deleting them.
+**Fixed the same night.** `TestModeRefusalError` + `_refuse_shopify_write_in_test_mode()` now
+guard four chokepoints: `shopify_post`, `shopify_put`, `shopify_delete`, and `shopify_graphql`
+**when the document is a mutation**. Reads pass through untouched, deliberately — most of the
+suite depends on them, a read cannot damage the store, and guarding them would only teach someone
+to switch the guard off. Truthiness matches `email_helper` (`1`/`true`/`TRUE`/`yes`), because a
+guard that only understood `"1"` would be silently off for a runner exporting `true`.
+
+Mutation detection is `(?m)^\s*mutation\b` — anchored per line, not `startswith()`. Every
+mutation in the module is a triple-quoted string opening with a newline and indentation, so a
+naive prefix check would have matched **none** of them. Broad on purpose: over-refusing a write
+costs a test fix, under-refusing one reaches the store.
+
+Layer 3 is adapted rather than skipped. The convention's post-suite store audit needs a network
+call and the live store, so it cannot sit in the default suite; the offline equivalent is a source
+scan that fails when any function containing `requests.post/put/delete` lacks the guard. It parses
+50 functions and finds 6 write paths — 4 guarded, 2 allowlisted with the reason they are already
+covered (the staged-byte uploads are only reachable after `stagedUploadsCreate`, itself a guarded
+mutation). Verified non-vacuous by printing the classification, not by trusting a green tick.
 
 | | Happy | Boundary | Degenerate | Refusals | Regression guarded |
 |---|---|---|---|---|---|
-| Test cannot reach the store | ✅ every test in `TestHostKeepsItsReceipt` installs `_never_upload` | ⬜ **gap: no source-level guard** — `shopify_helper` write chokepoints under `DUCK_TEST_MODE` | ⬜ gap: no post-suite audit for junk files in Shopify Files | ⬜ gap | ⬜ gap |
+| Writes refused | ✅ `duckAgent/tests/test_shopify_test_mode_guard.py::TestWritesAreRefused::test_post_refuses` | ✅ `::test_every_truthy_spelling_refuses` (4 spellings) | ✅ `::test_delete_refuses` — the one write no later write can undo | ✅ `::test_a_graphql_mutation_refuses` | ✅ `::test_the_refusal_is_catchable_and_distinct` — a bare RuntimeError would be eaten by the module's `except Exception` fall-softs |
+| Reads stay open | ✅ `::TestReadsStayOpen::test_a_read_query_is_allowed` | ✅ `::test_shopify_get_is_untouched` | ✅ `::TestMutationDetection::test_reads_are_not_mistaken_for_mutations` (3 shapes) | n/a | ✅ full suite 2,745 passed with the guard live — no existing test wrote through a patched `requests` |
+| Mutation detection | ✅ `::TestMutationDetection::test_indentation_and_comments_do_not_hide_a_mutation` (4 shapes) | ✅ same — leading blank lines, comments, deep indentation | n/a | n/a | ✅ same — `startswith()` would have matched none of this module's mutations |
+| The incident itself | ✅ `::TestTheIncidentCannotRecur::test_the_video_upload_refuses_before_any_network_call` | ✅ `::test_the_image_upload_refuses_too` | n/a | n/a | ✅ `::TestProductionIsUnaffected::test_without_the_flag_a_write_proceeds` — the guard keys on intent, not on being in a test process |
+| No future gap | ✅ `::TestNoFutureWriteShipsUnguarded::test_every_mutating_request_is_guarded` | ✅ `::test_the_known_chokepoints_are_still_the_chokepoints` — catches a rename that would make the scan cover nothing | n/a | n/a | ✅ both — the guard otherwise protects exactly today's four functions |
+
+**One accidental defence worth naming, and not relying on.** Without `SHOPIFY_DOMAIN` /
+`SHOPIFY_API_VERSION` / `SHOPIFY_TOKEN` the client raises before any network call, which is why
+most test runs never reached the store. It is luck, not a control: a run that loads the real
+`.env` — as the 2026-10-14 duckvideo work did — has the credentials and sails straight through.
+The guard tests supply fake credentials specifically so they exercise the guard and not the
+missing-env accident.
+
+**Operator decision outstanding:** the two junk `FAILED` videos are still in the store.
