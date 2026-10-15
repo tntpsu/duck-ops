@@ -3102,6 +3102,78 @@ from a silent channel.
 **Verified live** (not mocked): both properties read in one call — 808 listings, 7,068 views,
 `channel_coverage.missing == []`.
 
-**Operator action outstanding.** `.env` still holds `GA4_PROPERTY_ID=471407647`. It needs
-`471407647,468950523`. An `.env` edit is Tier 3 and was not separately approved, so the producer
-is correct but still reading one property until that line changes.
+**Closed 2026-10-14.** `.env` line 237 now reads `GA4_PROPERTY_ID=471407647,468950523`
+(operator-approved Tier 3). The producer was then run with no inline override and read both
+properties from `.env`: 808 listings, 7,068 views, `property_errors: []`,
+`channel_coverage.missing == []`. `first_party_demand_feeds` went green; the OS board moved
+42/9/4 to 48 green / 6 yellow / 1 red.
+
+
+## Surface 92 — Per-product profit, split by the channel that earned it (2026-10-15)
+
+**The question that could not be asked.** `profit_per_product.json` has answered "which ducks make
+money" since Surface 11. It could never answer "where do they make it" — the producer read every
+cache file identically and summed Etsy and Shopify line items into one number. That is the question
+every catalog decision actually turns on, and Surface 91 had just made the stakes concrete: over the
+28 days to 2026-10-14 the Shopify site took **25% more traffic than Etsy and returned 39% of the
+net profit** (2,286 vs 1,827 sessions; $882 vs $2,282). Nothing in this payload could show it.
+
+**The channel is in the order, not in the file name.** The collector writes Shopify *and* Etsy
+orders into `<date>_shopify_orders.json` — 186 of 281 rows in the live 30-day window carry
+`platform: etsy` inside a shopify-named file. A split keyed on the file name hands Etsy's entire
+revenue to Shopify. The producer reads `order["platform"]`, falls back to the file name only for
+rows that carry no platform field, and **counts the disagreement** in
+`data_quality.platform_filename_mismatch` (currently 186). Reading the right field silently would
+have fixed the number and lost the only signal that the writer is still wrong
+([[feedback_swallowed_errors_lie]]) — the collector-side fix is a separate, open item.
+
+**A gross split would have been a trap.** Line items carry only `revenue_ex_tax - cogs`, so the
+first working split reported Etsy at 92.7% margin and Shopify at 91.3% — near-identical, and
+wrong in the one direction that mattered: the costs it dropped are precisely the ones that
+*differ* between channels. Etsy charges platform and payment fees; Shopify collects $4.50 of
+shipping against a $4.90 label. The order-level identity (verified against the live cache, not
+assumed):
+
+```
+order["net_profit"] == sum(line["gross_profit"]) - order_costs
+order_costs == platform_fees + payment_fees + ads_fees + shipping_label_cost - shipping_collected
+```
+
+Those costs are now allocated pro-rata onto line revenue. On the same 28 days the allocation
+reproduces the independently-summed order-level net to within 7 cents ($2,282.34 vs $2,282.27 Etsy;
+$882.25 vs $882.32 Shopify) and the channels stop looking alike: **81.8% vs 74.2%**, $12.61 vs
+$9.59 net per order. `net_profit_total` and `margin_pct` are left exactly where they were so no
+rendered number moved; the cost-bearing figures arrive as `net_after_order_costs` /
+`margin_after_costs_pct` under their own names ([[feedback_status_fields_one_meaning]]).
+
+Also corrected while in here: `order_count` has always counted **line items**, so two variants of
+one duck in a single order read as two orders. The value is unchanged — a surface the operator
+reads should not shift silently — and the honest count ships beside it as `order_count_distinct`.
+
+| | Happy | Boundary | Degenerate | Refusals | Regression guarded |
+|---|---|---|---|---|---|
+| Channel split | ✅ `duck-ops/tests/test_profit_per_product.py::ChannelSplitTests::test_one_product_two_channels_splits` | ✅ `::test_single_channel_product_says_so` | ✅ `::test_empty_cache_still_has_the_channel_keys` | n/a | ✅ `::test_channel_names_are_normalised` — "Etsy"/"ETSY " would have fragmented into near-duplicate columns |
+| Partition invariants | ✅ `::test_channel_revenue_sums_to_the_row_total` | ✅ `::test_top_level_channels_sum_to_top_level_totals` | n/a | n/a | ✅ `::test_per_channel_margin_is_computed_from_that_channel` — copying the row margin down would flatter a high-fee channel |
+| Attribution source | ✅ `::test_the_platform_field_beats_the_file_name` — **the defect this ships for** | ✅ `::test_a_missing_platform_falls_back_to_the_file_name` | ✅ `::test_an_unreadable_file_name_lands_in_unknown` (own channel, never folded into a real one) | n/a | ✅ `::test_the_filename_disagreement_is_counted_not_hidden` |
+| Order counting | ✅ `::test_distinct_orders_are_counted_separately_from_line_items` | ✅ `::test_an_order_spanning_products_is_not_double_counted` | n/a | n/a | ✅ same pair — a 3-duck basket read as 3 Etsy orders |
+| Cost allocation | ✅ `::OrderCostAllocationTests::test_costs_split_pro_rata_on_revenue` | ✅ `::test_allocation_reproduces_the_order_net` | ✅ `::test_a_revenueless_order_splits_its_costs_evenly` | n/a | ✅ `::test_shipping_overcollected_is_a_negative_cost` — clamping at zero would hide shipping profit |
+| Channel economics | ✅ `::test_fees_show_up_as_a_channel_difference` | n/a | ✅ `::test_an_order_with_no_cost_fields_allocates_nothing` | n/a | ✅ `::test_the_existing_net_is_left_alone` — pins that no rendered number moved |
+
+**Verified live** (not mocked): producer run against the real cache, 30-day window, 145 products.
+Per-channel order counts (etsy 186 / shopify 95) and revenue ($2,892.79 / $1,250.06) match an
+independent recount of the cache exactly; `net_after_order_costs` matches the independent
+order-level sum to within 7 cents.
+
+**What it already shows.** Single-channel products with ≥5 units: Football Ducks is Shopify-only
+($271 net), while ASL I Love You Duck ($227), Football Team Duck ($218) and Michigan Wolverines
+($158) are Etsy-only. Note that "Football Ducks" and "Football Team Duck" are plausibly the same
+duck listed under different titles per channel — grouping keys on `product_id`, which never
+merges across platforms, so a cross-platform alias file (the Surface 11.1 idea) is what would turn
+this list from suggestive into decisive.
+
+**Open follow-ups.**
+- The collector should write Etsy orders to `<date>_etsy_orders.json`. Until it does,
+  `platform_filename_mismatch` stays at roughly the Etsy order count and is the canary, not a bug
+  in this producer.
+- No OS card reads `platform_filename_mismatch` yet, so the canary is currently only visible to a
+  reader of the payload ([[feedback_residual_risk_needs_a_tracked_home]]).

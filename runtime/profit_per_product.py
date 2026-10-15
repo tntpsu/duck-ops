@@ -27,6 +27,17 @@ one row, not five.
 Time window: last 30 days by default. Older orders aren't deleted —
 they just don't influence "is this duck currently profitable" decisions.
 
+Channel split (2026-10-15, Surface 92): every row also carries
+`by_channel`, and the payload carries top-level `channels`, because
+"which ducks make money" and "where do they make it" are different
+questions and only the first was answerable. The channel is read from
+each ORDER's `platform` field and never from the file name: the collector
+writes Etsy orders into `<date>_shopify_orders.json` (181 of 273 rows in
+the 28 days to 2026-10-14), so a filename-keyed split hands Etsy's
+revenue to Shopify. Where the two disagree the field wins and
+`data_quality.platform_filename_mismatch` counts it, so fixing the
+reader here does not quietly excuse the writer.
+
 The producer is invoked manually for now (one-shot). A launchd plist
 to fire it daily alongside profit_intel.py would be a small Tier 3
 followup once the operator has used the surface for ~1 week.
@@ -55,6 +66,26 @@ SUMMARY_PATH = DUCK_OPS_ROOT / "state" / "profit_per_product.json"
 MIN_UNITS_FOR_CONFIDENT_MARGIN = 3
 
 
+# A channel label that we could not attribute. Kept as its own channel
+# rather than folded into a real one — unattributable money should be
+# visible, not quietly credited to whichever channel is larger.
+_CHANNEL_UNKNOWN = "unknown"
+
+
+@dataclass
+class _ChannelSlice:
+    """One channel's share of a single product's P&L."""
+    units: int = 0
+    line_items: int = 0
+    order_ids: set[str] = field(default_factory=set)
+    revenue_total: float = 0.0
+    cogs_total: float = 0.0
+    net_profit_total: float = 0.0
+    gross_profit_total: float = 0.0
+    discount_total: float = 0.0
+    order_costs_allocated: float = 0.0
+
+
 @dataclass
 class _ProductBucket:
     label: str  # product_title, or "<no title>" fallback
@@ -76,6 +107,8 @@ class _ProductBucket:
     net_profit_total: float = 0.0
     gross_profit_total: float = 0.0
     discount_total: float = 0.0
+    order_costs_allocated: float = 0.0
+    channels: dict[str, _ChannelSlice] = field(default_factory=dict)
 
 
 def _safe_float(value: Any) -> float:
@@ -129,18 +162,99 @@ def _product_key(line_item: dict[str, Any]) -> tuple[str, str]:
     return ("__unknown__", "<no product label>")
 
 
+def _channel_from_filename(name: str) -> str | None:
+    """`2026-10-13_shopify_orders.json` -> `shopify`.
+
+    A HINT, not evidence. The collector saves Shopify and Etsy orders
+    together into the shopify-named file, so this is only consulted for
+    orders that carry no `platform` field of their own (older cache files)."""
+    stem = name[:-5] if name.endswith(".json") else name
+    parts = stem.split("_")
+    if len(parts) >= 3 and parts[-1] == "orders":
+        return "_".join(parts[1:-1]).strip().lower() or None
+    return None
+
+
+def _order_costs(order: dict[str, Any]) -> float:
+    """The costs an order carries that its line items never see.
+
+    Verified against the live cache (2026-10-15):
+      order["net_profit"] == sum(line["gross_profit"]) - _order_costs(order)
+
+    Shipping is netted, not added: collecting $4.99 against a $4.90 label is
+    a 9c gain, and collecting $4.50 against the same label is a 40c loss.
+    A negative result is therefore correct and must not be clamped — it is
+    how an over-collected shipping charge shows up as profit."""
+    return (
+        _safe_float(order.get("platform_fees"))
+        + _safe_float(order.get("payment_fees"))
+        + _safe_float(order.get("ads_fees"))
+        + _safe_float(order.get("shipping_label_cost"))
+        - _safe_float(order.get("shipping_collected"))
+    )
+
+
+def _slice_to_row(sl: _ChannelSlice) -> dict[str, Any]:
+    """Render one channel slice. Margin is computed from the slice's own
+    revenue and net — copying the row's margin down would make a
+    high-fee channel look as healthy as the product's average."""
+    revenue = sl.revenue_total
+    return {
+        "orders": len(sl.order_ids),
+        "line_items": sl.line_items,
+        "units": sl.units,
+        "revenue_total": round(revenue, 2),
+        "cogs_total": round(sl.cogs_total, 2),
+        "discount_total": round(sl.discount_total, 2),
+        "net_profit_total": round(sl.net_profit_total, 2),
+        "gross_profit_total": round(sl.gross_profit_total, 2),
+        "margin_pct": round(sl.net_profit_total / revenue * 100, 2) if revenue > 0 else 0.0,
+        "avg_net_per_unit": round(sl.net_profit_total / sl.units, 2) if sl.units else 0.0,
+        # margin_pct above is gross: revenue less COGS, the number this
+        # producer has always reported. The two below carry the channel's
+        # own fees and shipping, which is the only basis on which two
+        # channels can actually be compared.
+        "order_costs_allocated": round(sl.order_costs_allocated, 2),
+        "net_after_order_costs": round(sl.net_profit_total - sl.order_costs_allocated, 2),
+        "margin_after_costs_pct": (
+            round((sl.net_profit_total - sl.order_costs_allocated) / revenue * 100, 2)
+            if revenue > 0 else 0.0),
+        "avg_net_after_costs_per_unit": (
+            round((sl.net_profit_total - sl.order_costs_allocated) / sl.units, 2)
+            if sl.units else 0.0),
+    }
+
+
 def _bucket_to_row(bucket: _ProductBucket) -> dict[str, Any]:
     """Convert an internal bucket to the JSON shape the page consumes."""
     revenue = bucket.revenue_total
     margin_pct = (bucket.net_profit_total / revenue * 100) if revenue > 0 else 0.0
     title_variants_sorted = sorted(bucket.title_variants)
+    by_channel = {name: _slice_to_row(sl)
+                  for name, sl in sorted(bucket.channels.items())}
+    # "Where does this duck belong" is a profit question. Ranking on
+    # revenue would crown the channel that takes more money and keeps
+    # less of it — which is exactly the comparison being made.
+    primary_channel = (
+        max(sorted(bucket.channels.items()),
+            key=lambda kv: kv[1].net_profit_total - kv[1].order_costs_allocated)[0]
+        if bucket.channels else None
+    )
+    distinct_orders = len({oid for sl in bucket.channels.values()
+                           for oid in sl.order_ids})
     return {
         "label": bucket.label,
         "sample_sku": bucket.sample_sku,
         "sample_product_id": bucket.sample_product_id,
         "sample_product_handle": bucket.sample_product_handle,
         "units_sold": bucket.units_sold,
+        # order_count has always counted LINE ITEMS, so two variants of one
+        # duck in a single order read as two orders. The number is left
+        # alone so no surface shifts under the operator, and the honest
+        # count sits beside it under its own name rather than overloading
+        # this one ([[feedback_status_fields_one_meaning]]).
         "order_count": bucket.order_count,
+        "order_count_distinct": distinct_orders,
         "distinct_skus": sorted(bucket.distinct_skus),
         "distinct_sku_count": len(bucket.distinct_skus),
         # Operator transparency: when product_id grouping merges
@@ -157,6 +271,15 @@ def _bucket_to_row(bucket: _ProductBucket) -> dict[str, Any]:
         "is_confident_margin": bucket.units_sold >= MIN_UNITS_FOR_CONFIDENT_MARGIN,
         "avg_revenue_per_unit": round(revenue / bucket.units_sold, 2) if bucket.units_sold else 0.0,
         "avg_net_per_unit": round(bucket.net_profit_total / bucket.units_sold, 2) if bucket.units_sold else 0.0,
+        "order_costs_allocated": round(bucket.order_costs_allocated, 2),
+        "net_after_order_costs": round(
+            bucket.net_profit_total - bucket.order_costs_allocated, 2),
+        "margin_after_costs_pct": (
+            round((bucket.net_profit_total - bucket.order_costs_allocated) / revenue * 100, 2)
+            if revenue > 0 else 0.0),
+        "by_channel": by_channel,
+        "channel_count": len(by_channel),
+        "primary_channel": primary_channel,
     }
 
 
@@ -223,10 +346,16 @@ def aggregate_per_product(
     items_without_cogs = 0
     file_count = 0
     total_orders_seen = 0
+    orders_without_platform = 0
+    platform_filename_mismatch = 0
+    # Channel-level order ids dedupe across products: a three-duck basket
+    # is ONE Etsy order, not three.
+    channel_order_ids: dict[str, set[str]] = defaultdict(set)
 
     files = _iter_cache_files(cache_dir=cdir, since=window_start_date)
     for path in files:
         file_count += 1
+        file_channel = _channel_from_filename(path.name)
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -239,13 +368,33 @@ def aggregate_per_product(
         if not isinstance(orders, list):
             malformed_files += 1
             continue
-        for order in orders:
+        for order_index, order in enumerate(orders):
             if not isinstance(order, dict):
                 continue
             total_orders_seen += 1
+            # The order's own `platform` is the only trustworthy source:
+            # the collector writes both platforms into the shopify-named
+            # file. A disagreement is counted, not smoothed away.
+            declared = str(order.get("platform") or "").strip().lower()
+            if declared:
+                channel = declared
+                if file_channel and declared != file_channel:
+                    platform_filename_mismatch += 1
+            else:
+                orders_without_platform += 1
+                channel = file_channel or _CHANNEL_UNKNOWN
+            order_ref = str(order.get("order_id") or "").strip() or (
+                f"__anon::{path.name}::{order_index}")
             line_items = order.get("line_items")
             if not isinstance(line_items, list):
                 continue
+            # Pro-rata on line revenue. A zero-revenue basket (fully
+            # discounted, or a cache row with no revenue) still paid its
+            # fees, so it splits evenly rather than losing the cost.
+            valid_items = [li for li in line_items if isinstance(li, dict)]
+            order_cost_pool = _order_costs(order)
+            order_line_revenue = sum(_safe_float(li.get("revenue_ex_tax"))
+                                     for li in valid_items)
             for li in line_items:
                 if not isinstance(li, dict):
                     continue
@@ -293,6 +442,30 @@ def aggregate_per_product(
                 bucket.gross_profit_total += gross_profit
                 bucket.discount_total += discount
 
+                if order_line_revenue > 0:
+                    cost_share = revenue / order_line_revenue
+                elif valid_items:
+                    cost_share = 1.0 / len(valid_items)
+                else:
+                    cost_share = 0.0
+                allocated = order_cost_pool * cost_share
+                bucket.order_costs_allocated += allocated
+
+                sl = bucket.channels.get(channel)
+                if sl is None:
+                    sl = _ChannelSlice()
+                    bucket.channels[channel] = sl
+                sl.units += qty
+                sl.line_items += 1
+                sl.order_ids.add(order_ref)
+                sl.revenue_total += revenue
+                sl.cogs_total += cogs_total
+                sl.net_profit_total += net_profit
+                sl.gross_profit_total += gross_profit
+                sl.discount_total += discount
+                sl.order_costs_allocated += allocated
+                channel_order_ids[channel].add(order_ref)
+
     rows = sorted(
         [_bucket_to_row(b) for b in buckets.values()],
         key=lambda r: -r["net_profit_total"],
@@ -302,7 +475,42 @@ def aggregate_per_product(
     totals_cogs = sum(r["cogs_total"] for r in rows)
     totals_net = sum(r["net_profit_total"] for r in rows)
     totals_units = sum(r["units_sold"] for r in rows)
+    totals_order_costs = sum(r["order_costs_allocated"] for r in rows)
+    totals_net_after = sum(r["net_after_order_costs"] for r in rows)
     totals_margin = (totals_net / totals_revenue * 100) if totals_revenue > 0 else 0.0
+
+    # Summed from the rounded per-row slices rather than recomputed, so the
+    # channel header and the rows beneath it can never disagree on screen.
+    channel_totals: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        for cname, c in (row.get("by_channel") or {}).items():
+            agg = channel_totals.setdefault(cname, {
+                "orders": 0, "line_items": 0, "units": 0, "products": 0,
+                "revenue": 0.0, "cogs": 0.0, "net_profit": 0.0,
+                "margin_pct": 0.0, "order_costs": 0.0,
+                "net_after_order_costs": 0.0, "margin_after_costs_pct": 0.0,
+            })
+            agg["line_items"] += c["line_items"]
+            agg["units"] += c["units"]
+            agg["products"] += 1
+            agg["revenue"] += c["revenue_total"]
+            agg["cogs"] += c["cogs_total"]
+            agg["net_profit"] += c["net_profit_total"]
+            agg["order_costs"] += c["order_costs_allocated"]
+            agg["net_after_order_costs"] += c["net_after_order_costs"]
+    for cname, agg in channel_totals.items():
+        agg["orders"] = len(channel_order_ids.get(cname, set()))
+        agg["revenue"] = round(agg["revenue"], 2)
+        agg["cogs"] = round(agg["cogs"], 2)
+        agg["net_profit"] = round(agg["net_profit"], 2)
+        agg["margin_pct"] = (round(agg["net_profit"] / agg["revenue"] * 100, 2)
+                             if agg["revenue"] > 0 else 0.0)
+        agg["order_costs"] = round(agg["order_costs"], 2)
+        agg["net_after_order_costs"] = round(agg["net_after_order_costs"], 2)
+        agg["margin_after_costs_pct"] = (
+            round(agg["net_after_order_costs"] / agg["revenue"] * 100, 2)
+            if agg["revenue"] > 0 else 0.0)
+    channels = dict(sorted(channel_totals.items()))
 
     confident_rows = [r for r in rows if r["is_confident_margin"]]
     loss_makers = [r for r in rows if r["net_profit_total"] < 0]
@@ -321,10 +529,16 @@ def aggregate_per_product(
             "cogs": round(totals_cogs, 2),
             "net_profit": round(totals_net, 2),
             "margin_pct": round(totals_margin, 2),
+            "order_costs": round(totals_order_costs, 2),
+            "net_after_order_costs": round(totals_net_after, 2),
+            "margin_after_costs_pct": (
+                round(totals_net_after / totals_revenue * 100, 2)
+                if totals_revenue > 0 else 0.0),
             "units": totals_units,
             "orders_scanned": total_orders_seen,
             "products": len(rows),
         },
+        "channels": channels,
         "products": rows,
         "loss_makers": loss_makers,
         "low_margin": low_margin,
@@ -333,6 +547,15 @@ def aggregate_per_product(
             "malformed_files": malformed_files,
             "line_items_without_revenue": items_without_revenue,
             "line_items_without_cogs": items_without_cogs,
+            "orders_without_platform": orders_without_platform,
+            "platform_filename_mismatch": platform_filename_mismatch,
+            "platform_source_note": (
+                "Channel is read from each order's `platform` field. The "
+                "collector writes Etsy orders into <date>_shopify_orders.json "
+                "as well, so the file name is only a fallback for orders with "
+                "no platform field; platform_filename_mismatch counts how "
+                "often the two disagree."
+            ),
             "confidence_floor_units": MIN_UNITS_FOR_CONFIDENT_MARGIN,
             "confidence_floor_note": (
                 f"Products with fewer than {MIN_UNITS_FOR_CONFIDENT_MARGIN} "
