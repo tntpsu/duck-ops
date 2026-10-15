@@ -3177,3 +3177,112 @@ this list from suggestive into decisive.
   in this producer.
 - No OS card reads `platform_filename_mismatch` yet, so the canary is currently only visible to a
   reader of the payload ([[feedback_residual_risk_needs_a_tracked_home]]).
+
+
+## Surface 93 — Work that succeeded, discarded for want of a receipt (2026-10-15)
+
+Two reds on the board, one root cause: a step threw away a finished piece of work because nothing
+persisted the evidence that it existed.
+
+### 93a — duckvideo: the transcode outlived the poll, so the video became an orphan
+
+`duckvideo_weekly` exited 1 at 2026-10-14 09:37:39. The MP4 reached Shopify Files at 09:32:36 and
+`shopify_video_url_from_id` gave up after 300s. **Shopify finished the transcode anyway** — asked
+that evening, `gid://shopify/Video/38432528793783` was `fileStatus: READY` with four sources
+including 1080p, `fileErrors: []`. The run had already been declared a failure and the rendered
+video abandoned.
+
+The defect was one line out of order (`flows/duckvideo/steps.py`):
+
+```python
+result = shopify_upload_video_bytes(...)          # {"id": gid, "url": None}
+if not result.get("url"):
+    raise RuntimeError(f"... video {result.get('id')} has no public CDN URL ...")
+st.set("duckvideo_shopify_file_id", result.get("id"))   # never reached
+```
+
+The gid was *printed in the error text* and never written, so state held
+`duckvideo_video_path` (2.8MB, still on disk) and no file id at all. A `--force` retry would
+re-upload the same bytes and wait on a second transcode, leaving the first as a permanent orphan.
+Evidence capture must never fail the action it documents
+([[feedback_receipts_never_load_bearing]]) — third instance of this class.
+
+Fix: the id is persisted the moment `fileCreate` returns (`State.set` writes to disk, so it
+survives the crash); re-entry re-polls that id instead of re-uploading; the poll budget is 900s,
+which still leaves most of the scheduler's 1800s for the render. `--force` deliberately still
+uploads fresh, so a genuinely bad video stays replaceable.
+
+**The poster had the same bug one layer down,** found by doing the recovery: image `fileCreate`
+also returns an id with a null url, and the step stored `duckvideo_poster_url = None` and dropped
+the id. Posters are non-fatal, which is exactly why nobody noticed. Now the poster id is kept too.
+
+| | Happy | Boundary | Degenerate | Refusals | Regression guarded |
+|---|---|---|---|---|---|
+| Receipt kept | ✅ `duckAgent/tests/test_duckvideo_flow.py::TestHostKeepsItsReceipt::test_the_happy_path_is_unchanged` | ✅ `::test_the_file_id_is_saved_before_the_url_is_judged` — **the defect**, and asserts it reached DISK | ✅ `::test_a_poster_whose_url_is_not_ready_keeps_its_id` | n/a | ✅ `::test_force_still_uploads_a_fresh_video` |
+| Resume, don't repay | ✅ `::test_a_retry_repolls_instead_of_reuploading` | ✅ `::test_a_still_transcoding_retry_does_not_reupload_either` | ✅ `::test_the_poster_still_uploads_on_the_reuse_path` | ✅ same (raises "already uploaded", never re-uploads) | ✅ `::test_a_failed_poster_is_still_non_fatal_on_the_reuse_path` |
+| Poll budget | ✅ `::test_the_poll_budget_outlives_a_real_transcode` (floor, not a pinned value — [[feedback_pin_the_rule_not_the_reading]]) | n/a | n/a | n/a | ✅ same |
+
+**Verified live, not mocked:** the 2026-10-14 run was recovered by handing the step the lost gid
+and letting the new resume path run — `reused_upload: true`, 1080p CDN URL adopted, no re-upload,
+no re-render.
+
+### 93b — the stalled-jobs card judged directories, so a corrected re-run never cleared
+
+2026-10-14 18:28, job `f0e0b2180fa3` launched for "Mummy Quacker Duck" against
+`pics/good-guy-quackers-20261014-182615`. The photo-folder guard refused it — **correctly**; it
+stopped another duck's photos shipping under this one's name. At 18:49 the operator re-ran the
+same duck from the right folder as `4d876e12903f`, which published to both channels, attached
+14/14 images and emailed.
+
+The card still read RED six hours later, naming "Mummy Quacker Duck" and asserting "nothing is
+coming for these unless they are re-run" — when it already had been. Because
+`_load_newduck_stalled_jobs_health` globbed job *directories* and judged each alone, that red
+would never have cleared on its own; only deleting the folder would. A card that cries wolf
+permanently costs the real alarm this bracket exists for.
+
+Fix: a pre-pass collects the ducks that any run published or emailed, and a stalled job whose
+duck matches one is reported as `superseded_jobs` instead of `stalled_jobs`. Two deliberate
+choices:
+- **Exact match on the normalised name only.** A loose match that wrongly called a stall
+  "superseded" would hide the failure the card was built to catch — strictly worse than a false
+  alarm. "Mummy Quacker" finishing does not clear "Mummy Quacker Duck", and an unnamed job can
+  never match.
+- **The pre-pass ignores the 7-day lookback.** The successful re-run can age out before the dead
+  directory does, and resolution must not expire ([[feedback_never_grade_an_open_window]]).
+
+Resolved is not "never happened": the mis-start stays in the payload with `superseded_by`.
+
+| | Happy | Boundary | Degenerate | Refusals | Regression guarded |
+|---|---|---|---|---|---|
+| Superseded | ✅ `duckAgent/creative_agent/runtime/tests/test_newduck_stalled_jobs_card.py::TestASupersededMisstartIsNotAStall::test_a_reun_of_the_same_duck_clears_the_misstart` | ✅ `::test_a_finished_run_outside_the_lookback_still_counts` | ✅ `::test_a_nameless_stalled_job_is_never_superseded` | n/a | ✅ `::test_the_superseded_job_is_still_reported_not_erased` |
+| Not over-matched | ✅ `::test_matching_ignores_case_and_padding_only` | ✅ `::test_a_partial_name_does_not_count_as_the_same_duck` | ✅ `::test_a_different_duck_finishing_does_not_clear_it` | n/a | ✅ all three — a false "resolved" hides a real stall |
+
+**Still open (named, not fixed).** A hard failure sends **nothing**. `console.py::_run_job` ends
+at `self._update(job_id, status="failed", ...)`; the status lands in the job JSON and the portal,
+and the only other detection is this card at the 6h threshold. An immediate operator email belongs
+in that branch, but it is a new notification lane and wants the `/new-flow` checklist (cadence
+gating so a burst of failures cannot spam) rather than a tail-end edit.
+
+### 93c — `helpers/shopify_helper.py` has no DUCK_TEST_MODE guard at all
+
+Found by causing it. Two tests in the new `TestHostKeepsItsReceipt` class stubbed the *poll* but
+not the *upload*; they passed only because the resume path did not exist yet, fell through to the
+real `shopify_upload_video_bytes`, and left **two junk `FAILED` videos in the live store** at
+2026-10-15 04:50:37Z and 04:50:38Z (`gid://shopify/Video/38453598126263`,
+`gid://shopify/Video/38453598355639`, alt "Highland Cow Duck product video").
+
+`tests/conftest.py` sets `DUCK_TEST_MODE=1`, and `helpers/email_helper.py` honours it — but
+`helpers/shopify_helper.py` contains **zero** occurrences of it. The three-layer convention
+(`ai-agents/CLAUDE.md` §4) was written for state-file writes and layer 2 was never extended to
+the Shopify write paths. Any test that reaches a Shopify write reaches production
+([[feedback_test_runs_reach_the_outside_world]] — the email incident, one API over).
+
+Immediate mitigation only: a module-level `_never_upload` helper that every test in the class
+installs, so a forgotten stub fails the test instead of the store. The real fix — a source-level
+refusal at the `shopify_post` / `shopify_put` / GraphQL-mutation chokepoints, leaving reads
+working — is **not done** and is the top follow-up. The two junk videos are still in the store
+pending an operator decision on deleting them.
+
+| | Happy | Boundary | Degenerate | Refusals | Regression guarded |
+|---|---|---|---|---|---|
+| Test cannot reach the store | ✅ every test in `TestHostKeepsItsReceipt` installs `_never_upload` | ⬜ **gap: no source-level guard** — `shopify_helper` write chokepoints under `DUCK_TEST_MODE` | ⬜ gap: no post-suite audit for junk files in Shopify Files | ⬜ gap | ⬜ gap |
