@@ -3470,3 +3470,98 @@ It was left untouched; deleting it is a separate call.
   one is worse than one known-wrong view with a note. This is the next piece of work, not an
   oversight.
 
+## Surface 95 — A canary for a setting that lives in someone else's app (2026-10-15)
+
+**How it surfaced.** The operator asked how to get star ratings into Google results, flipped the
+two settings, and the fix verified clean: 86 of 90 rated products emitting an `aggregateRating`
+that matches Shopify's stored rating, on the same node as the offer. Then the obvious question —
+what would tell us if that stopped being true? Nothing would. The configuration lives entirely
+inside two third-party app UIs. No repo file records it, our Shopify token cannot read it
+(`appInstallations` → `ACCESS_DENIED`), and Judge.me's `"Add JSON-LD snippets"` checkbox **ships
+CHECKED**, so an app update or a support-driven "let's turn our snippets back on" silently restores
+the broken state. Search traffic would decay for weeks before anyone re-read a product page.
+
+**What broken looks like.** Before the fix both apps emitted a `Product` node and neither was
+usable:
+
+| | Smart SEO node | Judge.me node (JS-injected) |
+|---|---|---|
+| `offers` / price | yes | **no** |
+| `aggregateRating` | **no** | yes |
+| `@id` | **no** | `<url>#product` |
+
+Judge.me sets `@id` so its rating will *merge* into the main node; Smart SEO emitted no `@id`, so
+the two never joined. Google saw one complete product with no rating and one rating stub with no
+price, and showed stars for neither. **Two half-nodes is the default state when both apps are left
+on**, which is why this needs a watcher rather than a one-time fix.
+
+**The signal that makes it cheap.** Judge.me's injected node is client-side, so a plain fetch
+cannot see it — but the page embeds `jdgmSettings`, and exactly **one key out of 640** differs
+between the broken and fixed states: `disable_json_ld`. That makes the regression detectable from
+an HTTP GET. No browser, no Chrome dependency, no cross-repo import of openclaw's Playwright.
+
+**The producer** (`duck-ops/runtime/product_schema_canary.py`, daily) samples live product pages
+and asks three questions each: is Judge.me still suppressed; does the one good node carry a rating
+matching the stored `reviews.rating` metafield; is that rating reachable from a price. Anchors (the
+highest review counts) are re-checked every run; the rest of the budget rotates so coverage
+compounds. Three unrated products ride along as controls — stars on a product with no reviews is a
+fabricated-review problem and worse than having no stars.
+
+**The rule this surface is built around:** *"nothing is wrong" and "I could not check" are
+different answers.* A blind producer finds zero defects, and zero defects rendered as green is the
+same fake reassurance that let the original defect live. `pages_checked` and `pages_unreadable` are
+separate counters and the input card goes **RED** on a blind run, never green.
+
+**Two cards** (`/new-flow` Part 2 bracket, registered the same commit as the producer):
+- `product_schema_source_sanity` — can we see the storefront, and is Judge.me still off? RED on a
+  duplicate emitter, RED when 0 pages were readable, RED >72h stale.
+- `product_schema_rating_coverage` — do the sampled rated products actually emit a usable rating?
+  RED on any missing / mismatched / price-less rating, RED on a rating for an unrated product,
+  YELLOW when the sample happened to contain nothing rated (not a defect, but not a pass).
+
+**The canary found a defect in itself on its first live run.** Two pages reported
+`rating_without_offers`: `football-ducks` and `dachshund-duck`. Both were correct — a `ProductGroup`
+carries `aggregateRating` + `hasVariant` and the **offers live on the variants**, which is Google's
+variant spec. Requiring `offers` on the rating-bearing node is right for a plain `Product` and
+wrong for a group. Fixed in `_offer_reachable` with two regression tests before the fix landed;
+the re-run is 5/5 clean. Smart SEO emits both shapes — `build-your-own-duck` *does* put `offers` on
+the group — so the check accepts either and only flags a rating with no reachable price anywhere.
+
+### Coverage
+
+| use case | happy | regression present | blind / unreadable | degenerate html | prod pollution | card wiring |
+|---|---|---|---|---|---|---|
+| Judge.me duplicate emitter returns | `test_the_setting_is_read_from_the_page_not_guessed` | `test_the_pre_fix_page_shape_is_flagged`, `test_it_is_flagged_even_though_a_rating_is_present`, `test_the_summary_counts_duplicate_emitter_pages`, `test_judgeme_emitting_again_is_red` | `test_a_missing_setting_is_unknown_not_healthy`, `test_an_unreadable_judgeme_setting_is_a_coverage_gap_not_a_pass` | `test_a_brace_inside_a_settings_string_does_not_truncate_the_parse`, `test_a_non_boolean_setting_is_unknown` | n/a | `test_a_red_source_card_tells_the_operator_which_checkbox` |
+| Smart SEO drops `aggregateRating` | `test_a_matching_rating_passes` | `test_a_missing_rating_is_its_own_verdict`, `test_a_missing_rating_points_at_smart_seo` | n/a | `test_unparseable_ld_json_block_is_skipped_not_fatal` | n/a | `test_a_red_coverage_card_names_the_smart_seo_setting` |
+| rating ≠ stored metafield | `test_a_matching_rating_passes` | `test_a_wrong_value_is_a_mismatch`, `test_a_wrong_review_count_is_a_mismatch`, `test_a_mismatch_points_at_the_sync` | n/a | n/a | n/a | `test_broken_count_aggregates_every_defect_kind` |
+| rating with no reachable price | `test_the_healthy_page_puts_both_on_one_node` | `test_a_rating_node_without_offers_is_flagged`, `test_a_group_with_no_price_anywhere_is_still_flagged`, `test_a_rating_without_offers_is_red` | n/a | n/a | n/a | — |
+| unrated product claims stars | `test_an_unrated_product_with_no_rating_passes` | `test_an_unrated_product_showing_a_rating_is_flagged`, `test_the_summary_counts_it`, `test_stars_on_a_product_with_no_reviews_is_the_worst_case` | n/a | n/a | n/a | — |
+| `ProductGroup` + `hasVariant` | `test_a_product_group_with_variants_passes`, `test_a_group_may_carry_the_rating_while_its_variants_carry_the_price` | `test_two_rating_bearing_nodes_are_a_duplicate` | n/a | `test_all_three_nodes_are_seen_but_only_one_carries_the_rating` | n/a | — |
+| producer blind | `test_zero_defects_and_zero_checks_are_distinguishable` | `test_an_unreadable_page_is_not_counted_as_checked`, `test_a_blind_run_is_red_not_green`, `test_a_blind_run_and_a_clean_run_do_not_look_alike` | `test_rate_limiting_is_recorded_distinctly`, `test_a_raised_exception_does_not_lose_the_other_pages`, `test_a_page_with_no_product_node_is_not_a_pass` | `test_empty_html` | n/a | `test_a_red_source_card_without_duplicates_asks_for_a_rerun` |
+| catalog read from the right metafields | `test_the_standard_reviews_namespace_is_used`, `test_a_rating_metafield_is_unwrapped_from_its_json`, `test_pagination_is_followed` | n/a | n/a | n/a | n/a | — |
+| sample selection | `test_the_same_rotation_picks_the_same_products`, `test_the_highest_review_counts_are_checked_every_run`, `test_unrated_controls_are_always_included`, `test_rotation_eventually_covers_products_outside_the_anchors` | `test_a_different_rotation_moves_the_window` | n/a | `test_an_empty_catalog_yields_nothing_rather_than_raising`, `test_a_catalog_smaller_than_the_sample_is_fine`, `test_the_sample_never_exceeds_its_budget` | n/a | — |
+| state write isolation | `test_a_tmp_path_write_round_trips`, `test_without_test_mode_the_guard_does_not_fire` | `test_the_frozen_production_path_is_refused_under_test_mode`, `test_the_guard_compares_the_frozen_path_not_the_live_constant` | n/a | n/a | `test_production_canary_state_has_no_fixture_handles`, `test_production_canary_state_points_at_the_real_storefront`, `test_the_frozen_path_constant_still_points_at_production` | n/a |
+| card freshness + registration | `test_healthy_sample_is_green`, `test_full_coverage_is_green` | `test_stale_beyond_two_cadences_is_red`, `test_stale_coverage_is_red`, `test_a_duplicate_emitter_outranks_staleness` | `test_never_produced_is_yellow_with_the_command`, `test_never_produced_is_yellow`, `test_nothing_rated_in_the_sample_is_yellow_not_green`, `test_mildly_stale_is_yellow`, `test_partial_rate_limiting_is_yellow_not_red` | `test_a_corrupt_state_file_does_not_raise` (×2), `test_non_numeric_counters_do_not_raise` | n/a | `test_both_cards_are_registered`, `test_both_cards_are_registered_with_no_payload_at_all`, `test_green_cards_ask_nothing_of_the_operator`, `test_red_cards_are_marked_repair_now`, `test_the_two_cards_are_independent`, `test_both_cards_carry_business_impact_copy` |
+| producer/reader join | `test_the_producer_writes_where_the_loaders_read`, `test_every_summary_key_the_cards_read_is_one_the_producer_writes` | n/a | n/a | n/a | n/a | n/a |
+
+**Files.** Producer `duck-ops/runtime/product_schema_canary.py` (new); tests
+`duck-ops/tests/test_product_schema_canary.py` (44) and
+`duck-ops/tests/test_no_test_pollution_in_product_schema_canary.py` (3); isolation redirect in
+`duck-ops/tests/conftest.py`; the two loaders, the payload keys and both card registrations in
+`duckAgent/creative_agent/runtime/src/duck_creative_agent/viewer.py`; card tests
+`duckAgent/tests/test_product_schema_canary_card.py` (33). Schedule prepared, **not installed**
+(Tier 3): `duckAgent_runtime/prepared_plists/com.philtullai.duckops.product-schema-canary.daily.plist`
++ `duckAgent_runtime/run_product_schema_canary.sh`, daily 07:35.
+
+**Non-vacuous by construction.** Four mutations, each failing only the tests that name its
+behaviour: deleting the `duplicate_emitter` branch → 2 failures; dropping `@graph` from the node
+walker → 14; letting a blind run read green → 2; removing the sample anchors → 1. Restored green:
+duck-ops 47, duckAgent card suite 33.
+
+**Named and not fixed.** (1) No `/portal/intel/*` page — the cards carry the whole signal and a
+page would be two numbers. (2) The canary cannot see a *client-side* duplicate from any emitter
+that does not expose a server-side flag the way Judge.me does; a second review app would need its
+own detector, or a rendered-page check. (3) Google's own verdict is unobserved — Search Console's
+rich-result report is the ground truth and nothing reads it; the canary proves only that the markup
+is correct, not that Google accepted it. (4) `profit_intel.py::_channel_mix_window` still carries
+the Surface 94 platform-as-channel defect.

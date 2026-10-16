@@ -241,6 +241,18 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
                             tmp_path / "etsy_title_refresh_outcome.json")
     except ImportError:
         pass
+    # 2026-10-15: product_schema_canary (Surface 95) — new prod-WRITE path.
+    # Three-layer isolation: this redirect + the DUCK_TEST_MODE frozen-path
+    # guard in write_product_schema_canary + tests/
+    # test_no_test_pollution_in_product_schema_canary.py. duckAgent reads the
+    # STATE FILE for its two OS cards and never imports this module, so there
+    # is no duckAgent-side constant to patch.
+    try:
+        import product_schema_canary as _psc
+        monkeypatch.setattr(_psc, "PRODUCT_SCHEMA_CANARY_PATH",
+                            tmp_path / "product_schema_canary.json")
+    except ImportError:
+        pass
     # 2026-07-03: demand_intel (Demand page) — new prod-WRITE path (funnel action
     # buckets); three-layer isolation (this redirect + DUCK_TEST_MODE guard in
     # write_demand_intel + tests/test_no_test_pollution_in_demand_intel.py). Also
