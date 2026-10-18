@@ -3565,3 +3565,72 @@ own detector, or a rendered-page check. (3) Google's own verdict is unobserved �
 rich-result report is the ground truth and nothing reads it; the canary proves only that the markup
 is correct, not that Google accepted it. (4) `profit_intel.py::_channel_mix_window` still carries
 the Surface 94 platform-as-channel defect.
+
+## Surface 96 — The batch email that trained itself on its own decoration (2026-10-17)
+
+The 2026-10-15 Thursday batch-review email put this on the option its own judge had ranked #1 and
+scored 96/100:
+
+> Phil training caution - creative quality - Phil training caution - creative quality -
+> Phil training caution - creative quality - Duck B image - Needs review ... clearly presenting a
+> chef duck ...
+
+Pumpkin Head vs Haunted Scarecrow carried watch-outs about a zombie, a skeleton and a chef. The
+operator's reading of the email is the product here, and it said the best option looked broken.
+
+**Two defects, one loop.** `rank_creative_candidates` decorates a matched phrase with
+`Phil training caution:` for display. `_candidate_feedback_bits` then records *the decorated
+string* into `data/creative_feedback_ledger.json` as a `negative_cue`, and the raw
+`creative_quality` block alongside it. Next run those cues return as `negative_phrases`, get
+decorated again, and are written back. The chain grows one layer per week.
+
+1. **The guard inspected the wrong end.** It skipped re-prefixing only when the text
+   `startswith("Phil training caution:")`. Real stored cues begin `creative quality:`, so the guard
+   never fired. A comment at that line says this was fixed on 2026-06-11 — that fix caught one
+   branch of a two-branch mechanism, and the test guarding it (below) could not tell.
+2. **Match strength did not scale with phrase length.** `required_matches = min(4, ...)` meant a
+   35-token stored sentence matched any candidate sharing four words. Every candidate's quality
+   block carries the same QA template ("Needs review or retry before approval email", "Style QA
+   passed for a concept preview"), which supplies four trivially — so *every* stored caution matched
+   *every* candidate. That is the cross-contamination, and it is independent of the nesting.
+
+**A test was defending the bug.** `test_thursday_funnel_fixes.py::TestWarningDedup` asserted that
+the string `startswith("Phil training caution:")` appeared in the source. It passed for four months
+while the guard it named failed on every real cue, and it would have blocked this fix. Replaced with
+a behavioural assertion ([[feedback_pin_the_rule_not_the_reading]]).
+
+| use case | fresh note | already marked | chain-wrapped (real) | round trip | unrelated candidate | own candidate |
+|---|---|---|---|---|---|---|
+| marker applied for display | `test_a_bare_warning_gets_one_marker` | `test_an_already_marked_warning_is_not_marked_again` | `test_the_real_chain_wrapped_cue_collapses_to_one_marker` | `test_two_full_passes_do_not_grow_the_marker_chain` | n/a | n/a |
+| the note survives stripping | n/a | n/a | `test_the_note_itself_survives_the_collapse` | `test_the_underlying_note_is_still_recorded` | n/a | n/a |
+| ledger stores notes, not decoration | n/a | n/a | `test_recorded_cues_carry_no_display_marker` | `test_the_stored_cue_never_exceeds_one_marker_over_many_passes` | n/a | n/a |
+| a caution is about this candidate | n/a | n/a | n/a | n/a | `test_shared_boilerplate_alone_does_not_match` | `test_a_long_note_still_matches_the_candidate_it_describes` |
+| real operator phrases still land | n/a | n/a | n/a | n/a | n/a | `test_a_genuine_short_operator_phrase_still_matches` |
+| the June regression, behaviourally | n/a | `TestWarningDedup::test_no_double_prefix_or_duplicates` | n/a | n/a | n/a | n/a |
+
+**Files.** `helpers/creative_quality_loop.py` gains `strip_training_markers` (peels every layer,
+preserves the operator's spacing byte for byte) and `strip_training_markers_deep` (the persisted
+`quality` block held the same chains one key away from the cues). Applied at all four leak points:
+the display prefix, `summarize_candidate_quality`'s intake of upstream review text,
+`_candidate_feedback_bits`, and the stored `quality`. `_phrase_matches_training_text` now requires
+60% of tokens with no cap. Tests: `tests/test_creative_training_marker_loop.py` (11), rewritten
+`TestWarningDedup`.
+
+**Mutations.** Single-pass strip instead of the peel loop → 3 failures (chain, already-marked,
+ledger). Restore the 4-token cap → 1 (shared boilerplate). Persist the raw `quality` block → 1
+(ledger). Stop normalising upstream review warnings → 1 (chain). Each failed only the tests naming
+its behaviour.
+
+**The stored damage.** 78 ledger events carried 53 `Phil training caution` and 16
+`Phil training match` copies. Purged in place and verified field-by-field: 16 fields changed, 0
+unexplained, event ids identical, notes preserved. The first attempt also collapsed a double space
+inside an operator's own sentence, which is an untracked edit to their words — `strip_training_markers`
+was changed to preserve inner spacing and the purge re-verified before it was applied.
+
+**Named but not fixed.** (1) The email renderer still flattens `: ` to ` - `, so a note that legitimately
+contains a colon reads like decoration; the strip is anchored to known markers only, so this is cosmetic,
+not a correctness risk. (2) 60% is calibrated against the QA template as it reads today — if that template
+grows, the shared-token floor rises with it and the threshold wants re-checking. (3) Nothing alarms on
+marker text reaching the ledger; a cheap assertion at `append_creative_feedback_event` would turn the
+next recurrence into a loud failure rather than a slow drift. (4) `positive_cues` had the same shape and
+is fixed by the same code path, but only the negative side has a golden chain from production.
