@@ -3634,3 +3634,70 @@ grows, the shared-token floor rises with it and the threshold wants re-checking.
 marker text reaching the ledger; a cheap assertion at `append_creative_feedback_event` would turn the
 next recurrence into a loud failure rather than a slow drift. (4) `positive_cues` had the same shape and
 is fixed by the same code path, but only the negative side has a golden chain from production.
+
+---
+
+### Surface 97 — the SEO batch that applied 8 of 9 and parked the lane anyway (2026-10-19)
+
+**Sequel to Surface 82e, through the branch 82e did not enumerate.** 82e fixed *"a review with
+nothing to approve parks the lane"* on 2026-10-11 and shipped `dismiss_shopify_seo_review_run`. The
+very batch that fix then sent — *Missing SEO titles, 9 items, 9 of 9 applyable* — parked the lane
+again 8 days later by a different route.
+
+**What happened.** The apply ran 2026-10-11 08:42 and succeeded on 8 products, each read back and
+receipted (`verification_receipts`, all `verified`). The ninth, Bronco Buddy Duck
+(`gid://shopify/Product/8825618727095`), failed `Product does not exist`: it had been deleted after
+the audit was generated and recreated as **DRAFT** `gid://shopify/Product/8832633176247` with no SEO
+title. Confirmed live — the old gid returns `product: null` under the same credential that wrote its
+eight siblings, and a `title:*Bronco*` search returns exactly one product, the new draft.
+
+**The defect.** `duckAgent/helpers/shopify_seo_review_helper.py:364`:
+
+```python
+payload["status"] = "applied" if not failures else "apply_attempted"
+```
+
+There is no terminal state for a **permanent** failure. `apply_attempted` is *pending* to every
+reader — `_PARKED_PENDING_STATUSES` (viewer.py:26840), the `shopify_seo_kickoff` guard
+(`shopify_seo_kickoff.py:144`), `viewer_data.py:4502`, and the `shopify_seo_freshness` card — and
+nothing retries it. Worse, `_send_next_category_review_email` fires only on `status == "success"`,
+so one dead gid starved **every remaining SEO category** behind it, not just its own batch. 89% of
+the work was done and the lane read as fully blocked for 9 days.
+
+**Second defect — the card reason quoted the batch size.** The card read *"Missing SEO titles,
+9 item(s) … has been 'apply_attempted' for 9d"*, taking `item_count` from the audit rather than the
+unresolved remainder. The operator-visible difference is "an afternoon of SEO review" versus "one
+dead reference, click dismiss". This is the **second** time this same card's copy has misdirected:
+82e was the first (it instructed a `dismiss` reply that had no matching verb). Fifth instance of
+[[feedback_pin_the_rule_not_the_reading]], whose second generalisation is exactly this.
+
+**Why the matrix did not catch it.** The cell was **not** empty. Line 318 carries
+`test_parked_review_is_red_with_actionable_reason` and it passed throughout — it asserts a parked
+review is red with *an* actionable reason, never that the reason names the unresolved remainder, and
+nothing anywhere asserts that a partial apply can reach a terminal state at all. An occupied cell
+with a test too weak to observe the failure, per retro step 0.
+
+| Use case | Happy | All fail | Some fail transiently | Some fail PERMANENTLY | Card copy accuracy |
+|---|---|---|---|---|---|
+| SEO batch apply → lane advances | ✅ `test_shopify_seo_review.py` (status `applied`, next email sent) | ✅ `apply_attempted`, lane parks (correct) | 🔴 no row — retry path unbuilt | 🔴 **this surface** — parks forever | 🔴 reason quotes `item_count`, not the remainder |
+| Parked review surfaces as red | ✅ `::test_parked_review_is_red_with_actionable_reason` | ✅ `::test_37d_stale_is_red` | n/a | 🔴 red for the wrong reason | 🔴 same |
+
+**Not fixed — four named gaps.** (1) No terminal status for a permanently unappliable item; the fix
+is to classify failures transient vs permanent and let a batch whose only remaining failures are
+permanent close as `applied_with_permanent_failures`. (2) `_send_next_category_review_email` gated on
+`success` rather than "batch finished", which is what turned one dead product into a whole-lane
+stall. (3) The card reason should render from live unresolved count at read time, not from the
+audit's `item_count`. (4) Nothing notices that a resource in an open batch has been deleted since the
+audit — a cheap existence check at apply time would turn this into an immediate, legible failure
+rather than a 9-day park.
+
+**Resolution of the live instance.** Blocked, not applied: `dismiss_shopify_seo_review_run` is the
+right production path (it writes both the run file and `latest.json` —
+[[feedback_retire_artifacts_in_authoritative_store]]) but the call was refused by the Claude Code
+classifier as an external-system write. Left for the operator with the reason text drafted. Bronco
+Buddy's missing SEO title is a **new finding for the next audit under its new gid**, not an
+unapplied item of this run.
+
+**Memory:** [[feedback_partial_apply_parks_the_lane]] (new),
+[[feedback_pin_the_rule_not_the_reading]] (5th instance),
+[[feedback_incomplete_fix_enumerate_all_branches]] (82e → 97 is the canonical pair).
