@@ -3679,20 +3679,58 @@ with a test too weak to observe the failure, per retro step 0.
 
 | Use case | Happy | All fail | Some fail transiently | Some fail PERMANENTLY | Card copy accuracy |
 |---|---|---|---|---|---|
-| SEO batch apply → lane advances | ✅ `test_shopify_seo_review.py` (status `applied`, next email sent) | ✅ `apply_attempted`, lane parks (correct) | 🔴 no row — retry path unbuilt | 🔴 **this surface** — parks forever | 🔴 reason quotes `item_count`, not the remainder |
-| Parked review surfaces as red | ✅ `::test_parked_review_is_red_with_actionable_reason` | ✅ `::test_37d_stale_is_red` | n/a | 🔴 red for the wrong reason | 🔴 same |
+| SEO batch apply → lane advances | ✅ `test_shopify_seo_partial_apply.py::TestACleanBatchIsUnchanged` (2) | ✅ `::TestRetryableWorkKeepsTheRunPending::test_a_transient_failure_stays_apply_attempted` | ✅ `::TestRetryableWorkKeepsTheRunPending` (2 — mixed stays pending) | ✅ `::TestAPermanentFailureClosesTheBatch` (4) | ✅ `::TestTheLoaderActuallyUsesThePhrase` (4) |
+| Permanence is asked, not parsed | ✅ `::TestPermanenceIsAskedNotParsed::test_the_probe_runs_once_per_failing_resource` | n/a | ✅ `::test_a_deletion_worded_failure_on_a_live_resource_is_retryable` | ✅ `::test_an_unanswerable_probe_is_treated_as_retryable`, `::test_a_raising_probe_...` | n/a |
+| Parked review surfaces as red | ✅ `::test_parked_review_is_red_with_actionable_reason` | ✅ `::test_37d_stale_is_red` | n/a | ✅ `::TestTheLoaderActuallyUsesThePhrase` | ✅ 〃 |
+| A closed batch is not reopened | ✅ `::TestATerminalRunIsNotReopened` (asserts zero further Shopify writes) | n/a | n/a | n/a | n/a |
 
-**Not fixed — four named gaps.** (1) No terminal status for a permanently unappliable item; the fix
-is to classify failures transient vs permanent and let a batch whose only remaining failures are
-permanent close as `applied_with_permanent_failures`. (2) `_send_next_category_review_email` gated on
-`success` rather than "batch finished", which is what turned one dead product into a whole-lane
-stall. (3) The card reason should render from live unresolved count at read time, not from the
-audit's `item_count`. (4) Nothing notices that a resource in an open batch has been deleted since the
-audit — a cheap existence check at apply time would turn this into an immediate, legible failure
-rather than a 9-day park.
+**STATUS: SHIPPED 2026-10-21.** All four named gaps closed in one change.
 
-**Resolution of the live instance.** Blocked, not applied: `dismiss_shopify_seo_review_run` is the
-right production path (it writes both the run file and `latest.json` —
+`APPLIED_WITH_PERMANENT_FAILURES = "applied_with_permanent_failures"` is the new terminal status.
+**No reader needed changing**, which is why this shape was chosen: every consumer allowlists the
+*pending* statuses (`_PARKED_PENDING_STATUSES`, the kickoff `== "apply_attempted"` guard,
+`viewer_data`'s pending sets), so a status they have never heard of is terminal by construction
+rather than by N coordinated edits.
+
+1. **Terminal state for permanent failure.** `_record_failures` splits every failure into
+   `permanent_failures` / `transient_failures`; a run with no transient remainder closes.
+2. **Next-category email gated on `batch_finished`, not `status == "success"`** — the line that
+   turned one dead product into a whole-lane stall.
+3. **Card reason renders the remainder** via `_shopify_seo_scope_phrase(item_count, apply_result)`:
+   *"1 of 9 item(s) unresolved, 8 already applied and verified — that item no longer exists in
+   Shopify, so there is nothing left to apply."*
+4. **Deletion is detected at apply time** by `_resource_exists` (gap 4 folded into gap 1): a
+   `node(id:)` probe, one per failing item, cached.
+
+**Permanence is asked, not parsed.** The probe exists instead of matching `Product does not exist`,
+because that is one message from one mutation and the others word it differently — pinning the rule
+to today's string is [[feedback_pin_the_rule_not_the_reading]] again. An unanswerable probe (throttle,
+raise, `errors`) returns `None` and counts as **transient**: a batch must never close itself because
+we could not ask ([[feedback_app_scoped_read_is_not_store_fact]]).
+
+**Mutations.** Five, each failing only the tests naming its behaviour: revert to
+`"applied" if not failures else "apply_attempted"` → 2; re-gate the email on `success` → 2; make an
+unanswerable probe count as permanent → 2; revert the reason f-string to `{r_items} item(s)` → 2;
+flatten the scope phrase → 3.
+
+**The mutation run caught a hole in the tests themselves.** On the first pass the reason-f-string
+mutation survived — `_shopify_seo_scope_phrase` was covered in isolation while nothing asserted the
+*loader* used it, so reverting the card to the batch-size wording failed no test. That is
+[[feedback_loader_and_registration_both_need_tests]] in a new costume: the helper and the call site
+are two assertions. `TestTheLoaderActuallyUsesThePhrase` calls `_load_shopify_seo_health` against a
+staged `latest.json` and reads the rendered reason.
+
+**One copy bug found while writing those tests.** The vanished-resource clause was a bare trailing
+phrase, so the rendered reason read *"8 already applied and verified but no longer present in
+Shopify"* — attaching the deletion to the eight that had succeeded, the exact opposite of the truth.
+Now attached explicitly to the unresolved item, with singular/plural agreement.
+
+**Suites:** duckAgent **1861 passed, 1 xfailed**; creative_agent runtime **1013 passed**; duck-ops
+**1367 passed, 1 skipped**; new file 22 passed.
+
+**Resolution of the live instance.** Still blocked, and now *only* cosmetically — the code fix means
+no future batch parks this way, but the existing 10-11 run keeps its `apply_attempted` status until
+someone closes it. `dismiss_shopify_seo_review_run` is the right production path (it writes both the run file and `latest.json` —
 [[feedback_retire_artifacts_in_authoritative_store]]) but the call was refused by the Claude Code
 classifier as an external-system write. Left for the operator with the reason text drafted. Bronco
 Buddy's missing SEO title is a **new finding for the next audit under its new gid**, not an
