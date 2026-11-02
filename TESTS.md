@@ -3805,17 +3805,120 @@ asserting `missed_run` (rather than merely "the job appears") is what distinguis
 duckAgent `test_viewer_scheduler_verdict_expiry.py` 5 passed. Live payload regenerated: **34/34
 healthy, bad_count 0**.
 
-**Still open — the canary is not in the registry.** `tracked_jobs` is 34 and the product-schema
-canary is not among them, so a silent stop would not reach the scheduler card (its two staleness
-cards do catch it, which is how the 3.1d drift surfaced — one card later than it should be). The
-array-form fix is necessary but not sufficient: the canary's plist passes a single bespoke runner
-(`run_product_schema_canary.sh`) with no job-name argument, so `len(args) < 2` drops it before the
-schedule is ever read, and that wrapper writes no scheduler receipt. Fixing it means re-pointing the
-plist at `run_duck_ops_observe_review.sh product_schema_canary_daily runtime/product_schema_canary.py
---sample 20` and re-installing — a Tier-3 launchd mutation, prepared but not applied.
+**CLOSED 2026-11-02 — the canary is now in the registry.** `tracked_jobs` was 34 and the
+product-schema canary was not among them, so a silent stop would not have reached the scheduler
+card (its two staleness cards did catch it, which is how the 3.1d drift surfaced — one card later
+than it should have been). The array-form fix was necessary but not sufficient: the old plist
+passed a single bespoke runner (`run_product_schema_canary.sh`) with no job-name argument, so
+`len(args) < 2` dropped it before the schedule was ever read, and that wrapper wrote no scheduler
+receipt. The plist now points at `run_duck_ops_observe_review.sh product_schema_canary_daily
+runtime/product_schema_canary.py --sample 20` and has been re-installed (Tier-3, operator-approved).
+Live proof: **35/35 tracked jobs healthy**, the canary's own row reading `last_start 2026-11-02T10:35`
+and `next_expected 2026-11-03T07:35:00-05:00` — which is also the first live confirmation that the
+array-form parse AND the post-DST offset both resolve correctly on a real job rather than a fixture.
 
 **Memory:** [[feedback_pin_the_rule_not_the_reading]] (the status-vocabulary sibling — grouping
 scheduler items on `status != "green"` matches all 34, since they speak
 `healthy`/`missed_run` and `ok`/`warn`/`bad`), [[feedback_never_grade_an_open_window]] (adjacent:
 that one is about grading too *early*, this one about computing the boundary *wrong*),
 [[feedback_red_ci_is_no_ci]] (a grader that false-alarms twice gets ignored).
+
+### Surface 99 — the day the AI budget ran out and every card stayed green (2026-11-02)
+
+**STATUS: SHIPPED 2026-11-02**
+
+Gemini's prepaid credits ran out. Nothing crashed. Every Gemini-backed surface fell through to a
+path that still produced *presentable* output — Meme Monday posted an `internal_studio_template`
+render instead of the AI one — and all **57 OS cards stayed green**. The operator found out because
+he asked an unrelated question nine hours later.
+
+```
+402 RESOURCE_EXHAUSTED. {'error': {'code': 402, 'message': 'Your prepayment credits are depleted...
+```
+
+This is [[feedback_plausible_fallbacks_mask_failure]] at full size: the fallback is *supposed* to
+exist, it did its job, and the fact that the expensive half of the pipeline had stopped running was
+not anybody's output. Two things had to be true for it to be invisible, and both were:
+
+1. **`gemini_helper` wrote to no log at all.** The shared `llm_call_log.jsonl` that the cost
+   producer and the Inspector read had only ever seen OpenAI, so the 402s reached nothing.
+2. **Nothing graded "are we on the fallback path?"** The render receipt recorded
+   `fallback_reason: ai_background_unavailable` faithfully — into a per-run JSON file no card reads.
+
+**The shape of the fix.** A ledger (`state/provider_health_log.jsonl`) fed by three facts —
+`failure` (classified), `fallback` (a surface ran degraded), and `ok` (a provider call *succeeded*,
+throttled to one per provider per hour) — plus a daily producer that grades it, an OS card, and the
+email the operator asked for: *"I need emailed daily that we are out of $ and are using the fallback
+path."*
+
+**Out of credits is a STATE, not an event** — the design decision the whole surface turns on.
+Gemini is mostly exercised by the Monday meme, so a grader that only looks at a 24-hour window sees
+no 402 by Wednesday, reports green, and stops emailing while the account is still empty and every
+render that week is degraded. So the verdict per provider is the latest *decisive* event in the whole
+ledger — a `credits_exhausted` failure or an `ok` heartbeat — and exhausted holds until a call
+actually succeeds. That is also what makes a top-up clear the card with nothing to acknowledge.
+
+**The `ok` heartbeat is what lets green mean anything.** Without it, "no failures in 24h" is
+indistinguishable from "nothing ran" and from "the instrumentation broke". An empty ledger grades
+`yellow`, never green ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
+
+**Classification is load-bearing, and Google makes it hard.** Google returns `RESOURCE_EXHAUSTED`
+for *both* billing exhaustion (402) and rate limiting (429) — same message, opposite operator
+actions (pay vs wait). The status is the only reliable separator, and the wrapper hands the
+classifier a bare string with the status embedded in the text, so it is parsed from both.
+
+| Use case | Happy | Out of money | Different failure | No evidence | Test-mode |
+|---|---|---|---|---|---|
+| classify a provider error | ✅ `test_classification` (9 cases) | ✅ `::test_classification[REAL_402]` | ✅ `::test_google_says_resource_exhausted_for_both_billing_and_rate_limits` | n/a | n/a |
+| record a failure | ✅ `test_recording_a_failure_returns_the_kind_and_writes_one_line` | ✅ same | ✅ same | n/a | ✅ `::test_writing_the_production_ledger_under_test_mode_refuses` |
+| record never breaks the work | ✅ `::test_recording_never_breaks_the_work_it_documents` | ✅ same | ✅ same | n/a | n/a |
+| liveness heartbeat | ✅ `::test_the_heartbeat_is_throttled` | n/a | n/a | ✅ `::test_the_heartbeat_resumes_after_the_throttle_window` | n/a |
+| grade the ledger | ✅ `test_a_success_after_the_refusal_clears_the_verdict` | ✅ `::test_a_credit_refusal_with_no_later_success_reads_red` | ✅ `::test_rate_limiting_is_not_a_billing_problem` | ✅ `::test_an_empty_ledger_is_not_green` | ✅ `::test_writing_the_production_state_under_test_mode_refuses` |
+| grade a stale outage | ✅ `::test_a_fallback_older_than_the_window_does_not_raise_the_alarm` | ✅ **`::test_an_exhausted_provider_stays_red_long_after_the_window`** | ✅ `::test_ordering_is_by_timestamp_not_file_order` | n/a | n/a |
+| fallback detection | ✅ `::test_fallback_runs_without_a_refusal_read_yellow` | ✅ `::test_one_provider_failing_does_not_mask_another_that_is_fine` | ✅ same | n/a | n/a |
+| daily email | ✅ `::test_red_emails` | ✅ same | ✅ `::test_fallback_without_a_refusal_still_emails` | ✅ `::test_the_no_evidence_yellow_does_not_email` | ✅ conftest redirect (layer 1) |
+| email cadence | ✅ `::test_a_new_day_emails_again` | ✅ `::test_no_second_email_the_same_day` | ✅ `::test_green_does_not_email` | n/a | n/a |
+| OS card loader | ✅ `LoaderTests::test_a_present_payload_is_available` | ✅ `RegistrationTests::test_out_of_credits_tells_the_operator_which_provider_to_pay` | ✅ `::test_a_non_billing_failure_still_gives_an_action` | ✅ `::test_a_missing_payload_never_raises` / `::test_a_corrupt_payload_never_raises` | n/a |
+| OS card registration | ✅ `::test_the_card_is_registered` | ✅ same | ✅ same | ✅ **`::test_the_card_is_registered_with_no_payload_at_all`** | n/a |
+| ledger robustness | ✅ `::test_malformed_lines_are_counted_not_fatal` | n/a | n/a | ✅ `::test_a_missing_ledger_is_not_an_exception` | ✅ `test_no_test_pollution_in_provider_health.py` (layer 3) |
+
+The two bolded rows are the ones that would have caught this outage and that a window-only,
+present-payload-only design would both fail.
+
+**Instrumented at the choke points, not the branches.** `GeminiHelper` has eight
+`return {'success': False, ...}` sites; a decorator on the three *module-level* entry points
+(`gemini_generate_image`, `gemini_edit_image`, `gemini_analyze_image_json`) covers every caller in
+both repos, because a fix that covers some branches of a multi-branch mechanism is one that gets
+found incomplete later ([[feedback_incomplete_fix_enumerate_all_branches]]). Fallback recording sits
+in `_generate_ai_background` — the single point all three internal renderers reach — plus the meme
+AI-panel refusal, which is the one that actually fired.
+
+**Three-layer isolation** (architectural convention #4), because this ledger does not merely feed a
+file — it feeds an email. A polluting test would mail the operator a fabricated outage, and the next
+real alert would read as more of the same ([[feedback_red_ci_is_no_ci]]): autouse conftest redirects
+in BOTH repos, `TestModeRefusalError` guards in `provider_health._append` and
+`provider_credit_health.write_state`, and `tests/test_no_test_pollution_in_provider_health.py`.
+
+**Verified against the real failure, not a mock** ([[feedback_real_generation_test_beats_mocks]]):
+a live `gemini_analyze_image_json` call was made through the instrumented path, returned the real
+402, and landed in the production ledger classified `credits_exhausted` with `status_code: 402`. The
+producer then graded **red**, emailed, and on an immediate second run correctly did **not** email
+again. The card renders live on `/portal/os` (**57 → 58 cards**, red, "Top up gemini").
+
+**Suites:** duck-ops **1397 passed, 1 skipped**; duckAgent **1889 passed, 1 xfailed**.
+
+**Residual risk, tracked here rather than in prose**
+([[feedback_residual_risk_needs_a_tracked_home]]): the `ok` heartbeat only proves liveness for
+providers that something *calls*. A provider nobody exercises for days grades `yellow` ("no
+evidence"), not green — correct, but it means the no-evidence yellow is expected on quiet days and
+must not be allowed to drift into being ignored. It deliberately does not email.
+
+**Open:** OpenAI and PhotoRoom are not yet instrumented — `photoroom_helper` already classifies its
+402 into the same vocabulary but does not record, and `openai_helper` logs cost but not failure
+kind. The ledger and the card are provider-generic and need no change to accept them.
+
+**Memory:** [[feedback_plausible_fallbacks_mask_failure]] (the parent rule — the fallback produced
+presentable output, which is exactly why nothing surfaced),
+[[feedback_a_failed_probe_is_a_fact_about_the_probe]] (absence of evidence is not health),
+[[feedback_incomplete_fix_enumerate_all_branches]] (why the decorator sits at the entry points),
+[[feedback_receipts_never_load_bearing]] (recording must never fail the work it documents).

@@ -46,6 +46,31 @@ os.environ.setdefault("DUCK_TEST_MODE", "1")
 
 
 @pytest.fixture(autouse=True)
+def _redirect_provider_health_state(tmp_path, monkeypatch):
+    """Layer 1 of the 3-layer isolation for the provider-credit producer.
+
+    Without this, a test that grades a fixture ledger would overwrite the live
+    state file, turn the OS card whatever the fixture said, and -- because the
+    producer emails on red -- send the operator a real "you are out of credits"
+    email from pytest.
+    """
+    try:
+        import provider_credit_health
+    except ImportError:
+        yield
+        return
+    monkeypatch.setattr(
+        provider_credit_health, "STATE_PATH", tmp_path / "provider_credit_health.json"
+    )
+    monkeypatch.setattr(
+        provider_credit_health,
+        "PROVIDER_HEALTH_LOG_PATH",
+        tmp_path / "provider_health_log.jsonl",
+    )
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _redirect_llm_call_log(tmp_path, monkeypatch):
     """Redirect llm_call_helpers.LLM_CALL_LOG_PATH to a tmp file so
     no test write reaches the production log. Autouse: applies to
