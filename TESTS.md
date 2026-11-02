@@ -3732,10 +3732,90 @@ Now attached explicitly to the unresolved item, with singular/plural agreement.
 no future batch parks this way, but the existing 10-11 run keeps its `apply_attempted` status until
 someone closes it. `dismiss_shopify_seo_review_run` is the right production path (it writes both the run file and `latest.json` —
 [[feedback_retire_artifacts_in_authoritative_store]]) but the call was refused by the Claude Code
-classifier as an external-system write. Left for the operator with the reason text drafted. Bronco
+classifier as an external-system write. **Closed 2026-10-22** once the operator granted the write:
+the run is `dismissed` with the reason recorded, and the dismiss advanced the lane to
+`shopify_seo_missing_description_20261022_181142`. Bronco
 Buddy's missing SEO title is a **new finding for the next audit under its new gid**, not an
 unapplied item of this run.
 
 **Memory:** [[feedback_partial_apply_parks_the_lane]] (new),
 [[feedback_pin_the_rule_not_the_reading]] (5th instance),
 [[feedback_incomplete_fix_enumerate_all_branches]] (82e → 97 is the canonical pair).
+
+
+### Surface 98 — the scheduler that cried "missed" twelve times when the clocks changed (2026-11-01)
+
+**STATUS: SHIPPED 2026-11-01**
+
+The morning US DST ended, `scheduler_health` reported **12 bad jobs**, every one `missed_run`,
+every one with `last_exit_code: 0`. Nothing had missed anything. The tell was in the offsets:
+
+```
+last_start_at   2026-10-31T23:55:04-04:00   (EDT -- when it really ran)
+expected_at     2026-10-31T23:55:00-05:00   (EST -- today's offset)
+```
+
+A schedule window is a **wall-clock** time, but `_schedule_datetime` did its arithmetic on the
+`now` it was handed — and `now` is a *fixed-offset* datetime (`datetime.now().astimezone()`).
+`now.replace(hour=…)` then `- timedelta(days=1 or 7)` carries today's offset backwards onto a date
+that was governed by the other one. Across a transition that is exactly an hour of error, and the
+grace window is 30 minutes, so `started_at >= expected_at - grace` went false for every job whose
+last window fell before the change. 12 phantom misses, with the weeklies each staying wrong until
+their own next firing — up to five more days.
+
+The fix resolves the window in a zone that knows about DST (`ZoneInfo`, overridable via
+`DUCK_SCHEDULER_TZ`) and re-localises `now` on the way in, so callers passing a fixed-offset
+datetime — which every existing caller and test does — still get a correct answer. ZoneInfo
+recomputes the offset from the resulting wall time, which is the whole point.
+
+**The direction matters, and only one direction is a bug.** Fall-back computes the window an hour
+*late*, which manufactures false alarms. Spring-forward computes it an hour *early*, moving the
+threshold in the permissive direction — but with daily and weekly cadences the previous run sits a
+day or a week away, so a one-hour error never reaches it and no real miss is concealed. An earlier
+draft of this note claimed spring-forward hid genuine misses; it does not, and no test asserts a
+scenario that cannot be constructed.
+
+**Second false alarm on this same grader.** § 15.1's 2026-06 incident had the same shape — four
+weekly governance jobs plus `business_digest_monday` reading "missed" for an unrelated reason. A
+grader that cries wolf twice is on its way to being ignored ([[feedback_red_ci_is_no_ci]]), which is
+why this one gets a permanent test rather than a one-off correction.
+
+**A sibling bug fell out of the fix.** launchd accepts `StartCalendarInterval` as a dict *or* an
+array of dicts. Only the dict was read (`if isinstance(..., dict) else {}`), so an array-form job
+was discovered and tracked with an **empty schedule** — which can never produce a `missed_run`, so
+it graded `no_history` forever: present on the card, never actually checked against its window. The
+product-schema canary from Surface 95 ships in exactly that form. Now normalised to a list, with
+the most recent past / soonest future firing taken across all entries.
+
+| Use case | Happy | Window missed for real | Clock change | Wrong shape |
+|---|---|---|---|---|
+| daily window graded | ✅ `ClockChangeTests::test_a_window_before_the_fall_back_is_not_a_phantom_miss` | ✅ `::test_a_genuinely_missed_window_before_the_fall_back_is_still_caught` | ✅ `::test_the_expected_window_carries_the_offset_in_force_at_that_time` | n/a |
+| next window advertised | ✅ `::test_the_next_window_after_the_change_uses_the_new_offset` | n/a | ✅ same (asserts the NEW offset) | n/a |
+| weekly window graded | ✅ `::test_a_weekly_window_before_the_change_keeps_its_own_offset` | covered by the daily case (shared branch) | ✅ same | n/a |
+| array-form schedule | ✅ `ScheduleShapeTests::test_an_array_form_schedule_grades_a_real_run_healthy` | ✅ `::test_an_array_form_schedule_is_actually_graded` | n/a | ✅ same — `missed_run` not `no_history` is the proof the schedule was read |
+
+The sharp assertion in that last row is deliberate: an empty schedule cannot produce a miss, so
+asserting `missed_run` (rather than merely "the job appears") is what distinguishes *read* from
+*silently dropped*. Asserting presence alone would have passed against the bug.
+
+**Pre-fix run is the mutation evidence**: 4 of the 7 new tests failed before the change
+(`-05:00` vs `-04:00`, and `no_history` vs `missed_run`), 3 passed as guards.
+
+**Suites:** duck-ops **1374 passed, 1 skipped**; `test_scheduler_health.py` 14 passed;
+duckAgent `test_viewer_scheduler_verdict_expiry.py` 5 passed. Live payload regenerated: **34/34
+healthy, bad_count 0**.
+
+**Still open — the canary is not in the registry.** `tracked_jobs` is 34 and the product-schema
+canary is not among them, so a silent stop would not reach the scheduler card (its two staleness
+cards do catch it, which is how the 3.1d drift surfaced — one card later than it should be). The
+array-form fix is necessary but not sufficient: the canary's plist passes a single bespoke runner
+(`run_product_schema_canary.sh`) with no job-name argument, so `len(args) < 2` drops it before the
+schedule is ever read, and that wrapper writes no scheduler receipt. Fixing it means re-pointing the
+plist at `run_duck_ops_observe_review.sh product_schema_canary_daily runtime/product_schema_canary.py
+--sample 20` and re-installing — a Tier-3 launchd mutation, prepared but not applied.
+
+**Memory:** [[feedback_pin_the_rule_not_the_reading]] (the status-vocabulary sibling — grouping
+scheduler items on `status != "green"` matches all 34, since they speak
+`healthy`/`missed_run` and `ok`/`warn`/`bad`), [[feedback_never_grade_an_open_window]] (adjacent:
+that one is about grading too *early*, this one about computing the boundary *wrong*),
+[[feedback_red_ci_is_no_ci]] (a grader that false-alarms twice gets ignored).

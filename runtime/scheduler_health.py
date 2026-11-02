@@ -8,12 +8,17 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from governance_review_common import OUTPUT_OPERATOR_DIR, STATE_DIR, now_local_iso, write_json, write_markdown
 
 
 DUCKAGENT_RUNTIME_ROOT = Path(os.getenv("DUCKAGENT_RUNTIME_ROOT", "/Users/philtullai/ai-agents/duckAgent_runtime"))
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+# 2026-11-01: schedule windows are WALL-CLOCK times, so they must be
+# resolved in a zone that knows about DST -- not against a fixed UTC
+# offset. See _schedule_datetime.
+SCHEDULER_TZ = ZoneInfo(os.getenv("DUCK_SCHEDULER_TZ", "America/New_York"))
 SCHEDULER_LOG_PATH = DUCKAGENT_RUNTIME_ROOT / "logs" / "duckagent_scheduler.log"
 RECEIPT_DIR = DUCKAGENT_RUNTIME_ROOT / "state" / "scheduler_receipts"
 SCHEDULER_RESOLUTION_DIR = STATE_DIR / "scheduler_resolutions"
@@ -184,12 +189,12 @@ def _load_scheduled_jobs(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> dict[st
         job_name = str(args[1]).strip()
         if not job_name:
             continue
-        schedule = payload.get("StartCalendarInterval") if isinstance(payload.get("StartCalendarInterval"), dict) else {}
+        schedule = _normalize_schedule(payload.get("StartCalendarInterval"))
         jobs[job_name] = {
             "job_name": job_name,
             "label": str(payload.get("Label") or path.stem),
             "plist_path": str(path),
-            "schedule": dict(schedule),
+            "schedule": schedule,
             "command": " ".join(str(part) for part in args),
             "timeout_seconds": JOB_TIMEOUT_SECONDS.get(job_name, DEFAULT_TIMEOUT_SECONDS),
             "grace_seconds": DEFAULT_GRACE_SECONDS,
@@ -274,12 +279,23 @@ def _failure_dependency_from_log(
     return None
 
 
-def _schedule_datetime(schedule: dict[str, Any], *, now: datetime, future: bool) -> datetime | None:
-    if not schedule:
-        return None
-    hour = _safe_int(schedule.get("Hour"), 0)
-    minute = _safe_int(schedule.get("Minute"), 0)
-    weekday_raw = schedule.get("Weekday")
+def _normalize_schedule(raw: Any) -> list[dict[str, Any]]:
+    """launchd accepts StartCalendarInterval as a single dict OR an array of
+    them (several firing times for one job). Only the dict was read, so an
+    array-form job was tracked with an EMPTY schedule and therefore never
+    checked against a window at all -- it graded `no_history` forever. The
+    product-schema canary ships in the array form."""
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [entry for entry in raw if isinstance(entry, dict)]
+    return []
+
+
+def _schedule_entry_datetime(entry: dict[str, Any], *, now: datetime, future: bool) -> datetime | None:
+    hour = _safe_int(entry.get("Hour"), 0)
+    minute = _safe_int(entry.get("Minute"), 0)
+    weekday_raw = entry.get("Weekday")
     if weekday_raw is None:
         candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if future:
@@ -294,6 +310,36 @@ def _schedule_datetime(schedule: dict[str, Any], *, now: datetime, future: bool)
         return candidate if candidate > now else candidate + timedelta(days=7)
     return candidate if candidate <= now else candidate - timedelta(days=7)
 
+
+def _schedule_datetime(schedule: Any, *, now: datetime, future: bool) -> datetime | None:
+    """Resolve a job's nearest past (or next future) firing time.
+
+    2026-11-01: twelve jobs reported `missed_run` with exit 0 the morning DST
+    ended. `now` arrives as a FIXED-offset datetime, so doing .replace() and
+    timedelta arithmetic on it stamps TODAY's offset onto a window that
+    actually occurred under the other one. Across a transition that is an hour
+    of error -- more than the 30-minute grace -- so every job whose last window
+    fell before the change read as missed. Re-localising into a real zone makes
+    the arithmetic wall-clock correct, because ZoneInfo recomputes the offset
+    from the resulting wall time.
+
+    An ambiguous wall time (the repeated hour on the fall-back date) resolves
+    to fold=0, the first/earlier occurrence.
+    """
+    entries = _normalize_schedule(schedule)
+    if not entries:
+        return None
+    local = now.astimezone(SCHEDULER_TZ)
+    stamps = [
+        stamp
+        for stamp in (
+            _schedule_entry_datetime(entry, now=local, future=future) for entry in entries
+        )
+        if stamp is not None
+    ]
+    if not stamps:
+        return None
+    return min(stamps) if future else max(stamps)
 
 def _latest_event(events: list[dict[str, Any]], job_name: str, event_name: str) -> dict[str, Any] | None:
     matches = [item for item in events if item.get("job_name") == job_name and item.get("event") == event_name]

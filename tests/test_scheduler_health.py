@@ -334,5 +334,202 @@ class SchedulerHealthTests(unittest.TestCase):
             self.assertIsNotNone(item["resolution"])
 
 
+def _write_duckops_plist(path: Path, *, label: str, job_name: str, schedule) -> None:
+    """A duck-ops job, whose StartCalendarInterval may legitimately be a dict
+    OR an array of dicts (launchd accepts both)."""
+    path.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": label,
+                "ProgramArguments": [
+                    "/Users/philtullai/ai-agents/duckAgent_runtime/run_duck_ops_observe_review.sh",
+                    job_name,
+                    f"/Users/philtullai/ai-agents/duck-ops/runtime/{job_name}.py",
+                ],
+                "StartCalendarInterval": schedule,
+            },
+            sort_keys=False,
+        )
+    )
+
+
+def _receipt(job_name: str, *, started: str, finished: str) -> str:
+    return json.dumps(
+        {
+            "job_name": job_name,
+            "run_id": f"{job_name}_run_1",
+            "status": "succeeded",
+            "exit_code": 0,
+            "started_at": started,
+            "updated_at": finished,
+            "finished_at": finished,
+            "timeout_seconds": 1800,
+            "pid": 4242,
+        }
+    )
+
+
+class ClockChangeTests(unittest.TestCase):
+    """2026-11-01: twelve jobs reported `missed_run` with exit 0 the morning
+    DST ended. None had missed anything.
+
+    `now` arrives as a FIXED-offset datetime, so attaching its offset to a
+    past wall-clock time stamps today's offset (EST, -05:00) onto a window
+    that actually occurred in EDT (-04:00). The computed window lands one hour
+    late in absolute terms, which exceeds the 30-minute grace, so every job
+    whose last window fell before the transition reads as missed.
+
+    The fall-back direction produces false alarms. Spring-forward moves the
+    threshold an hour EARLIER, which is more permissive -- but with daily and
+    weekly cadences the previous run is a day or a week away, so the one-hour
+    error never reaches it and nothing is hidden. Only this direction is a bug
+    worth grading, which is why these tests are all fall-back.
+
+    Second false-alarm incident on this grader (see TESTS.md: the 2026-06
+    weekly-governance false "missed" runs), hence a permanent test.
+    """
+
+    FALL_BACK_NOW = "2026-11-01T11:05:00-05:00"  # EST, hours after the change
+
+    def _daily_payload(self, *, with_receipt: bool):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            receipt_dir = root / "receipts"
+            launch_agents.mkdir()
+            receipt_dir.mkdir()
+            _write_plist(
+                launch_agents / "com.philtullai.duckagent.reviews.daily.plist",
+                label="com.philtullai.duckagent.reviews.daily",
+                job_name="reviews_daily",
+                schedule={"Hour": 23, "Minute": 55},
+            )
+            if with_receipt:
+                # Ran in its window, while EDT was still in force.
+                (receipt_dir / "reviews_daily.json").write_text(
+                    _receipt(
+                        "reviews_daily",
+                        started="2026-10-31T23:55:04-0400",
+                        finished="2026-10-31T23:55:38-0400",
+                    ),
+                    encoding="utf-8",
+                )
+            return scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat(self.FALL_BACK_NOW),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=root / "empty.log",
+                receipt_dir=receipt_dir,
+                write_outputs=False,
+            )
+
+    def test_a_window_before_the_fall_back_is_not_a_phantom_miss(self) -> None:
+        payload = self._daily_payload(with_receipt=True)
+        item = payload["items"][0]
+        self.assertEqual(item["status"], "healthy")
+        self.assertEqual(item["severity"], "ok")
+        self.assertEqual(payload["summary"]["missed_count"], 0)
+
+    def test_a_genuinely_missed_window_before_the_fall_back_is_still_caught(self) -> None:
+        """The fix must not buy a green card by making every pre-transition
+        window unmissable."""
+        payload = self._daily_payload(with_receipt=False)
+        self.assertEqual(payload["items"][0]["status"], "missed_run")
+        self.assertEqual(payload["summary"]["missed_count"], 1)
+
+    def test_the_expected_window_carries_the_offset_in_force_at_that_time(self) -> None:
+        """The defect, stated directly: the window is 23:55 EDT, not 23:55 EST."""
+        payload = self._daily_payload(with_receipt=True)
+        self.assertEqual(payload["items"][0]["expected_at"], "2026-10-31T23:55:00-04:00")
+
+    def test_the_next_window_after_the_change_uses_the_new_offset(self) -> None:
+        payload = self._daily_payload(with_receipt=True)
+        self.assertEqual(payload["items"][0]["next_expected_at"], "2026-11-01T23:55:00-05:00")
+
+    def test_a_weekly_window_before_the_change_keeps_its_own_offset(self) -> None:
+        """The weeklies are the slow half of the incident: each one stays red
+        until its next firing, so a Tuesday job misread on Sunday stays wrong
+        for two more days."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            receipt_dir = root / "receipts"
+            launch_agents.mkdir()
+            receipt_dir.mkdir()
+            _write_duckops_plist(
+                launch_agents / "com.philtullai.duckops.competitor-benchmark.weekly.plist",
+                label="com.philtullai.duckops.competitor-benchmark.weekly",
+                job_name="competitor_benchmark_weekly",
+                schedule={"Weekday": 2, "Hour": 6, "Minute": 45},
+            )
+            (receipt_dir / "competitor_benchmark_weekly.json").write_text(
+                _receipt(
+                    "competitor_benchmark_weekly",
+                    started="2026-10-27T06:45:04-0400",
+                    finished="2026-10-27T06:45:12-0400",
+                ),
+                encoding="utf-8",
+            )
+            payload = scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat(self.FALL_BACK_NOW),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=root / "empty.log",
+                receipt_dir=receipt_dir,
+                write_outputs=False,
+            )
+            item = payload["items"][0]
+            self.assertEqual(item["status"], "healthy")
+            self.assertEqual(item["expected_at"], "2026-10-27T06:45:00-04:00")
+
+
+class ScheduleShapeTests(unittest.TestCase):
+    """launchd accepts StartCalendarInterval as a dict OR an array of dicts.
+    Only the dict was read, so an array-form job was tracked with an EMPTY
+    schedule -- which grades as `no_history` forever instead of being checked
+    against its window. The product-schema canary ships in the array form.
+    """
+
+    def _array_form_payload(self, *, with_receipt: bool):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            receipt_dir = root / "receipts"
+            launch_agents.mkdir()
+            receipt_dir.mkdir()
+            _write_duckops_plist(
+                launch_agents / "com.philtullai.duckops.product-model-index.daily.plist",
+                label="com.philtullai.duckops.product-model-index.daily",
+                job_name="product_model_index_daily",
+                schedule=[{"Hour": 7, "Minute": 35}],
+            )
+            if with_receipt:
+                (receipt_dir / "product_model_index_daily.json").write_text(
+                    _receipt(
+                        "product_model_index_daily",
+                        started="2026-11-01T07:35:02-0500",
+                        finished="2026-11-01T07:35:40-0500",
+                    ),
+                    encoding="utf-8",
+                )
+            return scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat("2026-11-01T11:05:00-05:00"),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=root / "empty.log",
+                receipt_dir=receipt_dir,
+                write_outputs=False,
+            )
+
+    def test_an_array_form_schedule_is_actually_graded(self) -> None:
+        """`missed_run` rather than `no_history` is the proof the schedule was
+        read -- an empty schedule can never produce a miss."""
+        payload = self._array_form_payload(with_receipt=False)
+        item = payload["items"][0]
+        self.assertEqual(item["status"], "missed_run")
+        self.assertEqual(item["expected_at"], "2026-11-01T07:35:00-05:00")
+
+    def test_an_array_form_schedule_grades_a_real_run_healthy(self) -> None:
+        payload = self._array_form_payload(with_receipt=True)
+        self.assertEqual(payload["items"][0]["status"], "healthy")
+
+
 if __name__ == "__main__":
     unittest.main()
