@@ -3990,14 +3990,60 @@ and the three that still passed are the ones that test the field and the constan
 wiring. A presence-only test would have passed against the bug
 ([[feedback_pin_the_rule_not_the_reading]]).
 
-**Open — the gap the checkbox does not close.** The operator states they hold **more than one**
-licence. A ticked box cannot say *which* one covers a given duck, and the two known licensors cover
-disjoint marks (CLC is recorded against all 7 college ducks and does not cover MLB marks). So
-`licensed_by` can confirm that a licence was asserted but cannot answer "which licence, for which
-mark" — the question a challenge asks. Closing it needs either a licensor picker sourced from
-`config/licensed_products.json` or a `licensors` block mapping each rights-holder to its permitted
-marks. Until then the Brewers duck still blocks, because reason (2) above is untouched: the fix
-shipped here is the launcher wiring, not the scope model.
+**Round 2, same day — the checkbox writes a record, and the licence covers its own
+mark.** The operator's next instruction: *"the checkbox can put the name in a json file so other
+places can read it so we can get thru the process."* Two pieces, and the second is a deliberate
+scope change:
+
+1. `record_licensed_product()` persists the product into `config/licensed_products.json` keyed by
+   `newduck_licence_key(name)` (handle-shaped, because `licensed_by_for_handle` keys on the Shopify
+   handle and a new duck has none until publish). Called from `step_newduck_prepare`, so every
+   later reader — the remake and refresh paths — resolves the licence with no flag retyped. It
+   **never downgrades** an existing entry: a tick on a product already recorded against CLC keeps
+   "Collegiate Licensing Company" and only restamps `last_asserted_at`, because overwriting a real
+   rights-holder with a placeholder would destroy the only answer we have. It refuses to rewrite a
+   file it could not parse — fail closed beats dropping seven recorded licences.
+2. `_newduck_licence_covers_term()` makes a licence cover the product's **own** mark. Two arms, and
+   nothing else: the term is a claim word the licence already permits (needed because the vision
+   model puts `official` / `licensed` in `avoid_terms` itself, so without it a licensed listing
+   would be permitted under `official_or_logo_claim` and blocked one line later under
+   `visual_brief_avoid_term` for the identical word), or the term appears in the licensed product's
+   own name.
+
+**It is still not a skeleton key.** `Disney` in an Alabama duck, `Michigan Wolverines` in the
+Brewers duck, and `rubber duck` anywhere all still block with a licence in force — the last one
+because a material claim is a fact about the product, not a rights question. Pinned by
+`TestStillNotASkeletonKey`.
+
+**Verified on the real blocked package, not a fixture.** The stored copy package from the 20:47
+Brewers run was re-audited both ways: **8 blockers → 0**, `block_publish` True → False, and all 8
+re-emitted as visible `permitted, licensed by …` warnings. A permitted claim is always a warning,
+never a silent pass.
+
+**Three-layer isolation**, because `LICENSED_PRODUCTS_PATH` went from read-only to a write target
+and the file is **git-tracked** — pollution here lands a fake rights-holder in a commit diff, not
+just in scratch state. (1) autouse `_redirect_licensed_products` in duckAgent's conftest, seeded
+with a **copy** of the real registry so the tests that assert the seven college products still
+read real content; duck-ops gets none on purpose, as it never imports `flows.newduck`.
+(2) `LicensedProductsTestModeRefusal` against `_FROZEN_LICENSED_PRODUCTS_PATH`.
+(3) `test_no_test_pollution_in_licensed_products.py`, which also asserts the guard *refuses* rather
+than that it exists.
+
+**A fixture that polluted every test's `tmp_path`.** The first version of layer 1 created its
+sandbox under `tmp_path`, so every test in the repo gained a stray directory —
+`test_etsy_refresh_token_rotation.py::test_no_backup_file_is_left_behind` asserts its `tmp_path`
+holds nothing but `.env` and caught it immediately, which is exactly what that test was written
+for. Fixed with `tmp_path_factory.mktemp`, which lands beside `tmp_path` rather than inside it.
+Worth recording: an autouse fixture that creates files eagerly is a shared-scope write, and
+[[feedback_edits_into_shared_scope_collide]] applies to `tmp_path` as much as to a 500-line module.
+
+**Still open — which licence.** The checkbox cannot name a rights-holder and the operator holds
+more than one licence, so the written entry carries the placeholder licensor plus
+`"needs_licensor": true`, flagged rather than left looking complete
+([[feedback_plausible_fallbacks_mask_failure]]). The record can confirm a licence was asserted and
+the date, and cannot answer "which licence, for which mark" — the question a challenge asks. It
+clears by hand: fill `licensor` and `agreement` on the entry, which the file already supports and
+the writer then preserves forever. A licensor picker sourced from the same file is the next step.
 
 **Memory:** [[feedback_pin_the_rule_not_the_reading]] (why the tests read the constant instead of
 repeating the string, and why the sequence assertion is universally quantified),
