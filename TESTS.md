@@ -3922,3 +3922,86 @@ presentable output, which is exactly why nothing surfaced),
 [[feedback_a_failed_probe_is_a_fact_about_the_probe]] (absence of evidence is not health),
 [[feedback_incomplete_fix_enumerate_all_branches]] (why the decorator sits at the entry points),
 [[feedback_receipts_never_load_bearing]] (recording must never fail the work it documents).
+
+## Surface 100 — A licence the launcher could not express (2026-11-02)
+
+STATUS: SHIPPED
+
+**Files.** `creative_agent/runtime/src/duck_creative_agent/action_registry.py`
+(`NEWDUCK_ASSERTED_LICENCE`, the `licensed` field on `_newduck_action`,
+`_newduck_review_commands`) · `creative_agent/runtime/tests/test_action_registry.py`
+(`TestNewduckLicensedCheckbox`) · `tests/test_newduck_licensed_claim.py` ·
+audit logic unchanged in `flows/newduck/steps.py::_audit_newduck_copy_package`.
+
+**How it surfaced.** The operator asked why new-listing runs were failing, saying "I have a
+license so not sure why it failed", and proposed a checkbox on the newduck page. One run had
+blocked: **Milwaukee Brewers World Championship Duck**, 20:47, eight blockers that were all one
+cause — the term `Milwaukee Brewers` in every copy field.
+
+**Two separate reasons the licence did not apply, and only one of them is the one people guess.**
+
+1. *It never reached the code.* `licensed_by` was `null`. The portal launcher offered four fields
+   (duck name, images folder, creative direction, force rerun); `--licensed` is a CLI-only flag.
+   A licensed product kicked off from the page **always** audited as unlicensed. This is the half
+   the checkbox fixes.
+2. *Setting it would not have helped.* The exemption in `_audit_newduck_copy_package` is scoped to
+   a single blocker label:
+
+   ```python
+   if licensor and hit["label"] == "official_or_logo_claim":
+   ```
+
+   The blocker that fired is `visual_brief_avoid_term` — a different label, emitted because the
+   vision model recognised the team from the photos and listed
+   `["Milwaukee Brewers", "MLB", "Major League Baseball", …]` in `avoid_terms`. A licence permits
+   the *claim words*; it does not permit the *mark*. The run would have blocked identically with
+   `--licensed` set.
+
+**Why a boolean, against the standing design.** `--licensed` takes a rights-holder string on
+purpose (operator 2026-09-27: a bare yes decays into folklore, and "licensed by whom" is what a
+challenge asks) and `test_the_cli_carries_a_licensor_string_not_a_flag` pins it. The operator was
+shown that, plus the option of a name-from-config or a reveal-on-tick field, and chose the plain
+checkbox anyway (2026-11-02). The CLI contract is unchanged; the checkbox sends
+`NEWDUCK_ASSERTED_LICENCE`, which records that a human asserted a licence at launch and states in
+its own text that no rights-holder was named — the honest rendering of a boolean rather than an
+invented licensor.
+
+**The trap found while wiring it.** `main_agent.py` rewrites state's `_cli` dict **unconditionally
+on every invocation**. The launcher fires prepare and email as two separate processes, and
+`step_newduck_remake_review` re-audits off `_cli["licensed_by"]` — so sending `--licensed` on the
+prepare command alone would silently revoke the permission mid-sequence. It rides on every command
+in the sequence, and the test asserts that over the whole sequence rather than over the two
+commands we happen to emit today.
+
+| Use case | Happy | Not ticked | Ticked but value blank | Second command drops it | Licence used as a skeleton key | Field absent from form |
+|---|---|---|---|---|---|---|
+| Portal sends the licence | unit:`test_a_ticked_box_sends_the_licence` | unit:`test_an_unticked_box_sends_no_licence` | unit:`test_the_recorded_value_is_non_empty` | unit:`test_the_licence_rides_on_every_command_in_the_sequence` | n/a | unit:`test_the_field_is_offered_to_the_browser` |
+| Composes with the other checkbox | unit:`test_it_composes_with_force` | n/a | n/a | n/a | n/a | n/a |
+| Audit honours the licence | unit:`test_a_named_licensor_unblocks_the_claim` (pre-existing) | unit:`test_an_official_claim_blocks_without_a_licensor` (pre-existing) | unit:`test_a_blank_licensor_does_not_count_as_permission` (pre-existing) | n/a | unit:`test_a_visual_brief_avoid_term_still_blocks` | n/a |
+| Operator sees why a run blocked | manual: workflow record `blocked` / `copy_review_blocked` with the blocker list, verified on the Brewers run | n/a | n/a | n/a | n/a | n/a |
+
+**Verified against the live config, not only the fixture:** `ActionRegistry().preview("newduck", …)`
+was rendered both ways against the real runtime config and the real images folder. Unticked emits
+the previous two commands byte-for-byte; ticked appends
+`--licensed 'operator asserted at launch (portal checkbox, no rights-holder named)'` to both.
+
+**Sharpness check.** The wiring was removed and the suite re-run: **3 of the 6 new tests failed**,
+and the three that still passed are the ones that test the field and the constant rather than the
+wiring. A presence-only test would have passed against the bug
+([[feedback_pin_the_rule_not_the_reading]]).
+
+**Open — the gap the checkbox does not close.** The operator states they hold **more than one**
+licence. A ticked box cannot say *which* one covers a given duck, and the two known licensors cover
+disjoint marks (CLC is recorded against all 7 college ducks and does not cover MLB marks). So
+`licensed_by` can confirm that a licence was asserted but cannot answer "which licence, for which
+mark" — the question a challenge asks. Closing it needs either a licensor picker sourced from
+`config/licensed_products.json` or a `licensors` block mapping each rights-holder to its permitted
+marks. Until then the Brewers duck still blocks, because reason (2) above is untouched: the fix
+shipped here is the launcher wiring, not the scope model.
+
+**Memory:** [[feedback_pin_the_rule_not_the_reading]] (why the tests read the constant instead of
+repeating the string, and why the sequence assertion is universally quantified),
+[[feedback_loader_and_registration_both_need_tests]] (wiring the command is half the job — the
+field has to reach the form), [[feedback_residual_risk_needs_a_tracked_home]] (the one-licence
+ambiguity is recorded here rather than left as prose),
+[[feedback_etsy_title_tag_policy]] (the sibling gate that also enforces copy policy on tags).
