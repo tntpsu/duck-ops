@@ -4082,14 +4082,60 @@ catch a deletion *and* a substitution, and keep passing as licences are recorded
 instance of [[feedback_pin_the_rule_not_the_reading]] — and the first where the brittle reading was
 in a test I had just extended rather than one I inherited.
 
-**Residual risk, tracked ([[feedback_residual_risk_needs_a_tracked_home]]).** The create-once
-publish guards read `st.get("shopify_product_id")` / `st.get("etsy_listing_id")` — **per run
-state**, as their own log lines say ("already exists for this run"). Two runs of the same duck
-therefore hold two independent states, so approving both review emails creates two Shopify
-products and two Etsy listings. The operator hit exactly this setup (two Brewers runs three
-minutes apart, both awaiting approval). No cross-run dedup exists; a handle- or title-level check
-before create is the fix, and until then "reply to one email only" is an operator rule rather than
-an enforced one.
+**Round 4 — cross-run create-once (CLOSES the residual risk above).** The create-once guards read
+`st.get("shopify_product_id")` / `st.get("etsy_listing_id")` — per-run state, as their own log
+lines say ("already exists for this run"). Two runs of the same duck therefore held two independent
+states and both would create. The operator had exactly that setup: two Brewers runs three minutes
+apart, both awaiting approval, and avoided two Shopify products plus two Etsy listings only by
+asking first.
+
+**Why the index is the workflow records, not the run directories.** A `state_newduck.json` is
+~40MB of inline base64 and there are 500+ of them, so scanning run dirs to answer "did another run
+publish this duck" is not an option. The per-run `workflow_control/newduck-*.json` records are
+~2.5KB and already carry `metadata.listing_name`, `metadata.shopify_product_id` and
+`metadata.etsy_listing_id`. `read_shared_workflow_records(lane)` on the bridge reads the live
+`WORKFLOW_CONTROL_STATE_DIR` off the loaded module, so a conftest redirect reaches it.
+
+**Matched on the slugged listing name**, reusing `newduck_licence_key`. It is the one identifier
+stable across runs — the operator types the same name, while titles are LLM copy and differ run to
+run (both Brewers runs happened to agree, which is luck, not a contract). Slug *equality*, never
+title containment: containment is where false positives come from, and refusing to publish a
+legitimate new duck is its own failure ([[feedback_competitor_titles_defeat_text_dedup]]).
+
+**Adopted per channel, refused only when there is nothing left to do.** A prior run that landed on
+Shopify but failed on Etsy must not park the lane
+([[feedback_partial_apply_parks_the_lane]]) — this run adopts the id that exists, the existing
+per-run guard then skips that create, and the missing half still gets made. Only when BOTH ids are
+already present does it refuse, with a message naming the prior run and both ids.
+
+| Use case | Happy | Same duck, prior run published both | Prior run published one channel | Prior run never published | Different duck | Own run re-publishing |
+|---|---|---|---|---|---|---|
+| Find a prior publication | n/a | unit:`test_it_finds_a_prior_run_that_published_the_same_duck` | unit:`test_it_prefers_the_run_that_landed_on_both_channels` | unit:`test_it_ignores_a_run_that_never_published` | unit:`test_it_ignores_a_different_duck` | unit:`test_it_ignores_the_current_run` |
+| Publish decision | unit:`test_an_unrelated_duck_does_not_block_publishing` | unit:`test_it_refuses_when_both_channels_already_exist`, `test_the_refusal_names_both_ids` | unit:`test_a_partial_prior_run_is_adopted_not_refused` | n/a | n/a | n/a |
+| Gate ordering | n/a | unit:`test_the_copy_review_gate_still_runs_first` | n/a | n/a | n/a | n/a |
+| Reader robustness | unit:`test_it_only_reads_the_requested_lane` | n/a | n/a | unit:`test_it_returns_nothing_when_the_directory_is_absent` | n/a | unit:`test_an_unreadable_record_is_skipped_not_fatal` |
+
+**Verified against live records, read-only.** `_newduck_prior_publication` was run against the real
+`workflow_control` directory: Santa Duck → run `…45aeb0ff0907` (shopify 15924258439351, etsy
+4607852487), Rudolf → `…b8536db3def2`, Brewers → `…ce5c2e1be935` (shopify 15927019208887, etsy
+4608717228), Pizza Duck → no prior publication, publish proceeds. The Brewers duck went live from
+the 22:59 run while this was being built, so the still-pending 22:56 run is now a real duplicate
+risk — and the guard refuses it by name. Sharpness: removing the guard fails 3 of the 5
+publish-guard tests.
+
+**The reader needed the same isolation as the writer, for the mirror-image reason.** duckAgent's
+conftest had stubbed `record_shared_workflow_transition` so a test could not pollute production
+state; nothing stopped production state from *deciding* a test.
+`test_newduck_publish_reuses_reviewed_commerce_keyword_strategy` started failing the moment the
+guard landed, because its fixture duck — "Everything Is Fine Duck" — is a **real published
+product**, so the guard correctly refused to duplicate it. `read_shared_workflow_records` is now
+stubbed to `[]` on the bridge and on every caller module.
+[[feedback_test_isolation_from_production_state]] has only ever been written up as "tests must not
+write to prod"; this is the read direction of the same rule.
+
+**And one of the new tests was passing for the wrong reason.** With the autouse stub returning
+`[]`, `test_it_returns_nothing_when_the_directory_is_absent` passed whether or not the real reader
+worked. The bridge tests now bind the real function at import, before the fixture replaces it.
 
 **Memory:** [[feedback_pin_the_rule_not_the_reading]] (why the tests read the constant instead of
 repeating the string, and why the sequence assertion is universally quantified),
