@@ -4045,6 +4045,52 @@ the date, and cannot answer "which licence, for which mark" — the question a c
 clears by hand: fill `licensor` and `agreement` on the entry, which the file already supports and
 the writer then preserves forever. A licensor picker sourced from the same file is the next step.
 
+**Round 3 — the approval that went nowhere (2026-11-02, same evening).** The operator replied
+"publish" to a Brewers review email and got nothing back: *"did noting happen? i didn't get a bad
+reply"*. Something did happen. The reply parsed (`ACTION:publish`,
+`RUN:browser_newduck_job_36192a6baf18`), `step_newduck_publish` ran, refused on the eight
+blockers, exited 1, and wrote `logs/mail_reply_2026-11-02_21-54-52_uid5040.log`. Two independent
+causes, both fixed here:
+
+1. **`--force` was overriding a policy gate.** It is a checkpoint override — "overwrite
+   checkpoints and re-run" — but `step_newduck_email` treated it as permission to mail a bundle it
+   knew was blocked, so an approval request went out for a listing that could never be approved.
+   `force` no longer reaches the `block_publish` check in either `step_newduck_email` or
+   `step_newduck_publish`. It still skips an already-published run in the publish step, which is
+   the half that genuinely *is* a checkpoint — pinned separately, because a blanket removal would
+   have broken re-publishing.
+2. **The first publish branch of `handle_mail_event` was bare.** No try/except, no feedback email.
+   The Shopify-activation branch fifteen lines above had sent `send_publish_feedback_email(status=
+   "failed")` since the day it was written. Same mechanism, one branch instrumented, the sibling
+   missed ([[feedback_incomplete_fix_enumerate_all_branches]]). Failure-only on purpose: a
+   successful publish already emails the Shopify draft-activation request, so a success notice
+   would double up — silence is only ambiguous when something went wrong.
+
+| Use case | Happy | Blocked + force | Already published | Refused approval | Test-mode leak |
+|---|---|---|---|---|---|
+| Review email for a blocked bundle | n/a | unit:`test_the_email_step_refuses_a_blocked_bundle_even_with_force` | n/a | n/a | n/a |
+| Publish a blocked listing | n/a | unit:`test_the_publish_step_refuses_a_blocked_listing_even_with_force` | unit:`test_force_still_skips_an_already_published_run` | n/a | n/a |
+| Operator learns the outcome | manual: success already sends the draft-activation email | n/a | n/a | unit:`test_the_mail_handler_wraps_the_first_publish`, `test_both_publish_branches_report_failure` | unit:`test_the_feedback_email_cannot_escape_under_test_mode` |
+| Refusal says what to do next | n/a | unit:`test_the_refusal_names_the_two_ways_forward` (reads the recorded `next_action`, not the source) | n/a | n/a | n/a |
+
+**A count that broke the moment the feature worked.**
+`test_all_seven_college_products_are_recorded` asserted `len(products) == 7`. The operator's first
+real licensed run wrote an eighth entry and the test failed — not a regression, the feature
+working. Replaced with the seven handles named explicitly, which is the stronger assertion anyway:
+a count of 7 still passes if a college duck is swapped for something unrelated, while the names
+catch a deletion *and* a substitution, and keep passing as licences are recorded. Sixth-plus
+instance of [[feedback_pin_the_rule_not_the_reading]] — and the first where the brittle reading was
+in a test I had just extended rather than one I inherited.
+
+**Residual risk, tracked ([[feedback_residual_risk_needs_a_tracked_home]]).** The create-once
+publish guards read `st.get("shopify_product_id")` / `st.get("etsy_listing_id")` — **per run
+state**, as their own log lines say ("already exists for this run"). Two runs of the same duck
+therefore hold two independent states, so approving both review emails creates two Shopify
+products and two Etsy listings. The operator hit exactly this setup (two Brewers runs three
+minutes apart, both awaiting approval). No cross-run dedup exists; a handle- or title-level check
+before create is the fix, and until then "reply to one email only" is an operator rule rather than
+an enforced one.
+
 **Memory:** [[feedback_pin_the_rule_not_the_reading]] (why the tests read the constant instead of
 repeating the string, and why the sequence assertion is universally quantified),
 [[feedback_loader_and_registration_both_need_tests]] (wiring the command is half the job — the
