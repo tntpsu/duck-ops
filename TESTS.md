@@ -1967,6 +1967,95 @@ wrote them. They now assert that the beats tile the clip and that the card lands
 beat. [[feedback_pin_the_rule_not_the_reading]], instance seven, in a prompt where rewording is
 the expected maintenance operation.
 
+## Surface 64f — Three guards the lane did not have (2026-11-04, operator: "2. you can add the gate / 3. do this as well / my ducks are only 2.5\" tall, so the video made the ducks look bigger... this goes for all the ducks i have, that are all between 2.25\" and 2.5\". curious if this can be robust")
+
+### 1. `handoff_ready` — a prototype is not a product video
+
+`step_duckvideo_prepare` skipped only `needs_review`, so an unfinished model was a valid turntable
+subject. It now requires `model.handoff_ready`, and a missing flag counts as not-ready (an index
+written before the flag existed has no claim to being a finished print). Falling through to a photo
+video is the right failure — the right duck in a weaker format beats the wrong duck in a better
+one — and the skip is recorded in `duckvideo_model_skips` carrying `slug_text`, `match_reason`,
+`match_score` and `matched_tokens`, so the **second** hole stays readable: that entry rested on the
+single token "captain" yet carried `match_score: 1` and `match_reason: "operator_confirmed"`. The
+gate does not fix the matcher; it makes the weak match surface the moment it costs something.
+
+| Use case | Happy | Prototype | Flag absent | Older gate | Visibility |
+|---|---|---|---|---|---|
+| Turntable pick | unit:`test_a_finished_model_is_still_picked`, `test_it_walks_past_a_prototype_to_a_finished_model` | unit:`test_the_real_entry_no_longer_turntables`, `test_it_still_makes_a_video_of_that_duck` | unit:`test_a_missing_flag_is_treated_as_not_ready` | unit:`test_needs_review_is_still_honoured` | unit:`test_the_skip_is_recorded`, `test_it_names_the_model_that_would_have_been_used`, `test_it_carries_the_evidence_the_match_rested_on`, `test_nothing_is_recorded_when_nothing_was_skipped` |
+
+### 2. `google_model_availability` — the free half of the eval, daily
+
+The gated eval resolves the configured model id against the live model list and would have caught
+the 2026-10-22 Veo shutdown on the day. It is manual-trigger because it also **spends money
+generating a clip**. The preflight half costs nothing: one `ListModels` call. That half is now a
+daily producer (`duck-ops/runtime/google_model_availability.py`) and an OS card.
+
+It covers every configured Google id, not just the video one, because the image path has the same
+shape waiting: `gemini_helper._resolve_image_model` walks a preference list, then falls back to
+"any model with 'image' in the name", then to a hard-coded default — a retired id there does not
+raise, it silently promotes a different model. The ids are read **from the constants that ship**
+(`helpers/google_model_inventory.py`); a canary with its own copy of the list checks the list, not
+the system. `PREFERRED_IMAGE_MODELS` was extracted from a local variable to a module constant for
+exactly this.
+
+**It found something on its first run.** Four of the six configured image models are already gone:
+`gemini-2.0-flash-exp-image-generation` and all three `imagen-4.0-*` ids. Nothing is broken today —
+the primary (`gemini-2.5-flash-image`) and the second choice still resolve — but the fallback
+ladder is four rungs shorter than the code believes, and the Studio picker is offering the operator
+four dead options. Card is live and yellow on that.
+
+| Use case | Happy | Required gone | Optional gone | Probe cannot run | Isolation |
+|---|---|---|---|---|---|
+| Grade | unit:`test_everything_present_is_green` | unit:`test_a_missing_required_id_is_red`, `test_the_red_reason_names_the_dead_id`, `test_the_red_action_points_at_the_override`, `test_required_beats_optional_in_the_verdict` | unit:`test_a_missing_optional_id_is_only_yellow` | unit:`test_a_listing_error_grades_unknown` (3 errors), `test_nothing_is_marked_missing_when_we_could_not_look`, `test_no_configured_ids_at_all_is_not_green_by_default` | n/a |
+| Id spelling | unit:`test_a_bare_id_matches_a_prefixed_listing`, `test_a_prefixed_id_matches_a_prefixed_listing` | unit:`test_a_different_model_does_not_match` | unit:`test_a_substring_is_not_a_match` | n/a | n/a |
+| Probe | n/a | n/a | n/a | unit:`test_a_missing_key_is_a_result_not_an_exception`, `test_an_sdk_explosion_is_a_result`, `test_an_empty_list_is_an_error_not_a_catalog`, `test_a_broken_inventory_import_still_returns_rows` | n/a |
+| State writes | unit:`test_it_writes_atomically_to_a_tmp_path` | n/a | n/a | n/a | 3-layer: conftest redirect + `test_test_mode_refuses_the_frozen_production_path` + `test_the_production_state_holds_no_fixture_ids`; plus `test_layer_one_has_already_redirected_the_live_constant` |
+| OS card | unit:`test_a_red_verdict_reaches_the_card`, `test_green_asks_for_nothing`, `test_the_action_names_the_dead_id_not_just_a_count` | n/a | unit:`test_yellow_carries_the_producers_recommendation` | unit:`test_unknown_renders_yellow_never_green` | unit:`test_the_card_registers_with_no_payload_at_all`, `test_it_does_not_disturb_the_credit_card_beside_it`; loader: 4 tests |
+
+**`unknown` is a producer status with no card colour.** The dangerous rounding is down to green, so
+the card renders it yellow with the reason it could not look
+([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
+
+**Writing the tests exposed the layer-1/layer-2 interaction.** `test_test_mode_refuses_the_frozen
+_production_path` first asserted against `STATE_PATH` and passed for the wrong reason until the
+conftest redirect landed, at which point it failed — because layer 1 had already pointed
+`STATE_PATH` at a tmp file, which is the whole idea. The guard's contract is about the FROZEN
+factory default, so that is what it is tested against now, with a companion test asserting layer 1
+is still in place.
+
+Launchd: `prepared_plists/com.philtullai.duckops.google-model-availability.daily.plist`, 07:25
+daily, Tier-3 install (operator).
+
+### 3. Scale — the ducks are 2.25–2.5 inches and the model had no way to know
+
+A reference photo carries **no scale cue**: a product shot on white could be a keyring or a garden
+ornament, so the model falls back on how big the object usually is, and a rubber duck is usually
+bath-toy sized. On the dashboard that rendered a 2.5-inch duck at roughly twice life size, with a
+Santa hand too small to be a hand. A buyer who orders off that video is disappointed at the
+doorstep, so this is a returns problem, not a taste one.
+
+`build_subject_scale_line` composes one statement from a versioned `subject` block — the real
+height, a palm comparison, in-frame object limits, a framing cap, and a hand-size relation —
+and `build_motion_prompt` appends it to **every** concept, which is what the operator meant by
+robust: the whole catalog is 2.25–2.5 inches, so one statement covers every duck and every scene.
+All three kinds of anchor go in deliberately: absolute units alone are weakly respected, while the
+palm comparison and the frame fraction are things the model can check its own output against.
+
+| Use case | Happy | Block absent | Partial block | Every concept | Wiring |
+|---|---|---|---|---|---|
+| Scale line | unit:`test_the_scale_line_states_the_real_height`, `test_it_gives_a_comparison_and_not_only_a_number`, `test_it_constrains_the_framing_too`, `test_it_sizes_a_hand_against_the_duck` | unit:`test_a_missing_subject_block_still_produces_a_scale_line` (fails soft toward SAYING something) | unit:`test_a_partial_subject_block_fills_in_the_rest` | unit:`test_every_concept_inherits_it` | unit:`test_the_run_prompt_actually_carried_it` (prepare passes the library block — a gap there is invisible in helper tests) |
+| Subject truths | unit:`test_the_prompt_still_says_what_it_is_made_of` (an addition, never a replacement) | n/a | n/a | n/a | n/a |
+
+**Verified by eye, which is the only gate that works here.** Before: the duck dominated the
+dashboard and the glove read smaller than it. After: the duck sits against the Jeep radio stack at
+roughly a third of the dash depth and the glove is plainly larger than the duck.
+[[feedback_visual_output_needs_eyes]] — no probe distinguishes these two clips.
+
+**Honest limit:** this is a strong steer, not a constraint. The model still pushes in past the
+stated frame fraction toward the end of the clip; it stays readable there only because a hand — the
+best scale reference there is — is in shot. Scale remains a human-review property.
+
 ## Surface 65 — competitor social intel: viral-post surfacing + generation priors + /portal/intel/social (SPEC-FIRST 2026-08-12, operator: "post types that go more viral… we haven't gathered as much intel as we could" / "wire it in and include tier 2" / "a clean duck ops page… raw data")
 
 **Design:** the per-post competitor data (84 posts, 7 accounts: format/hook_family/theme/caption/engagement/url) existed but only averaged into aggregates. Three additions: (T1) `competitor_social_benchmark_collector` gains `top_viral_posts` (top 8 w/ links) + median/max per format (means hid the 272× reel outlier) + markdown section; (T2) a `social_priors` block {winning_format, winning_hook_family, sample_hooks, basis_post_count} consumed FAIL-SOFT by meme + duckvideo caption/hook prompts (human-reviewed lanes → light gate per convention 5 calibration; priors are one steering line, never a hard rule); (Page) `/portal/intel/social` per the inspector recipe over the EXISTING snapshots/benchmark state (no new producer). Poster fix (same day): video poster = FIRST frame (mid-frame was 180° into rotation — duck facing away; operator caught it).

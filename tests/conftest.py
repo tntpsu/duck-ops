@@ -337,4 +337,16 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         monkeypatch.setattr(_pmi, "PRODUCT_MODEL_OVERRIDES_PATH", tmp_path / "product_model_overrides.json")
     except ImportError:
         pass
+
+    # 2026-11-04: google_model_availability.STATE_PATH (Surface 64f) — new
+    # module-level prod-path constant, isolated on arrival per the three-layer
+    # policy (this fixture + the source-level DUCK_TEST_MODE guard in
+    # write_state + the no-pollution audit in
+    # tests/test_google_model_availability.py). A fixture verdict reaching the
+    # live file would paint the OS card with invented model ids.
+    try:
+        from runtime import google_model_availability as _gma
+        monkeypatch.setattr(_gma, "STATE_PATH", tmp_path / "google_model_availability.json")
+    except ImportError:
+        pass
     yield
