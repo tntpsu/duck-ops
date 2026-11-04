@@ -1908,6 +1908,65 @@ publish refused by name on the live run. Probe metrics were green on BOTH takes
   files stay comparable; the operator-facing email line now names the real model instead
   ("Veo" was printed to the operator for three weeks after Veo stopped existing).
 
+## Surface 64e — A second beat, and a name the catalog does not use (2026-11-04, operator: "so i want to change the title of the video to Rudolph Duck - not rudolph reindeer. also can the video be a little longer? would be be nice after to have santa's arm come in the scene to take rudolph off the dash and say these wont last long at the bottom?")
+
+**Three changes, each of which had a thing hiding behind it.**
+
+**`DUCKVIDEO_DUCK_NAME` — the on-screen title and the catalog title are different fields.** The
+hook and the caption were both built from `product["title"]`, which for this duck is the
+70-character SEO string *"Rudolf Reindeer Duck - 3D Printed Collectible Desk and Dashboard Decor
+Gift"* — and the operator wanted the video to say *"Rudolph Duck"* (a different spelling as well
+as a shorter name). The pin feeds the hook generator and the caption; `product["title"]` is
+deliberately **left alone**, because it is what the email subject, the receipts and the workflow
+metadata use to say WHICH product this is. A display name that rewrote the product identity would
+be the Bronco-Buddy failure in a new place. (Separately: the Shopify listing still spells it
+*Rudolf*. Not touched — that is a listing change, not a video one.)
+
+**Length is a property of the scene, not a global.** `max_clip_seconds` 8 → 10 (the
+single-generation ceiling on this API), but the extra seconds live on the concept as
+`clip_seconds`, so a one-beat concept does not silently get longer and more expensive. The catch:
+`validate_motion_video` had a **fixed 6–9.5s window**, so the first 10s clip would have probed
+`duration_out_of_range` and been thrown away for a ken-burns fallback — a cap raised in one place
+and enforced in another, which is how the ai_motion arm would have quietly stopped working while
+reporting a tagged fallback. The window now follows the length actually requested.
+
+**The closing card.** `overlay_hook_line` gained an optional second card along the bottom from
+`closing_at` onward, both composited in ONE ffmpeg pass. `closing_line` / `closing_at_seconds` are
+concept fields. The copy was run through `validate_hook_line` rather than waved through — "These
+won't last long" is a scarcity line, not a durability claim, but the validator is what decides
+that.
+
+| Use case | Happy | Unset/absent | Wrong value | Concept without it | Sharpness |
+|---|---|---|---|---|---|
+| Display name | unit:`test_the_pin_renames_the_hook_input_and_the_caption` | unit:`test_without_the_pin_the_catalog_title_is_used` | unit:`test_a_blank_pin_is_not_a_name` | n/a | removing the pin fails 1 |
+| Product identity | unit:`test_the_catalog_title_is_left_alone` (title + handle unchanged) | n/a | n/a | n/a | n/a |
+| Clip length | unit:`test_length_and_closing_card_come_from_the_concept`, `test_the_requested_length_reaches_the_generator` | n/a | n/a | unit:`test_a_concept_without_them_keeps_the_single_beat_default` | removing it fails 3 |
+| Validation window | unit:`test_the_validation_window_follows_the_requested_length` | n/a | n/a | n/a | n/a |
+| Closing card | unit:`test_the_closing_card_reaches_the_overlay`, `test_the_closing_copy_passes_the_hook_validator` | n/a | n/a | unit: same default test (empty string, 0.0) | removing it fails 1 |
+| Concept shape | unit:`TestTheSantaGrabConcept` (beats tile the clip, card lands inside the lift beat, arm-only, no deform during the lift, no model-rendered text, calm sibling still present, cap admits 10s) | n/a | n/a | n/a | n/a |
+
+**A sibling, not an edit** — `snowy_dashboard_santa_grab_v1` beside `snowy_dashboard_christmas_v1`,
+on the `rainy_driveway` precedent. The calm clip is a finished thing and stays in rotation; this is
+the version with a sales beat.
+
+**Generation 1 of it got the cards and the length right and the lift wrong.** A red sleeve with a
+white fur cuff drifted in beside the duck with **no visible hand**, and then the duck was simply
+gone from the next shot — it read as something fuzzy appearing and everything vanishing, not as
+Santa picking the duck up. Third time on this lane that describing the intended result was not
+enough and the guardrail had to name what the failure *looks like* (tornado: "faint grey smudge";
+snow: "no white specks on the dashboard"; now: "the sleeve is never empty... the duck is never
+simply absent from one shot to the next"). Generation 2 lands: gloved fingers close on the duck,
+it is visibly lifted and carried up out of frame, and the empty dashboard holds under the card.
+Shipped 10.03s, 1080×1920, hosted, handover email sent.
+
+**And two of these tests were pinning the wording, not the rule.** `test_the_card_lands_while_the
+_arm_is_in_frame` regexed the literal phrase *"A single adult arm"* and
+`test_the_lift_is_described_as_two_timecoded_beats` asserted *"lifts it straight up off the
+dashboard"* — both broke on the rewrite they were written to survive, in the same session that
+wrote them. They now assert that the beats tile the clip and that the card lands inside the last
+beat. [[feedback_pin_the_rule_not_the_reading]], instance seven, in a prompt where rewording is
+the expected maintenance operation.
+
 ## Surface 65 — competitor social intel: viral-post surfacing + generation priors + /portal/intel/social (SPEC-FIRST 2026-08-12, operator: "post types that go more viral… we haven't gathered as much intel as we could" / "wire it in and include tier 2" / "a clean duck ops page… raw data")
 
 **Design:** the per-post competitor data (84 posts, 7 accounts: format/hook_family/theme/caption/engagement/url) existed but only averaged into aggregates. Three additions: (T1) `competitor_social_benchmark_collector` gains `top_viral_posts` (top 8 w/ links) + median/max per format (means hid the 272× reel outlier) + markdown section; (T2) a `social_priors` block {winning_format, winning_hook_family, sample_hooks, basis_post_count} consumed FAIL-SOFT by meme + duckvideo caption/hook prompts (human-reviewed lanes → light gate per convention 5 calibration; priors are one steering line, never a hard rule); (Page) `/portal/intel/social` per the inspector recipe over the EXISTING snapshots/benchmark state (no new producer). Poster fix (same day): video poster = FIRST frame (mid-frame was 180° into rotation — duck facing away; operator caught it).
