@@ -1767,6 +1767,20 @@ Tests: `duckAgent/tests/test_newduck_description_quality.py` (12: validator code
 
 **Build status (2026-08-07):** P1 ✅ 4138972/8c03740 (index producer + 3-layer, 12 tests; real dry-run: 2 matches both flagged needs_review, honest buckets). P2 ✅ 213705d + 8add188 (22 tests; **render gated eval PASSED live** — real 7s 1080x1920 h264 Highland Cow turntable; eval caught 2 real Blender-5.x bugs: Action.fcurves removed, and Blender exits 0 on script exceptions without --python-exit-code). P3 ✅ ebee233 (11 tests; **Shopify VIDEO live eval NOT yet run — Tier-3, blocks first live post**). P4 ✅ 1eb5e84 (11 tests + 33 regression green). P5 ✅ 3bb31ee/45a3d92/b9a710c (13 flow tests + 20 card tests + registration; approval hole in the --all runner closed — fn(st,force=) gets awaiting_approval, only email-reply/CLI pass operator_approved=True). P6 pending Tier-3: Shopify video live eval → plist installs (duckvideo Wed 09:30, index daily 07:35; prepared_plists/) → supervised first Reel. NOTE: 7 pre-existing order-dependent full-suite failures (thursday_funnel×4, weekly_sale_history×1, workflow_freshness×2) reproduce at clean HEAD — NOT from this surface; separate follow-up.
 
+**Open — the turntable renders one wrong model, every single-mode week (found 2026-11-04, operator:
+"the duck video is bad this week. It used a bad prototype model of captain america").** The
+2026-11-04 weekly reel turntabled `captain_duck_smooth_duck_intent_v9` — a Captain America
+prototype — under the title *Pilot Duck*. `duck-ops/state/product_model_index.json` holds exactly
+ONE item, and that item maps Pilot Duck → the captain duck model with `match_reason:
+"operator_confirmed"`, `match_score: 1`, `matched_tokens: ["captain"]` (pilot/captain), and
+`handoff_ready: false`. Two separate holes: a match whose only evidence is one ambiguous token
+carries a perfect score and the `operator_confirmed` label, and `step_duckvideo_prepare` skips
+only `needs_review` items — it never looks at `handoff_ready`, so an unfinished prototype is a
+valid turntable subject. With one item in the index the wrong pair is picked **deterministically**
+every single-mode week. Not fixed here (the ask was a replacement video, not the weekly lane);
+needs a `handoff_ready` gate in prepare plus a look at how that entry got `operator_confirmed`.
+[[feedback_pin_the_rule_not_the_reading]] — `match_score: 1` is a stored reading, not a rule.
+
 ## Surface 64b — duckvideo enhancements: multi-duck montage + local cutout-on-backdrop (SPEC-FIRST 2026-08-09, operator: "should the photo based ones have a background? ... fade in and out for other ducks")
 
 **Design:** montage = photos-only collection reel (3-5 ducks, per-duck scrim labels, one hook/one approval; turntable renders stay the single-duck format — operator-confirmed split). Selection ladder occasion→trending→theme, strategies NEVER mix; trending source = `trend_candidates.json` `signal_summary.trending_score`/`sold_last_7d` via `catalog_match.matching_products` (`demand_intel.json` REJECTED — stale since 07-03). Mode: `DUCKVIDEO_MODE=single|montage|auto`, auto = even-ISO-week proposes montage, data disposes (≥3 ducks or single fallback with recorded reason). Cutout: reuse meme lane's local rembg (`studio_image._rembg_remove_background`, u2net, ~0.4s warm, models cached in ~/.u2net) — deterministic mask gate (alpha coverage 0.15-0.90, bbox sanity), ALL-or-nothing per video, fallback to blurred-self with `cutout_fallback_reason` ([[plausible fallbacks]]). Kill switches: `DUCKVIDEO_CUTOUT=off`, `DUCKVIDEO_MODE=single`.
@@ -1806,6 +1820,93 @@ Tests: `duckAgent/tests/test_newduck_description_quality.py` (12: validator code
 **Operator round 2 (2026-08-18, same day): both review findings fixed + re-eval'd.** (1) Restyle — "it made it look like a knitted duck (like its name)": the product NAME in the prompt got read as a material instruction. Fix: name never enters the prompt (`build_motion_prompt` pins this, `test_build_prompt_keeps_product_name_out`); identity comes from the photo. (2) "The first part was just the image" — top-level `image=` is FIRST-FRAME anchoring → clip opens on the studio photo and crossfades. Fix: `reference_images=[VideoGenerationReferenceImage(reference_type="ASSET")]` inside `GenerateVideosConfig` — appearance guidance from frame one, no anchor. Two more live-probed Gemini-API constraints recorded: `reference_images` is a CONFIG field (top-level kwarg → TypeError), and `negative_prompt` is rejected in the reference-image use case (constraints ride in prompt text; config library v2). Re-eval: duck reads as glossy printed plastic w/ knit texture matching the real product, scene from frame one, all probes green.
 
 **Round 3 (2026-08-22, operator: "the video added duck feet to the Michigan Duck"):** the reference image guides appearance but Veo still COMPLETES from its cartoon-duck prior — it invented webbed feet absent from the product. The prompt forbade changes but not additions; `build_motion_prompt` now bans added feet/legs/limbs/accessories ("base and silhouette stay exactly as shown"), pinned in `test_build_prompt_keeps_product_name_out`. Library v5 adds two operator-suggested weather concepts (rainy_driveway ASMR, tornado_watch chaos-outside/peace-inside). Known residual: Veo can blend the SUBJECT's theme into the scene (cow-print tornado funnel) — content-level, caught by the human review gate by design.
+
+## Surface 64d — Veo was shut down, and a clip the operator posts themselves (2026-11-04, operator: "the duck video is bad this week. It used a bad prototype model of captain america. Let make a video using the new Rudolph duck... I also don't want the video posted to social media. I will put it up myself with audio. The email should also include the caption and hashtags to put up")
+
+**Two unrelated things in one ask.** The *weekly* video was bad because of a bad model match (see
+the Surface 64 note below); the *replacement* video could not be made at all, because Track B's
+renderer had been dead since 2026-10-22.
+
+**The renderer was dead and nothing said so.** Every `veo-3.1-*` preview was shut down on the
+Gemini API on 2026-10-22; the id now 404s with *"no longer available ... use
+models/gemini-omni-1.1-flash ... Interactions API"*, no `veo-*` id resolves, and none appears in
+`ListModels`. This is not the model-id drift the lane was built to ride out
+(`DUCKVIDEO_VEO_MODEL` exists precisely for that) — **the request shape moved too**:
+`models.generate_videos` / `predictLongRunning` → `interactions.create`, and the API rejects the
+1.x client outright (*"The legacy Interactions API schema is no longer supported. Please upgrade
+your google-genai Python SDK to version >= 2.0.0"*). So: `google-genai` 1.68 → 2.34 in both pins,
+`DEFAULT_VIDEO_MODEL = "gemini-omni-1.1-flash"`, request wrapped in `request={"body": {...}}`,
+`output_video` read off the interaction, `duration` is a real parameter again.
+
+The Veo decisions were carried across rather than re-learned: `task="reference_to_video"`, **not**
+`image_to_video` — the latter anchors the FIRST FRAME on the studio photo, which is the 2026-08-18
+*"the first part was just the image"* bug, and `reference_to_video` is the exact migrated
+equivalent of Veo's `ASSET` `reference_images`.
+
+**The lane never noticed it was broken.** The 2026-10-28 run hit the dead model and logged
+`ai_motion_failed:`, then rendered a ken-burns clip and emailed it as normal — a tagged fallback,
+so not silent, but nothing *alarmed*. [[feedback_plausible_fallbacks_mask_failure]] again. The
+gated eval's model preflight would have caught the shutdown on 2026-10-22; it is manual-trigger
+and had not been run. See the open item below.
+
+| Use case | Happy | Dead/absent model | Generation fails | Operator posts it | Env override | Test pollution |
+|---|---|---|---|---|---|---|
+| Interactions request shape | unit:`test_the_request_asks_for_a_reference_not_a_first_frame` (task + aspect + resolution + input order) | n/a | n/a | n/a | unit:`test_the_env_override_still_works_under_both_names` | genai client monkeypatched |
+| Clip length | unit:`test_the_clip_length_rides_in_the_prompt` (`duration` param AND prompt text) | n/a | unit: seconds-cap refusal makes NO api call (existing) | n/a | n/a | n/a |
+| Response handling | unit:`test_an_inline_video_is_written_to_disk`, `test_a_uri_video_is_downloaded` | n/a | unit:`test_a_failed_interaction_returns_failed`, `test_a_completed_interaction_with_no_video_returns_failed`, `test_a_video_output_with_neither_data_nor_uri_fails`, `test_poll_timeout_returns_failed_never_raises`, `test_sdk_exception_returns_failed` | n/a | n/a | n/a |
+| Manual-post flag | unit:`test_the_flag_lands_in_the_run_payload`, `test_the_usual_truthy_spellings_work` | n/a | n/a | unit:`test_an_off_value_does_not_silently_disable_posting` | n/a | n/a |
+| Publish refusal | unit:`test_a_normal_approved_run_still_publishes` | n/a | n/a | unit:`test_an_approved_reply_still_does_not_post`, `test_the_refusal_says_why_and_where_the_caption_went`, `test_a_normal_run_still_reaches_the_approval_gate` | n/a | n/a |
+| Handover email | unit:`test_a_normal_run_keeps_its_approval_buttons` | n/a | n/a | unit:`test_it_asks_for_no_reply`, `test_it_is_tagged_as_a_receipt_not_an_approval`, `test_the_handover_is_not_left_awaiting_an_approval` | n/a | n/a |
+| Caption + hashtags | unit:`test_the_email_shows_them_separately`, `test_single_mode`, `test_ai_motion_mode`, `test_montage_mode` | n/a | unit:`test_a_raising_occasion_helper_does_not_lose_the_base_tags` | unit:`test_the_caption_box_does_not_repeat_the_hashtags`, `test_a_caption_with_no_hashtag_tail_survives_intact` | unit:`test_an_unset_env_var_still_yields_tags` | n/a |
+| Scene concept | unit:`TestTheSnowyChristmasConcept` (9 tests: slots render, the three things asked for, wipers, nothing inside, lights off the duck, no invented costume, ambience-only audio, version bump, ids unique) | n/a | n/a | n/a | n/a | reads the SHIPPED config, conftest redirects the live path |
+
+**`DUCKVIDEO_MANUAL_POST=1` is the handover, and it is a state of the run, not an absence of
+action.** Ignoring the review email already skipped the post — but the email still *asked* for an
+approval, a decision artifact still opened in the queue, and a stray `duckvideo publish` reply
+days later still posted it. The flag is read ONCE at prepare time and persisted into the payload,
+because the env of the process that prepared the clip is the only place that intent exists (render,
+email and the mail reply all run elsewhere). Three consequences, all tested: publish refuses
+**before** the approval gate, so even an explicit approval cannot post it; the email carries
+`ACTION:notify` — the existing tag for "a receipt, not an approval request", which also keeps the
+run out of the decision queue, since `phase1_observer` opens an artifact only on `ACTION:review`
+([[feedback_auto_manual_queue_contract]]); and the transition records `verified /
+handed_to_operator_manual_post` rather than `proposed`, which would have parked the run forever in
+the desk's follow-through view awaiting an approval nobody is going to give.
+
+**The hashtag fix that had only landed on one of three branches.** `_base_hashtags()` returns `[]`
+when `MEME_BASE_HASHTAGS` is unset rather than raising, so the `except` fallback in the `ai_motion`
+and `montage` caption builders could never fire and those captions shipped with **no hashtags at
+all** whenever that env var was absent. The single-mode branch was fixed on 2026-10-09 and its two
+siblings were not — found only because the operator asked for the hashtags in the email.
+[[feedback_incomplete_fix_enumerate_all_branches]], one helper, three call sites.
+
+**Real generation, and the first one was wrong.** `snowy_dashboard_christmas_v1` (library v10 →
+v11) — Rudolf Reindeer Duck pinned via `DUCKVIDEO_PRODUCT_HANDLE`, parked Jeep dashboard, snow
+falling, a house strung with Christmas lights ahead through the windshield, ambience-only audio
+because the operator dubs it themselves. Generation 1 got the scene right and **snowed on the
+inside of the dashboard**, and rendered the duck as a soft knitted plush instead of printed
+plastic. Both failures were already forbidden — in the *guardrails*, which are appended at the very
+END of the assembled prompt. The rewrite moves the no-snow-inside constraint into the prompt body
+where it is read early, and names the plush failure explicitly the way the tornado rewrite had to
+name "faint grey smudge": describing only the desired result is what let both through. Generation 2
+is clean on both counts (dashboard bare and dry, duck reads as printed plastic with layer lines,
+house lit, snow outside) and shipped: 8.04s, 1080×1920, h264+aac, hosted, handover email sent,
+publish refused by name on the live run. Probe metrics were green on BOTH takes
+([[feedback_visual_output_needs_eyes]] — the contact sheet is what separated them).
+
+**Open (not fixed here):**
+- **The eval is the canary and nobody pulls it.** `scripts/eval_duckvideo_motion.py` resolves the
+  configured model id against the live model list and would have failed loudly on 2026-10-22. It is
+  manual-trigger by design (real spend). Either schedule the preflight alone — it is a free
+  `models.list` call, no generation — as an OS card, or accept that a dead video model surfaces only
+  when a human looks at the weekly reel. [[feedback_verify_the_job_is_firing_first]].
+- **Video generation is not in either price table.** Veo never was either, so this is inherited, not
+  new: video bills in output *video tokens* (this clip: 46,336) and the two token price tables have
+  no entry, so every clip books as unpriced. [[feedback_no_silent_caps]] sibling — a cost that does
+  not appear is a cost nobody can act on.
+- **The renderer id is still `veo_motion`.** Kept deliberately so historical `state_duckvideo.json`
+  files stay comparable; the operator-facing email line now names the real model instead
+  ("Veo" was printed to the operator for three weeks after Veo stopped existing).
 
 ## Surface 65 — competitor social intel: viral-post surfacing + generation priors + /portal/intel/social (SPEC-FIRST 2026-08-12, operator: "post types that go more viral… we haven't gathered as much intel as we could" / "wire it in and include tier 2" / "a clean duck ops page… raw data")
 
