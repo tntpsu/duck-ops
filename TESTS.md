@@ -2044,17 +2044,55 @@ palm comparison and the frame fraction are things the model can check its own ou
 
 | Use case | Happy | Block absent | Partial block | Every concept | Wiring |
 |---|---|---|---|---|---|
-| Scale line | unit:`test_the_scale_line_states_the_real_height`, `test_it_gives_a_comparison_and_not_only_a_number`, `test_it_constrains_the_framing_too`, `test_it_sizes_a_hand_against_the_duck` | unit:`test_a_missing_subject_block_still_produces_a_scale_line` (fails soft toward SAYING something) | unit:`test_a_partial_subject_block_fills_in_the_rest` | unit:`test_every_concept_inherits_it` | unit:`test_the_run_prompt_actually_carried_it` (prepare passes the library block — a gap there is invisible in helper tests) |
+| Scale line | unit:`test_the_scale_line_states_the_real_height`, `test_it_gives_a_comparison_and_not_only_a_number`, `test_it_constrains_the_framing_too`, `test_it_sizes_a_hand_against_the_duck`, `test_it_names_the_wrong_hand_geometry_out_loud` | unit:`test_a_missing_subject_block_still_produces_a_scale_line` (fails soft toward SAYING something) | unit:`test_a_partial_subject_block_fills_in_the_rest`, `test_a_subject_block_from_before_the_hand_clause_still_gets_one` | unit:`test_every_concept_inherits_it`, `test_the_hand_clause_rides_on_every_concept` | unit:`test_the_run_prompt_actually_carried_it` (prepare passes the library block — a gap there is invisible in helper tests) |
 | Subject truths | unit:`test_the_prompt_still_says_what_it_is_made_of` (an addition, never a replacement) | n/a | n/a | n/a | n/a |
 
-**Verified by eye, which is the only gate that works here.** Before: the duck dominated the
-dashboard and the glove read smaller than it. After: the duck sits against the Jeep radio stack at
-roughly a third of the dash depth and the glove is plainly larger than the duck.
-[[feedback_visual_output_needs_eyes]] — no probe distinguishes these two clips.
+**Verified by eye, which is the only gate that works here.** Round one: the duck stopped
+dominating the dashboard, and the dash framing was right. [[feedback_visual_output_needs_eyes]] —
+no probe distinguishes any of these clips.
 
-**Honest limit:** this is a strong steer, not a constraint. The model still pushes in past the
-stated frame fraction toward the end of the clip; it stays readable there only because a hand — the
-best scale reference there is — is in shot. Scale remains a human-review property.
+### 3b. The hand, round two — "could close around it" is not a frame
+
+Operator on the round-one clip: *"the glove if you look at final frames is smaller than the duck,
+it seems the hand just goes around the body and the head pops out. The body and head should fit in
+the palm."* The final frames back it up and then some: a white fur mass about as wide as the duck's
+body slid in behind it, **no fingers ever rendered**, the duck tipped onto it and the whole thing
+rose. It read as a large plush being bundled up.
+
+The scale line had said a hand "is far larger than the duck and could close around it completely."
+That is a *capability*, not a frame — nothing in it the model can check its own output against.
+What replaced it is checkable geometry (shorter than a palm is wide, about as tall as a thumb is
+long, fingertips past the top of the head) plus the failure **named out loud**: fingers curled
+around the middle with the head above the fist. Naming the failure is the only thing that has
+worked on this model, three for three now — the tornado smudge, the snow inside the cab, the empty
+sleeve.
+
+The Santa beat was restaged with it: the hand enters **open and palm-up**, sized against the frame
+("well over half the frame height"), and the duck is scooped down INTO the cupped palm rather than
+grabbed. The guardrails forbid the mitten/fur-blob shape by name. Third rewrite of this beat; the
+`_rewritten` note on the concept carries all three.
+
+| Use case | Happy | Wrong geometry named | Staged in the beat | Older config |
+|---|---|---|---|---|
+| Hand scale | unit:`test_it_sizes_a_hand_against_the_duck`, `test_the_shipped_config_carries_the_hand_comparison` | unit:`test_it_names_the_wrong_hand_geometry_out_loud`, `test_the_guardrail_names_the_wrong_proportions_too` | unit:`test_the_hand_is_staged_bigger_than_the_duck` | unit:`test_a_subject_block_from_before_the_hand_clause_still_gets_one` |
+
+**A test of mine nearly defended the bug again.** `test_the_second_beat_describes_a_lift` asserted
+the word "lift"; the palm-up rewrite says "scoops". It is now
+`test_the_second_beat_takes_the_duck_away` and asserts the rule — a hand is in the beat, the duck
+leaves the frame — not the verb ([[feedback_pin_the_rule_not_the_reading]]). That is the seventh
+instance of this class.
+
+**Verified by eye, round two:** five separated gloved fingers, palm-up, duck seated in the palm
+hollow with the fingers reaching past it on the far side. The operator's specific complaint is
+gone.
+
+**Honest limits, both of them.** (1) This is a strong steer, not a constraint — the model still
+pushes in past the stated frame fraction late in the clip, readable only because a hand is in
+shot. (2) The duck still spans roughly the full width of the palm where a 2.5-inch figurine should
+span about two thirds, so it reads at perhaps 3.5 inches rather than 2.5 — much closer than the
+round-one clip and still not literal. Scale remains a human-review property; there is no automated
+check that distinguishes any of these clips, and a re-roll of the same prompt is a dice throw, not
+a fix.
 
 ## Surface 65 — competitor social intel: viral-post surfacing + generation priors + /portal/intel/social (SPEC-FIRST 2026-08-12, operator: "post types that go more viral… we haven't gathered as much intel as we could" / "wire it in and include tier 2" / "a clean duck ops page… raw data")
 
