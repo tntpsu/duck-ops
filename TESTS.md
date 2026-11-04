@@ -1999,11 +1999,19 @@ raise, it silently promotes a different model. The ids are read **from the const
 the system. `PREFERRED_IMAGE_MODELS` was extracted from a local variable to a module constant for
 exactly this.
 
-**It found something on its first run.** Four of the six configured image models are already gone:
-`gemini-2.0-flash-exp-image-generation` and all three `imagen-4.0-*` ids. Nothing is broken today —
-the primary (`gemini-2.5-flash-image`) and the second choice still resolve — but the fallback
-ladder is four rungs shorter than the code believes, and the Studio picker is offering the operator
-four dead options. Card is live and yellow on that.
+**It found something on its first run.** Four of the six configured image models were already
+gone: `gemini-2.0-flash-exp-image-generation` and all three `imagen-4.0-*` ids. Nothing was broken
+— the primary (`gemini-2.5-flash-image`) and the second choice still resolved — but the fallback
+ladder was four rungs shorter than the code believed, and the Studio picker was offering the
+operator four dead options.
+
+**Pruned the same day** (operator: "u can prune the dead image models"). Re-probed against
+ListModels first, then: the four dead ids out of `PREFERRED_IMAGE_MODELS`, `gemini-3-pro-image`
+(stable) in place of the `-preview` spelling at rung 1 with the preview kept below it, and
+`gemini-3.1-flash-image` / `-flash-lite-image` added so the ladder is real again. **Position 0 is
+deliberately untouched** — changing what actually generates is a `/model-change` with an eval
+behind it, not a cleanup. The Studio picker now mirrors the ladder. Producer re-run: green, 6/6.
+Card verified green on the live page after a cache refresh + viewer bounce.
 
 | Use case | Happy | Required gone | Optional gone | Probe cannot run | Isolation |
 |---|---|---|---|---|---|
@@ -2026,6 +2034,20 @@ is still in place.
 
 Launchd: `prepared_plists/com.philtullai.duckops.google-model-availability.daily.plist`, 07:25
 daily, Tier-3 install (operator).
+
+**What the prune's own tests can and cannot do.** Whether an id is *alive* is only knowable from a
+live probe — that is the canary's job, daily, and no unit test substitutes for it. What the unit
+tests pin is that the pieces agree with each other, which is what will rot between prunes: the
+ladder has more than one rung and no duplicates, a `-preview` id never outranks its stable twin
+(the exact shape of the Veo shutdown), the hard-coded last-resort return in `_resolve_image_model`
+is still the top of the ladder, the Studio picker offers nothing the ladder — and therefore the
+canary — does not cover, and exactly one image id is marked `required`. Rules, not today's list
+([[feedback_pin_the_rule_not_the_reading]]): a test asserting the current five would fail on the
+next correct prune. Mutation-checked — reordering the ladder fails four of them.
+
+| Use case | Ladder shape | Preview vs stable | Outage path | Picker | Canary coverage |
+|---|---|---|---|---|---|
+| Image model ids | unit:`test_it_has_more_than_one_rung`, `test_no_id_appears_twice`, `test_every_id_is_spelled_the_way_listmodels_returns_them` | unit:`test_a_preview_id_never_outranks_its_stable_twin` | unit:`test_the_hardcoded_default_is_the_top_of_the_ladder` | unit:`test_auto_is_still_offered`, `test_every_other_option_is_a_model_the_ladder_knows`, `test_the_default_model_is_pickable`, `test_no_option_is_offered_twice`, `test_every_option_has_a_label_a_human_can_read` | unit:`test_the_inventory_collects_every_rung`, `test_exactly_one_image_id_is_required`; live: the daily producer |
 
 ### 3. Scale — the ducks are 2.25–2.5 inches and the model had no way to know
 
