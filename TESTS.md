@@ -5412,10 +5412,48 @@ fingers below and thumb alongside, carried out of frame still visible. That grip
 geometry was recorded as **DISPROVED** on 2026-11-07, when the same wording still
 produced a fist around the duck's middle plus a second elf arm.
 
-**n=1, and two variables moved at once** (the negative list became live for the first
-time since 11-04, and resolution went 720p→1080p native). The success is recorded; the
-*attribution* is not claimed ([[feedback_a_number_needs_its_denominator]]). Residual:
-the white body still reads faintly felted.
+**That was n=1, and two variables had moved at once** (the negative list became live for
+the first time since 11-04, and resolution went 720p→native 1080p). So the clip was a
+recorded result, never an attribution
+([[feedback_a_number_needs_its_denominator]]).
+
+### Re-measured, 2026-11-09 (two more renders, ~$2) — **the format does not hold**
+
+Two further generations of the byte-identical prompt, same photo, same settings, run
+back to back. Scoreboard across all three:
+
+| | lift beat | product fidelity | wipers still |
+|---|---|---|---|
+| run 1 | palm-up scoop ✓ | ✓ | **sweeps** |
+| run 2 | **fist grip** | **costume gone** — plain yellow duck in antlers | ✓ |
+| run 3 | **fist grip** | ✓ | **sweeps** |
+
+**0 of 3 clean, each failing something different.** The scoop reproduces about one run in
+three, so run 1 was a lucky draw and this concept is not lockable as a house format on
+prompt wording alone. Two defects three renders were enough to expose that one never was:
+
+- *The wiper ban fails ~2 in 3.* `The wipers never move -- the car is parked.` sits
+  verbatim in `guardrails` and the blade visibly sweeps anyway. A prohibition again
+  ([[reference_veo_motion_gotchas]]); there is no obvious relocation form, which is the
+  point — the rule's reach has a floor.
+- *Run 2 dropped the product's entire reindeer costume* — no tan suit, no white belly,
+  no brown feet, just a yellow duck wearing antlers. First costume loss measured on this
+  lane, and **no probe check can see it**: h264, 1080x1920, duration, audio and size all
+  passed on a clip of the wrong product ([[feedback_visual_output_needs_eyes]]).
+
+Correction to the 11-09 entry above: the "faintly felted white body" was not a defect.
+The reference photo *is* a tan reindeer suit with a white belly patch and brown feet, so
+runs 1 and 3 were faithful and run 2 was the miss.
+
+Three independent late-stage failures of one text prompt is the case for the staged
+first frame (`DUCKVIDEO_STAGED_FRAME`, still unwired), not a fourth rewrite. Recorded in
+the concept's own `_measured_2026_11_09` note so it survives this session
+([[feedback_residual_risk_needs_a_tracked_home]]).
+
+**Open gap, no test yet:** nothing in the suite can fail on a wiper that moves or a
+costume that vanishes — both are eyes-only. A judge-style literal-field check
+(`wiper_visible_moving?` / `costume_present?`) on the review frames is the shape that
+would close it ([[feedback_vision_judge_literal_fields]]).
 
 **Files touched (106):** `duckAgent/creative_agent/runtime/src/duck_creative_agent/viewer.py`,
 `duckAgent/creative_agent/runtime/tests/test_duckvideo_lane_health.py`,
