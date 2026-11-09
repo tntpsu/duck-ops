@@ -4893,3 +4893,152 @@ those tests with *their* message, not the conftest's.
 
 **Still open after 102:** own-follower snapshots (no producer writes them — the page can only show
 what is collected); non-SMTP outbound remains unenumerated in both repos.
+
+## Surface 103 — A caption that never changed, and a cutout that never ran (2026-11-08, SPEC-FIRST)
+
+Two items off the social roadmap. Both turned out to be different problems than the roadmap said,
+which is becoming the pattern ([[feedback_verify_roadmap_against_code_before_building]]):
+investigate before building, every time.
+
+### A. review_carousel shipped one byte-identical caption for three weeks
+
+**Confirmed, not assumed.** All three published posts carry the same caption, sha1 `8f9b04fd91ff`,
+307 chars: *"Five-star favorites from the MyJeepDuck flock. Real customer feedback, quick-ship
+smiles, and dashboard joy from ducks people genuinely loved. Which slide is your favorite?"*
+Reach 20 / 23 / 19 — the lowest and tightest of any lane. Zero comments on all three.
+
+**Mechanism, end to end.** `_build_carousel_caption` has two branches. The good one interpolates
+product titles; the fallback is a static string. `build_review_carousel_run` fills each slide's
+`product_title` from `candidate["product_title"] or candidate["product_query"] or "Duck review"`.
+Every eligible candidate in `review_social_pool.json` arrives from `carousel_source:
+daily_review_bridge` with **`product_title`, `product_query`, `product_handle` and `customer_name`
+all empty strings** — so every slide gets the literal `"Duck review"` placeholder.
+`_distinct_named_products` then filters `"duck review"` out as generic, `named_products` is empty,
+and the static branch fires. Every week. Forever.
+
+This is the plausible-fallback class in its purest form
+([[feedback_plausible_fallbacks_mask_failure]]): the fallback emits *publishable prose*, so nothing
+went red and nobody noticed for three weeks. A crash would have been found the first day.
+
+**What the fallback throws away.** The candidates carry `rating: 5` and a real `selected_quote`
+each — *"My little Dallas Cowboys Duck is ADORABLE!!! SUPER DUPER CRAFTSMANSHIP!!!"*, *"This is
+adorable for a family member for Christmas who has a Jeep!"* A lane whose entire premise is
+customer reviews was publishing a caption that quoted no review. The material was always there.
+
+**Second fix in the same place.** The caption closes on *"Which slide is your favorite?"* — an open
+question, and all three posts earned 0 comments. The one engagement finding we have says a named
+A-or-B earns comments where an open question does not (6.58 per 100 reach vs 0.00, 8 posts,
+MEDIUM confidence). Closing on a two-option binary applies it. Flagged as MEDIUM, not asserted.
+
+| Use case | Happy | No quotes at all | Quote too long | Duplicate quotes | Placeholder titles only | Real titles present | Varies week to week |
+|---|---|---|---|---|---|---|---|
+| Caption leads with a real review | unit | unit (fail-visible, not static prose) | unit (truncated on a word) | unit (deduped) | unit (the live bug) | unit (titles still used) | unit (distinct across candidate sets) |
+| Caption closes on a named A-or-B | unit | unit | n/a | n/a | unit | unit | n/a |
+| Operator can see the basis + warnings | unit | unit | n/a | n/a | unit | unit | n/a |
+| No emoji/quote-mark corruption | unit | n/a | unit | n/a | n/a | n/a | n/a |
+
+Deliberately out of scope: **fixing the upstream `daily_review_bridge` so `product_title` is
+populated.** It has `listing_id` for every candidate, so the title is recoverable, but that means
+touching the bridge plus a listing lookup. Recorded as an open follow-up; the caption must work
+without it regardless, since it already has to.
+
+### B. duckvideo's background removal has failed on every scheduled run since 2026-08-12
+
+The roadmap said *"reel cadence 1/month → 2-3/week; pipeline exists, lane unwired."* **All three
+clauses are wrong.** `com.philtullai.duckagent.duckvideo.weekly` is loaded and firing every
+Wednesday 09:30, exit 0, ~14 minutes of real work; the scheduler receipt for 2026-11-04 reads
+`succeeded`. The lane is wired and already weekly.
+
+What actually limits it: duckvideo is **approval-gated by construction**, so the scheduled `--all`
+run always lands on `awaiting_approval` and publishes only from an operator email reply. Of the
+five weekly runs in the window, 10-21 was approved and published; the review emails for 10-07,
+10-14, 10-28 and 11-04 went out (timestamps recorded) and no reply came. **Raising the render
+cadence would produce more unreplied emails, not more posts.** That is an operator decision, not a
+code change, and it is not in this surface.
+
+But the investigation found a real defect underneath. Every one of those runs logs
+`cutout_quality_gate: photo 1 rembg_failed: No module named 'duck_creative_agent'`, in **10 run
+states going back to 2026-08-12**. `helpers/duck_video_helper.cutout_product_image` imports
+`duck_creative_agent.studio_image._rembg_remove_background`, but `run_scheduled_flow.sh` sets no
+`PYTHONPATH` and `main_agent.py` only appends the repo root — not `creative_agent/runtime/src`. So
+background removal has never once run on a scheduled clip. It fails soft to "blurred-self" by
+design (*"Never raises — returns (None, meta) on any failure"*), which is exactly why a 100%
+failure rate survived three months.
+
+Interactive runs work, because the documented commands all set `PYTHONPATH` by hand. Only the
+scheduled path was broken, which is the hardest place to notice.
+
+| Use case | Happy | Module importable | Module missing | Scheduled entry point | Rate is visible |
+|---|---|---|---|---|---|
+| `duck_creative_agent` imports from every entry point | unit | unit | unit | unit (no PYTHONPATH in env) | n/a |
+| Cutout runs on a scheduled clip | manual:real render | unit | unit (still falls back, does not raise) | unit | **unit (fallback is loud, not silent)** |
+| A 100% fallback rate cannot hide again | n/a | n/a | n/a | n/a | unit |
+
+Also found and **not** fixed, because both are operator decisions rather than defects:
+`ai_motion_failed: veo_exception: ClientError: 402 RESOURCE_EXHAUSTED ... prepayment credits are
+depleted` on the 10-28 run (so it fell back to `kenburns_photos`), and the four unreplied duckvideo
+review emails above. Neither is something to patch around.
+
+### Shipped 2026-11-08 — Surface 103 results
+
+**103A.** `review_carousel._build_carousel_caption` now returns
+`(caption, hashtags, meta)` with `meta.basis` and `meta.warnings`, surfaced to the operator through
+`approval_summary` (operator-visible, so no schema change). The caption leads with a real review,
+states the slide count, and closes on a named binary. Against the live pool:
+
+> *"Worked with me to create exactly what I requested. Very pleased and my grandson will love it!"
+> 5 five-star reviews from the flock this week. Swipe for the rest — all real customer words,
+> nothing rewritten. Slide 1 or slide 5?"*
+
+226 chars, `basis: quote_only`, and the missing-product-title warning raised rather than absorbed.
+Rotating the candidate order gives three different captions. **21 new tests** in
+`test_review_carousel_caption.py` — there was no test on this function at all before today, which
+is a large part of why three identical weeks went unnoticed.
+
+Two things found while writing it. A hardcoded *"Five more five-star reviews"* was wrong twice over
+— it hardcoded the count, and *"more"* was off by one, since the quote above it is one OF the
+slides. And the first `_clean_quote` stripped the rating sign-off **by position** (`idx > 20`),
+which got it wrong in both directions: a quote that was *only* decoration survived intact and would
+have opened a caption on five bare stars, while a review merely STARTING with "5 stars!" risked
+being cut to nothing. A sign-off is a suffix, so it is now stripped as one — trailing
+`unicodedata` symbol chars plus the literal tokens — and a result with no letters left returns
+empty. Interior emoji survive: *"SUPER DUPER CRAFTSMANSHIP!!!😍 I Love Him!!!!💙"* is kept whole
+while the trailing `5-STARS ⭐⭐⭐⭐⭐A++A++💜🌻` goes.
+
+**103B.** `src/main_agent.py` now appends `creative_agent/runtime/src` to `sys.path` itself, so the
+import no longer depends on the caller's environment. Verified the way it had to be — a subprocess
+with `PYTHONPATH` stripped, which is the scheduled condition; proving it in-process would prove
+nothing, because pytest has already put the path there. Then the real check: `cutout_product_image`
+run on an actual product photo with no `PYTHONPATH` returns a **real cutout, alpha_coverage 0.477**,
+where for three months it returned `None`.
+
+`helpers/duck_video_helper.cutout_product_image` now separates `ImportError`/`ModuleNotFoundError`
+from everything else: an environment fault prints a loud `CUTOUT UNAVAILABLE ... setup fault, not an
+image fault` line and carries a distinct `rembg_unavailable_environment:` reason plus
+`environment_fault: True`, while a per-image failure keeps the ordinary `rembg_failed:` label and
+stays quiet. That asymmetry is the actual fix for the invisibility: the reason was *already*
+recorded in all 10 run states for three months and recording was never enough, because a 100%
+environment failure wearing the same label as per-image noise reads as per-image noise. Escalating
+both would have made the new channel noise too, which is how we got here — so
+`test_an_image_fault_is_not_loud` pins that it does not. It still never raises; the blurred-self
+fallback is a real product decision. **7 new tests.**
+
+Sharpness: reverting the `sys.path` fix fails 2 of 7; the 5 that survive are the
+environment-vs-content labelling, which is independent of it and should survive.
+
+**Not fixed, because neither is a defect.** The four unreplied duckvideo review emails (10-07,
+10-14, 10-28, 11-04 — all sent, none answered) are the lane's real throughput limit and an operator
+decision, not a cadence setting; raising the render cadence would produce more unreplied emails. And
+`402 RESOURCE_EXHAUSTED — prepayment credits are depleted` on the Veo/AI Studio account from the
+10-28 run, which fell back to `kenburns_photos`. Both belong in front of the operator, not patched
+around.
+
+**Still open:** the upstream `daily_review_bridge` leaves `product_title`, `product_query`,
+`product_handle` and `customer_name` empty on every candidate while carrying `listing_id`, so the
+titles are recoverable with a lookup. The caption works without them either way, which is the point
+— but the carousel slides themselves still say "Duck review".
+
+**Files touched (103):** `duckAgent/creative_agent/runtime/src/duck_creative_agent/review_carousel.py`,
+`duckAgent/creative_agent/runtime/tests/test_review_carousel_caption.py` (new),
+`duckAgent/src/main_agent.py`, `duckAgent/helpers/duck_video_helper.py`,
+`duckAgent/tests/test_duckvideo_cutout_environment.py` (new).

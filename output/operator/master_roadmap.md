@@ -233,6 +233,18 @@ patterns that repeated, or that an independent dataset confirmed, are listed as 
    aren't posting in a group."* The earlier read ("Facebook is dead") was the wrong conclusion from
    the right number.
 
+4. **Added 2026-11-08 — duckvideo's background removal had not run since 2026-08-12.** Every
+   scheduled run logged `rembg_failed: No module named 'duck_creative_agent'` (10 run states):
+   `run_scheduled_flow.sh` sets no `PYTHONPATH` and `main_agent.py` only had the repo root on
+   `sys.path`, so the cutout worked in every documented command and every test — all of which set
+   `PYTHONPATH` by hand — and failed in the one path nobody watches. It fails soft to a
+   blurred-self fallback by design, so three months of slightly worse clips never went red. Fixed
+   (Surface 103B); the real cutout now runs with no `PYTHONPATH` at alpha coverage 0.477. **Any
+   judgement about which duckvideo format or style "works" is drawn from clips rendered without
+   background removal.**
+5. **Veo/AI Studio prepayment credits are depleted** — `402 RESOURCE_EXHAUSTED` on the 10-28 run,
+   which fell back to `kenburns_photos`. Not patched around; it needs a top-up or a decision.
+
 **Discarded as confounded** — best posting time, best hook family, best theme/duck. Each rested on
 too few posts per bucket or on one dominant account.
 
@@ -243,8 +255,8 @@ too few posts per bucket or on one dominant account.
 | 1 | thursday | Publish the vote post waiting in `runs/2026-11-05` | **operator action** — reply `publish <id>` to that run's BATCH REVIEW email. The 10-22 and 10-29 option sets are Halloween and now dead; do not publish them. |
 | 2 | meme + duckvideo captions | Distinct-account floor + relative-margin gate on the steering prior | ✅ shipped |
 | 3 | jeepfact + meme | Facebook GROUP post kit in the review email | ✅ shipped |
-| 4 | duckvideo | Reel cadence 1/month → 2-3/week | open — pipeline exists, lane unwired |
-| 5 | review_carousel | `_build_carousel_caption` shipped its generic branch byte-identical 3 weeks running | open, ~1 hr |
+| 4 | duckvideo | Reel cadence 1/month → 2-3/week | **WRONG DIAGNOSIS — closed 2026-11-08.** The lane is wired AND already weekly: `duckvideo.weekly` fires every Wed 09:30, exit 0, ~14 min of real work. It is approval-gated by construction, so the scheduled run lands on `awaiting_approval` and publishes only from an email reply. Of 5 runs in the window, 10-21 was approved; the emails for 10-07, 10-14, 10-28 and 11-04 were all sent and **none was answered**. Raising the cadence produces more unreplied emails, not more posts. **Operator decision, not a code change.** |
+| 5 | review_carousel | `_build_carousel_caption` shipped its generic branch byte-identical 3 weeks running | **✅ shipped 2026-11-08** (Surface 103A). Caption now leads with a real customer review, varies with the candidate set, and closes on a named binary instead of an open question. Degraded cases report a `basis` + warnings instead of emitting plausible prose. |
 | 6 | jeepfact | Off carousel, onto reel or single image | open, ~half day |
 | 7 | duckvideo | End clips on an A-or-B choice | open, ~1-2 hrs, speculative (stacks an untested mechanic on a proven format) |
 | 8 | measurement | First-party section on `/portal/intel/social` | **✅ shipped 2026-11-08** (TESTS.md Surface 102). Own-follower snapshots still open — no producer writes them yet. |
