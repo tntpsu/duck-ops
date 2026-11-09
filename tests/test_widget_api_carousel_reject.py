@@ -19,6 +19,7 @@ Pinned contracts:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -83,6 +84,24 @@ class CarouselRejectEmailTests(unittest.TestCase):
         for c in ctx_stack:
             c.stop()
 
+    def _without_test_mode(self):
+        """Clear DUCK_TEST_MODE for the two tests below that must reach
+        widget_api's real send path.
+
+        Both are safe by construction, not by flag: one replaces
+        widget_api.smtplib.SMTP with a MagicMock, the other hands
+        _load_smtp_creds an empty dict so there is nothing to log in with.
+        The guard added 2026-11-08 refuses outbound mail whenever
+        DUCK_TEST_MODE=1 (conftest sets it for the whole suite) and sits
+        ahead of the creds check, so without this opt-out the first test
+        would assert on a refusal payload and the second would never reach
+        the missing-SMTP branch it exists to pin.
+
+        Do NOT copy this into a test that has not mocked the transport.
+        """
+        env = {k: v for k, v in os.environ.items() if k != "DUCK_TEST_MODE"}
+        return patch.dict(os.environ, env, clear=True)
+
     def test_carousel_reject_emits_needs_changes_email_subject(self) -> None:
         """The most critical assertion: a Reject on a carousel row
         produces an email subject containing FLOW:review_carousel,
@@ -96,7 +115,8 @@ class CarouselRejectEmailTests(unittest.TestCase):
             ctx = self._patch_storage(Path(tmp), candidate)
             try:
                 # Mock SMTP send so the test doesn't try to actually send.
-                with patch.object(widget_api.smtplib, "SMTP") as smtp_mock:
+                with self._without_test_mode(), \
+                        patch.object(widget_api.smtplib, "SMTP") as smtp_mock:
                     smtp_instance = MagicMock()
                     smtp_mock.return_value.__enter__.return_value = smtp_instance
                     with patch.object(
@@ -144,7 +164,8 @@ class CarouselRejectEmailTests(unittest.TestCase):
             candidate = _carousel_candidate()
             ctx = self._patch_storage(Path(tmp), candidate)
             try:
-                with patch.object(widget_api, "_load_smtp_creds", lambda: {}):
+                with self._without_test_mode(), \
+                        patch.object(widget_api, "_load_smtp_creds", lambda: {}):
                     result = widget_api.reject_publish_candidate(candidate["artifact_id"])
             finally:
                 self._unpatch(ctx)

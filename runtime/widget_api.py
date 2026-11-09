@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import smtplib
 import sys
 from datetime import datetime, timezone
@@ -158,6 +159,47 @@ def reject_publish_candidate(artifact_id: str) -> dict[str, Any]:
     return response
 
 
+# DUCK_TEST_MODE refusal for the two senders in this module.
+#
+# Both of them mail a `Re: MJD: ... | ACTION:publish` (or ACTION:needs_changes)
+# to the operator's own inbox, which the mail watcher then PARSES to trigger
+# the real publish. So a test that reaches either one does not merely send an
+# email — it publishes a duck post. That is the whole reason this guard is
+# unconditional rather than path-scoped.
+#
+# _load_smtp_creds() reads duckAgent/.env straight off disk, so the
+# "missing SMTP env" branch above is NOT a safety net in a test environment:
+# the credentials are really there. The guard is the only thing standing
+# between a test run and a publish.
+#
+# Unlike notifier.send_message, these two can refuse by returning: their
+# callers read the returned dict and nothing downstream records the send as
+# having happened.
+_OUTBOUND_TEST_MODE_ENV = "DUCK_TEST_MODE"
+_OUTBOUND_TEST_MODE_TRUTHY = frozenset({"1", "true", "TRUE", "yes"})
+
+
+def _blocked_by_test_mode(subject: str) -> dict[str, Any] | None:
+    """Returns a refusal payload when DUCK_TEST_MODE=1, else None."""
+    flag = str(os.environ.get(_OUTBOUND_TEST_MODE_ENV) or "").strip()
+    if flag not in _OUTBOUND_TEST_MODE_TRUTHY:
+        return None
+    print(
+        f"[widget_api] BLOCKED by DUCK_TEST_MODE, not sent: {subject!r}",
+        file=sys.stderr,
+    )
+    return {
+        "ok": False,
+        "blocked_test_mode": True,
+        "error": (
+            "refused under DUCK_TEST_MODE=1: this email triggers a real publish "
+            "when the mail watcher parses it. Mock widget_api.smtplib in the "
+            "test, or call approve_publish_candidate(..., dry_run=True)."
+        ),
+        "subject": subject,
+    }
+
+
 def _send_review_carousel_needs_changes_email(candidate: dict[str, Any]) -> dict[str, Any]:
     """Send a Re: MJD: ... | ACTION:needs_changes email for a
     carousel reject, mirroring the same SMTP plumbing approve_publish_candidate
@@ -173,6 +215,10 @@ def _send_review_carousel_needs_changes_email(candidate: dict[str, Any]) -> dict
 
     subject = f"Re: MJD: [{flow}] {title} | FLOW:{flow} | RUN:{run_id} | ACTION:needs_changes"
     body = "needs_changes\n\n(rejected via portal /portal/decisions)\n"
+
+    blocked = _blocked_by_test_mode(subject)
+    if blocked is not None:
+        return blocked
 
     creds = _load_smtp_creds()
     missing = [key for key in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS") if not creds.get(key)]
@@ -223,6 +269,11 @@ def approve_publish_candidate(artifact_id: str, dry_run: bool = False) -> dict[s
 
     subject = f"Re: MJD: [{flow}] {title} | FLOW:{flow} | RUN:{run_id} | ACTION:publish"
     body = "publish\n\n(approved via Pulse glasses dashboard)\n"
+
+    # dry_run returns before the transport, so it stays legal under test mode.
+    blocked = None if dry_run else _blocked_by_test_mode(subject)
+    if blocked is not None:
+        return blocked
 
     creds = _load_smtp_creds()
     missing = [key for key in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS") if not creds.get(key)]

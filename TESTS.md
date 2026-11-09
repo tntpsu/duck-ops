@@ -4638,16 +4638,92 @@ section still carries its visible "why you're seeing this"; sections render insi
 overflowing on a phone — which is what makes it pasteable at all; 0 tables and no fixed width above
 600px in this email, so there is nothing to stack or overflow.
 
+### D. The other four senders, and the enumeration that was missing (same day)
+
+Part C closed `email_summary`. The lesson was not "fix `email_summary`" — it was that **nobody had
+enumerated the senders**, so a guard sat on the one path no lane takes. Closing the remaining four
+the same day, because a fix covering one branch of a multi-branch mechanism is presumed incomplete
+([[feedback_incomplete_fix_enumerate_all_branches]]).
+
+| Sender | Shape of the guard | Why that shape |
+|---|---|---|
+| `duck-ops/runtime/notifier.py::send_message` | **raises** `TestModeRefusalError` | Its caller runs `record_sent_artifact` + `write_json(STATE_PATH)` on the next line. A quiet return would stamp the mail delivered, the dedup ledger would never offer it again, and the email would be **lost rather than deferred** — the guard itself becomes a mail-eater. This is the asymmetry that makes a copy-paste of the `email_summary` guard wrong here. |
+| `duck-ops/runtime/notifier.py::send_whatsapp_message` | **raises** | Not SMTP — it shells out to a docker gateway, so an audit grepping for `smtplib` misses it entirely. It still reaches the operator's phone. |
+| `duck-ops/runtime/widget_api.py` ×2 | **returns** a refusal dict tagged `blocked_test_mode` | Callers read the returned dict and nothing records the send afterwards. Tagged because both already return `{"ok": False}` on real failure, and the fail-soft caller reports the error string to the operator: "SMTP is down" and "we refused on purpose" must not read alike. |
+| `duckAgent/flows/ops/steps.py` ×2 | **returns** `False` + a loud `BLOCKED` line | Both are `-> bool` and already return `False` for "did not send". The loud line is the separate visibility channel they have instead of a status dict ([[feedback_swallowed_errors_lie]]). |
+
+Both duck-ops guards are **unconditional** on `DUCK_TEST_MODE`, deliberately unlike this repo's
+path-based guards (`workflow_control._refusing_test_mode_prod_write` and siblings), which refuse
+only on the frozen production path so a tmp-isolated test can still exercise the write. There is no
+tmp SMTP server and no tmp WhatsApp gateway: a send either reaches the operator or it does not. The
+comment at the guard says so, so nobody "fixes" it to match the others.
+
+All four guards sit **ahead of the credentials check**, not after. `widget_api._load_smtp_creds`
+reads `duckAgent/.env` straight off disk, so the "missing SMTP env" branch is not a safety net in a
+test environment — the credentials really are there. And on a machine where `.env` is absent, a
+guard placed after that branch would never consult the flag at all, making the refusal depend on
+whether a file happens to exist. `approve_publish_candidate(dry_run=True)` is exempt: it returns
+before the transport, so refusing it would be pointless strictness costing the operator a preview.
+
+**Both widget_api senders mail a `Re: ... | ACTION:publish` / `ACTION:needs_changes` to the
+operator's own inbox, which the mail watcher PARSES to trigger the real publish.** A test reaching
+either one does not merely send an email — it publishes a duck post. That is why these two are
+unconditional rather than path-scoped.
+
+| Use case | Happy | Refuses under flag | Refusal is actionable | Guard precedes creds | Flag read at call time | Transport never touched | Falsy flag still sends |
+|---|---|---|---|---|---|---|---|
+| `notifier.send_message` | unit:guards | unit:guards | unit:guards (names `--dry-run`) | n/a | unit:guards | unit:guards (exploding SMTP) | unit:guards |
+| `notifier.send_whatsapp_message` | n/a | unit:guards | unit:guards | n/a (precedes target check) | unit:guards | unit:guards (exploding `subprocess.run`) | n/a |
+| `widget_api` needs_changes | unit:carousel_reject | unit:guards | unit:guards (tagged) | unit:guards | unit:guards | unit:guards | n/a |
+| `widget_api` approve_publish | unit:guards (dry_run) | unit:guards | unit:guards | unit:guards | unit:guards | unit:guards | n/a |
+| `ops.send_insights_email` | n/a | unit:ops_guard | unit:ops_guard (loud line) | unit:ops_guard | unit:ops_guard | unit:ops_guard | n/a |
+| `ops.send_recommendations_email` | n/a | unit:ops_guard | unit:ops_guard | unit:ops_guard | n/a | unit:ops_guard | n/a |
+| A NEW unguarded SMTP sender | — | unit:enumeration (both repos) | — | — | — | — | — |
+
+`unit:guards` = `duck-ops/tests/test_outbound_test_mode_guards.py` (22). `unit:ops_guard` =
+`duckAgent/tests/test_ops_email_test_mode_guard.py` (7). `unit:enumeration` = an AST walk in each
+repo asserting every function that touches `smtplib` consults the flag, so the next sender fails in
+CI rather than in the inbox. The duckAgent one was appended to
+`tests/test_no_email_escapes_in_test_mode.py`, whose title had been claiming this of the whole repo
+since 2026-09-25 while testing exactly one function.
+
+Both enumeration tests match **any callee whose name contains `test_mode`**, not today's
+`_test_mode_active` / `_refuse_outbound_under_test_mode`, so renaming a predicate does not break
+them ([[feedback_pin_the_rule_not_the_reading]]); and both flag only functions that reach `smtplib`
+*themselves*, since flagging a caller of an already-guarded sender (`notifier.main`) would teach
+the next person to add the guard twice. **Stated scope limit: SMTP only.** A future sender on a
+third channel is not caught — `send_whatsapp_message` is covered by its own test, not by the scan.
+
+**Two things the sharpness check caught that the tests as first written did not.** Neutering the
+guards failed only 3 of 7 duckAgent tests, because both ops senders wrap their whole body in
+`except Exception: return False` — so a real SMTP blow-up is reported *identically* to "we didn't
+send", and `assert result is False` proves nothing about whether the transport was touched. The
+fixture now records every connection attempt and each test asserts the list is empty. Then one test
+still passed, because a minimal `INSIGHTS` fixture made the HTML builder raise *before* SMTP: "no
+connection was opened" was true for the wrong reason. Those tests now also require the guard's own
+`BLOCKED` line. Final sharpness: 15 of 22 (duck-ops) and 5 of 7 (duckAgent) fail with the guards
+neutered; the survivors are the structural audits and the falsy-flag cases, which should survive.
+
+Two pre-existing tests in `test_widget_api_carousel_reject.py` had to opt out of the guard
+explicitly via a shared `_without_test_mode()` helper — one mocks `smtplib.SMTP`, the other hands
+`_load_smtp_creds` an empty dict to pin the missing-creds fail-soft contract that the guard now
+precedes. Both are safe **by construction, not by flag**, and the helper's docstring says so plus
+"do NOT copy this into a test that has not mocked the transport."
+
+**Files touched (D):** `duck-ops/runtime/notifier.py`, `duck-ops/runtime/widget_api.py`,
+`duck-ops/tests/test_outbound_test_mode_guards.py` (new),
+`duck-ops/tests/test_widget_api_carousel_reject.py`, `duckAgent/flows/ops/steps.py`,
+`duckAgent/tests/test_ops_email_test_mode_guard.py` (new),
+`duckAgent/tests/test_no_email_escapes_in_test_mode.py`.
+
 **Open follow-ups** (tracked here, not left as prose):
-- **Three more unguarded `smtplib` senders**, none of which read `DUCK_TEST_MODE`:
-  `duckAgent/flows/ops/steps.py:954` and `:1586`, `duck-ops/runtime/notifier.py:2238`
-  (`send_message`, guarded only by a caller-passed `--dry-run`, i.e. by discipline rather than by
-  construction), and `duck-ops/runtime/widget_api.py:191/195/245/249`. Left alone deliberately:
-  `notifier.send_message` is duck-ops' primary operator mail path and a wrongly-placed guard there
-  would silently suppress real mail. Needs the same treatment as `email_summary`, one sender at a
-  time, each with its own sharpness check.
-- **`tests/conftest.py` should mock both senders**, not rely on an env var that a sender can
-  forget to read. Setting the variable is necessary and was never sufficient.
+- **`tests/conftest.py` in both repos should mock the senders**, not rely on an env var that a
+  sender can forget to read. Setting the variable is necessary and was never sufficient — the
+  enumeration tests now make an unguarded sender *visible*, but a mocked transport in conftest
+  would make it *harmless*. Belt and braces; only the braces exist today.
+- **Non-SMTP outbound is still unenumerated.** Both enumeration tests cover `smtplib` only. No
+  audit covers `requests.post` to an external API, a webhook, or another gateway shell-out. The
+  honest statement is that the SMTP class is closed and the general class is not.
 - Operator confirmation that a group kit was actually posted — needs a reply token, which means
   touching the shared `infer_action` parser. Unbuilt by choice; until then `posted_confirmed` stays
   `None` and group effect is unmeasured.

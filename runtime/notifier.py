@@ -15,6 +15,7 @@ import copy
 import html
 import hashlib
 import json
+import os
 import smtplib
 import subprocess
 import sys
@@ -40,7 +41,7 @@ from nightly_action_summary import (
 from open_order_intelligence import (
     refresh_order_snapshots,
 )
-from workflow_control import record_workflow_transition
+from workflow_control import TestModeRefusalError, record_workflow_transition
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "notifier.json"
@@ -2235,7 +2236,43 @@ def build_message(settings: dict[str, Any], artifact: dict[str, Any]) -> EmailMe
     return msg
 
 
+# DUCK_TEST_MODE refusal for the two paths that leave this machine.
+#
+# Deliberately NOT shaped like the path-based guards elsewhere in this repo
+# (workflow_control._refusing_test_mode_prod_write and its siblings), which
+# refuse only when the resolved write path is the frozen production one so a
+# tmp-isolated test can still exercise the write. There is no tmp SMTP server
+# and no tmp WhatsApp gateway — an outbound send either reaches the operator
+# or it does not — so this rule is unconditional, with no isolated-path
+# escape hatch. Don't "fix" it to match the others.
+#
+# It raises rather than returning quietly because send_message's caller
+# records the artifact as sent on the next line (record_sent_artifact +
+# write_json(STATE_PATH)). A silent no-op would mark the mail delivered and
+# the dedup ledger would never offer it again, losing the email rather than
+# merely deferring it. That asymmetry is why duckAgent's email_helper guard
+# can return a status dict here and this one cannot.
+_OUTBOUND_TEST_MODE_ENV = "DUCK_TEST_MODE"
+_OUTBOUND_TEST_MODE_TRUTHY = frozenset({"1", "true", "TRUE", "yes"})
+
+
+def _refuse_outbound_under_test_mode(channel: str, descriptor: str) -> None:
+    """Raise TestModeRefusalError if DUCK_TEST_MODE=1. Called first thing in
+    every function that sends something off the machine."""
+    flag = str(os.environ.get(_OUTBOUND_TEST_MODE_ENV) or "").strip()
+    if flag not in _OUTBOUND_TEST_MODE_TRUTHY:
+        return
+    raise TestModeRefusalError(
+        f"Refusing to send {channel} under DUCK_TEST_MODE=1 ({descriptor}). "
+        "This send leaves the machine, so there is no path-isolated variant to "
+        "fall back on: mock the transport in the test (monkeypatch "
+        "notifier.smtplib.SMTP or notifier.subprocess.run), or drive the "
+        "notifier with --dry-run."
+    )
+
+
 def send_message(settings: dict[str, Any], msg: EmailMessage) -> None:
+    _refuse_outbound_under_test_mode("an email", f"subject={msg['Subject']!r}")
     with smtplib.SMTP(settings["host"], settings["port"]) as server:
         if settings.get("use_starttls"):
             server.starttls()
@@ -2292,6 +2329,7 @@ def send_whatsapp_message(
     media_urls: list[str] | None = None,
     media_title: str | None = None,
 ) -> None:
+    _refuse_outbound_under_test_mode("a WhatsApp message", f"body={str(message)[:60]!r}")
     whatsapp_cfg = settings.get("whatsapp") or {}
     target = whatsapp_cfg.get("target")
     docker_path = whatsapp_cfg.get("docker_path") or "/usr/local/bin/docker"
