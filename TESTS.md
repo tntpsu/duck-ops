@@ -5042,3 +5042,198 @@ titles are recoverable with a lookup. The caption works without them either way,
 `duckAgent/creative_agent/runtime/tests/test_review_carousel_caption.py` (new),
 `duckAgent/src/main_agent.py`, `duckAgent/helpers/duck_video_helper.py`,
 `duckAgent/tests/test_duckvideo_cutout_environment.py` (new).
+
+---
+
+## Surface 104 — The lookup nobody wrote, and the outbound half the mail audit admitted it had missed (2026-11-09)
+
+Both halves of what Surface 103 wrote down as **still open**, closed. Neither was a new idea; both
+were named in that surface's own text and then not done, which is the shape
+[[feedback_residual_risk_needs_a_tracked_home]] exists to prevent — the difference here is that the
+residual risk *did* have a tracked home, in this file, and so came back.
+
+### 104A — `product_title` was always recoverable; nothing looked it up
+
+`helpers/review_carousel_bridge.py` wrote every candidate with `product_query: ""` **while carrying
+`listing_id`**, so `build_review_carousel_run` substituted its `"Duck review"` placeholder and
+`_distinct_named_products` then dropped it as generic. Three byte-identical captions
+(sha1 `8f9b04fd91ff`) and, underneath them, 133 pool candidates whose slides were all captioned
+"Duck review" — on a lane whose entire premise is naming the product a real customer praised.
+
+**New: `helpers/etsy_listing_titles.py`.** A `listing_id -> title` ladder, cache first:
+
+| Source | Why / why not |
+|---|---|
+| `duck-ops/state/profit_per_product.json` (07:20 producer) | **Used.** For an `etsy`-channel row `sample_product_id` IS the Etsy listing id and `label` is the live title. Free, no network, rebuilt daily. Partial by construction — only products that sold inside the 30-day window — which is stated rather than hidden: 4 of the 5 carousel-eligible candidates, 28 of 55 across the pool. |
+| `duck-ops/state/etsy_listing_map.json` | Rejected: 18 of 275 products mapped (exact-title joins to the Shopify catalog), and it resolved **0 of the 5**. |
+| `duck-ops/state/etsy_title_refresh/my_all_listings.json` | Rejected **despite having all 279 listings with titles** — it is the output of a hand-run script from 2026-09-09 with no producer behind it, so it would rot silently and there would be nothing to notice ([[feedback_verify_the_job_is_firing_first]]). |
+| Etsy API `GET /listings/{id}` | **Used as the fallback.** Authoritative, one call, only on a cache miss, and refused under `DUCK_TEST_MODE` — a GET cannot damage the shop, but a suite making one live read per candidate would spend the rate budget on fixtures. |
+
+Two properties carry the trust, and the tests are mostly about them rather than about the happy path:
+
+- **An unresolved title stays empty.** Not "Duck review", not the handle, not a guess from the
+  quote. The caption builder already reports an empty title loudly and asks for a human caption,
+  which is the correct outcome when we genuinely do not know
+  ([[feedback_plausible_fallbacks_mask_failure]]).
+- **`source` is always recorded, including on a miss (`unresolved` / `no_listing_id`).** An empty
+  title with no provenance cannot be told from a lookup nobody attempted, and a reader cannot tell a
+  cache hit from a guess ([[feedback_a_number_needs_its_denominator]]).
+
+**Display name vs listing title, kept separate.** Etsy titles are keyword-stuffed by design and by
+our own policy (120–140 chars, occasions appended): `ASL I Love You Duck, 3D Printed Dashboard
+Decor, Sign Language Gift` is a good *listing* title and reads as spam in a caption. `display_name`
+takes the first segment, decodes HTML entities (`Mother&#39;s` was live in the data), and — for a
+title with no separator at all — cuts at the clause the description hangs off, because a character
+cut gave `3D Printed Dallas Football Duck with Optional Black and`, a broken phrase that would have
+been read aloud. A result that would end on a connector is trimmed back; a result with no letters
+in it returns empty. The full title is kept in `product_title_full`.
+
+**Non-obvious bug the tests pin: the id spaces must not be mixed.** `sample_product_id` is an Etsy
+listing id only on an `etsy`-channel row; on a `web`/`tiktok`/`ebay` row it is a **Shopify** product
+id. Matching a listing_id against those would resolve to whatever product happened to share the
+number and publish a confidently wrong product name on a slide. `test_a_non_etsy_row_is_ignored`.
+
+**The fix does not land without a backfill.** The carousel picks from the *existing* pool, all of it
+written before the fix, so the bridge change alone would have left the next carousel saying "Duck
+review" while the tests went green. `scripts/backfill_review_candidate_titles.py` is **repeatable,
+not one-shot** — it only ever fills a blank title, never overwrites or blanks one — because a
+candidate can be unresolvable today and resolvable next month as the sales window moves.
+
+Applied: **133 of 133** candidates now carry a title (90 from the cache, 43 from the API), and
+re-running reports `would fill: 0`. Live result, driven through the real builder rather than
+asserted:
+
+- before — `basis: quote_only`, one warning: *"No slide carries a real product title…"*
+- after — `basis: quote_and_products`, **no warnings**, 5 named products, slide labels
+  `3D-Printed Swim Team Ducks` / `3D Printed Dallas Football Duck` / `ASL I Love You Duck` /
+  `Tennessee Volunteers Football Duck` / `Mom Duck with Baby`.
+
+`customer_name` stays empty and that is deliberate: Etsy reviews carry `buyer_user_id` and no name,
+so there is nothing to put there, and "a customer" would read as a real attribution.
+
+**Isolation.** `PROFIT_PER_PRODUCT_PATH` is read-only, so there is no pollution to prevent — the
+other direction is the problem. An autouse conftest fixture redirects it to an absent tmp path,
+because otherwise production state decides a test: "an unknown listing stays unresolved" would pass
+or fail depending on what sold in the last 30 days ([[feedback_pin_the_rule_not_the_reading]]).
+
+**29 + 6 tests.** Sharpness: reverting the bridge line fails 5 of the 6 bridge tests; reverting
+`display_name`'s clause cut fails 1 of 29 with the broken phrase as the diff.
+
+### 104B — non-SMTP outbound, enumerated
+
+Surface 101/102 guarded five SMTP senders and stated its own limit out loud: *"Scope limit, worth
+stating: SMTP only. Non-SMTP outbound (`requests.post` to a mail API, a webhook, a gateway
+shell-out) is still unenumerated."* That sentence is the whole defect class — **"unenumerated" was
+what let four emails and two Shopify videos escape**, not any individual wrong guard.
+
+**The rule is the HTTP verb, not the module.** Not "no network from a test": reads are fine and the
+suite depends on them. The question is the one from [[feedback_test_runs_reach_the_outside_world]] —
+*if the full suite ran right now, what would the outside world notice?* So
+`helpers/outbound_guard.py` passes GET/HEAD/OPTIONS and refuses everything else, including a verb
+added later. That keeps the blast radius near nil (the reviews fetch, the IG container poll and the
+comments read all still work) while the writes stop.
+
+Guarded, 9 sites across 2 repos, 2 of them chokepoints:
+
+| Site | Why there |
+|---|---|
+| `helpers/meta_token_manager.py::make_request` | **Chokepoint.** All nine Meta publish/create/edit calls in `meta_helper.py` route through it. |
+| `helpers/etsy_api_wrapper.py::make_request` | **Chokepoint.** Every Etsy listing create/update/publish/delete. |
+| `helpers/etsy_api_wrapper.py::_refresh_access_token` | The sharpest one — see below. |
+| `helpers/etsy_helper.py` ×3 (image upload, video upload, video delete) | Hand-built multipart; never reach the chokepoint ([[feedback_incomplete_fix_enumerate_all_branches]]). |
+| `helpers/shopify_helper.py` ×2 (staged uploads) | The staged target is Shopify's upload bucket, not the Admin API, so the 2026-10-15 guards did not cover it — and that incident came down this path. |
+| `flows/meme/replace.py` ×2 (delete a scheduled FB post, rewrite its caption) | Raw Graph calls, bypass the token manager. |
+| `src/main_agent.py::_req` | Same. |
+| `trend_pipeline/etsy_token_manager.py` ×2 | A *second* Etsy token manager with the same hazard. |
+| `duck-ops/runtime/google_tasks_bridge.py` ×2 (`_http_json`, token mint) | A task created here lands in the operator's real list. |
+
+**The find worth the whole exercise: a guard in the wrong place was making the outcome worse.**
+Etsy invalidates a refresh token the moment it is used. `_update_env_file` already refused to write
+under `DUCK_TEST_MODE` — so a test run that reached `_refresh_access_token` would **spend the live
+refresh token and then be correctly refused permission to persist its replacement**, leaving `.env`
+holding a dead credential and the shop unreachable with no code change in between. That is the
+recurring "Etsy API death" ([[reference_etsy_two_credentials]]), and the existing guard placement
+made it *more* likely, not less. The guard now sits before the POST, and
+`test_etsy_refresh_token_is_not_spent_under_test_mode` asserts nothing reaches the token endpoint
+at all.
+
+**The allowlist is the deliverable, not the exception list.** 25 duckAgent + 9 duck-ops outbound
+paths that are *not* guarded, each with a specific one-line reason — reads, loopback, interactive
+OAuth setup, paid generation — enforced by `test_every_reason_is_specific` and
+`test_allowlist_has_no_stale_entries`. A category label is how an allowlist stops being an audit.
+
+**Paid generation is named, not guarded, and the reason is specific.** `openai_chat`, the three
+`openai_image_*`, four PhotoRoom calls, six 3D AI Studio calls and `duck-ops`' `call_openai` all
+have mocked-transport tests that legitimately reach them, so a verb guard fires *before* the mock
+and each would need a per-test opt-out. That is a **spend** guard — a different axis from "the
+outside world would notice" — and it gets its own row below rather than being smuggled in here.
+
+**A live hazard found by the enumeration itself:** `trend_pipeline/test_reddit_oauth.py` was named
+`test_*`, sat outside `tests/`, and **pytest collected it** — a bare `pytest` from the repo root
+picked it up and it would have performed a real Reddit OAuth POST. It is a hand-run probe, so it is
+now `probe_reddit_oauth.py`.
+
+**And the audit's own first draft was not sharp.** Neutering the Meta guard left the file with
+invalid syntax, the walk's `except SyntaxError: continue` skipped the file, and the offender vanished
+along with it — so the test passed with the guard removed
+([[feedback_a_failed_probe_is_a_fact_about_the_probe]]). `_scan` now *reports* unparseable files and
+`test_every_scanned_file_parses` fails on them; 254 files parse today, 0 unparseable. With valid
+syntax, the neuter fails the audit by name. Behavioural tests sit beside the structural one in both
+repos, because a guard that is present and wrong looks identical to an AST walk.
+
+**The opt-out has teeth.** 27 existing tests in 4 files stub `requests.post`/`put` and then assert
+on what was sent, so the guard refused ahead of their stub. Clearing the flag alone would also
+excuse a *future* test in those files that stubs nothing, so the
+`reaches_a_mocked_outbound_transport` fixture clears the flag **and swaps the real transport for an
+exploding one** in the same breath — a test that stubs wins, a test that does not gets a loud
+assertion instead of a live write. Same reasoning as the SMTP fixtures: a quiet mock would be worse
+than no mock.
+
+**14 + 8 tests.**
+
+### 104C — a re-sent review email that says it is one
+
+`step_duckvideo_email --force` produced a body byte-identical to the original: headed *"Duck video
+ready for review"*, with no hint that the clip was five weeks old or that two known pipeline faults
+applied to it. Both facts were already in the run state; nothing rendered them. `_resend_note` now
+renders a banner **only on a re-send** (empty string on a first send, so the weekly email is
+unchanged) carrying: first-sent date and age, the render date as a *distinct* fact (a clip can be
+re-sent without being re-rendered), and plain-English versions of the two faults —
+`rembg_failed: No module named 'duck_creative_agent'` becomes *"rendered before the
+background-removal fix: the duck sits on a blurred copy of its own photo"*, and `402
+RESOURCE_EXHAUSTED` becomes *"the Veo prepayment credits were exhausted on this run"*. It leads with
+**"nothing has been published"**.
+
+`test_an_ordinary_cutout_failure_is_not_dressed_up_as_the_env_fault` is the one that matters: an
+image that genuinely defeated background removal is unremarkable, and labelling it with the install
+bug would be the same conflation that hid the install bug for three months, pointed the other way.
+
+**13 tests.**
+
+**Correction to Surface 103.** It recorded "four unreplied duckvideo review emails (10-07, 10-14,
+10-28, 11-04 — all sent, none answered)". **2026-10-14 was never sent**:
+`duckvideo_email_sent_at` is `null` and there is no `duckvideo_publish_result`, though the clip was
+rendered and hosted. Three sent-and-unanswered, one never offered.
+
+**Open, with a home:** a spend guard for paid generation (14 duckAgent + 1 duck-ops call sites,
+listed in each repo's `ALLOWED`), which needs the per-test opt-out treatment and a decision about
+whether a refused LLM call should raise or return a tagged stub.
+
+**Files touched (104):** `duckAgent/helpers/etsy_listing_titles.py` (new),
+`duckAgent/helpers/outbound_guard.py` (new),
+`duckAgent/scripts/backfill_review_candidate_titles.py` (new),
+`duckAgent/helpers/review_carousel_bridge.py`, `duckAgent/helpers/etsy_api_wrapper.py`,
+`duckAgent/helpers/etsy_helper.py`, `duckAgent/helpers/meta_token_manager.py`,
+`duckAgent/helpers/shopify_helper.py`, `duckAgent/flows/meme/replace.py`,
+`duckAgent/flows/duckvideo/steps.py`, `duckAgent/src/main_agent.py`,
+`duckAgent/trend_pipeline/etsy_token_manager.py`,
+`duckAgent/trend_pipeline/probe_reddit_oauth.py` (renamed from `test_reddit_oauth.py`),
+`duckAgent/tests/conftest.py`, `duckAgent/tests/test_outbound_non_smtp_writes.py` (new),
+`duckAgent/tests/test_etsy_listing_titles.py` (new),
+`duckAgent/tests/test_duckvideo_resend_note.py` (new),
+`duckAgent/tests/test_review_carousel_bridge.py`,
+`duckAgent/tests/test_etsy_refresh_token_rotation.py`,
+`duckAgent/tests/test_etsy_listing_video_upload.py`,
+`duckAgent/tests/test_meme_caption_edit.py`, `duckAgent/tests/test_shopify_video_upload.py`,
+`duck-ops/runtime/google_tasks_bridge.py`,
+`duck-ops/tests/test_outbound_non_smtp_writes.py` (new).

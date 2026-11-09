@@ -255,8 +255,8 @@ too few posts per bucket or on one dominant account.
 | 1 | thursday | Publish the vote post waiting in `runs/2026-11-05` | **operator action** — reply `publish <id>` to that run's BATCH REVIEW email. The 10-22 and 10-29 option sets are Halloween and now dead; do not publish them. |
 | 2 | meme + duckvideo captions | Distinct-account floor + relative-margin gate on the steering prior | ✅ shipped |
 | 3 | jeepfact + meme | Facebook GROUP post kit in the review email | ✅ shipped |
-| 4 | duckvideo | Reel cadence 1/month → 2-3/week | **WRONG DIAGNOSIS — closed 2026-11-08.** The lane is wired AND already weekly: `duckvideo.weekly` fires every Wed 09:30, exit 0, ~14 min of real work. It is approval-gated by construction, so the scheduled run lands on `awaiting_approval` and publishes only from an email reply. Of 5 runs in the window, 10-21 was approved; the emails for 10-07, 10-14, 10-28 and 11-04 were all sent and **none was answered**. Raising the cadence produces more unreplied emails, not more posts. **Operator decision, not a code change.** |
-| 5 | review_carousel | `_build_carousel_caption` shipped its generic branch byte-identical 3 weeks running | **✅ shipped 2026-11-08** (Surface 103A). Caption now leads with a real customer review, varies with the candidate set, and closes on a named binary instead of an open question. Degraded cases report a `basis` + warnings instead of emitting plausible prose. |
+| 4 | duckvideo | Reel cadence 1/month → 2-3/week | **WRONG DIAGNOSIS — closed 2026-11-08.** The lane is wired AND already weekly: `duckvideo.weekly` fires every Wed 09:30, exit 0, ~14 min of real work. It is approval-gated by construction, so the scheduled run lands on `awaiting_approval` and publishes only from an email reply. Of 5 runs in the window, 10-21 was approved. **Corrected 2026-11-09:** the emails for 10-07, 10-28 and 11-04 were sent and none was answered, and **10-14 was never emailed at all** — `duckvideo_email_sent_at` is `null` with no `duckvideo_publish_result`, though the clip was rendered and hosted. So: three unanswered, one never offered. Raising the cadence produces more unreplied emails, not more posts. **Operator decision, not a code change.** All four were re-sent 2026-11-09 at the operator's request, each carrying a re-send banner with the clip's age and its known faults (TESTS.md Surface 104C). |
+| 5 | review_carousel | `_build_carousel_caption` shipped its generic branch byte-identical 3 weeks running | **✅ shipped 2026-11-08** (Surface 103A). Caption now leads with a real customer review, varies with the candidate set, and closes on a named binary instead of an open question. Degraded cases report a `basis` + warnings instead of emitting plausible prose. **Slides closed 2026-11-09** (Surface 104A): the bridge now resolves the product title from the `listing_id` it was already carrying, and all 133 existing pool candidates were backfilled, so slides name the real product instead of "Duck review" and the caption moved from `basis: quote_only` with a warning to `quote_and_products` with none. |
 | 6 | jeepfact | Off carousel, onto reel or single image | open, ~half day |
 | 7 | duckvideo | End clips on an A-or-B choice | open, ~1-2 hrs, speculative (stacks an untested mechanic on a proven format) |
 | 8 | measurement | First-party section on `/portal/intel/social` | **✅ shipped 2026-11-08** (TESTS.md Surface 102). Own-follower snapshots still open — no producer writes them yet. |
@@ -346,6 +346,18 @@ Why this is high value:
 - Produces the data needed to evaluate Phase 4.5 ROI: "is the loop worth its cost?"
 
 Pairs naturally with Priority 0 (Phase 4.5) — engagement data + cost data together answer "which flows are worth running."
+
+**Added 2026-11-09 (Surface 104B): the same axis, from the other end — a test-run spend guard.**
+The non-SMTP outbound enumeration now covers every write that the outside world would *notice*
+(Etsy, Meta, Shopify staged uploads, Google Tasks), and it deliberately left **paid generation
+named but unguarded**: `openai_chat`, the three `openai_image_*`, four PhotoRoom calls, six 3D AI
+Studio calls, and `duck-ops`' `call_openai` — 15 call sites, each listed with a reason in the
+`ALLOWED` table of `tests/test_outbound_non_smtp_writes.py` in both repos. They are not guarded
+because each has mocked-transport tests that legitimately reach them, so a verb guard fires *before*
+the mock and every one would need a per-test opt-out. Two decisions are owed before building it:
+whether a refused paid call should raise or return a tagged stub, and whether the ceiling belongs at
+the call site or at the registry. Spend is a different blast radius from "someone outside sees it",
+which is why it was not smuggled into that commit.
 
 ### Priority 0.6: Per-Product Profit Drill-Down (high-ROI #3, queued)
 Audit `/portal/intel/profit` to confirm it answers "which ducks make money, which lose money." If not, add per-SKU profit drill-down following the inspector-page recipe.

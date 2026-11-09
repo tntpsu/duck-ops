@@ -20,6 +20,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from workflow_control import TestModeRefusalError
+
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / "state"
@@ -28,6 +30,39 @@ DUCKOPS_ENV_PATH = ROOT / ".env"
 TASKS_STATE_PATH = STATE_DIR / "google_tasks_custom_design_tasks.json"
 
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+_OUTBOUND_TEST_MODE_ENV = "DUCK_TEST_MODE"
+_OUTBOUND_TEST_MODE_TRUTHY = frozenset({"1", "true", "TRUE", "yes"})
+_OUTBOUND_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _refuse_outbound_write_under_test_mode(method: str, descriptor: str) -> None:
+    """A task created here lands in the operator's real Google Tasks list.
+
+    The repo's outbound convention had only ever covered SMTP (five senders,
+    2026-11-08) -- its own audit said so: "Non-SMTP outbound (`requests.post`
+    to a mail API, a webhook, a gateway shell-out) is still unenumerated."
+    This is that gap on the Google Tasks channel.
+
+    Unconditional, like the other outbound guards in this repo and unlike the
+    path-based ones: `workflow_control._refusing_test_mode_prod_write` refuses
+    only on the frozen prod path so a tmp-isolated test can still write, but
+    there is no tmp Google Tasks list. GET passes -- listing tasklists and
+    reading existing tasks change nothing.
+    """
+    if str(method or "").strip().upper() in _OUTBOUND_READ_METHODS:
+        return
+    import os
+
+    flag = str(os.environ.get(_OUTBOUND_TEST_MODE_ENV) or "").strip()
+    if flag not in _OUTBOUND_TEST_MODE_TRUTHY:
+        return
+    raise TestModeRefusalError(
+        f"Refusing a {str(method).upper()} to Google Tasks under "
+        f"{_OUTBOUND_TEST_MODE_ENV}=1 ({descriptor}). It would appear in the "
+        "operator's real task list and no test run could take it back. Mock "
+        "_http_json / fetch_google_access_token in this test, or clear the flag "
+        "for one deliberate live call.")
 GOOGLE_TASKLISTS_URL = "https://tasks.googleapis.com/tasks/v1/users/@me/lists"
 GOOGLE_TASKS_URL_TEMPLATE = "https://tasks.googleapis.com/tasks/v1/lists/{tasklist_id}/tasks"
 GOOGLE_TASK_URL_TEMPLATE = "https://tasks.googleapis.com/tasks/v1/lists/{tasklist_id}/tasks/{task_id}"
@@ -100,6 +135,7 @@ def google_tasks_config(env: dict[str, str] | None = None) -> dict[str, Any]:
 
 
 def _http_json(url: str, *, method: str = "GET", headers: dict[str, str] | None = None, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+    _refuse_outbound_write_under_test_mode(method, f"url={url}")
     body = None
     req_headers = dict(headers or {})
     if payload is not None:
@@ -128,6 +164,9 @@ def fetch_google_access_token(config: dict[str, Any]) -> tuple[str | None, dict[
     client_secret = str(config.get("client_secret") or "").strip()
     if client_secret:
         token_payload["client_secret"] = client_secret
+    # A separate urlopen from _http_json, so it needs its own guard. Minting
+    # an access token is a POST that spends the operator's refresh token.
+    _refuse_outbound_write_under_test_mode("POST", "mint a Google access token")
     data = urllib.parse.urlencode(token_payload).encode("utf-8")
     request = urllib.request.Request(
         GOOGLE_TOKEN_URL,
