@@ -5450,6 +5450,43 @@ first frame (`DUCKVIDEO_STAGED_FRAME`, still unwired), not a fourth rewrite. Rec
 the concept's own `_measured_2026_11_09` note so it survives this session
 ([[feedback_residual_risk_needs_a_tracked_home]]).
 
+### The staged first frame, measured the same way (2026-11-09, ~$3)
+
+The claim above — that three late-stage failures of one text prompt argue for a staged
+keyframe — was then tested rather than asserted. Three generations from the existing
+`duckvideo_staged_frame/staged_frame_corrected.png` (1080p, `image_to_video`, the
+operator-approved staged prompt), scored on the same three defects:
+
+| | duck scale vs the vent | wipers still | duck visibly taken and carried out |
+|---|---|---|---|
+| staged 1 | ✓ | ✓ | ✓ |
+| staged 2 | ✓ | ✓ | ✓ |
+| staged 3 | ✓ | ✓ | ✓ |
+
+**3 of 3, against 0 of 3 for the text-only prompt.** The generalisation is stronger than
+"relocation beats prohibition": for anything **present at t=0**, staging beats wording
+outright. The wipers hold still in all three not because a sentence forbids motion but
+because their position is pinned by the frame — the same reason the duck keeps its size
+and its costume.
+
+What staging does **not** buy is the cupped-palm articulation. All three grip or rest the
+duck on the hand rather than closing a palm around it. That is consistent with the
+prototype's own note — *staging pins only objects present at t=0*, and the hand enters at
+4s — and it is the same limit the 11-07 session recorded. The sales beat still reads
+correctly in all three: a large gloved hand takes a small duck and carries it away.
+
+**Caveats, stated rather than buried.** The staged frame holds the Elf duck, not Rudolf,
+so nothing here speaks to costume fidelity across the two sets. And the staged prompt is
+not the concept's prompt — it opens "Animate this exact first frame forward in time" —
+so staging and wording moved together. That confound is inherent to the method, not a
+loose variable that could have been held still.
+
+**Not wired.** Per-product staging needs an erased dashboard plate (reusable), the
+product's duck composited at a known pixel size, and a harmonise pass whose prompt must
+contain "its base must stay on the same row of the image" or the image model silently
+shrinks the duck ~10%. Four scripts for that exist in `duckvideo_staged_frame/scripts/`
+and none is reachable from a flow.
+
 **Open gap, no test yet:** nothing in the suite can fail on a wiper that moves or a
 costume that vanishes — both are eyes-only. A judge-style literal-field check
 (`wiper_visible_moving?` / `costume_present?`) on the review frames is the shape that
