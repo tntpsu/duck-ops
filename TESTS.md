@@ -5321,3 +5321,108 @@ queue. Would need a label/thread read, not a send-time timestamp.
 `duckAgent/tests/test_no_test_pollution_in_run_state.py` (new),
 `duckAgent/tests/test_duckvideo_resend_note.py`, `duckAgent/flows/duckvideo/steps.py`,
 `duckAgent/runs/2026-10-28/state_duckvideo.json` (restored; not in git).
+
+---
+
+## Surface 106 — the duckvideo manual-post handoff, and a negative prompt nobody sent
+
+Two defects found on 2026-11-09 while answering a question that was not about either:
+*"are the 4 duck videos even good for a top tier video?"* Both were invisible because
+each failed toward a plausible result rather than an error
+([[feedback_plausible_fallbacks_mask_failure]]).
+
+### 106A — `skipped_manual_post` read as an approval stall
+
+`DUCKVIDEO_MANUAL_POST` clips end at `duckvideo_publish_status = "skipped_manual_post"`:
+DuckAgent deliberately does not post them and the operator posts them by hand with
+their own audio. `_load_duckvideo_lane_health` counted any non-empty publish status as
+"approved, awaiting a posted receipt", so a clip that can never produce
+`duckvideo_posts.json` went RED at 48h, forever. On 2026-11-09 the card's only red was
+the lane's two best videos (`rudolf-snow-2026-11-04`, `rudolph-santa-v3-2026-11-04`),
+both working exactly as designed — and the real alarm the card exists for was
+indistinguishable from that noise.
+
+Excluding them would have been the easy fix and the wrong one: **no API reports an
+Instagram post made by hand**, so a handoff the operator never completes is a genuine
+failure this lane is otherwise blind to. The review email even said *"there is no reply
+to send"* — true of publishing, false of everything after it. Per
+[[feedback_auto_manual_queue_contract]], a manual lane stays visible WITH a why rather
+than being hidden or promoted.
+
+| Use case | Happy | Terminal-state confusion | Operator never posts | No run id | Spelling drift |
+|---|---|---|---|---|---|
+| Manual-post clip, fresh | unit:lane_health:manual_post_handoff_is_not_an_approval_stall | — | — | — | — |
+| Manual-post clip past grace | — | — | unit:lane_health:manual_post_unconfirmed_past_the_grace_is_yellow_not_red | — | — |
+| Operator confirms by reply | unit:manual_post_receipt:stamps_the_run_and_tells_the_operator | unit:lane_health:operator_confirmation_closes_the_handoff | — | unit:manual_post_receipt:fails_closed_without_a_run_id | — |
+| Both receipts present | unit:lane_health:a_confirmed_manual_post_is_counted_once | — | — | — | — |
+| Genuine agent-approval stall | — | unit:lane_health:a_real_approval_stall_is_still_red | — | — | — |
+| Reply token parsing | unit:manual_post_receipt:the_documented_forms_are_accepted | unit:manual_post_receipt:does_not_hijack_a_reply_that_merely_mentions_posting | — | unit:manual_post_receipt:fails_closed_when_the_run_has_no_saved_state | unit:manual_post_receipt:card_watches_the_status_the_flow_actually_writes |
+| Email asks for the token | unit:manual_post_receipt:the_manual_post_branch_names_the_token | unit:manual_post_receipt:no_longer_claims_there_is_nothing_to_reply | — | — | — |
+
+Grace is **7 days**, not the 48h agent rule: a hand-posted clip waits on a human, not a
+queue drain ([[feedback_two_card_observability_bracket]] — grace ≥ the lane's pacing).
+`infer_reply_action` gained `posted`, kept deliberately narrow (`^posted` or
+`duckvideo posted`) because an inferred action OVERRIDES the subject's `ACTION`
+metadata, so a loose `\bposted\b` would hijack replies in every other lane
+([[feedback_pin_the_rule_not_the_reading]]).
+
+### 106B — `defaults.negative_prompt` had no consumer
+
+The old renderer passed `negative_prompt=` to `models.generate_videos`. The 2026-11-04
+migration to `interactions.create` (`2afcbad`, *"Migrate the motion renderer off Veo,
+which no longer exists"*) dropped the argument. **Nothing read the key after that**, and
+nothing said so, because it stayed in `config/duckvideo_motion_concepts.json` looking
+live and load-bearing. `grep -rn negative_prompt helpers/ flows/` returns the gtdf lane
+and `duck_style_system`, and no duckvideo caller at all.
+
+Visible cost: the 2026-11-04 `rudolf-snow` clip rendered the duck as a soft plush toy
+while `"plush, felt, fuzzy texture"` sat in the config, and the 2026-10-07 clip morphed
+the duck's beak and eyes while `"morphing"` sat two words away. Both read as *the model
+ignoring a guardrail*. The guardrail was never sent
+([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
+
+| Use case | Happy | Empty config | Concept needs a banned term | Caller drops the arg | Exception goes stale |
+|---|---|---|---|---|---|
+| Avoid line reaches the prompt | unit:negative_prompt:terms_reach_the_prompt | unit:negative_prompt:no_defaults_means_no_line | — | — | — |
+| Santa-grab keeps its hand | — | — | unit:negative_prompt:human_hands_is_dropped_for_the_grab_concept | — | — |
+| Other concepts still ban hands | unit:negative_prompt:other_concepts_still_ban_hands | — | — | — | — |
+| Every call site passes defaults | — | — | — | unit:negative_prompt:production_callers_pass_defaults (AST) | — |
+| Exceptions stay honest | — | — | — | — | unit:negative_prompt:every_exception_names_a_live_concept, unit:negative_prompt:every_excepted_term_is_actually_banned |
+| Live config end to end | unit:negative_prompt:the_live_negative_prompt_reaches_a_real_prompt | — | — | — | — |
+
+The one exception is real, not cosmetic: the global list bans `human hands` because a
+stray hand in a dashboard shot is nearly always a hallucination, while
+`snowy_dashboard_santa_grab_v1`'s entire second beat **is** a gloved hand lifting the
+duck. Sending the list verbatim tells the model to omit the subject of the clip. The
+exception lives in code next to its reason, and two tests reject it the moment the
+concept or the term disappears ([[feedback_residual_risk_needs_a_tracked_home]]).
+
+Phrased as "Do not include" and kept to the residue only: this model answers RELOCATION
+over prohibition ([[reference_veo_motion_gotchas]]), so the load-bearing guardrails stay
+positive and per-concept in `guardrails`. There is no positive form of "no watermark".
+
+### Measured, 2026-11-09 (gated eval, real spend ~$1)
+
+`scripts/eval_duckvideo_motion.py --concept snowy_dashboard_santa_grab_v1 --seconds 8`
+against the live Rudolf Reindeer photo: **59s, native 1080x1920, 5.9 MB, probe checks
+passed**, and by eye the two defects the config's own `_revised_2026_11_07` note had
+left open are both gone — the duck reads clearly smaller than the dashboard air vent,
+and the lift renders as a palm-up scoop with the duck sitting INSIDE the cupped palm,
+fingers below and thumb alongside, carried out of frame still visible. That grip
+geometry was recorded as **DISPROVED** on 2026-11-07, when the same wording still
+produced a fist around the duck's middle plus a second elf arm.
+
+**n=1, and two variables moved at once** (the negative list became live for the first
+time since 11-04, and resolution went 720p→1080p native). The success is recorded; the
+*attribution* is not claimed ([[feedback_a_number_needs_its_denominator]]). Residual:
+the white body still reads faintly felted.
+
+**Files touched (106):** `duckAgent/creative_agent/runtime/src/duck_creative_agent/viewer.py`,
+`duckAgent/creative_agent/runtime/tests/test_duckvideo_lane_health.py`,
+`duckAgent/src/main_agent.py`, `duckAgent/flows/duckvideo/steps.py`,
+`duckAgent/helpers/duck_video_motion_helper.py`,
+`duckAgent/scripts/eval_duckvideo_motion.py`,
+`duckAgent/tests/test_duckvideo_manual_post_receipt.py` (new),
+`duckAgent/tests/test_duckvideo_negative_prompt_is_sent.py` (new),
+`duckAgent/runs/rudolph-santa-v3-2026-11-04/state_duckvideo.json` (operator confirmed
+the manual post in session; stamped with its source, not in git).
