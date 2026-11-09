@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-09-13
+Last updated: 2026-11-08 (social reach improvement roadmap added; sections below still carry their own dated audit notes)
 
 ## Document Ownership
 
@@ -192,6 +192,58 @@ Companion docs:
 - Monday review email is installed.
 - Reply apply/publish activates only ready Shopify drafts and leaves blocked drafts alone.
 - Quality suggestions are surfaced separately from blocking issues.
+
+## Social Reach Improvement Roadmap (measured 2026-11-08, month-one baseline)
+
+Derived from a full read of our own output for 2026-10-09 → 2026-11-08: **13 Instagram posts, 747
+total reach, median 40 per post, 81 likes, 7 comments, 1 save; 11 Facebook posts, 0 link clicks
+across the 8 with readable metrics.** At this scale a 2-vs-4-like difference is noise, so only
+patterns that repeated, or that an independent dataset confirmed, are listed as actionable.
+
+**What the data actually supports.**
+1. **Format ordering: reel > image > carousel.** HIGH confidence — the only finding that replicated
+   in two independent samples. Ours: 36.4 / 21.5 / 10.0 reach per post. Competitors (72 posts,
+   excluding the one 104k account): same order, reel visible on 7 accounts with none above 22%.
+2. **A named A-or-B choice earns comments; an open question does not.** MEDIUM — 6 posts asking an
+   open question earned 0 comments between them; 2 naming two options earned 5. 6.58 comments per
+   100 reach against 0.00. Mechanically plausible and cheap to act on.
+3. **The Page is not where the audience is.** Operator 2026-11-08: *"I am not being seen because we
+   aren't posting in a group."* The earlier read ("Facebook is dead") was the wrong conclusion from
+   the right number.
+
+**Discarded as confounded** — best posting time, best hook family, best theme/duck. Each rested on
+too few posts per bucket or on one dominant account.
+
+**Lane changes, ranked. ✅ = shipped 2026-11-08 (TESTS.md Surface 101).**
+
+| # | Lane | Change | State |
+|---|---|---|---|
+| 1 | thursday | Publish the vote post waiting in `runs/2026-11-05` | **operator action** — reply `publish <id>` to that run's BATCH REVIEW email. The 10-22 and 10-29 option sets are Halloween and now dead; do not publish them. |
+| 2 | meme + duckvideo captions | Distinct-account floor + relative-margin gate on the steering prior | ✅ shipped |
+| 3 | jeepfact + meme | Facebook GROUP post kit in the review email | ✅ shipped |
+| 4 | duckvideo | Reel cadence 1/month → 2-3/week | open — pipeline exists, lane unwired |
+| 5 | review_carousel | `_build_carousel_caption` shipped its generic branch byte-identical 3 weeks running | open, ~1 hr |
+| 6 | jeepfact | Off carousel, onto reel or single image | open, ~half day |
+| 7 | duckvideo | End clips on an A-or-B choice | open, ~1-2 hrs, speculative (stacks an untested mechanic on a proven format) |
+| 8 | measurement | First-party section on `/portal/intel/social` + own-follower snapshots | open, ~1 hr + page |
+
+**Why #3 is a hand-off and not an integration.** Verified against Meta's own Graph API v19.0
+changelog: `publish_to_groups` and the Groups API were **removed 2024-04-22**, and no current
+version exposes an endpoint that creates a post in a group. This will not become automatable; the
+kit automates the rewrite instead. Group reach is also not readable through any API, so group
+effect is **operator-reported or unmeasured** — do not expect a number for it next month.
+
+**Measurement gap this roadmap does not close.** `/portal/intel/social` is competitor-only: all six
+of its render sections read `competitor_social_benchmark.json` and `competitor_social_snapshots.json`.
+Our own `social_performance_posts.json` has a daily producer (`social_performance_collector.py`,
+06:35) and **no reader surface** — its only consumers turn it into prose in emails
+([[feedback_email_to_portal_inversion]]). Until item 8 lands, next month's comparison is a manual
+re-read, not a page refresh.
+
+**Baseline to beat next month** (Instagram unless noted): 747 reach, median 40, 81 likes, 7
+comments, 1 save, 1 reel, 7 carousels, 0 Facebook link clicks. Each change above carries its own
+target so the comparison is per-lane rather than one blended number that cannot say which change
+worked.
 
 ## Highest-Value Open Work
 

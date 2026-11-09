@@ -1781,6 +1781,42 @@ every single-mode week. Not fixed here (the ask was a replacement video, not the
 needs a `handoff_ready` gate in prepare plus a look at how that entry got `operator_confirmed`.
 [[feedback_pin_the_rule_not_the_reading]] — `match_score: 1` is a stored reading, not a rule.
 
+**Santa-grab concept corrected from measured results (2026-11-07, operator: "do the first two").**
+Three findings from the staged-frame session folded into
+`config/duckvideo_motion_concepts.json` v15→v16, each measured, not reasoned:
+(1) **`clip_seconds` 10 → 8** and `limits.max_clip_seconds` 10 → 8. Byte-identical
+snow wording produced a clean cabin at 8s and drifted snowflakes INSIDE the cabin
+at 10s, twice. Duration was the variable. (2) **the cabin-snow guardrail is now a
+RELOCATION** ("ALL falling snow is outside, on the far side of the glass") rather
+than a prohibition — the ban failed twice, the relocation held first try.
+(3) **the hand is sized against the round dashboard air vent**, not "over half the
+frame height": a frame fraction is not checkable against anything in the scene,
+and it still rendered the hand ~2.2x too small. Also `defaults.resolution`
+720p → **1080p**: the API accepts it and returns true native 1080x1920 at ~4 Mbps,
+where 720p returns 720x1280 and `normalize_motion_video` lanczos-upscales it — so
+every clip shipped before this was a 720p upscale (verify by ffprobing the RAW
+file; the normalized one is 1080x1920 either way).
+
+**Five tests in `TestTheSantaGrabConcept` were defending the bug** and had to be
+rewritten before the fix could land: `clip_seconds == 10`, `max_clip_seconds >= 10`,
+and three asserting the exact prohibition/frame-height wording we had just
+disproved. Each now asserts the RULE (`clip_seconds <= 8` as a measured ceiling;
+cap >= this concept's length; the cabin-clear and in-palm intents satisfied by
+either phrasing) with the superseded wording kept as an accepted alternative.
+A sixth latent bug: `_last_beat` replaces `.split("[6-10s]")`, which after the
+retiming returned the WHOLE prompt and passed by accident. Sharpness verified by
+re-injecting all four regressions — 4 of the rewritten tests fail. 171 duckvideo
+tests green. [[feedback_pin_the_rule_not_the_reading]], 7th+ instance.
+
+**NOT fixed, and the lane still ships it:** the duck renders oversized on this
+concept. Correct scale needs the staged first frame (composite the duck onto an
+erased dashboard plate at a known pixel size, pass as frame 1 via
+`image_to_video` rather than `reference_to_video`), which is **not wired** —
+no `DUCKVIDEO_STAGED_FRAME` path exists. Working artifacts, the corrected plate
+and the exact prompts are parked outside git at
+`ai-agents/duckvideo_staged_frame/`. The grip guardrail rewrite (fist → open
+palm) is **inference, not measurement** — it has never been generated.
+
 ## Surface 64b — duckvideo enhancements: multi-duck montage + local cutout-on-backdrop (SPEC-FIRST 2026-08-09, operator: "should the photo based ones have a background? ... fade in and out for other ducks")
 
 **Design:** montage = photos-only collection reel (3-5 ducks, per-duck scrim labels, one hook/one approval; turntable renders stay the single-duck format — operator-confirmed split). Selection ladder occasion→trending→theme, strategies NEVER mix; trending source = `trend_candidates.json` `signal_summary.trending_score`/`sold_last_7d` via `catalog_match.matching_products` (`demand_intel.json` REJECTED — stale since 07-03). Mode: `DUCKVIDEO_MODE=single|montage|auto`, auto = even-ISO-week proposes montage, data disposes (≥3 ducks or single fallback with recorded reason). Cutout: reuse meme lane's local rembg (`studio_image._rembg_remove_background`, u2net, ~0.4s warm, models cached in ~/.u2net) — deterministic mask gate (alpha coverage 0.15-0.90, bbox sanity), ALL-or-nothing per video, fallback to blurred-self with `cutout_fallback_reason` ([[plausible fallbacks]]). Kill switches: `DUCKVIDEO_CUTOUT=off`, `DUCKVIDEO_MODE=single`.
@@ -4452,3 +4488,174 @@ repeating the string, and why the sequence assertion is universally quantified),
 field has to reach the form), [[feedback_residual_risk_needs_a_tracked_home]] (the one-licence
 ambiguity is recorded here rather than left as prose),
 [[feedback_etsy_title_tag_policy]] (the sibling gate that also enforces copy policy on tags).
+
+## Surface 101 — The group we were never posting to, and the ad we were quoting as advice (2026-11-08)
+
+Two changes from one month-long read of our own social output (13 Instagram posts, 747 total
+reach, median 40; 11 Facebook posts, 0 link clicks across the 8 with readable metrics).
+
+**A. The Facebook finding was right and the recommendation was wrong.** The data said Facebook
+produced nothing. The reason was not Facebook — operator 2026-11-08: *"I don't want to stop
+Facebook, I am not being seen because we aren't posting in a group. If u can't then I will have to
+manually do after."* The Page has a 3-digit audience; the Jeep audience is in groups. Verified
+against Meta's own Graph API v19.0 changelog, not a blog: `publish_to_groups` and the Groups API
+were **removed 2024-04-22**, and no current version exposes an endpoint that creates a post in a
+group. So group posting is permanently a human action, and the automatable part is the rewrite, not
+the post. `helpers/group_post_kit.py` builds the group-shaped caption and the lane review emails
+carry it as paste-ready text. No new reply, no change to the `ACTION:` tag — the one approval being
+asked for is still the one scheduled post, so nothing new enters the decision queue
+([[feedback_auto_manual_queue_contract]]).
+
+| Use case | Happy | Nothing to remove | Empty source | Only promo | Real archived caption | Ordinary prose |
+|---|---|---|---|---|---|---|
+| Strip hashtag wall | unit:`test_hashtag_wall_is_removed`, `test_lane_supplied_multiword_hashtags_go_as_a_unit` | unit:`test_a_no_op_rewrite_is_labelled_unchanged` | unit:`test_an_empty_caption_is_unavailable_not_blank_output` | unit:`test_a_caption_that_was_only_promo_reports_emptied` | unit:`test_a_bare_domain_is_still_a_promo_link` | n/a |
+| Strip promo links | unit:`test_promo_links_are_removed`, `test_a_bare_domain_with_a_path_goes_too` | unit:`test_the_block_never_claims_a_removal_it_did_not_make` | n/a | unit:`test_a_caption_that_was_only_promo_reports_emptied` | unit:`test_a_bare_domain_is_still_a_promo_link` | unit:`test_ordinary_prose_is_not_mistaken_for_a_domain` |
+| Strip "link in bio" / shop CTA | unit:`test_link_in_bio_sentence_is_removed_not_just_the_phrase`, `test_shop_cta_is_removed` | n/a | n/a | n/a | n/a | n/a |
+| No truncation artifacts | unit:`test_an_orphaned_link_label_goes_with_the_link` | unit:`test_a_label_with_real_content_is_kept` | n/a | n/a | unit:`test_an_orphaned_link_label_goes_with_the_link` | n/a |
+| Classify what it closes on | unit:`test_an_existing_binary_ask_is_recognised_as_already_good` | unit:`test_a_statement_close_is_named_as_a_statement` | n/a | n/a | unit:`test_an_existing_open_question_is_not_called_a_statement` | n/a |
+| Never invent an ask | unit:`test_no_generic_question_is_invented` | unit:`test_a_duplicated_ask_is_not_repeated` | n/a | n/a | n/a | n/a |
+| Render the hand-off | unit:`test_the_block_carries_paste_delimiters`, `test_the_block_explains_why_there_is_no_publish_button` | unit:`test_the_block_never_claims_a_removal_it_did_not_make` | unit:`test_an_unusable_kit_renders_as_a_refusal_not_an_empty_box` | n/a | manual:rendered against `runs/2026-11-04/state_jeepfact.json` | n/a |
+| Receipt honesty | unit:`test_the_receipt_records_the_basis_so_no_ops_are_countable` | unit:`test_the_receipt_records_the_basis_so_no_ops_are_countable` | n/a | n/a | n/a | unit:`test_posted_is_never_inferred` |
+| No outbound side effects | unit:`test_the_module_sends_nothing` | n/a | n/a | n/a | n/a | n/a |
+
+**The fixtures passed and the real caption failed, twice.** Per
+[[feedback_real_generation_test_beats_mocks]] the kit was run against the live 2026-11-04 jeepfact
+caption after all 22 fixture tests were green, and it found two defects neither fixture reached:
+
+1. `🦆 Shop our Jeep ducks: myjeepduck.com` **survived**. The URL pattern required a scheme or
+   `www.`; a bare domain is still a promo link to a group moderator. Fixed with `_BARE_DOMAIN_RE`,
+   plus `test_ordinary_prose_is_not_mistaken_for_a_domain` so the broader pattern cannot start
+   eating sentences ("CJ-2A", "12,778").
+2. The caption closes on `💡 Which fact surprised you the most?` — an **open** question, the exact
+   shape measured at 0 comments — and the kit's note said it "closes on a statement". A confidently
+   wrong note, on every Wednesday post. `_ask_warning` now classifies the close as binary / open /
+   none and quotes the question back.
+3. Removing the link then left `🦆 Shop our Jeep ducks:` dangling, which reads as a truncation bug
+   to whoever sees the post. `_DANGLING_LABEL_RE` takes the orphaned label with the link.
+
+**Measurement is honestly bounded.** Group reach, impressions and clicks are not readable through
+any API. `group_post_kit_receipt` therefore counts kits PRODUCED and pins `posted_confirmed: None`
+— operator-reported, never inferred ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]). A
+reply token to confirm posting was deliberately NOT built: it would mean changing `infer_action`,
+the reply parser every lane shares, to buy a self-reported number. Tracked as the open follow-up
+rather than left as prose ([[feedback_residual_risk_needs_a_tracked_home]]).
+
+**B. The steering prior was quoting a competitor's sponsored ad as advice.** `_social_priors`
+already median-ranked with a `post_count >= 3` gate, so one viral POST could not flip it — but
+nothing defended against one dominant ACCOUNT. Live measurement 2026-11-08:
+
+| hook family | posts | distinct accounts | top-account share | median |
+|---|---|---|---|---|
+| statement_showcase | 36 | 7 | 0.25 | 26.46 |
+| engagement_prompt | 30 | 6 | 0.23 | 25.02 |
+| cta_merchandising | 12 | **2** | **0.92** | **3003.54** |
+
+`cta_merchandising` cleared the post-count gate on 12 posts from 2 accounts, 92% of them
+f3dprinted (104k followers against our 3-digit reach), so the family's median WAS that one
+account's median — and `social_priors_prompt_line` was injecting *"the best-performing caption
+style right now is cta_merchandising on reels (e.g. "3D Printed Ultimate Onion Slicer Printed on
+the Snapmaker U1, link in bio!")"* into every meme and duckvideo caption prompt.
+
+| Use case | Happy | One dominant account | Nothing clears the floor | Photo finish | Unopposed | All zero |
+|---|---|---|---|---|---|---|
+| Measure concentration | unit:`test_concentration_is_measured_not_inferred_from_post_count` | unit:`test_concentration_is_measured_not_inferred_from_post_count` | n/a | n/a | n/a | n/a |
+| Pick a hook prior | unit:`test_a_label_concentrated_on_one_account_is_not_a_prior` | unit:`test_a_label_concentrated_on_one_account_is_not_a_prior` | unit:`test_no_family_clearing_the_floor_yields_no_hook_prior` | unit:`test_a_photo_finish_is_not_a_prior`, `test_the_margin_is_relative_not_absolute` | unit:`test_an_unopposed_label_needs_no_margin` | unit:`test_an_all_zero_board_is_not_a_prior` |
+| Pick a format prior | unit:`test_a_broad_format_still_clears_the_floor` | unit:`test_a_broad_format_still_clears_the_floor` | n/a | unit:`test_a_clear_lead_is_a_prior` | n/a | n/a |
+| Example hooks | unit:`test_sample_hooks_only_ever_illustrate_the_winning_family` | unit:`test_a_suppressed_family_carries_no_examples` | unit:`test_a_suppressed_family_carries_no_examples` | n/a | n/a | n/a |
+| Thin overall sample | n/a | n/a | unit:`test_a_thin_sample_still_yields_no_priors_at_all` | n/a | n/a | n/a |
+| Prompt line composition | unit:`test_valid_priors_yield_steering_line` | unit:`test_format_only_priors_still_steer` | unit:`test_neither_half_yields_empty_line` | unit:`test_format_only_line_makes_no_caption_claim` | n/a | unit:`test_no_literal_none_ever_reaches_a_prompt` |
+| No leak through examples | unit:`test_suppressed_hook_never_leaks_through_sample_hooks` | unit:`test_suppressed_hook_never_leaks_through_sample_hooks` | n/a | n/a | n/a | n/a |
+| Operator-facing render | unit:`test_a_fully_populated_prior_gets_no_suppression_note` | unit:`test_a_suppressed_prior_never_renders_the_word_none` | unit:`test_the_card_explains_why_it_was_suppressed` | n/a | unit:`test_the_surviving_prior_is_still_shown_alongside_a_suppressed_one` | n/a |
+
+**The matrix caught a bug before the first edit, which is the whole point of writing it first.**
+`load_social_priors()` returned `None` unless `winning_hook_family` was set. Suppressing the bad
+hook family would therefore have silently discarded `winning_format: reel` as a side effect — and
+the format ordering reel > image > carousel is the **one** finding that replicated independently in
+both samples (competitors: reel on 7 accounts, no account above 22%; ours: 36.4 vs 21.5 vs 10.0
+reach per post). Fixing the confounded half would have thrown away the sound half. The reader now
+accepts either half and the format-only line says out loud that it is making no caption claim.
+
+**A second gate the floor alone did not cover.** With `cta_merchandising` removed,
+statement_showcase led engagement_prompt 26.46 to 25.02 — a 5.8% gap on 36 vs 30 posts, which is
+noise, and shipping it would have told every caption prompt that statements beat asks: the exact
+opposite of our own measurement (6.58 comments per 100 reach on a named A-or-B choice, against
+0.00 across six open questions). `_PRIORS_MIN_MEDIAN_MARGIN = 0.20` requires a prior to be able to
+lose. The margin is **relative**, not absolute, because +1.0 is decisive at median 2 and noise at
+median 100 ([[feedback_pin_the_rule_not_the_reading]]).
+
+**Live result, verified end to end.** Benchmark rebuilt (pure recompute, no network); the prompt
+line every caption now receives is: *"Competitor intel (directional steer, not a rule): the
+best-performing format right now is reel. No caption style is being recommended — no hook family
+has enough independent accounts behind it to be worth copying, so write the hook on its own
+merits."* The onion slicer is gone. Sharpness: dropping the account floor to 1 fails 3 of the new
+collector tests.
+
+**A stale-bytecode trap, recorded because it produced a confident wrong reading mid-session.**
+Verifying sharpness by editing `_PRIORS_MIN_LABEL_ACCOUNTS = 3` to `1` and restoring the file with
+`cp` left `3` on disk and `1` in the loaded module: the restore landed inside the same mtime second
+AND `3`→`1` is byte-identical in length, so CPython's mtime+size pyc validation passed and served
+the floor-1 bytecode. `grep` said 3, the module said 1, and the tests "failed after being
+restored". Delete `__pycache__` before trusting any same-second, same-size restore.
+
+**Files touched.** duckAgent: `helpers/group_post_kit.py` (new), `tests/test_group_post_kit.py`
+(new, 29), `helpers/social_priors.py`, `tests/test_social_priors.py` (+5),
+`flows/meme/steps.py::step_meme_email`, `flows/jeepfact/steps.py::step_jeepfact_email`,
+`creative_agent/runtime/src/duck_creative_agent/social_intel_page.py::_render_social_priors`,
+`creative_agent/runtime/tests/test_social_intel_page.py` (+4). duck-ops:
+`runtime/competitor_social_benchmark_collector.py` (`_top_dimensions`, `_social_priors`),
+`tests/test_competitor_social_benchmark_collector.py` (+13).
+
+**C. Driving the real surface found an unguarded outbound sender — the most serious thing here.**
+The group kit and the priors card were both verified on the live surface rather than in tests only:
+`/portal/intel/social` was curled and its priors card reads `winning_hook_family — not steering —
+suppressed` with the explanation note (no literal "None"), and the jeepfact review email was
+rendered end-to-end from a copy of `runs/2026-11-04` under `DUCK_TEST_MODE=1`.
+
+**That render sent a real email to the operator.** `helpers/email_helper.send_email` has carried a
+`DUCK_TEST_MODE` guard since the four-email incident; `email_summary` — 90 lines below it in the
+same module — builds its own `EmailMessage` and dials `smtplib.SMTP` directly and had **no guard at
+all**. Every lane review email (jeepfact, meme, thursday, newduck, weekly_sale, reviews…) goes out
+through `email_summary`, not through `send_email`. The run printed *"Review email sent
+successfully"*, captured nothing in the outbox, and delivered. **10+ existing test files reach
+`email_summary` and `tests/conftest.py` does not mock it** — it only sets the env var the unguarded
+path never read. That asymmetry is almost certainly the mechanism behind the original incident; the
+rule was written up as "tests must not write prod STATE" and the outbound half was only ever
+enforced on one of the module's two senders.
+
+| Use case | Happy | Under DUCK_TEST_MODE | With attachments | Env absent at import | Both senders |
+|---|---|---|---|---|---|
+| `email_summary` sends | manual:real send verified pre-fix (a real email reached the operator) | unit:`test_email_summary_does_not_send_under_test_mode` | unit:`test_attachments_do_not_sneak_past_the_guard` | unit:`test_the_guard_reads_the_env_at_call_time` | unit:`test_both_senders_are_guarded_not_just_one` |
+| Body is inspectable | n/a | unit:`test_email_summary_captures_what_would_have_been_sent` | n/a | n/a | n/a |
+
+Tests dial a monkeypatched `smtplib.SMTP` that raises, so a regression fails loudly instead of
+mailing someone. Sharpness: removing the guard fails 4 of the 5.
+
+**Operator-surface assertions, on the rendered email rather than on tests.** `ACTION:review`
+unchanged (the group kit adds no new action tag and no reply for the operator to send, so the
+auto/manual queue contract is untouched and nothing new enters the decision queue); the `Approve`
+section still carries its visible "why you're seeing this"; sections render inside
+`<pre style="white-space:pre-wrap">`, so the copy block keeps its newlines and wraps instead of
+overflowing on a phone — which is what makes it pasteable at all; 0 tables and no fixed width above
+600px in this email, so there is nothing to stack or overflow.
+
+**Open follow-ups** (tracked here, not left as prose):
+- **Three more unguarded `smtplib` senders**, none of which read `DUCK_TEST_MODE`:
+  `duckAgent/flows/ops/steps.py:954` and `:1586`, `duck-ops/runtime/notifier.py:2238`
+  (`send_message`, guarded only by a caller-passed `--dry-run`, i.e. by discipline rather than by
+  construction), and `duck-ops/runtime/widget_api.py:191/195/245/249`. Left alone deliberately:
+  `notifier.send_message` is duck-ops' primary operator mail path and a wrongly-placed guard there
+  would silently suppress real mail. Needs the same treatment as `email_summary`, one sender at a
+  time, each with its own sharpness check.
+- **`tests/conftest.py` should mock both senders**, not rely on an env var that a sender can
+  forget to read. Setting the variable is necessary and was never sufficient.
+- Operator confirmation that a group kit was actually posted — needs a reply token, which means
+  touching the shared `infer_action` parser. Unbuilt by choice; until then `posted_confirmed` stays
+  `None` and group effect is unmeasured.
+- `carousel` in the competitor benchmark is 9 posts from 2 accounts (0.89 top share). It is not the
+  winner so it does not reach the prior, but the per-format medians on `/portal/intel/social` are
+  still one account's for that row and are rendered without that caveat.
+- First-party section on `/portal/intel/social`. All six of its render sections read competitor
+  state only; our own `social_performance_posts.json` has a daily producer and no reader surface
+  ([[feedback_email_to_portal_inversion]]).
+- `runs/2026-11-04/state_jeepfact.json` ships four facts labelled `🔍 Fact :` with no number.
+  Pre-existing, unrelated to this change, visible in a published post.

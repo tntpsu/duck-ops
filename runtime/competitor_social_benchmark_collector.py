@@ -100,12 +100,16 @@ def _top_accounts(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _top_dimensions(posts: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     counter: Counter[str] = Counter()
     scores_by_label: dict[str, list[float]] = {}
+    accounts_by_label: dict[str, Counter[str]] = {}
     for row in posts:
         label = _compact_text(row.get(key)).lower()
         if not label:
             continue
         counter[label] += 1
         scores_by_label.setdefault(label, []).append(float(row.get("engagement_score") or 0.0))
+        handle = _compact_text(row.get("account_handle")).lower()
+        if handle:
+            accounts_by_label.setdefault(label, Counter())[handle] += 1
     rows = []
     for label, count in counter.most_common(8):
         scores = scores_by_label.get(label) or [0.0]
@@ -113,10 +117,19 @@ def _top_dimensions(posts: list[dict[str, Any]], key: str) -> list[dict[str, Any
         # reel MEAN to 807 while the median was ~44 — the mean alone both
         # overstated typical performance and hid that outliers ARE the intel
         # (operator audit 2026-08-12).
+        # Account concentration, not just volume. A label can clear any
+        # post-count gate on ONE account's posting habit: cta_merchandising
+        # was 12 posts from 2 accounts, 92% of them f3dprinted (104k
+        # followers), so the family's median WAS that one account's median.
+        # Counting posts cannot see that; counting accounts can.
+        accounts = accounts_by_label.get(label) or Counter()
+        top_share = (max(accounts.values()) / count) if accounts and count else 0.0
         rows.append(
             {
                 "label": label,
                 "post_count": count,
+                "distinct_account_count": len(accounts),
+                "top_account_share": round(top_share, 3),
                 "avg_engagement_score": round(sum(scores) / max(1, count), 2),
                 "median_engagement_score": round(statistics.median(scores), 2),
                 "max_engagement_score": round(max(scores), 2),
@@ -147,6 +160,27 @@ def _top_viral_posts(posts: list[dict[str, Any]], *, limit: int = 8) -> list[dic
 
 
 _PRIORS_MIN_POSTS = 10
+_PRIORS_MIN_LABEL_POSTS = 3
+# A label must be visible on at least this many DISTINCT accounts before it
+# is allowed to steer a prompt. Median ranking defends against one viral
+# POST; nothing defended against one dominant ACCOUNT. Audit 2026-11-08:
+# `cta_merchandising` won the hook prior on 12 posts from 2 accounts, 92%
+# of them f3dprinted (104k followers vs our 3-digit reach), and
+# social_priors_prompt_line was injecting that account's sponsored onion
+# slicer into every meme and duckvideo caption prompt as "what works right
+# now". Formats survive this floor (reel: 7 accounts, none above 22%);
+# hook families do not, which is the finding, not a failure to tune.
+_PRIORS_MIN_LABEL_ACCOUNTS = 3
+# ...and it must beat the runner-up by enough to be a real ordering. The
+# account floor answers "is this one account?"; it does not answer "is this
+# distinguishable from second place?". Live 2026-11-08, once the floor
+# removed cta_merchandising, statement_showcase led engagement_prompt
+# 26.46 to 25.02 -- a 5.8% gap on 36 vs 30 posts, i.e. noise -- and
+# shipping it would have told every caption prompt that statements beat
+# asks, the exact opposite of our own measurement (6.58 comments/100 reach
+# on a named A-or-B choice vs 0.00 across six open questions). A prior
+# worth steering with has to be able to lose.
+_PRIORS_MIN_MEDIAN_MARGIN = 0.20
 
 
 def _social_priors(posts: list[dict[str, Any]],
@@ -154,20 +188,45 @@ def _social_priors(posts: list[dict[str, Any]],
                    by_hook: list[dict[str, Any]],
                    viral: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Steering block for the generation lanes (meme/duckvideo caption and
-    hook prompts). MEDIAN-ranked so one viral outlier can't flip the prior;
+    hook prompts). MEDIAN-ranked so one viral outlier can't flip the prior,
+    and floored on DISTINCT ACCOUNTS so one dominant account cannot either;
     omitted entirely when the sample is too thin to steer with."""
     if len(posts) < _PRIORS_MIN_POSTS:
         return None
+
     def _best(rows: list[dict[str, Any]]) -> str | None:
-        ranked = sorted((r for r in rows if r.get("post_count", 0) >= 3),
-                        key=lambda r: -float(r.get("median_engagement_score") or 0.0))
-        return ranked[0]["label"] if ranked else None
-    sample_hooks = [v["visible_hook"] for v in viral[:3] if v.get("visible_hook")]
+        ranked = sorted(
+            (r for r in rows
+             if int(r.get("post_count") or 0) >= _PRIORS_MIN_LABEL_POSTS
+             and int(r.get("distinct_account_count") or 0) >= _PRIORS_MIN_LABEL_ACCOUNTS),
+            key=lambda r: -float(r.get("median_engagement_score") or 0.0),
+        )
+        if not ranked:
+            return None
+        top = float(ranked[0].get("median_engagement_score") or 0.0)
+        if len(ranked) > 1:
+            runner_up = float(ranked[1].get("median_engagement_score") or 0.0)
+            if runner_up > 0 and (top - runner_up) / runner_up < _PRIORS_MIN_MEDIAN_MARGIN:
+                return None
+        return ranked[0]["label"] if top > 0 else None
+
+    winning_hook = _best(by_hook)
+    # Example hooks are only honest as examples OF the winning family. When
+    # no family clears the floor they would be three posts from whichever
+    # account happens to be loudest -- the exact leak the floor exists to
+    # close, re-opened through a different field.
+    sample_hooks: list[str] = []
+    if winning_hook:
+        sample_hooks = [
+            v["visible_hook"] for v in viral
+            if v.get("visible_hook") and (v.get("hook_family") or "") == winning_hook
+        ][:3]
     return {
         "winning_format": _best(by_format),
-        "winning_hook_family": _best(by_hook),
+        "winning_hook_family": winning_hook,
         "sample_hooks": sample_hooks,
         "basis_post_count": len(posts),
+        "min_label_accounts": _PRIORS_MIN_LABEL_ACCOUNTS,
         "updated_at": now_local_iso(),
     }
 
