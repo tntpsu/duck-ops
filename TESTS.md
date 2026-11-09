@@ -5237,3 +5237,87 @@ whether a refused LLM call should raise or return a tagged stub.
 `duckAgent/tests/test_meme_caption_edit.py`, `duckAgent/tests/test_shopify_video_upload.py`,
 `duck-ops/runtime/google_tasks_bridge.py`,
 `duck-ops/tests/test_outbound_non_smtp_writes.py` (new).
+
+---
+
+## Surface 105 — A test overwrote a real run, and the emails were in the Trash (2026-11-09)
+
+Two findings from re-sending the duckvideo review emails. The first I caused.
+
+### 105A — `runs/` had no test isolation, and I proved it
+
+`helpers/state_helper.RUNS_DIR` is the **oldest prod-path constant in the repo**
+and had **none** of architectural convention #4's three layers. `State.__init__`
+resolves `RUNS_DIR / run_id` and loads whatever is there; `State.set()` persists on
+**every** call. So a test constructing `State(run_id="<a real date>", flow="<a real
+flow>")` does not merely read production run state — it writes its fixture values
+back over it. **Eleven test files do that today.**
+
+A helper I added for Surface 104C used `run_id="2026-10-28"`, and running that file
+overwrote `runs/2026-10-28/state_duckvideo.json`, destroying the run's `duckvideo`
+payload: product, hook, caption, `model_entry`, the motion concept, and **both
+fallback reasons — including the `402 RESOURCE_EXHAUSTED` evidence this roadmap
+cites**. `runs/` is gitignored, so git had nothing to restore from. Dates make the
+worst fixture ids precisely because they look like placeholders.
+
+**Recovery, and what stayed lost.** The run's own review email carried the product
+title, hook, caption and both fallback reasons verbatim in its Mode line (Gmail
+`1a182b7d37ade68d`); `catalog_index.json` gave the product id, handle and image by
+exact title match. `prepared_at`'s seconds, `model_entry` and the motion concept id
+are gone. The file carries a `_recovered` block naming the cause, the sources, the
+one approximated value and the two lost ones — a reconstruction that cannot be told
+from the original is worse than a gap.
+
+**Three layers, same commit:** autouse conftest redirect of `RUNS_DIR`; a refusal
+inside `State.__init__` when `DUCK_TEST_MODE` is set and the dir resolves inside the
+frozen production runs dir — **on READ as well as write**, unlike the other prod-path
+guards, because the damage starts at construction (State loads the file and the first
+`set()` writes the merge back, so there is no safe read of a real run from a test);
+and `tests/test_no_test_pollution_in_run_state.py`.
+
+**The audit's first draft would not have caught this, and that is the lesson worth
+keeping.** Nothing fixture-shaped was written — a real-looking timestamp and two
+`null`s were — and the loss was what *disappeared*. **A pollution audit that scans for
+added markers cannot see a deletion.** So it checks the SHAPE instead: a run that got
+as far as writing a `duckvideo` payload must still carry the fields a real prepare
+writes. That test fails on the damaged file and passes on the restored one, verified
+both ways. `kind` is deliberately not required — the lane's first run (2026-08-08)
+predates the field, and pinning it would fail on real history
+([[feedback_pin_the_rule_not_the_reading]]).
+
+**The redirect broke nothing, which is its own finding.** 2177 duckAgent tests pass
+with it in place. None of the eleven files were *relying* on production run state;
+they were only polluting it.
+
+### 105B — "sent and not answered" was the wrong reading
+
+The duckvideo review emails for 2026-10-07, 10-21, 10-28 and 11-04 are in the
+mailbox with `labelIds: [..., "TRASH", "SENT"]` and **no `INBOX` label**. The 09-30,
+09-09 and 08-19 ones carry `INBOX`. So the three Surface 103/104 recorded as "sent,
+none answered" were **in the Trash**, not sitting in the inbox being ignored.
+
+What that does and does not license us to say: 10-21 was replied to *and* trashed, so
+trashing is at least sometimes housekeeping after handling. But a review email in the
+Trash cannot be replied to from the inbox, and the lane's state file had no way to
+know — `duckvideo_email_sent_at` records that SMTP accepted the message and nothing
+observes what happens to it afterwards. The operator's own framing on 11-09 ("I need
+new emails for the duck videos u sent so I can reply publish") fits the Trash reading
+exactly. Treat the throughput limit as **delivery-and-attention**, not
+indifference ([[feedback_notification_is_not_a_data_pipeline]]).
+
+All four re-sent 2026-11-09 05:13–05:14Z, confirmed `INBOX` + `UNREAD`, each carrying
+the Surface 104C banner with the correct variant: "This is a re-send" for 10-07
+(32 days), 10-28 (11 days) and 11-04 (4 days), and "This clip is from an earlier run
+— rendered and hosted but never emailed" for 10-14.
+
+**Open, named rather than built:** nothing watches what becomes of an outbound review
+email after SMTP accepts it. A lane whose only gate is an email reply is blind to its
+own delivery — which is the two-card bracket argument
+([[feedback_two_card_observability_bracket]]) applied to the mailbox rather than the
+queue. Would need a label/thread read, not a send-time timestamp.
+
+**Files touched (105):** `duckAgent/helpers/state_helper.py`,
+`duckAgent/tests/conftest.py`,
+`duckAgent/tests/test_no_test_pollution_in_run_state.py` (new),
+`duckAgent/tests/test_duckvideo_resend_note.py`, `duckAgent/flows/duckvideo/steps.py`,
+`duckAgent/runs/2026-10-28/state_duckvideo.json` (restored; not in git).
