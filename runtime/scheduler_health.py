@@ -164,6 +164,71 @@ def _matching_resolution(receipt: dict[str, Any] | None, resolution: dict[str, A
     return resolution
 
 
+ACCEPTED_RUNNERS = ("run_scheduled_flow.sh", "run_duck_ops_observe_review.sh")
+
+
+def _duck_plists(launch_agents_dir: Path) -> list[Path]:
+    return sorted(launch_agents_dir.glob("com.philtullai.duckagent.*.plist")) + \
+        sorted(launch_agents_dir.glob("com.philtullai.duckops.*.plist"))
+
+
+def _discover_unmonitored_jobs(
+    launch_agents_dir: Path = LAUNCH_AGENTS_DIR,
+    *,
+    known_job_names: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Calendar-scheduled duck agents this card CANNOT grade.
+
+    2026-11-09: the card reported 35 jobs all healthy on a machine holding 50
+    loaded duck agents. ACCEPTED_RUNNERS is a whitelist of wrapper SCRIPTS, so
+    a job wired through any third wrapper is skipped in silence -- and the only
+    agent with a nonzero last exit was one of the skipped ones
+    (engineering-governance-digest.morning, dying on an unset variable since
+    11-01). The same filter had already hidden 17 duck-ops producers until
+    2026-06-12; widening it that day re-closed it around the next new wrapper.
+
+    These jobs write no scheduler receipt, so there is nothing to grade them
+    ON. Inventing a `missed_run` verdict for each would be a confident wrong
+    answer about jobs that may be running fine. What the card can say honestly
+    is that they exist and it cannot see them -- `warn`, never `bad`.
+
+    KeepAlive daemons (creative_viewer, publish_idle, the WhatsApp bridge) are
+    excluded by the StartCalendarInterval requirement on purpose: "did it run
+    on time" is not their question, and grading them on a cadence they do not
+    have would manufacture a second false verdict to fix the first.
+    """
+    known = known_job_names or set()
+    found: list[dict[str, Any]] = []
+    if not launch_agents_dir.exists():
+        return found
+    for path in _duck_plists(launch_agents_dir):
+        try:
+            payload = plistlib.loads(path.read_bytes())
+        except Exception:
+            continue
+        if not isinstance(payload, dict) or not payload.get("StartCalendarInterval"):
+            continue
+        args = payload.get("ProgramArguments")
+        args = args if isinstance(args, list) else []
+        runner = str(args[0]) if args else ""
+        job_name = str(args[1]).strip() if len(args) > 1 else ""
+        if runner.endswith(ACCEPTED_RUNNERS) and job_name:
+            continue
+        if job_name and job_name in known:
+            continue
+        found.append({
+            "label": str(payload.get("Label") or path.stem),
+            "job_name": job_name or None,
+            "plist_path": str(path),
+            "runner": runner.rsplit("/", 1)[-1],
+            "schedule": _normalize_schedule(payload.get("StartCalendarInterval")),
+            "reason": (
+                "wrapper_not_recognised" if job_name else "no_job_name_argument"
+            ),
+        })
+    return sorted(found, key=lambda item: str(item.get("label") or ""))
+
+
 def _load_scheduled_jobs(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> dict[str, dict[str, Any]]:
     jobs: dict[str, dict[str, Any]] = {}
     if not launch_agents_dir.exists():
@@ -172,9 +237,7 @@ def _load_scheduled_jobs(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> dict[st
     # duck-ops jobs run via run_duck_ops_observe_review.sh (which now writes
     # receipts into the same scheduler_receipts dir); before this they were
     # invisible to the scheduler_health card — 17 producers unmonitored.
-    plist_paths = sorted(launch_agents_dir.glob("com.philtullai.duckagent.*.plist")) + \
-        sorted(launch_agents_dir.glob("com.philtullai.duckops.*.plist"))
-    accepted_runners = ("run_scheduled_flow.sh", "run_duck_ops_observe_review.sh")
+    plist_paths = _duck_plists(launch_agents_dir)
     for path in plist_paths:
         try:
             payload = plistlib.loads(path.read_bytes())
@@ -184,7 +247,7 @@ def _load_scheduled_jobs(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> dict[st
         if not isinstance(args, list) or len(args) < 2:
             continue
         runner = str(args[0])
-        if not runner.endswith(accepted_runners):
+        if not runner.endswith(ACCEPTED_RUNNERS):
             continue
         job_name = str(args[1]).strip()
         if not job_name:
@@ -539,14 +602,34 @@ def _overall_status(items: list[dict[str, Any]]) -> str:
     return "ok"
 
 
+def _unmonitored_clause(counts: dict[str, int]) -> str:
+    """Never let the clean copy imply coverage the card does not have."""
+    blind = counts.get("unmonitored_count", 0)
+    if not blind:
+        return ""
+    return (
+        f" {blind} scheduled job(s) write no receipt and are NOT graded here "
+        "(see unmonitored_jobs)."
+    )
+
+
 def _headline(status: str, counts: dict[str, int]) -> str:
+    tail = _unmonitored_clause(counts)
     if status == "bad":
         return (
             f"Scheduler health needs attention: {counts.get('bad_count', 0)} bad job(s), "
-            f"{counts.get('warn_count', 0)} warning job(s)."
+            f"{counts.get('warn_count', 0)} warning job(s).{tail}"
         )
     if status == "warn":
-        return f"Scheduler health has {counts.get('warn_count', 0)} warning job(s), but no bad jobs."
+        if not counts.get("warn_count", 0) and counts.get("unmonitored_count", 0):
+            return (
+                f"Every one of the {counts.get('tracked_jobs', 0)} tracked job(s) is healthy, but"
+                f"{tail.rstrip()}"
+            )
+        return (
+            f"Scheduler health has {counts.get('warn_count', 0)} warning job(s), "
+            f"but no bad jobs.{tail}"
+        )
     return "Scheduler health is clean across tracked scheduled jobs."
 
 
@@ -587,6 +670,9 @@ def build_scheduler_health(
         )
         for job_name, job in sorted(jobs.items())
     ]
+    unmonitored = _discover_unmonitored_jobs(
+        launch_agents_dir, known_job_names=set(jobs.keys())
+    )
     items.sort(
         key=lambda item: (
             {"bad": 0, "warn": 1, "ok": 2}.get(str(item.get("severity") or "ok"), 9),
@@ -594,8 +680,14 @@ def build_scheduler_health(
         )
     )
     status = _overall_status(items)
+    # Unmonitored jobs never escalate past warn: "I cannot see this" is a
+    # weaker claim than "this is broken", and conflating them is how a card
+    # earns the reputation that makes an operator stop reading it.
+    if status == "ok" and unmonitored:
+        status = "warn"
     counts = {
         "tracked_jobs": len(items),
+        "unmonitored_count": len(unmonitored),
         "attention_count": sum(1 for item in items if item.get("attention_needed")),
         "bad_count": sum(1 for item in items if item.get("severity") == "bad"),
         "warn_count": sum(1 for item in items if item.get("severity") == "warn"),
@@ -620,9 +712,19 @@ def build_scheduler_health(
         "status": status,
         "verdict_valid_until": verdict_deadlines[0] if verdict_deadlines else None,
         "headline": _headline(status, counts),
-        "recommended_action": "Resolve the top scheduler item before trusting downstream workflow freshness." if status != "ok" else "No action needed.",
+        "recommended_action": (
+            "Resolve the top scheduler item before trusting downstream workflow freshness."
+            if any(item.get("severity") in {"bad", "warn"} for item in items)
+            else (
+                "Point these jobs at a receipt-writing wrapper, or accept that this card "
+                "cannot vouch for them."
+                if unmonitored
+                else "No action needed."
+            )
+        ),
         "summary": counts,
         "items": items,
+        "unmonitored_jobs": unmonitored,
         "paths": {
             "scheduler_log": str(scheduler_log_path),
             "receipt_dir": str(receipt_dir),
@@ -649,6 +751,7 @@ def render_scheduler_health_markdown(payload: dict[str, Any]) -> str:
         f"- Bad: `{summary.get('bad_count', 0)}`",
         f"- Warn: `{summary.get('warn_count', 0)}`",
         f"- Healthy: `{summary.get('healthy_count', 0)}`",
+        f"- Not graded here: `{summary.get('unmonitored_count', 0)}`",
         "",
         "## Attention",
         "",
@@ -667,6 +770,22 @@ def render_scheduler_health_markdown(payload: dict[str, Any]) -> str:
                 lines.append(f"  Expected: `{item.get('expected_at')}`")
             if item.get("recommended_action"):
                 lines.append(f"  Next: {item.get('recommended_action')}")
+    unmonitored = list(payload.get("unmonitored_jobs") or [])
+    if unmonitored:
+        lines.extend([
+            "",
+            "## Scheduled but NOT graded here",
+            "",
+            "These launchd agents run on a calendar but write no scheduler receipt, so",
+            "nothing below vouches for them either way. Read 'healthy' above as a claim",
+            "about the tracked jobs only.",
+            "",
+        ])
+        for item in unmonitored:
+            lines.append(
+                f"- `{item.get('label')}` | runner `{item.get('runner')}` | "
+                f"{item.get('reason')}"
+            )
     lines.extend(["", "## Tracked Jobs", ""])
     for item in list(payload.get("items") or []):
         lines.append(

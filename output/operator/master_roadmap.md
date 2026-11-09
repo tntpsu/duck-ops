@@ -1,6 +1,6 @@
 # Duck Ops + DuckAgent Master Roadmap
 
-Last updated: 2026-11-08 (social reach improvement roadmap added; sections below still carry their own dated audit notes)
+Last updated: 2026-11-09 (scheduler roster coverage shipped; social reach improvement roadmap added 11-08; sections below still carry their own dated audit notes)
 
 ## Document Ownership
 
@@ -393,6 +393,21 @@ Next slices:
 1. use the readiness surface to decide whether weekly sale can move from manual email approval to auto-apply after operator approval
 2. add the same promotion contract automatically whenever a new approval-policy lane is created
 3. keep Email, WhatsApp, Review Inbox, and Business Desk aligned to one canonical approval contract so operator decisions do not fork
+
+**Added 2026-11-09 (Surface 107): the scheduler card was grading two thirds of the schedule.**
+`scheduler_health` reported 35 jobs all healthy while 50 duck launchd agents were loaded. Its
+roster filter accepts a plist only when `ProgramArguments[0]` ends in one of two wrapper names, so
+12 calendar-scheduled jobs sat outside its view — including the only loaded agent with a nonzero
+exit (`engineering-governance-digest.morning`, dead on an unset `$PYTHON_BIN` since 11-01, now
+fixed). The same filter had hidden 17 duck-ops producers until 2026-06-12; it was widened that day
+rather than removed, so it re-closed around the next new wrapper. The card now reports them as
+`unmonitored_jobs` at **warn**, never bad — none writes a receipt, so there is nothing to grade them
+on, and "I cannot see this" is a weaker claim than "this is broken".
+
+**Still open, needs a Tier-3 decision:** `scheduler_health.py` has no launchd job of its own. Nothing
+fires it, which is why its payload sat at 2026-11-03 for six days; the card that grades the schedule
+is not on the schedule. Second slice: point the 12 at a receipt-writing wrapper so they can be graded
+rather than merely counted.
 
 ### Priority 2: Outcome Learning Layer Expansion
 The social learning foundation is now live. The next high-value work is extending that same discipline into the remaining business outcomes:

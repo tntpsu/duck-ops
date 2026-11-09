@@ -5464,3 +5464,78 @@ would close it ([[feedback_vision_judge_literal_fields]]).
 `duckAgent/tests/test_duckvideo_negative_prompt_is_sent.py` (new),
 `duckAgent/runs/rudolph-santa-v3-2026-11-04/state_duckvideo.json` (operator confirmed
 the manual post in session; stamped with its source, not in git).
+
+---
+
+## Surface 107 — the card that grades every scheduled job was grading two thirds of them (2026-11-09)
+
+**Spec first** ([[feedback_pre_build_discipline]]); rows written before the edit.
+
+`scheduler_health` reported **35 jobs, all healthy**, on a machine with **50 duck launchd
+agents loaded**. Not a stale snapshot — a roster hole. `_load_scheduled_jobs` accepts a
+plist only when its `ProgramArguments[0]` ends in one of two names:
+
+```python
+accepted_runners = ("run_scheduled_flow.sh", "run_duck_ops_observe_review.sh")
+```
+
+Any job wired through a third wrapper is skipped silently. **Twelve calendar-scheduled
+jobs sit outside the card's view**, and the only loaded duck agent with a nonzero last
+exit is one of them:
+
+```
+last_exit=1  com.philtullai.duckops.engineering-governance-digest.morning
+```
+
+This is the second time this exact filter hid producers — the comment directly above it
+records 17 duck-ops jobs being invisible until 2026-06-12. The filter was widened that
+day instead of being removed, so it re-closed around the next new wrapper
+([[feedback_incomplete_fix_enumerate_all_branches]]).
+
+**Why not just grade them.** None of the twelve writes a scheduler receipt, so grading
+them on receipts would print twelve `missed_run` verdicts about jobs that may be running
+fine — a confident wrong answer, which is the failure mode this repo keeps paying for
+([[feedback_a_failed_probe_is_a_fact_about_the_probe]]). The honest output is the one
+the card cannot currently give: *these twelve exist and I cannot see them.* Severity
+`warn`, never `bad` — unmonitored is not the same claim as broken.
+
+### 107 — use case × failure mode
+
+| | Happy | Wrapper not whitelisted | No calendar (daemon) | Args < 2 | Plist unreadable | A tracked job is bad |
+|---|---|---|---|---|---|---|
+| Roster discovery | unit:graded-as-before | unit:listed-unmonitored | unit:daemon-excluded | unit:named-by-label | unit:skipped-never-raises | unit:unaffected |
+| Rollup status | unit:ok-when-none | unit:warn-not-ok | n/a | unit:warn-not-ok | n/a | unit:bad-still-wins |
+| Headline copy | unit:no-mention | unit:names-count | n/a | unit:names-count | n/a | unit:bad-copy-kept |
+| Markdown render | unit:section-absent | unit:section-lists-them | n/a | — | — | — |
+| OS card | — | manual:card-yellow-via-status+headline (no viewer edit — the card is driven entirely by the payload's `status` and `headline`) | — | — | — | — |
+
+**Daemons are deliberately out of scope.** `creative_viewer`, `publish_idle` and
+`duck_ops_whatsapp_bridge` are `KeepAlive` processes with no `StartCalendarInterval`.
+"Did it run on time" is not their question; grading them on a cadence they do not have
+would manufacture a second false verdict to fix the first.
+
+**Not fixed here:** `scheduler_health.py` itself has **no launchd job** — nothing fires
+it, which is why the payload sat at 2026-11-03 for six days. Installing one is Tier 3
+and needs operator approval. The card grading the schedule is not on the schedule.
+
+### 107B — the digest wrapper died on an unset variable
+
+`run_engineering_governance_digest_morning.sh:64` built its command from `$PYTHON_BIN`,
+which the script never sets — line 8 sets `VENV_PY`. Under `set -u` zsh aborts at the
+array expansion, so the job fired at 07:30 and died before reaching the digest, every
+morning since 2026-11-01. The `.err` log is 23 KB of one repeated line.
+
+The script's own design says this should have been survivable: the exit code of
+`repo_ci_status` is checked and logged as `WARN ... (continuing to digest)`. `set -u`
+killed the process two lines before that branch could run, so a failure the author had
+explicitly made non-fatal became fatal and silent
+([[feedback_swallowed_errors_lie]] inverted — here the loud channel existed and was
+never reached).
+
+Fixed: `$PYTHON_BIN` → `$VENV_PY`, the only occurrence across all 11 wrappers.
+Verified without side effects by running both commands exactly as the wrapper builds
+them, with `--send-email` omitted: `repo_ci_status` exit 0, digest built 6 findings.
+
+**No test.** `duckAgent_runtime/` is machine-local and not in git, so there is nothing
+for a repo test to assert against. The durable guard is 107's roster coverage: once the
+card can see this job, a wrapper that dies on startup stops being invisible.
