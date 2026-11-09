@@ -201,9 +201,31 @@ across the 8 with readable metrics.** At this scale a 2-vs-4-like difference is 
 patterns that repeated, or that an independent dataset confirmed, are listed as actionable.
 
 **What the data actually supports.**
-1. **Format ordering: reel > image > carousel.** HIGH confidence — the only finding that replicated
-   in two independent samples. Ours: 36.4 / 21.5 / 10.0 reach per post. Competitors (72 posts,
-   excluding the one 104k account): same order, reel visible on 7 accounts with none above 22%.
+1. **Format ordering — CORRECTED 2026-11-08 when the surface was built.** The original entry read
+   *"reel > image > carousel, HIGH confidence, the only finding that replicated in two independent
+   samples, ours 36.4 / 21.5 / 10.0 reach per post."* Two things are wrong with that and both
+   matter.
+
+   **Those three numbers do not reproduce.** No definition of "reach per post" over
+   `social_performance_posts.json` (24 normalized posts from 80 receipts, 0 malformed, same 30d
+   window) yields 36.4 / 21.5 / 10.0. The earlier pass counted receipts rather than the collector's
+   normalized output, so its denominators were not the ones the daily producer uses. The
+   reproducible figures, now rendered on `/portal/intel/social` with the definition and the
+   denominator stated on screen: **image median 50.0 reach over 5 posts with readable reach, mean
+   54.0; carousel median 25.0 over 7, mean 50.1; reel one single post at 126.** Instagram only —
+   Facebook exposes no reach for any of these posts.
+
+   **And "HIGH confidence, replicated in two samples" rested on an n of one.** We have exactly one
+   reel. One post cannot replicate anything, and ranking it first is precisely the mistake the
+   competitor priors were fixed for on this same day (Surface 101 part B: a label with too few
+   samples presented as a finding). The page now refuses to rank any format with fewer than 3 posts
+   of readable reach, so reel reads **"too few to compare"** rather than "winner".
+
+   **What is actually defensible, stated separately by source.** On *our* data: **image > carousel**
+   on median reach (50.0 vs 25.0), and **reel unknown**. On *competitor* data: reel leads across 72
+   posts on 7 accounts with none above 22% share — still real evidence, and still the reason to try
+   reels, but it is *their* evidence, not a replication of ours. Treat the reel push as a
+   competitor-backed bet whose first-party result is yet to exist, not as a confirmed finding.
 2. **A named A-or-B choice earns comments; an open question does not.** MEDIUM — 6 posts asking an
    open question earned 0 comments between them; 2 naming two options earned 5. 6.58 comments per
    100 reach against 0.00. Mechanically plausible and cheap to act on.
@@ -225,7 +247,7 @@ too few posts per bucket or on one dominant account.
 | 5 | review_carousel | `_build_carousel_caption` shipped its generic branch byte-identical 3 weeks running | open, ~1 hr |
 | 6 | jeepfact | Off carousel, onto reel or single image | open, ~half day |
 | 7 | duckvideo | End clips on an A-or-B choice | open, ~1-2 hrs, speculative (stacks an untested mechanic on a proven format) |
-| 8 | measurement | First-party section on `/portal/intel/social` + own-follower snapshots | open, ~1 hr + page |
+| 8 | measurement | First-party section on `/portal/intel/social` | **✅ shipped 2026-11-08** (TESTS.md Surface 102). Own-follower snapshots still open — no producer writes them yet. |
 
 **Why #3 is a hand-off and not an integration.** Verified against Meta's own Graph API v19.0
 changelog: `publish_to_groups` and the Groups API were **removed 2024-04-22**, and no current
@@ -241,7 +263,10 @@ Our own `social_performance_posts.json` has a daily producer (`social_performanc
 re-read, not a page refresh.
 
 **Baseline to beat next month** (Instagram unless noted): 747 reach, median 40, 81 likes, 7
-comments, 1 save, 1 reel, 7 carousels, 0 Facebook link clicks. Each change above carries its own
+comments, 1 save, 1 reel, 7 carousels, 0 Facebook link clicks. All of these now reproduce from
+`social_performance_posts.json` and are rendered on `/portal/intel/social`, so next month's
+comparison is a page refresh against the same definitions rather than a fresh hand-count that can
+disagree with this one — which is exactly what happened to the format numbers above. Each change above carries its own
 target so the comparison is per-lane rather than one blended number that cannot say which change
 worked.
 

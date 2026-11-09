@@ -4735,3 +4735,161 @@ precedes. Both are safe **by construction, not by flag**, and the helper's docst
   ([[feedback_email_to_portal_inversion]]).
 - `runs/2026-11-04/state_jeepfact.json` ships four facts labelled `🔍 Fact :` with no number.
   Pre-existing, unrelated to this change, visible in a published post.
+
+## Surface 102 — Our own numbers on the page that only ever showed theirs (2026-11-08, SPEC-FIRST)
+
+Roadmap item 8. `/portal/intel/social` has six render sections and **all six read competitor state**.
+Our own `social_performance_posts.json` has a daily producer (`social_performance_collector.py`,
+06:35) and **no reader surface at all** — its only consumers turn it into prose inside emails, which
+is the inversion [[feedback_email_to_portal_inversion]] exists to stop. Until this lands, next
+month's "did any of this work?" is a manual re-read of a month of posts, not a page refresh.
+
+Written BEFORE the first edit, per the `/coverage-matrix` gate. Numbers below come from the live
+state file (24 normalized posts out of 80 scanned receipts, 0 malformed, 30d window ending
+2026-11-08), read first so the matrix is grounded rather than guessed.
+
+**Four data facts that drive the design.** Each is a way this section could render a confident
+wrong number, which is the failure mode that matters on a page whose whole job is to be trusted.
+
+1. **Facebook reach is not readable.** Every Facebook post carries `reach_available: false` and no
+   `reach` key. Rendering `0` would be a *false claim* ("nobody saw it") rather than a missing one
+   ("we cannot see it") — the plausible-fallback class
+   ([[feedback_plausible_fallbacks_mask_failure]]). Must render as unreadable, never as a number.
+2. **The two platforms disagree on a field name.** Instagram emits `comments_count`; Facebook emits
+   `comment_count`. A single-key sum silently drops one platform's comments and looks fine. This is
+   the sender-asymmetry shape of Surface 101 part C, appearing in a reader instead of a writer.
+3. **Three Facebook posts are `metric_status: "cancelled"` with `metrics: {}`** — never published.
+   In a denominator they understate every per-post average. Excluded from the math, counted on
+   screen, because a silently smaller denominator is unauditable.
+4. **There is exactly one reel.** `reel` mean reach is 126 against image 54.0 and carousel 50.1 —
+   at n=1. Rendering that as the winning format would commit, on our own data, the identical sin
+   this page was just fixed for on the competitor side (Surface 101 part B): a label with too few
+   samples presented as a finding. Needs the same floor. There is no distinct-account dimension
+   here (every post is ours), so the floor is **minimum posts per label**, not accounts.
+
+| Use case | Happy | State file missing | Malformed / not a dict | Cancelled posts present | Platform field asymmetry | Metric unreadable | Below the n floor | Mobile |
+|---|---|---|---|---|---|---|---|---|
+| First-party headline (posts, reach, likes, comments, saves) | unit | unit (section omitted, page still renders competitor data) | unit | unit (excluded from math, shown as a count) | unit (both comment keys summed) | unit (FB reach reads "not readable", never 0) | n/a | manual:eyeball |
+| Reach by format | unit | unit | unit | unit | n/a | unit | **unit (n<3 → "too few to compare", not a number)** | manual:eyeball |
+| Posts by lane | unit | unit | unit | unit (cancelled counted separately) | n/a | n/a | n/a | manual:eyeball |
+| Page still renders when first-party state is absent | unit | unit | unit | n/a | n/a | n/a | n/a | — |
+| Loader never raises | unit | unit | unit | n/a | n/a | n/a | n/a | — |
+| Live surface actually serves it | — | — | — | — | — | — | — | **manual: curl the real route** |
+
+Deliberately **not** built, and why: no new producer (the collector already runs daily — this is a
+cheap reader per architectural convention #1); no OS card (the two-card bracket is for
+approve→execute lanes and this is a read surface; the collector's own staleness is graded
+elsewhere); no per-post table for our own posts (the competitor raw-posts table earns its place
+because those posts are unfamiliar — ours are 24 the operator published themselves).
+
+**The question this surface answers and the page currently cannot:** which lane is starving. Live
+lane counts are jeepfact 7, meme 11, thursday 2, duckvideo 1, review_carousel 3 — so roadmap item 4
+("duckvideo reel cadence 1/month → 2-3/week") becomes a number on a page instead of a claim in a
+roadmap.
+
+### B. conftest mocks the senders in both repos (the open follow-up from Surface 101 D)
+
+Surface 101 closed five senders by construction and added an AST enumeration so that a sixth is
+*visible*. Mocking the transport in `conftest.py` makes an unguarded sender *harmless*. Both layers
+or neither — architectural convention #4 applied to outbound side effects, not just state writes.
+
+| Use case | Happy | A sender with no guard | Guard-testing tests still work | Audit proves it |
+|---|---|---|---|---|
+| duckAgent suite cannot open an SMTP connection | unit | unit (autouse fixture intercepts) | unit (guard tests opt out explicitly) | unit |
+| duck-ops suite cannot open an SMTP connection | unit | unit | unit | unit |
+| duck-ops suite cannot reach the WhatsApp gateway | unit | unit | n/a | unit |
+
+**The subtlety that decides the design.** An autouse mock that silently absorbs sends would make the
+Surface 101 sharpness checks pass *with the guards deleted* — the mock would hide precisely what
+those tests exist to catch, and we would have swapped a real guard for the appearance of one. So the
+fixture must **fail loudly** on a send attempt rather than swallow it, and the guard tests keep
+their own exploding transports. A quiet mock is a worse outcome than no mock at all.
+
+### Shipped 2026-11-08 — results, and two things the spec did not foresee
+
+`creative_agent/runtime/src/duck_creative_agent/social_intel_page.py` gains
+`FIRST_PARTY_STATE_PATH`, four data helpers and three render sections, placed **before** the
+competitor sections. Page title moves from "Competitor Social" to "Social Intel"; the competitor
+`<h1>` is unchanged, so the existing assertion on it still holds. **33 page tests** (14 existing +
+19 new), **2098 duckAgent**, **1461 duck-ops**.
+
+Live surface, curled rather than inferred: `HTTP 200`, 59,073 bytes, all three sections present.
+Facebook renders `not readable` **twice** (reach and median reach, neither as 0); reel renders
+`too few to compare`; `With reach` appears as its own column. No literal `None`/`nan` anywhere in
+the page. All three of our tables sit in `.table-scroll` (`overflow-x: auto; max-width: 100%`), so
+each scrolls in its own container and the page body never scrolls sideways; the only px values in
+the stylesheet are the 640/720 media-query breakpoints. **The viewer DID need a bounce** — the
+first curl after the edit returned the old page, because this change adds module-level names rather
+than only changing a function body, and the long-running viewer had the module cached
+([[feedback_restart_long_running_service_after_deploy]]).
+
+**Two findings the spec-first matrix did not predict.** Both are the same shape — a number whose
+denominator is hidden — which suggests the matrix should carry a standing "is the denominator
+visible?" column for any surface that renders a statistic.
+
+1. **A count beside a statistic computed over a different denominator.** The first draft showed
+   `Posts` (all platforms) next to a median drawn only from posts with readable reach: `carousel 12`
+   beside a median over 7. Not wrong, and not auditable either. Split into `Posts` and
+   `With reach`, with the page saying which one the median uses.
+2. **Adding a third state path silently de-isolated every existing test in the file.** `_render_with`
+   patched the two competitor paths only, so the moment `FIRST_PARTY_STATE_PATH` existed, all 14
+   existing tests began reading **production** `social_performance_posts.json` — and two
+   "empty state" tests failed because production is not empty. That is architectural convention #4
+   appearing in a *reader*: a new module-level prod-path constant needs its isolation in the same
+   commit, even when it is only ever read. Fixed in `_render_with`, which now redirects all three.
+
+Sharpness, both directions: setting `_FIRST_PARTY_MIN_LABEL_POSTS` to 1 fails
+`test_label_below_the_floor_is_not_ranked`; collapsing the unreadable-reach branch to always print a
+number fails `test_facebook_reach_reads_as_unreadable_never_zero`. One of the new tests was itself
+unsharp first — a fixed-width slice after `html.split(">image<")` ran past `</tr>` and read the
+*next* row's text, so the test "failed" on a correct page. Replaced with a `_row_containing` helper
+that bounds on the real row.
+
+**Roadmap correction this surface forced.** The roadmap's headline format claim —
+*"reel > image > carousel, HIGH confidence, replicated in two independent samples, ours
+36.4 / 21.5 / 10.0 reach per post"* — does not survive contact with the producer. Those three
+numbers reproduce under no definition over the collector's normalized output; the earlier pass
+counted receipts, not normalized posts. And the "replication" rested on **one reel**. Corrected in
+`master_roadmap.md`: on our data **image > carousel** (median 50.0 vs 25.0) with **reel unknown**;
+the reel case is competitor-backed evidence, not a first-party replication. Building the surface
+that makes a number reproducible is what caught a number that was not.
+
+**Files touched (102A):** `duckAgent/creative_agent/runtime/src/duck_creative_agent/social_intel_page.py`,
+`duckAgent/creative_agent/runtime/tests/test_social_intel_page.py`,
+`duck-ops/output/operator/master_roadmap.md`.
+
+### Shipped 2026-11-08 — 102B, the conftest layer
+
+`duckAgent/tests/conftest.py` and `duck-ops/tests/conftest.py` each gain an autouse fixture that
+replaces `smtplib.SMTP` and `SMTP_SSL` with a raising stub; duck-ops also **filters**
+`subprocess.run` for the WhatsApp gateway's command shape (`--channel` + `whatsapp`). Both suites
+pass unchanged (2098 / 1461), which also says that nothing in either suite currently reaches a
+transport — the Surface 101 guards hold.
+
+Filtering rather than replacing `subprocess.run` is deliberate: nine duck-ops test files use
+subprocess legitimately, and a blanket stub would break them while teaching nobody anything.
+`test_an_unrelated_subprocess_call_still_works` fails if the filter ever becomes a blanket.
+
+Both fixtures **raise** rather than absorbing the call, for the reason the spec named: a mock that
+swallowed sends would make every Surface 101 "it refuses under test mode" test pass **with the
+guards deleted**, trading a real guard for the appearance of one. Tests that legitimately need the
+real path (`test_email_helper` asserting on an assembled message, the guard tests themselves)
+override with their own monkeypatch — safe by construction, visibly, in the test.
+
+Proven by deletion, not assumed: with the interceptor removed, a bare
+`smtplib.SMTP("smtp.gmail.com", 587)` inside a test really does reach Gmail. The proof is now
+permanent in `TestTheSecondLayerIsArmed` in both repos (SMTP, SMTP_SSL, the gateway command, the
+unrelated-subprocess control, and that each refusal message names both ways out — a refusal nobody
+can act on is a fixture somebody deletes).
+
+Note on precedence, worth knowing before debugging a surprise: a test's own `monkeypatch` of
+`smtplib` overrides the conftest fixture, so the Surface 101 guard tests still fail with their own
+exploding transports rather than the conftest's. That is why deleting `email_summary`'s guard fails
+those tests with *their* message, not the conftest's.
+
+**Files touched (102B):** `duckAgent/tests/conftest.py`,
+`duckAgent/tests/test_no_email_escapes_in_test_mode.py`, `duck-ops/tests/conftest.py`,
+`duck-ops/tests/test_outbound_test_mode_guards.py`.
+
+**Still open after 102:** own-follower snapshots (no producer writes them — the page can only show
+what is collected); non-SMTP outbound remains unenumerated in both repos.

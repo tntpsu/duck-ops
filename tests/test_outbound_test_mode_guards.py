@@ -344,3 +344,59 @@ class TestNoSenderIsLeftBehind:
             "notifier._refuse_outbound_under_test_mode or "
             "widget_api._blocked_by_test_mode) rather than removing this test."
         )
+
+
+class TestTheSecondLayerIsArmed:
+    """The conftest interceptors, asserted rather than assumed.
+
+    TestNoSenderIsLeftBehind makes an unguarded sender VISIBLE. These make one
+    HARMLESS: tests/conftest.py replaces smtplib for every test and filters
+    subprocess.run for the gateway's command shape, so a sender that forgets
+    the flag hits an AssertionError instead of the operator.
+
+    Both layers or neither -- the same convention production state writes have
+    had since 2026-06-09, finally applied to outbound side effects.
+    """
+
+    def test_a_raw_smtp_dial_is_intercepted(self):
+        import smtplib
+
+        with pytest.raises(AssertionError, match="A test opened an SMTP connection"):
+            smtplib.SMTP("smtp.gmail.com", 587)
+
+    def test_the_ssl_variant_is_intercepted_too(self):
+        """widget_api picks SMTP_SSL on port 465 and plain SMTP otherwise, so
+        covering one leaves the other wide open."""
+        import smtplib
+
+        with pytest.raises(AssertionError, match="A test opened an SMTP connection"):
+            smtplib.SMTP_SSL("smtp.gmail.com", 465)
+
+    def test_the_whatsapp_gateway_command_is_intercepted(self):
+        """The shape notifier.send_whatsapp_message builds."""
+        with pytest.raises(AssertionError, match="invoked the WhatsApp gateway"):
+            subprocess.run(
+                ["/usr/local/bin/docker", "exec", "openclaw-openclaw-gateway-1",
+                 "/usr/local/bin/node", "/app/dist/index.js", "message", "send",
+                 "--channel", "whatsapp", "--target", "+10000000000"],
+                check=True, capture_output=True, text=True)
+
+    def test_an_unrelated_subprocess_call_still_works(self):
+        """The gateway interceptor FILTERS; it does not replace subprocess.run.
+
+        Nine test files in this repo use subprocess legitimately. A blanket
+        replacement would break them and teach nobody anything, so the
+        interceptor fires on the gateway's own command shape only. If this test
+        fails, the filter has become a blanket.
+        """
+        result = subprocess.run(["echo", "duck"], capture_output=True, text=True)
+        assert result.stdout.strip() == "duck"
+
+    def test_the_refusals_say_what_to_do(self):
+        import smtplib
+
+        with pytest.raises(AssertionError) as excinfo:
+            smtplib.SMTP("smtp.gmail.com", 587)
+        text = str(excinfo.value)
+        assert "DUCK_TEST_MODE" in text
+        assert "monkeypatch" in text

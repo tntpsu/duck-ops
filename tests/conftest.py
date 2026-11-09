@@ -350,3 +350,58 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
     except ImportError:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_outbound_mail_or_whatsapp_from_tests(monkeypatch):
+    """Second layer under the per-sender DUCK_TEST_MODE guards: the suite
+    physically cannot reach the operator.
+
+    Surface 101 (2026-11-08) guarded notifier.send_message,
+    notifier.send_whatsapp_message and both widget_api senders by construction,
+    and added an AST enumeration so a sixth unguarded sender is *visible*. This
+    fixture makes one *harmless*. Outbound side effects had only ever had the
+    source layer, which is how a review email reached the operator during a
+    verification run while the suite was green.
+
+    Both interceptors RAISE rather than quietly absorbing the call. A mock that
+    swallowed sends would make the Surface 101 sharpness checks pass with the
+    guards deleted -- every "it refuses under test mode" test would go green
+    because nothing reached the wire, and a real guard would have been traded
+    for the appearance of one.
+
+    The WhatsApp interceptor FILTERS rather than replacing subprocess.run
+    wholesale: nine test files use subprocess legitimately, and a blanket
+    replacement would break them while teaching nobody anything. It fires only
+    on the gateway's own command shape, so an unrelated subprocess call is
+    untouched and a real gateway send cannot slip by.
+    """
+    import smtplib
+    import subprocess
+
+    def _refuse_smtp(*args, **kwargs):
+        raise AssertionError(
+            "A test opened an SMTP connection. Either a sender is missing its "
+            "DUCK_TEST_MODE guard (see notifier._refuse_outbound_under_test_mode "
+            "and widget_api._blocked_by_test_mode), or this test means to "
+            "exercise the real send path and should monkeypatch smtplib itself. "
+            f"Args: {args!r}"
+        )
+
+    real_run = subprocess.run
+
+    def _filtered_run(cmd, *args, **kwargs):
+        argv = [str(part) for part in cmd] if isinstance(cmd, (list, tuple)) else [str(cmd)]
+        joined = " ".join(argv)
+        looks_like_gateway = "--channel" in argv and "whatsapp" in joined
+        if looks_like_gateway:
+            raise AssertionError(
+                "A test invoked the WhatsApp gateway. notifier."
+                "send_whatsapp_message should have refused under "
+                f"DUCK_TEST_MODE. Command: {joined[:200]!r}"
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(smtplib, "SMTP", _refuse_smtp)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", _refuse_smtp)
+    monkeypatch.setattr(subprocess, "run", _filtered_run)
