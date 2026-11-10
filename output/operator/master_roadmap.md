@@ -409,6 +409,33 @@ fires it, which is why its payload sat at 2026-11-03 for six days; the card that
 is not on the schedule. Second slice: point the 12 at a receipt-writing wrapper so they can be graded
 rather than merely counted.
 
+### Shipped 2026-11-10 — the rest of the Gemini bill is visible too (Surface 112)
+
+The three `gemini_helper` entry points — image generation, image editing and
+the vision judge — ran on the same key and the same prepaid balance as the
+clips, and logged nothing to the cost ledger either.
+
+- **All three now write a row.** Done at the one `_noted` chokepoint every
+  Gemini caller in both repos already passes through.
+- **Priced in the unit each one bills in.** Images per call at $0.039 (Google's
+  documented 1,290 tokens per <=1024x1024 image, at the published rate);
+  the vision judge on real measured tokens, which the method had been
+  receiving and discarding on every response.
+- **The ladder is left unpriced on purpose.** We have never called those rungs,
+  so a price would be invented — and an unpriced model gets NAMED on the cost
+  card, which is the right alarm for a fallback nobody budgeted.
+- **The isolation guard was two-thirds broken and is now whole.** Surface 111
+  put it in `tests/conftest.py`, which the other two test roots never load
+  because `creative_agent/runtime/pyproject.toml` moves pytest's rootdir. It
+  would have protected a local `pytest tests/...` and nothing in CI. Moved to a
+  shared root module imported by all three, and verified by checksumming the
+  production ledger across a full three-root run.
+
+**Open, highest value:** `gemini_helper` still has no `DUCK_TEST_MODE` refusal
+on its paid calls. Nothing reaches the API today only because the two test
+files that touch it monkeypatch the functions away — a property of those
+tests, not a guard.
+
 ### Shipped 2026-11-10 — the video spend is visible, and named after Gemini (Surface 111)
 
 Answering "We are using Gemini to make videos?" turned up three reasons nobody

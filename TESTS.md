@@ -5901,3 +5901,110 @@ linted but **not installed**:
 - `com.philtullai.duckops.provider-credit-health.daily.plist` — the card above.
 - `com.philtullai.duckops.scheduler-health.plist` — Surface 110.
 - `com.philtullai.duckops.engineering-governance-digest.morning.plist` — Surface 110.
+
+## Surface 112 — The other half of the Gemini bill (2026-11-10, operator: "Do 1 and 3")
+
+Surface 111 put the video call on the cost ledger. `helpers/gemini_helper.py`
+is the rest of the same gap: three entry points — `gemini_generate_image`,
+`gemini_edit_image`, `gemini_analyze_image_json` — on the **same `GEMINI_KEY`
+and the same prepaid balance**, which is why one depletion stopped both the
+clips and the image work on 2026-11-09. None of them wrote an
+`llm_call_log` row.
+
+Two things made this gap harder to see than the video one:
+
+- **The module *was* instrumented — for the wrong question.** It has recorded
+  provider health since 2026-11-02, so anyone checking "is Gemini
+  instrumented?" found yes. Liveness and cost are two questions with one
+  plausible-looking answer ([[feedback_plausible_fallbacks_mask_failure]]).
+- **`analyze_image_json` was handed real token counts on every response and
+  discarded them.** Even a reader who went looking had nothing to price. Those
+  counts are now captured and returned.
+
+### Priced, with the unit each call actually bills in
+
+| Surface | `kind` | Priced by | Rate |
+|---|---|---|---|
+| `gemini_generate_image` | `image` | per call | **$0.039**/image |
+| `gemini_edit_image` | `image` | per call | **$0.039**/image |
+| `gemini_analyze_image_json` | `vision` | measured tokens | $0.30 / $2.50 per 1M |
+
+$0.039 is Google's own documented 1,290 output tokens per ≤1024×1024 image
+turned into dollars at the published image-output rate; several independent
+calculators quote the same figure. Both rates are **UNVERIFIED** and listed in
+`ESTIMATED_PRICING_MODELS`. The token count scales with resolution, so $0.039
+is a **floor** above 1024×1024.
+
+**The rest of `PREFERRED_IMAGE_MODELS` is deliberately unpriced.** We have
+never called those rungs, so any number would be invented — and an unpriced
+model is NAMED on the cost card, which is exactly the right signal for "the
+disaster-recovery ladder fell through to a rung nobody budgeted". Pinned by a
+test, so a later cleanup cannot quietly price them to silence the card.
+
+### Use case × failure mode
+
+| | Logged | Priced | Attributed | Isolated from prod |
+|---|---|---|---|---|
+| Image generated | unit:gemini_accounting | per call, end-to-end | unit (surface + model) | shared guard |
+| Image edited (the harmonize pass) | unit:gemini_accounting | per call, end-to-end | unit | shared guard |
+| Vision judge answers | unit:gemini_accounting | measured tokens, end-to-end | unit | shared guard |
+| Response carries no usage block | unit (zeros, no guess) | — | — | — |
+| Call fails (402) | unit:gemini_accounting | — | unit | shared guard |
+| Result carries no model | unit (`"unknown"`, not `""`) | named on the card | — | — |
+| Ladder rung called | — | **unpriced on purpose** → named | — | — |
+
+Two of those rows are the ones that usually rot. `model` is normalised from the
+SDK's `models/x` to the bare `x` both price tables are keyed on — unnormalised,
+the cost card splits one model across two rows that neither sum nor price. And
+a missing model logs as `"unknown"` rather than `""`, because an empty group
+label reads as a formatting bug instead of a missing attribution.
+
+The end-to-end tests cost a row through duck-ops' real `_entry_cost_usd`
+rather than asserting the writer's own field names. Both halves passing their
+own tests while disagreeing about the shape between them is the drift that
+catches.
+
+### The isolation guard moved to where it is actually loaded
+
+Surface 111 put the ledger redirect in `duckAgent/tests/conftest.py`. That was
+only two thirds of a fix: `creative_agent/runtime/pyproject.toml` is an
+inifile, so the real suite command
+
+```
+pytest creative_agent/runtime/tests creative_agent/tools/tests tests
+```
+
+sets rootdir to `creative_agent/runtime`, and the other two test roots never
+load `tests/conftest.py`. The protection would have worked when running
+`pytest tests/...` alone and done nothing in CI — the same trap
+`duckagent_test_cwd_guard.py` already exists to document. The fixture now
+lives in `duckagent_test_ledger_guard.py` at the repo root and is imported by
+**all three** conftests, following that module's pattern exactly.
+
+**How that was verified matters, because the obvious check was wrong.** A
+before/after checksum of the production ledger across the three-root run came
+back CHANGED, which read as pollution. It was not: three legitimate
+`catalog_dedup` rows had been written at 10:03 by a live scheduled job, from
+duck-ops' own writer. A checksum cannot tell a test write from concurrent
+production activity on a file production is actively appending to, so it
+answers a different question than the one asked
+([[feedback_a_failed_probe_is_a_fact_about_the_probe]] — and the alarming
+reading was the wrong one, as it was there). The real checks are
+marker-based: the post-suite audit passes, and the ledger contains **zero**
+`provider: gemini` rows, which is the stronger statement because the new
+instrumentation writes nothing else.
+
+### Still open
+
+- **`gemini_helper` has no `DUCK_TEST_MODE` refusal on its paid calls.** The
+  video call got one under Surface 111 because `.env` puts a live `GEMINI_KEY`
+  in the environment even under pytest. These three entry points have the same
+  exposure and nine caller modules, including two test files under
+  `creative_agent/tools/tests` — which happen to monkeypatch the functions
+  away entirely, so nothing reaches the API today. That is a property of those
+  tests, not a guard ([[feedback_test_runs_reach_the_outside_world]]: a flag
+  only helps if every sender reads it). Highest-value follow-up.
+- **Image calls log no token counts.** Per-call pricing does not need them,
+  but capturing them would turn the $0.039 estimate into a measurement the way
+  the video clip's 46,336 tokens did.
+- **Both prices are unverified.** Only the AI Studio billing page settles them.

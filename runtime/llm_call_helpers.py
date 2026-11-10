@@ -69,6 +69,12 @@ MODEL_PRICING_USD_PER_1M_TOKENS = {
     # Known expiry: gemini-omni-1.1-flash requests are reported to route to
     # 1.2 Flash rates (~30% cheaper) from 2026-12-03. Re-check then.
     "gemini-omni-1.1-flash": {"prompt": 1.500, "completion": 17.500},
+    # Google — the vision/text model behind gemini_analyze_image_json (the
+    # concept QA judge). Token-priced because that call returns text, and as of
+    # 2026-11-10 it reports real usage metadata, so these are applied to
+    # measured counts rather than a per-call guess.
+    # !! UNVERIFIED ESTIMATE !! Third-party-reported flash-family rates.
+    "gemini-2.5-flash": {"prompt": 0.300, "completion": 2.500},
     # Anthropic — covers what duckAgent flows will surface once Scope B
     # instrumentation lands (currently no Anthropic calls in the log).
     "claude-opus-4-7": {"prompt": 15.000, "completion": 75.000},
@@ -83,7 +89,10 @@ MODEL_PRICING_USD_PER_1M_TOKENS = {
 
 # Models whose pricing above is an unverified estimate. Surfaced on the cost
 # card so an estimate is never mistaken for a measurement.
-ESTIMATED_PRICING_MODELS = {"gpt-5.5", "gpt-5", "gemini-omni-1.1-flash"}
+ESTIMATED_PRICING_MODELS = {
+    "gpt-5.5", "gpt-5", "gemini-omni-1.1-flash", "gemini-2.5-flash",
+    "gemini-2.5-flash-image",
+}
 
 # Image-generation pricing per call. Operators care about images
 # specifically because a single 1024x1024 gpt-image-1 call ≈ $0.04
@@ -94,6 +103,19 @@ PER_CALL_IMAGE_COST_USD = {
     "gpt-image-2": 0.040,           # next-gen gpt-image; same flat estimate until OpenAI publishes rates
     "dall-e-3": 0.040,              # ~$0.04 per 1024x1024 standard
     "dall-e-3-hd": 0.080,           # ~$0.08 per 1024x1024 HD
+    # Gemini image generation and editing, added 2026-11-10. Billed on the same
+    # GEMINI_KEY as the video lane, and unlogged for exactly as long.
+    # 1,290 output tokens per <=1024x1024 image is Google's own documented
+    # figure; $0.039 is what the published image-output rate makes of it, and
+    # several independent calculators quote the same number.
+    # !! UNVERIFIED AGAINST GOOGLE'S OWN PRICE PAGE !! Listed in
+    # ESTIMATED_PRICING_MODELS. Note the token count scales with resolution,
+    # so this is a floor for anything larger than 1024x1024.
+    "gemini-2.5-flash-image": 0.039,
+    # The rest of PREFERRED_IMAGE_MODELS (the disaster-recovery ladder) is
+    # deliberately absent. We have never called them, so any price here would
+    # be invented -- and an unpriced model is NAMED on the cost card, which is
+    # the right signal for "the ladder fell through to a rung nobody budgeted".
 }
 
 
