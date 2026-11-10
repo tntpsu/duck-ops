@@ -114,6 +114,17 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
     tmp_log = tmp_path / "llm_call_log.jsonl"
     monkeypatch.setattr(llm_call_helpers, "LLM_CALL_LOG_PATH", tmp_log)
 
+    # duckAgent writes to the SAME ledger from its own module, which this
+    # fixture never covered. Any duck-ops test that reaches a duckAgent helper
+    # (several do) could append a fixture row to the operator's cost surface.
+    # Redirect it to the same tmp file; skipped when the sibling repo is absent.
+    try:
+        import helpers.llm_log as _duckagent_llm_log
+    except Exception:
+        _duckagent_llm_log = None
+    if _duckagent_llm_log is not None:
+        monkeypatch.setattr(_duckagent_llm_log, "_LLM_CALL_LOG_PATH", tmp_log)
+
     # The actual log_llm_call function reads LLM_CALL_LOG_PATH at
     # call time, so patching on the helpers module is sufficient
     # for the canonical path. Caller modules that did

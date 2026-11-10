@@ -409,6 +409,34 @@ fires it, which is why its payload sat at 2026-11-03 for six days; the card that
 is not on the schedule. Second slice: point the 12 at a receipt-writing wrapper so they can be graded
 rather than merely counted.
 
+### Shipped 2026-11-10 — the video spend is visible, and named after Gemini (Surface 111)
+
+Answering "We are using Gemini to make videos?" turned up three reasons nobody
+could see the largest Gemini line item. All three are closed.
+
+- **It is on the cost ledger.** `generate_motion_video` now writes one row per
+  attempted call (model, seconds, task, real output tokens) and heartbeats
+  provider health. It was the only Gemini caller writing nothing, which is why
+  the cost card reported perfect pricing coverage over a multi-dollar-a-day gap.
+- **It has a price.** $17.50/1M output tokens → **$0.81 per 8s clip**,
+  reconciling to $5.68 for 2026-11-09's seven clips against a $5.60-8.40
+  independent estimate. Flagged UNVERIFIED; re-check after 2026-12-03, when
+  1.1 requests reportedly move to 1.2 Flash rates.
+- **It is named after the provider that bills it.** `veo_motion` →
+  `gemini_motion`, every `veo_*` error code → `motion_*`, and the resend note
+  no longer tells the operator that "Veo" credits ran out. Readers accept both
+  ids so the archive stays readable.
+- **Found while shipping:** the shared cost ledger had no test isolation from
+  duckAgent's side. 26 fixture rows reached production on the first test run;
+  removed, and all three isolation layers added in the same commit.
+- **`provider_credit_health` had never been scheduled** — run by hand it went
+  red naming gemini correctly, against a card that had read green since
+  2026-11-02. The plist is linted; `launchctl bootstrap` still needs you.
+
+**Needs the operator** — three linted plists are not installed:
+`provider-credit-health.daily`, `scheduler-health`,
+`engineering-governance-digest.morning`.
+
 ### Shipped 2026-11-09 — the duckvideo staged first frame (Surface 108)
 
 Measured 3 of 3 clean against 0 of 3 for the text prompt on the same concept, so

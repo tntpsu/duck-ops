@@ -1936,13 +1936,11 @@ publish refused by name on the live run. Probe metrics were green on BOTH takes
   manual-trigger by design (real spend). Either schedule the preflight alone — it is a free
   `models.list` call, no generation — as an OS card, or accept that a dead video model surfaces only
   when a human looks at the weekly reel. [[feedback_verify_the_job_is_firing_first]].
-- **Video generation is not in either price table.** Veo never was either, so this is inherited, not
-  new: video bills in output *video tokens* (this clip: 46,336) and the two token price tables have
-  no entry, so every clip books as unpriced. [[feedback_no_silent_caps]] sibling — a cost that does
-  not appear is a cost nobody can act on.
-- **The renderer id is still `veo_motion`.** Kept deliberately so historical `state_duckvideo.json`
-  files stay comparable; the operator-facing email line now names the real model instead
-  ("Veo" was printed to the operator for three weeks after Veo stopped existing).
+- ~~**Video generation is not in either price table.**~~ Closed by Surface 111 (2026-11-10). The
+  46,336-token observation recorded here is what made the entry possible: it is exactly 5,792
+  tokens/second, which matches the published per-second rate, so two independent derivations agree.
+- ~~**The renderer id is still `veo_motion`.**~~ Closed by Surface 111 (2026-11-10). Historical
+  comparability is preserved by making READERS accept both ids rather than by freezing the writer.
 
 ## Surface 64e — A second beat, and a name the catalog does not use (2026-11-04, operator: "so i want to change the title of the video to Rudolph Duck - not rudolph reindeer. also can the video be a little longer? would be be nice after to have santa's arm come in the scene to take rudolph off the dash and say these wont last long at the bottom?")
 
@@ -5775,3 +5773,131 @@ and linted but **not installed**:
 - `duckAgent_runtime/prepared_plists/com.philtullai.duckops.engineering-governance-digest.morning.plist`
   — the same wrapper, routed through the shim, as the proof pattern for the
   other eleven.
+
+## Surface 111 — The biggest Gemini line item, invisible and filed under a dead provider (2026-11-10, operator: "We are using Gemini to make videos?" → "Do all 3")
+
+The operator's surprise was itself the finding. Yes: since Google shut Veo off
+on this API on **2026-10-22**, every clip has been made by
+`gemini-omni-1.1-flash` through `interactions.create`, billed to the same
+`GEMINI_KEY` as the image edits — which is why one depleted balance stopped
+both on 2026-11-09. Three independent reasons that was invisible:
+
+1. **The call wrote nothing.** It was the only Gemini caller with no
+   `llm_call_log` row and no provider heartbeat, so the cost card reported
+   `unknown_model_count: 0 / no_pricing_count: 0` — *perfect coverage* over a
+   multi-dollar-a-day gap. A hole that reports itself as covered is worse than
+   a visible one ([[feedback_plausible_fallbacks_mask_failure]]).
+2. **It had no price.** Inherited from Veo, which was never priced either.
+3. **It was named after a product that no longer exists.** The last real run
+   recorded `duckvideo_motion_model='gemini-omni-1.1-flash'` beside
+   `duckvideo_renderer='veo_motion'`: one state file naming two providers.
+
+### Video needs no new pricing pathway — it bills as output tokens
+
+The 46,336-token figure recorded under Surface 64d turned out to be the key.
+It is exactly **5,792 tokens/second** over an 8s clip, which matches the
+published per-second rate for this model to four decimals. So the per-second
+price and the per-token price are the same price written twice, and video
+prices through the existing token table with one entry:
+
+| | |
+|---|---|
+| Rate | `{"prompt": 1.500, "completion": 17.500}` per 1M tokens |
+| One 8s clip | 46,336 output tokens → **$0.81** |
+| 2026-11-09's seven clips | **$5.68**, against a $5.60–8.40 estimate derived independently |
+| Status | **UNVERIFIED** — third-party-reported, in `ESTIMATED_PRICING_MODELS` |
+| Known expiry | 1.1 requests reportedly route to 1.2 Flash rates (~30% cheaper) from 2026-12-03 |
+
+Two derivations agreeing is the whole reason this shipped rather than being
+left as a guess. **A clip with no usage report still gets priced** from
+`VIDEO_OUTPUT_TOKENS_PER_SECOND` and carries
+`tokens_derived_from_duration: true` — because a paid call booking $0 is the
+exact failure the instrumentation exists to end.
+
+### Use case × failure mode
+
+| | Logged | Priced | Named | Not over-counted | Isolated from prod |
+|---|---|---|---|---|---|
+| Clip succeeds, API reports usage | unit:accounting | unit:accounting | unit:accounting | n/a | unit:accounting |
+| Clip succeeds, no usage block | unit:accounting (derived+flagged) | unit:accounting | unit:accounting | n/a | unit:accounting |
+| Generation fails mid-call (402) | unit:accounting | no derived cost, by design | unit:accounting | unit:accounting | unit:accounting |
+| Refused before any request | unit:accounting (**no row**) | n/a | n/a | unit:accounting ×3 | n/a |
+| Model overridden by env | unit:accounting | n/a | unit:accounting | n/a | n/a |
+| Historical `veo_motion` run read back | n/a | n/a | unit:accounting + flow + manual_post | n/a | n/a |
+| Test run reaches the ledger | — | — | — | — | **3 layers** below |
+
+### The rename is the half with the trap in it
+
+Dropping `veo_motion` would silently reclassify every historical run as an
+unknown renderer — a worse bug than the stale name. So **readers** accept both
+(`is_motion_renderer`, one call site each instead of one per comparison) and
+the **writer** emits `gemini_motion`. The two pre-2026-11-10 state-setting
+tests were deliberately left on the legacy id as the tolerance probe. Also
+renamed: every `veo_*` error code → `motion_*` (no production consumer matched
+on them — the credit matcher keys on the provider's own `402` /
+`RESOURCE_EXHAUSTED` text, which is why it still reads old runs), and
+`veo_raw.mp4` / `veo_motion.mp4` → `motion_raw.mp4` / `gemini_motion.mp4`.
+The resend note said "the **Veo** prepayment credits were exhausted" to the
+operator; it now says Gemini, pinned by a test asserting the note never names
+a provider that no longer exists.
+
+### Found while shipping it: the ledger had no isolation from this repo
+
+Instrumenting the call put **26 fixture rows straight into the operator's
+production cost ledger** on the first test run. duck-ops has guarded *its*
+writer to `state/llm_call_log.jsonl` since the 2026-05-31 incident (96% of
+that ledger was fixtures), but `duckAgent/helpers/llm_log.py` writes to the
+**same file** from the other repo and was never guarded — safe only for as
+long as no test could reach a caller. The rows were removed and all three
+layers added in the same commit, per `ai-agents/CLAUDE.md` §4:
+
+1. Autouse conftest fixture in **both** repos redirecting
+   `helpers.llm_log._LLM_CALL_LOG_PATH` to tmp.
+2. Source guard: `log_llm_call` raises `TestModeRefusalError` under
+   `DUCK_TEST_MODE=1` when the path resolves to the frozen production one.
+   The check sits **ahead of** the function's blanket `except Exception`,
+   which would otherwise swallow the refusal it exists to make — and the
+   motion helper's accounting wrapper re-raises both repos' refusal types for
+   the same reason ([[feedback_test_runs_reach_the_outside_world]]).
+3. Post-suite audit: `tests/test_no_test_pollution_in_llm_call_log.py` scans
+   the real file for fixture models and synthetic artifact ids, and includes a
+   test proving the audit can actually fail
+   ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
+
+### Credit-health card: installed as far as permitted
+
+`provider_credit_health.py` had **never** been scheduled (absent from
+`~/Library/LaunchAgents` *and* `launchctl list`), and its card had sat on
+`green` since 2026-11-02 while the credits were in fact exhausted. Run by hand
+here, it went **red** naming the right provider:
+
+```
+gemini refused calls for billing and has not succeeded since
+2026-11-09T22:04:28 -- paid generation is running on the fallback path.
+```
+
+`launchctl bootstrap` was refused again (persistence), so the plist is linted
+and verified but **not loaded** — it joins the two from Surface 110 in the
+list below. Note the card is only as fresh as its last run: the cadence is the
+entire value, because the condition it detects is one nobody looks for until a
+render fails.
+
+### Still open
+
+- **Gemini image calls remain unlogged.** `gemini_helper`'s three entry points
+  heartbeat provider health but write no `llm_call_log` row, so the cost card
+  now shows Gemini *video* and still not Gemini *images*. Same shape, smaller
+  number; the fix is the same wrapper.
+- **A failed clip's real cost is unknowable.** A 402 before generation bills
+  nothing; a failure mid-generation may bill. The row records the attempt with
+  zero cost rather than inventing one.
+- **The price is unverified.** Only the AI Studio billing page settles it.
+
+### Not done — needs the operator
+
+`launchctl bootstrap` is refused in this session. Three plists are written and
+linted but **not installed**:
+
+- `com.philtullai.duckops.provider-credit-health.daily.plist` — the card above.
+- `com.philtullai.duckops.scheduler-health.plist` — Surface 110.
+- `com.philtullai.duckops.engineering-governance-digest.morning.plist` — Surface 110.

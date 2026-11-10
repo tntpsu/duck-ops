@@ -54,6 +54,21 @@ MODEL_PRICING_USD_PER_1M_TOKENS = {
     "gpt-4.1-mini": {"prompt": 0.400, "completion": 1.600},
     "gpt-4.1": {"prompt": 2.000, "completion": 8.000},
     "gpt-3.5-turbo": {"prompt": 0.500, "completion": 1.500},  # gpt-3.5-turbo-0125
+    # Google — video generation. Added 2026-11-10; the duckvideo ai_motion lane
+    # has billed real money here since the 2026-10-22 Veo shutdown and was
+    # absent from this table the whole time, so every clip booked as $0 while
+    # being the single largest Gemini line item.
+    # Video bills as OUTPUT TOKENS like any other completion, so it needs no
+    # separate pricing pathway: an 8s clip measured 46,336 output tokens on
+    # 2026-11-04. At the rate below that is $0.81/clip, which reconciles with
+    # the 7 clips generated on 2026-11-09 (~$5.68 against a $5.60-8.40
+    # independent estimate) -- two derivations agreeing is why this entry is
+    # trusted enough to ship at all.
+    # !! UNVERIFIED AGAINST GOOGLE'S OWN PRICE PAGE !! Both figures are
+    # third-party-reported and listed in ESTIMATED_PRICING_MODELS below.
+    # Known expiry: gemini-omni-1.1-flash requests are reported to route to
+    # 1.2 Flash rates (~30% cheaper) from 2026-12-03. Re-check then.
+    "gemini-omni-1.1-flash": {"prompt": 1.500, "completion": 17.500},
     # Anthropic — covers what duckAgent flows will surface once Scope B
     # instrumentation lands (currently no Anthropic calls in the log).
     "claude-opus-4-7": {"prompt": 15.000, "completion": 75.000},
@@ -68,7 +83,7 @@ MODEL_PRICING_USD_PER_1M_TOKENS = {
 
 # Models whose pricing above is an unverified estimate. Surfaced on the cost
 # card so an estimate is never mistaken for a measurement.
-ESTIMATED_PRICING_MODELS = {"gpt-5.5", "gpt-5"}
+ESTIMATED_PRICING_MODELS = {"gpt-5.5", "gpt-5", "gemini-omni-1.1-flash"}
 
 # Image-generation pricing per call. Operators care about images
 # specifically because a single 1024x1024 gpt-image-1 call ≈ $0.04
