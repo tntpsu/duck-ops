@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import plistlib
 import sys
+import json
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -40,10 +41,13 @@ CLEAN_RUN_LOG = (
 HEALTHY_PLIST_ARGS = [GRADED_RUNNER, "reviews_daily", "--flow", "reviews", "--all"]
 
 
-def _plist(path: Path, *, label: str, args: list[str], schedule: dict | None) -> None:
+def _plist(path: Path, *, label: str, args: list[str], schedule: dict | None,
+           env: dict | None = None) -> None:
     payload: dict = {"Label": label, "ProgramArguments": args}
     if schedule is not None:
         payload["StartCalendarInterval"] = schedule
+    if env is not None:
+        payload["EnvironmentVariables"] = env
     path.write_bytes(plistlib.dumps(payload, sort_keys=False))
 
 
@@ -82,8 +86,11 @@ class TestWhatTheRosterSees(_Harness):
         payload = self._build(make)
         blind = payload["unmonitored_jobs"]
         self.assertEqual(len(blind), 1)
-        self.assertEqual(blind[0]["job_name"], "engineering_governance_digest_morning")
-        self.assertEqual(blind[0]["reason"], "wrapper_not_recognised")
+        # args[1] of an UNRECOGNISED wrapper is not a job name, it is
+        # whatever that script happens to take first. Reporting it as one
+        # was a guess wearing a fact's clothes.
+        self.assertIsNone(blind[0]["job_name"])
+        self.assertEqual(blind[0]["reason"], "declares_no_job_name")
         self.assertEqual(blind[0]["runner"], "run_engineering_governance_digest_morning.sh")
         self.assertEqual(payload["summary"]["unmonitored_count"], 1)
 
@@ -121,7 +128,8 @@ class TestWhatTheRosterSees(_Harness):
         self.assertEqual(len(blind), 1)
         self.assertIsNone(blind[0]["job_name"])
         self.assertEqual(blind[0]["label"], "com.philtullai.duckops.review-queue-refresh")
-        self.assertEqual(blind[0]["reason"], "no_job_name_argument")
+        self.assertEqual(blind[0]["reason"], "declares_no_job_name")
+        self.assertIn(scheduler_health.JOB_NAME_ENV_KEY, blind[0]["how_to_fix"])
 
     def test_a_graded_job_is_never_also_reported_as_blind(self) -> None:
         def make(agents: Path) -> None:
@@ -147,7 +155,9 @@ class TestWhatTheRosterSees(_Harness):
             )
 
         payload = self._build(make)
-        self.assertEqual([i["job_name"] for i in payload["unmonitored_jobs"]], ["other_job"])
+        blind = payload["unmonitored_jobs"]
+        self.assertEqual([i["label"] for i in blind], ["com.philtullai.duckops.other"])
+        self.assertIsNone(blind[0]["job_name"])
 
 
 class TestWhatTheRollupSays(_Harness):
@@ -280,3 +290,131 @@ class TestTheLiveMachine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheDeclarationContract(_Harness):
+    """2026-11-09, second pass. The whitelist of runner NAMES had closed twice:
+    widened on 2026-06-12 to admit 17 duck-ops producers instead of being
+    removed, then re-closed around twelve more jobs by November. A third name
+    would close a third time, so the RULE changed instead of the list -- a
+    plist now opts IN by declaring the job name it writes receipts under.
+    """
+
+    def test_any_wrapper_that_declares_a_job_name_is_graded(self) -> None:
+        def make(agents: Path) -> None:
+            _plist(
+                agents / "com.philtullai.duckops.brand-new.plist",
+                label="com.philtullai.duckops.brand-new",
+                args=["/some/wrapper/nobody/whitelisted.sh", "--flag"],
+                schedule={"Hour": 9, "Minute": 0},
+                env={scheduler_health.JOB_NAME_ENV_KEY: "reviews_daily"},
+            )
+
+        payload = self._build(make, log=CLEAN_RUN_LOG)
+        self.assertEqual([i["job_name"] for i in payload["items"]], ["reviews_daily"])
+        self.assertEqual(payload["unmonitored_jobs"], [])
+
+    def test_a_declared_job_that_never_ran_reads_as_missed_not_invisible(self) -> None:
+        """The declaration is a CLAIM. A false one must surface as a bad
+        verdict, not as the job quietly leaving the roster."""
+        def make(agents: Path) -> None:
+            _plist(
+                agents / "com.philtullai.duckops.liar.plist",
+                label="com.philtullai.duckops.liar",
+                args=["/some/wrapper.sh"],
+                schedule={"Hour": 3, "Minute": 0},
+                env={scheduler_health.JOB_NAME_ENV_KEY: "never_runs"},
+            )
+
+        payload = self._build(make)
+        self.assertIn("never_runs", [i["job_name"] for i in payload["items"]])
+        self.assertEqual(payload["unmonitored_jobs"], [])
+
+    def test_the_two_lists_partition_the_plists(self) -> None:
+        """Graded and not-graded come from ONE resolver. A plist falling out of
+        both would be a job nobody is looking at -- the exact shape of the bug
+        this surface exists to fix."""
+        def make(agents: Path) -> None:
+            _plist(agents / "com.philtullai.duckops.a.plist", label="a",
+                   args=[GRADED_RUNNER, "reviews_daily"],
+                   schedule={"Hour": 9, "Minute": 0})
+            _plist(agents / "com.philtullai.duckops.b.plist", label="b",
+                   args=["/x/anything.sh"], schedule={"Hour": 4, "Minute": 0},
+                   env={scheduler_health.JOB_NAME_ENV_KEY: "declared_b"})
+            _plist(agents / "com.philtullai.duckops.c.plist", label="c",
+                   args=["python3"], schedule={"Hour": 5, "Minute": 0})
+
+        payload = self._build(make, log=CLEAN_RUN_LOG)
+        graded = {i["job_name"] for i in payload["items"]}
+        blind = {i["label"] for i in payload["unmonitored_jobs"]}
+        self.assertEqual(graded, {"reviews_daily", "declared_b"})
+        self.assertEqual(blind, {"c"})
+
+    def test_nobody_added_a_third_runner_name(self) -> None:
+        """The tuple is historical and closed. Growing it is the move that has
+        now failed twice."""
+        self.assertEqual(
+            scheduler_health.ACCEPTED_RUNNERS,
+            ("run_scheduled_flow.sh", "run_duck_ops_observe_review.sh"))
+
+
+class TestItDoesNotGradeItsOwnOpenWindow(unittest.TestCase):
+    """Once this producer runs under the receipt shim it is itself a graded
+    job -- and the shim writes `running` BEFORE the producer regenerates the
+    card, so the card would report its own job as forever in flight. Not a
+    verdict that self-corrects next run; structural
+    ([[feedback_never_grade_an_open_window]])."""
+
+    JOB = "scheduler_health_refresh"
+
+    def _receipts(self, status: str) -> dict:
+        return {self.JOB: {"job_name": self.JOB, "status": status,
+                           "run_id": "now", "receipt_path": "/x.json"}}
+
+    def _history(self, tmp: Path, *entries: dict) -> Path:
+        tmp.mkdir(parents=True, exist_ok=True)
+        (tmp / f"{self.JOB}.jsonl").write_text(
+            "\n".join(json.dumps(e) for e in entries), encoding="utf-8")
+        return tmp
+
+    def test_its_own_running_receipt_falls_back_to_the_last_finished_run(self):
+        with TemporaryDirectory() as raw:
+            history = self._history(
+                Path(raw) / "h",
+                {"job_name": self.JOB, "status": "running", "run_id": "older"},
+                {"job_name": self.JOB, "status": "succeeded", "run_id": "older",
+                 "exit_code": 0},
+                {"job_name": self.JOB, "status": "running", "run_id": "now"},
+            )
+            out = scheduler_health._unwind_own_in_flight_run(
+                self._receipts("running"), own_job=self.JOB, history_dir=history)
+        self.assertEqual(out[self.JOB]["status"], "succeeded")
+        self.assertIn("still in flight", out[self.JOB]["note"])
+
+    def test_another_jobs_running_receipt_is_left_alone(self):
+        """A genuinely stuck job must still show up. This rule is about the
+        window the producer is standing in, not about `running` in general."""
+        with TemporaryDirectory() as raw:
+            history = self._history(
+                Path(raw) / "h",
+                {"job_name": self.JOB, "status": "succeeded", "run_id": "older"})
+            out = scheduler_health._unwind_own_in_flight_run(
+                self._receipts("running"), own_job="some_other_job",
+                history_dir=history)
+        self.assertEqual(out[self.JOB]["status"], "running")
+
+    def test_a_finished_own_receipt_is_not_rewound(self):
+        with TemporaryDirectory() as raw:
+            history = self._history(
+                Path(raw) / "h",
+                {"job_name": self.JOB, "status": "failed", "run_id": "older"})
+            out = scheduler_health._unwind_own_in_flight_run(
+                self._receipts("succeeded"), own_job=self.JOB, history_dir=history)
+        self.assertEqual(out[self.JOB]["status"], "succeeded")
+
+    def test_no_history_leaves_the_receipt_untouched(self):
+        with TemporaryDirectory() as raw:
+            out = scheduler_health._unwind_own_in_flight_run(
+                self._receipts("running"), own_job=self.JOB,
+                history_dir=Path(raw) / "missing")
+        self.assertEqual(out[self.JOB]["status"], "running")

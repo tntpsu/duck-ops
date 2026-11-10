@@ -5714,3 +5714,64 @@ import.
 The 16 skips are the honest residue: tests that need duckAgent's code say so by
 name rather than failing, and rather than passing quietly — which is how a
 cross-repo drift check stops existing without anyone noticing.
+
+## Surface 110 — a declaration, not a third name on the whitelist (2026-11-09)
+
+Surface 107 made the twelve ungraded jobs *visible*. This makes them
+*gradable*, and fixes the mechanism that kept hiding them.
+
+The roster admitted a job by matching its runner against a tuple of two script
+names. That tuple had already closed once — widened on 2026-06-12 to admit 17
+duck-ops producers instead of being removed — and by 2026-11-09 it had
+re-closed around twelve more jobs. A third name would close a third time, so
+the rule changed instead of the list: **a plist opts in by declaring
+`DUCK_JOB_NAME`**, and `duckAgent_runtime/run_with_receipt.sh` is a generic
+shim that makes that declaration true by wrapping any existing wrapper.
+
+The declaration is a *claim*. If it is false the card reports `missed_run` —
+the correct answer — rather than the job quietly leaving the roster.
+
+| | Happy | Undeclared | False declaration | Resolvers disagree |
+|---|---|---|---|---|
+| Any wrapper, declared | unit:roster:declared_is_graded | unit:roster:blind_by_label | unit:roster:declared_never_ran | unit:roster:partition |
+| Historical two wrappers | unit:roster:graded_runner | n/a | n/a | unit:roster:partition |
+| The tuple stays closed | unit:roster:no_third_name | n/a | n/a | n/a |
+
+`unit:roster:partition` is the load-bearing one: graded and not-graded now come
+from a single resolver, so a plist cannot fall out of both — which is the exact
+shape of every bug on this surface.
+
+### Two bugs found by running it rather than reasoning about it
+
+1. **`timeout_seconds: 0` means instantly hung.** `_safe_int(0, default)` is 0,
+   not the default, so the shim's first receipt made the card go **red** on the
+   shim's own job within seconds of its first run.
+2. **A producer cannot grade the window it is standing in.** The shim writes
+   `running`, the producer regenerates the card, the shim then records the
+   outcome — so the card reported its own job as permanently in flight. Not a
+   verdict that self-corrects next run; structural. `_unwind_own_in_flight_run`
+   grades its own job from the last run that actually finished, and *only* its
+   own: another job's `running` receipt is left exactly as it is, because a
+   genuinely stuck job still has to show up.
+
+### Live card after the change
+
+```
+warn | Every one of the 37 tracked job(s) is healthy, but 12 scheduled job(s)
+       write no receipt and are NOT graded here (see unmonitored_jobs).
+```
+
+Each of the twelve now carries a `how_to_fix` naming the env key and the shim.
+
+### Not done — needs the operator
+
+`launchctl bootstrap` was refused here (persistence). Both plists are written
+and linted but **not installed**:
+
+- `duckAgent_runtime/prepared_plists/com.philtullai.duckops.scheduler-health.plist`
+  — gives `scheduler_health.py` the cadence it has never had. Until it is
+  loaded, every scheduler verdict is still only as fresh as the last manual
+  run, which was six days stale when this session started.
+- `duckAgent_runtime/prepared_plists/com.philtullai.duckops.engineering-governance-digest.morning.plist`
+  — the same wrapper, routed through the shim, as the proof pattern for the
+  other eleven.

@@ -118,6 +118,50 @@ def _load_json(path: Path, default: Any) -> Any:
         return default
 
 
+HISTORY_DIR = DUCKAGENT_RUNTIME_ROOT / "state" / "scheduler_history"
+
+
+def _unwind_own_in_flight_run(
+    receipts: dict[str, dict[str, Any]],
+    *, own_job: str | None = None, history_dir: Path = HISTORY_DIR,
+) -> dict[str, dict[str, Any]]:
+    """A job cannot grade its own open window.
+
+    When this producer runs under the receipt shim, the shim writes a
+    `running` receipt, the producer regenerates the card, and only then does
+    the shim record the outcome -- so the card reports its own job as forever
+    in flight. That is not a verdict that self-corrects next run; it is
+    structural, and the card would sit at warn permanently with a reason that
+    says nothing ([[feedback_never_grade_an_open_window]]).
+
+    So for its OWN job only, and only while that receipt is still open, grade
+    the last run that actually finished. Every other job's `running` receipt
+    stays exactly as it is -- a genuinely stuck job must still show up.
+    """
+    job = (own_job if own_job is not None else os.environ.get("DUCK_JOB_NAME") or "").strip()
+    if not job:
+        return receipts
+    current = receipts.get(job)
+    if not isinstance(current, dict) or str(current.get("status") or "") != "running":
+        return receipts
+    path = history_dir / f"{job}.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return receipts
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(entry, dict) and str(entry.get("status") or "") not in ("", "running"):
+            merged = dict(receipts)
+            merged[job] = {**entry, "receipt_path": current.get("receipt_path"),
+                           "note": "previous completed run; this run is still in flight"}
+            return merged
+    return receipts
+
+
 def _load_receipts(receipt_dir: Path = RECEIPT_DIR) -> dict[str, dict[str, Any]]:
     receipts: dict[str, dict[str, Any]] = {}
     if not receipt_dir.exists():
@@ -164,7 +208,38 @@ def _matching_resolution(receipt: dict[str, Any] | None, resolution: dict[str, A
     return resolution
 
 
+# Wrappers that take the job name as their FIRST argument. Historical: these
+# two predate the explicit declaration below and their plists carry no
+# environment key. Do NOT add to this tuple -- that is exactly what happened on
+# 2026-06-12, when it was widened to admit 17 duck-ops producers instead of
+# being removed, and by 2026-11-09 it had re-closed around twelve more jobs. A
+# new wrapper declares DUCK_JOB_NAME instead.
 ACCEPTED_RUNNERS = ("run_scheduled_flow.sh", "run_duck_ops_observe_review.sh")
+
+#: A plist sets this to opt its job INTO grading, whatever ran it. The claim it
+#: makes is "I write a scheduler receipt under this name" -- and if that claim
+#: is false the card reports missed_run, which is the correct answer, rather
+#: than the job quietly leaving the roster.
+JOB_NAME_ENV_KEY = "DUCK_JOB_NAME"
+
+
+def _declared_job_name(payload: dict[str, Any]) -> str:
+    """The job name a plist claims, or "" if it claims none.
+
+    ONE resolver for both the roster and the not-graded list, because they have
+    to agree by construction: a name the roster drops and the blind list also
+    drops is a job nobody is looking at, which is the shape of the bug this
+    whole surface exists to fix."""
+    env = payload.get("EnvironmentVariables")
+    if isinstance(env, dict):
+        declared = str(env.get(JOB_NAME_ENV_KEY) or "").strip()
+        if declared:
+            return declared
+    args = payload.get("ProgramArguments")
+    args = args if isinstance(args, list) else []
+    if len(args) > 1 and str(args[0]).endswith(ACCEPTED_RUNNERS):
+        return str(args[1]).strip()
+    return ""
 
 
 def _duck_plists(launch_agents_dir: Path) -> list[Path]:
@@ -211,19 +286,24 @@ def _discover_unmonitored_jobs(
         args = payload.get("ProgramArguments")
         args = args if isinstance(args, list) else []
         runner = str(args[0]) if args else ""
-        job_name = str(args[1]).strip() if len(args) > 1 else ""
-        if runner.endswith(ACCEPTED_RUNNERS) and job_name:
+        # Same resolver the roster used, so the two lists partition the plists
+        # instead of each applying its own idea of what counts.
+        job_name = _declared_job_name(payload)
+        if job_name:
             continue
-        if job_name and job_name in known:
+        if str(payload.get("Label") or path.stem) in known:
             continue
         found.append({
             "label": str(payload.get("Label") or path.stem),
-            "job_name": job_name or None,
+            "job_name": None,
             "plist_path": str(path),
             "runner": runner.rsplit("/", 1)[-1],
             "schedule": _normalize_schedule(payload.get("StartCalendarInterval")),
-            "reason": (
-                "wrapper_not_recognised" if job_name else "no_job_name_argument"
+            "reason": "declares_no_job_name",
+            "how_to_fix": (
+                f"set {JOB_NAME_ENV_KEY} in the plist's EnvironmentVariables and "
+                "have the wrapper write a scheduler receipt under that name "
+                "(duckAgent_runtime/run_with_receipt.sh does both)"
             ),
         })
     return sorted(found, key=lambda item: str(item.get("label") or ""))
@@ -243,13 +323,11 @@ def _load_scheduled_jobs(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> dict[st
             payload = plistlib.loads(path.read_bytes())
         except Exception:
             continue
-        args = payload.get("ProgramArguments") if isinstance(payload, dict) else None
-        if not isinstance(args, list) or len(args) < 2:
+        if not isinstance(payload, dict):
             continue
-        runner = str(args[0])
-        if not runner.endswith(ACCEPTED_RUNNERS):
-            continue
-        job_name = str(args[1]).strip()
+        args = payload.get("ProgramArguments")
+        args = args if isinstance(args, list) else []
+        job_name = _declared_job_name(payload)
         if not job_name:
             continue
         schedule = _normalize_schedule(payload.get("StartCalendarInterval"))
@@ -645,6 +723,7 @@ def build_scheduler_health(
     current = now or datetime.now().astimezone()
     jobs = _load_scheduled_jobs(launch_agents_dir)
     receipts = _load_receipts(receipt_dir)
+    receipts = _unwind_own_in_flight_run(receipts)
     resolutions = _load_resolutions(resolution_dir)
     events = _parse_scheduler_log(scheduler_log_path)
     for job_name in sorted({*receipts.keys(), *(event.get("job_name") for event in events if event.get("job_name"))}):
