@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-PROD_RECEIPTS = Path("/Users/philtullai/ai-agents/duckAgent/data/creative_quality_receipts")
+from conftest import DUCKAGENT_ROOT
+
+PROD_RECEIPTS = DUCKAGENT_ROOT / "data" / "creative_quality_receipts"
 _PLACEHOLDER_POST_IDS = {"1234567890", "9876543210", "17912345"}
 
 

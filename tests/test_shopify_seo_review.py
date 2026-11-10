@@ -8,9 +8,11 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 
-RUNTIME_DIR = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
+
+from conftest import requires_duckagent  # noqa: E402
 
 import shopify_seo_review
 
@@ -63,6 +65,7 @@ class ShopifySeoReviewTests(unittest.TestCase):
             self.assertTrue((review_run_dir / f"{payload['run_id']}.json").exists())
             self.assertTrue(output_path.exists())
 
+    @requires_duckagent
     def test_email_render_uses_reply_apply_language(self) -> None:
         with patch.dict("os.environ", {"APPROVAL_REPLY_TO": "ops@example.test"}):
             subject, text_body, html_body = shopify_seo_review.render_shopify_seo_review_email(

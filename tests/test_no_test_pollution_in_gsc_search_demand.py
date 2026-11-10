@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-PROD_GSC = Path("/Users/philtullai/ai-agents/duck-ops/state/gsc_search_demand.json")
+PROD_GSC = Path(__file__).resolve().parents[1] / "state" / "gsc_search_demand.json"
 
 
 def test_production_gsc_search_demand_has_no_test_markers():

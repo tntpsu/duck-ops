@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-PROD_BUILD_NEXT = Path("/Users/philtullai/ai-agents/duck-ops/state/build_next_queue.json")
+PROD_BUILD_NEXT = Path(__file__).resolve().parents[1] / "state" / "build_next_queue.json"
 
 
 def test_production_build_next_queue_has_no_test_markers():

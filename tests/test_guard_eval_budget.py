@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-MODULE_PATH = Path("/Users/philtullai/ai-agents/duck-ops/runtime/etsy_browser_guard.py")
+MODULE_PATH = Path(__file__).resolve().parents[1] / "runtime" / "etsy_browser_guard.py"
 sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("etsy_browser_guard", MODULE_PATH)
 guard = importlib.util.module_from_spec(SPEC)

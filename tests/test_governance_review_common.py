@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-_RUNTIME = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+_RUNTIME = Path(__file__).resolve().parents[1] / "runtime"
 if str(_RUNTIME) not in sys.path:
     sys.path.insert(0, str(_RUNTIME))
 

@@ -19,7 +19,7 @@ import sys
 import unittest
 from pathlib import Path
 
-RUNTIME_DIR = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
@@ -33,15 +33,19 @@ class DuckAgentRootResolutionTests(unittest.TestCase):
         /Users/duckAgent. This trips on any future refactor that
         moves the runtime/ subdir or changes the parents[N] math."""
         root = review_reply_executor.DUCK_AGENT_ROOT
-        # The expected shape: ai-agents/duckAgent
-        self.assertTrue(
-            root.exists(),
-            f"DUCK_AGENT_ROOT must resolve to an existing dir; got {root!r}"
-        )
+        # The MATH is the regression pin and runs everywhere: the 2026-05-26
+        # bug produced /Users/duckAgent, which this catches by name and (in
+        # the sibling test below) by parent. Whether that directory is
+        # actually checked out on THIS machine is a different claim, and a
+        # claim a CI runner with one repo cannot make -- so it is asserted
+        # separately and skipped by name rather than failing the pin.
         self.assertEqual(
             root.name, "duckAgent",
             f"DUCK_AGENT_ROOT must end in 'duckAgent', got {root.name!r}"
         )
+        if not root.exists():
+            self.skipTest(f"duckAgent is not checked out beside duck-ops ({root}); "
+                          "the resolution math above still ran")
         self.assertTrue(
             root.is_dir(),
             f"DUCK_AGENT_ROOT must be a directory; got {root!r}"
@@ -51,7 +55,10 @@ class DuckAgentRootResolutionTests(unittest.TestCase):
         """The whole reason DUCK_AGENT_ROOT exists: _load_send_email
         falls back to importing helpers/email_helper.py from it when
         the package isn't on sys.path. The fallback file must exist."""
-        helper_path = review_reply_executor.DUCK_AGENT_ROOT / "helpers" / "email_helper.py"
+        root = review_reply_executor.DUCK_AGENT_ROOT
+        if not root.exists():
+            self.skipTest(f"duckAgent is not checked out beside duck-ops ({root})")
+        helper_path = root / "helpers" / "email_helper.py"
         self.assertTrue(
             helper_path.exists(),
             f"helpers/email_helper.py must exist under DUCK_AGENT_ROOT; got {helper_path!r}"

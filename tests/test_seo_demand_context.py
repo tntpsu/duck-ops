@@ -10,7 +10,7 @@ import json
 import sys
 from pathlib import Path
 
-RUNTIME = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+RUNTIME = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 

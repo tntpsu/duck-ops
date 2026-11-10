@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 
-RUNTIME_DIR = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
@@ -33,7 +33,7 @@ def test_llm_call_log_path_is_redirected_during_tests():
     generate_jeepfact_config_via_llm / etc. silently appends fake
     entries that the OS card grades on for the next 7 days."""
     import llm_call_helpers
-    prod_path = "/Users/philtullai/ai-agents/duck-ops/state/llm_call_log.jsonl"
+    prod_path = str(Path(__file__).resolve().parents[1] / "state" / "llm_call_log.jsonl")
     actual = str(llm_call_helpers.LLM_CALL_LOG_PATH)
     assert actual != prod_path, (
         f"LLM_CALL_LOG_PATH must be redirected during tests. Got "
@@ -60,7 +60,7 @@ def test_workflow_control_state_dir_is_redirected_during_tests():
     (gtdf-winner-test-gtdf-winner-blocked.json) had been sitting
     in production workflow_control since 2026-05-26."""
     import workflow_control as _wc
-    prod_path = "/Users/philtullai/ai-agents/duck-ops/state/workflow_control"
+    prod_path = str(Path(__file__).resolve().parents[1] / "state" / "workflow_control")
     actual = str(_wc.WORKFLOW_CONTROL_STATE_DIR)
     assert actual != prod_path, (
         f"WORKFLOW_CONTROL_STATE_DIR must be redirected during "
@@ -79,7 +79,7 @@ def test_log_llm_call_writes_only_to_redirected_path():
     grow the production file. Uses Path.stat for the byte size
     delta as the empirical signal."""
     import llm_call_helpers
-    prod_path = Path("/Users/philtullai/ai-agents/duck-ops/state/llm_call_log.jsonl")
+    prod_path = Path(__file__).resolve().parents[1] / "state" / "llm_call_log.jsonl"
     size_before = prod_path.stat().st_size if prod_path.exists() else 0
     llm_call_helpers.log_llm_call({"at": "test-timestamp", "kind": "isolation_meta_test", "outcome": "test"})
     size_after = prod_path.stat().st_size if prod_path.exists() else 0

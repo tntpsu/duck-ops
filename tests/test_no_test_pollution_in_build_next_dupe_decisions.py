@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 PROD_DUPE_DECISIONS = Path(
-    "/Users/philtullai/ai-agents/duck-ops/state/build_next_dupe_decisions.json"
+    str(Path(__file__).resolve().parents[1] / "state" / "build_next_dupe_decisions.json")
 )
 
 # Titles only the test suite uses (TestDupeFlag in test_build_next_engine.py).

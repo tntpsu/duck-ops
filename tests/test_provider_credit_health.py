@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import requires_duckagent
+
 import provider_credit_health as pch
 
 
@@ -190,6 +192,7 @@ def test_writing_a_redirected_path_is_allowed(tmp_path, monkeypatch):
     assert json.loads(target.read_text())["status"] == "green"
 
 
+@requires_duckagent
 def test_the_daily_email_is_captured_not_sent_under_test_mode(monkeypatch):
     """The trap that already burned us once: on 2026-09-25 a pytest run sent
     four real emails to the operator. This surface emails on red, so a test that
@@ -199,7 +202,9 @@ def test_the_daily_email_is_captured_not_sent_under_test_mode(monkeypatch):
     than trusting that it does ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
     """
     monkeypatch.setenv("DUCK_TEST_MODE", "1")
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "duckAgent"))
+    from conftest import DUCKAGENT_ROOT
+
+    sys.path.insert(0, str(DUCKAGENT_ROOT))
     from helpers.email_helper import send_email
 
     subject, text, html = pch.render_email(_red())

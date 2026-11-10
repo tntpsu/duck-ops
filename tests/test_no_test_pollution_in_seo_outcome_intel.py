@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-PROD_INTEL = Path("/Users/philtullai/ai-agents/duck-ops/state/seo_outcome_intel.json")
+PROD_INTEL = Path(__file__).resolve().parents[1] / "state" / "seo_outcome_intel.json"
 
 
 def test_production_seo_outcome_intel_has_no_test_markers():

@@ -18,12 +18,28 @@ from pathlib import Path
 
 import pytest
 
-RUNTIME = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+RUNTIME = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 
 import llm_call_helpers
 import llm_cost_summary
+
+
+def _viewer_source() -> str:
+    """duckAgent's mirror of the price table.
+
+    Skips rather than fails when the sibling repo is not checked out: a CI
+    runner has one repo, and a cross-repo assertion that cannot run should say
+    so by name, not pass quietly as if it had.
+    """
+    from conftest import DUCKAGENT_ROOT
+
+    path = (DUCKAGENT_ROOT / "creative_agent" / "runtime" / "src"
+            / "duck_creative_agent" / "viewer.py")
+    if not path.is_file():
+        pytest.skip(f"cross-repo price-table check needs duckAgent at {path}")
+    return path.read_text(encoding="utf-8")
 
 
 class TestPricingTable:
@@ -42,10 +58,7 @@ class TestPricingTable:
     def test_both_repos_agree_on_the_gpt5_price(self):
         """The viewer holds a documented-in-sync copy; drift means the card and
         the producer disagree about spend."""
-        viewer = Path(
-            "/Users/philtullai/ai-agents/duckAgent/creative_agent/runtime/src/"
-            "duck_creative_agent/viewer.py"
-        ).read_text(encoding="utf-8")
+        viewer = _viewer_source()
         for model in ("gpt-5.5", "gpt-5"):
             price = llm_call_helpers.MODEL_PRICING_USD_PER_1M_TOKENS[model]
             needle = f'"{model}": {{"prompt": {price["prompt"]:.3f}, "completion": {price["completion"]:.3f}}}'
@@ -115,10 +128,7 @@ class TestTheCardActuallyChangesColour:
     It was that status stayed 'ok', so nobody scanning card colours saw it."""
 
     def _tile_source(self) -> str:
-        viewer = Path(
-            "/Users/philtullai/ai-agents/duckAgent/creative_agent/runtime/src/"
-            "duck_creative_agent/viewer.py"
-        ).read_text(encoding="utf-8")
+        viewer = _viewer_source()
         i = viewer.index("function costIntelSummary")
         return viewer[i : viewer.index("function seoOutcomeIntelSummary")]
 

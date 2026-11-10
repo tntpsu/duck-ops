@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-PROD_OCCASION_INTEL = Path("/Users/philtullai/ai-agents/duck-ops/state/occasion_intel.json")
+PROD_OCCASION_INTEL = Path(__file__).resolve().parents[1] / "state" / "occasion_intel.json"
 
 
 def test_production_occasion_intel_has_no_test_markers():

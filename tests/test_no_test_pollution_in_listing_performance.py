@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-PROD = Path("/Users/philtullai/ai-agents/duck-ops/state/listing_performance.json")
+PROD = Path(__file__).resolve().parents[1] / "state" / "listing_performance.json"
 
 
 def test_production_listing_performance_has_no_test_markers():

@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-MODULE_PATH = Path("/Users/philtullai/ai-agents/duck-ops/runtime/etsy_expired_relist.py")
+MODULE_PATH = Path(__file__).resolve().parents[1] / "runtime" / "etsy_expired_relist.py"
 sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("etsy_expired_relist", MODULE_PATH)
 etsy_expired_relist = importlib.util.module_from_spec(SPEC)

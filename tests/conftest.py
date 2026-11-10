@@ -32,7 +32,30 @@ import os
 import pytest
 
 
-RUNTIME_DIR = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+# Derived, not hard-coded. Until 2026-11-09 this was an absolute path into one
+# particular checkout, so `pytest` in a fresh clone imported the ORIGINAL
+# working tree's runtime/ and graded code the checkout did not contain: a probe
+# run that day reported 1486 passing while testing a different copy of the repo
+# ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]). It is also why this
+# suite had never run in CI.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_DIR = REPO_ROOT / "runtime"
+
+# The sibling repo, for the handful of tests that assert duck-ops and duckAgent
+# agree about something. Overridable, and ABSENT is a legitimate state -- a CI
+# runner checks out one repo. Those tests skip by name rather than failing, so
+# "the cross-repo check did not run here" is visible instead of implied.
+DUCKAGENT_ROOT = Path(
+    os.environ.get("DUCKAGENT_ROOT") or (REPO_ROOT.parent / "duckAgent"))
+
+#: Decorate any test that needs duckAgent's code to be importable. It skips
+#: with a reason naming the missing repo rather than failing, so a one-repo
+#: runner reports "did not check this" instead of "this is broken" -- and
+#: rather than passing quietly, which is how a cross-repo drift check stops
+#: existing without anyone noticing.
+requires_duckagent = pytest.mark.skipif(
+    not (DUCKAGENT_ROOT / "helpers").is_dir(),
+    reason=f"needs duckAgent checked out at {DUCKAGENT_ROOT}")
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 

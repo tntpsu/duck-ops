@@ -13,9 +13,9 @@ import sys
 import unittest
 from pathlib import Path
 
-PRODUCTION_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/email_cadence_overrides.json")
+PRODUCTION_PATH = Path(__file__).resolve().parents[1] / "state" / "email_cadence_overrides.json"
 
-RUNTIME = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+RUNTIME = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 

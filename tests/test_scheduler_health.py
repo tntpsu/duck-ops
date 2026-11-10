@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 
-RUNTIME_DIR = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
@@ -187,7 +187,7 @@ class SchedulerHealthTests(unittest.TestCase):
                     "ProgramArguments": [
                         "/Users/philtullai/ai-agents/duckAgent_runtime/run_duck_ops_observe_review.sh",
                         "occasion_engine_daily",
-                        "/Users/philtullai/ai-agents/duck-ops/runtime/occasion_engine.py",
+                        str(Path(__file__).resolve().parents[1] / "runtime" / "occasion_engine.py"),
                     ],
                     "StartCalendarInterval": {"Hour": 7, "Minute": 25},
                 }, sort_keys=False)
@@ -344,7 +344,7 @@ def _write_duckops_plist(path: Path, *, label: str, job_name: str, schedule) -> 
                 "ProgramArguments": [
                     "/Users/philtullai/ai-agents/duckAgent_runtime/run_duck_ops_observe_review.sh",
                     job_name,
-                    f"/Users/philtullai/ai-agents/duck-ops/runtime/{job_name}.py",
+                    str(Path(__file__).resolve().parents[1] / "runtime" / f"{job_name}.py"),
                 ],
                 "StartCalendarInterval": schedule,
             },

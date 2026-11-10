@@ -15,14 +15,14 @@ from pathlib import Path
 
 import pytest
 
-RUNTIME = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+RUNTIME = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME) not in sys.path:
     sys.path.insert(0, str(RUNTIME))
 
 import customer_ask_scout as cas  # noqa: E402
 
 FIXTURE = json.loads(
-    (Path("/Users/philtullai/ai-agents/duck-ops/tests/fixtures/customer_ask_golden.json")).read_text()
+    (Path(__file__).resolve().parent / "fixtures" / "customer_ask_golden.json").read_text()
 )
 TAXONOMY = cas.load_taxonomy()
 

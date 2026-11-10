@@ -11,7 +11,7 @@ import json
 import unittest
 from pathlib import Path
 
-PRODUCTION_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/theme_review_decisions.json")
+PRODUCTION_PATH = Path(__file__).resolve().parents[1] / "state" / "theme_review_decisions.json"
 
 # Handles used by the unit tests start with these markers.
 _TEST_HANDLE_PREFIXES = ("test-", "test_", "fixture-", "dummy-")

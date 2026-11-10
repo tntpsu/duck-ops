@@ -25,15 +25,24 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import pytest
 from unittest.mock import patch
 
 
-RUNTIME_DIR = Path("/Users/philtullai/ai-agents/duck-ops/runtime")
+RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
-DUCK_AGENT_ROOT = Path("/Users/philtullai/ai-agents/duckAgent")
-if str(DUCK_AGENT_ROOT) not in sys.path:
-    sys.path.insert(0, str(DUCK_AGENT_ROOT))
+# This module imports duckAgent's helpers package at import time, so it
+# cannot run where the sibling repo is not checked out -- a CI runner, or any
+# machine with a different layout. Skipping the module by name is honest;
+# an absolute path here merely hid the dependency behind one machine's disk.
+from conftest import DUCKAGENT_ROOT  # noqa: E402
+
+if not (DUCKAGENT_ROOT / "helpers").is_dir():
+    pytest.skip(f"needs duckAgent's helpers package at {DUCKAGENT_ROOT}",
+                allow_module_level=True)
+if str(DUCKAGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(DUCKAGENT_ROOT))
 os.environ.setdefault("3D_AI_STUDIO_KEY", "ci-test-key")
 
 

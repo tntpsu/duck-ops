@@ -15,7 +15,7 @@ import pytest
 import etsy_title_refresh_outcome as etro
 import workflow_control
 
-PROD = Path("/Users/philtullai/ai-agents/duck-ops/state/etsy_title_refresh_outcome.json")
+PROD = Path(__file__).resolve().parents[1] / "state" / "etsy_title_refresh_outcome.json"
 
 
 def test_the_production_outcome_file_holds_no_fixture_listings():

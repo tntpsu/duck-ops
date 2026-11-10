@@ -34,3 +34,23 @@ jobs:
               py_compile.compile(str(path), doraise=True)
           print(f"Compiled {len(files)} Python files.")
           PY
+
+  tests:
+    # Added 2026-11-09. Until then "Duck Ops Checks ✓" meant the runtime
+    # COMPILED -- 10 seconds, no test ever ran here. The suite could not run
+    # in CI because 125 of 151 test files hard-coded an absolute path into one
+    # particular checkout; a probe run that day reported 1486 passing while
+    # importing a DIFFERENT copy of the repo than the one under test.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install -r requirements-test.txt
+      # duckAgent is not checked out here. The handful of cross-repo
+      # assertions skip BY NAME rather than failing, so the summary says what
+      # this runner could not check instead of implying it did.
+      - name: Run the suite
+        run: pytest tests -q

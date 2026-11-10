@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-PROD_PATH = Path("/Users/philtullai/ai-agents/duck-ops/state/customer_ask_candidates.json")
+PROD_PATH = Path(__file__).resolve().parents[1] / "state" / "customer_ask_candidates.json"
 # Distinctive fixture-only subjects that should never appear in real output.
 SENTINELS = {"green bay packers", "dachshund"}
 

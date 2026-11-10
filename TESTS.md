@@ -5672,3 +5672,45 @@ therefore still rests on the prototype script, not on this code path, and
 `scripts/eval_duckvideo_motion.py --staged` is what re-measures it when credits
 return — it fails loudly rather than falling back, so the staged path can never
 be measured under the text path's name.
+
+## Surface 109 — the suite was grading a different copy of the repo (2026-11-09)
+
+`Duck Ops Checks ✓` took 10 seconds because it ran `ruff --select F821` and
+`py_compile` over `runtime/`. The 1,487-test suite had never run in CI, and
+could not: **125 of 151 test files hard-coded `/Users/philtullai/ai-agents/duck-ops`**,
+`tests/conftest.py` among them — and conftest's copy is the one that puts
+`runtime/` on `sys.path` for every other file.
+
+A clone probe made the consequence concrete. `pytest` inside a fresh checkout
+reported **1486 passing while importing the ORIGINAL working tree's**
+`runtime/workflow_control.py`. A green run in one copy of the repo was grading
+another copy's code, and nothing anywhere said so.
+
+### Use case × failure mode
+
+| | Happy | Sibling repo absent | Wrong tree imported | Dependency missing |
+|---|---|---|---|---|
+| conftest puts the right runtime on the path | unit:portable:conftest | n/a | unit:portable:conftest | n/a |
+| No test reaches outside its checkout | unit:portable:no_absolute_paths | n/a | unit:portable:no_absolute_paths | n/a |
+| Cross-repo assertions (price table, email render) | local run | skip **by name** | n/a | n/a |
+| Whole suite on a one-repo runner | CI job `tests` | 16 skips, 0 failures | n/a | `requirements-test.txt` |
+
+`unit:portable:no_absolute_paths` pins the rule, not the fix: a path may still
+appear as **data** (a launchd plist fixture naming a wrapper, a recorded
+`state_source`), because those are values the code under test parses. What may
+not come back is an absolute path used to **reach** something. It earned its
+place immediately — it caught a 126th file the sweep had missed, which imported
+duckAgent's `helpers` package at module scope and would have failed CI on
+import.
+
+### Verified, not assumed
+
+| Run | Result |
+|---|---|
+| In place, duckAgent present | 1489 passed, 1 skipped |
+| Fresh clone, venv holding only `requirements-test.txt`, `DUCKAGENT_ROOT` pointed at nothing | **1461 passed, 16 skipped, 0 failed** |
+| Tripwire planted in the clone's `runtime/` | seen by the import — the suite now tests the checkout it runs in |
+
+The 16 skips are the honest residue: tests that need duckAgent's code say so by
+name rather than failing, and rather than passing quietly — which is how a
+cross-repo drift check stops existing without anyone noticing.

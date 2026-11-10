@@ -1,0 +1,17 @@
+# What `pytest tests` needs, and nothing else.
+#
+# Derived 2026-11-09 by walking every import in runtime/ and tests/ and
+# subtracting the standard library, then verified by running the whole suite
+# in a fresh clone against a venv holding exactly this list and no duckAgent
+# sibling: 1476 passed, 12 skipped, 0 failed.
+#
+# Unpinned on purpose: this is a lint-grade gate, and a pin here rots into a
+# dependabot chore for a repo that ships no wheel. If a release breaks the
+# suite, pin THAT package with a dated note saying why.
+pytest
+pytest-subtests
+pillow
+cryptography
+python-dotenv
+requests
+google-genai
