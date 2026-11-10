@@ -5576,3 +5576,99 @@ them, with `--send-email` omitted: `repo_ci_status` exit 0, digest built 6 findi
 **No test.** `duckAgent_runtime/` is machine-local and not in git, so there is nothing
 for a repo test to assert against. The durable guard is 107's roster coverage: once the
 card can see this job, a wrapper that dies on startup stops being invisible.
+
+## Surface 108 — the staged first frame, wired (2026-11-09)
+
+Surface 106 measured it; this builds it. Three renders from a staged first frame
+scored **3 of 3** clean on duck scale, wipers stationary and the duck visibly
+taken and carried out of frame; three renders of the same concept's shipped text
+prompt scored **0 of 3**. The shipped prompt carries `The wipers never move --
+the car is parked.` verbatim and the wipers swept in two of three runs anyway.
+
+So the rule is wider than this lane's existing "relocation beats prohibition":
+
+> **For anything present at t=0, staging beats wording outright.**
+
+The wipers hold still in the staged clips because the frame pins them, not
+because a sentence forbids it — the same reason the duck keeps its size and its
+costume. What staging does NOT buy is anything that *arrives* later: Santa's
+hand enters at 4s and takes its size from nothing in the frame, so the scale
+wording stays in the prompt as the only lever on it. A weak lever, measured, but
+not no lever.
+
+### Use case × failure mode
+
+| | Happy | Required input absent | Image model misbehaves | Silent degradation | Operator can see why |
+|---|---|---|---|---|---|
+| Build the frame from plate + cutout | unit:staged:composite | unit:staged:no_plate | n/a | unit:staged:drift | unit:staged:reason |
+| Scale the duck by a depth-matched ruler | unit:staged:px_per_inch | unit:staged:height_default | n/a | unit:staged:ruler_is_subject_depth | n/a |
+| Two-part contact shadow (AO core + cast) | unit:staged:shadow_layers | n/a | n/a | unit:staged:shadow_vs_plate | n/a |
+| Harmonize keeps size and base row | manual:eyes (real Rudolf composite, 11-09) | unit:staged:no_harmonizer | unit:staged:harmonize_error | unit:staged:shrink_caught | unit:staged:reason |
+| Harmonize prompt keeps its base-row pin | unit:staged:prompt_pinned | n/a | n/a | unit:staged:unpinned_skips_pass | n/a |
+| Harmonize prompt is product-agnostic | unit:staged:no_product_colours | n/a | n/a | n/a | n/a |
+| Staged path asks for image_to_video | unit:staged:task_staged | n/a | n/a | unit:staged:task_default | unit:staged:email_says_path |
+| Text path keeps reference_to_video | unit:staged:task_default | n/a | n/a | unit:staged:task_default | unit:staged:email_says_path |
+| Concept without a plate keeps the text path | unit:staged:unstaged_flow | unit:staged:no_plate | n/a | unit:staged:reason_every_path | unit:staged:reason_every_path |
+| Cutout fails its quality gate | n/a | unit:staged:cutout_gate | n/a | unit:staged:reason_every_path | unit:staged:reason_every_path |
+| The paid harmonize call during a test run | n/a | n/a | n/a | unit:staged:test_mode_refusal | unit:staged:refusal_named |
+| Hand entering at 4s is NOT pinned by staging | n/a | n/a | manual:eyes | **doc — known limit, no lever** | doc |
+
+37 tests in `duckAgent/tests/test_duckvideo_staged_frame.py`; 255 green across
+every duckvideo file.
+
+### The measurement that was wrong, caught before it shipped
+
+The drift guard's first implementation recovered the duck's box by diffing the
+harmonized frame against the plate, which has no duck in it. On the real
+harmonized frame that returned a **669px box for a 204px duck**: an image model
+re-renders the *whole* picture — snow, house lights, windshield all move by far
+more than any sane threshold — however firmly the prompt says "pixel-for-pixel
+identical". That would have been the **fourth** automated measurement of this
+one scene to fail toward a confident wrong answer, after a saturation mask that
+caught the house's Christmas lights, a green-channel mask that caught its front
+door, and a vent-ring detector that reported 472px for a ring plainly 265px.
+
+What replaced it is direct rather than inferential: we *have* the duck we put
+there, so look for that silhouette across a sweep of scales and offsets and
+report where it matched best. Gradient magnitude, not intensity, because the
+pass is *supposed* to change the duck's brightness. Calibrated against the real
+harmonized frame:
+
+| candidate | measured scale | verdict |
+|---|---|---|
+| identical | 1.00 | accept |
+| relit (what a good harmonize does) | 1.00 | accept |
+| shrunk 10% (the actual historical bug) | 0.90 | reject |
+| shrunk 5% | 0.96 | reject |
+| an unrelated picture | — (score 0.29) | reject, unmeasurable |
+
+Deliberately asymmetric: a false reject costs only the lighting blend, and the
+composite underneath holds every property that measured 3 of 3. A false accept
+ships a wrong-sized duck, which is the one thing this path exists to prevent.
+
+### Two numbers in the config that are measurements, not preferences
+
+- `base_y: 1130` — on this plate y1045–1090 is a recessed defroster slot reading
+  23–26 grey levels (a hole) and y1095–1145 is the lit pad at 98–117. The clip
+  that shipped used 1105, on the rear lip against the slot, so the contact
+  shadow fell where no shadow can read and the duck looked like it was floating.
+  Pinned by `unit:staged:shadow_vs_plate`, which fails if the plate is ever
+  swapped for one whose geometry does not match.
+- `px_per_inch_at_subject: 81.6` — 204px for a 2.5in duck, measured at the
+  **duck's** depth. The lower dash vents sit nearer camera, so a vent-derived
+  ratio over-reads anything this far back.
+
+### What is NOT verified
+
+The wired path has **not** produced a clip. The verification render failed on
+`402 RESOURCE_EXHAUSTED — prepayment credits are depleted`, which also means the
+weekly duckvideo lane cannot generate anything until that is topped up. What the
+attempt did prove, on the real Rudolf product rather than the prototype's Elf:
+the cutout, the depth-matched scaling and the two-part shadow all produced a
+correct composite (duck at rows 926→1130, height exactly 204, shadow −48 grey
+levels at the contact line fading to zero by +60), and the 402 degraded to that
+composite with the reason named rather than failing the clip. The 3/3 result
+therefore still rests on the prototype script, not on this code path, and
+`scripts/eval_duckvideo_motion.py --staged` is what re-measures it when credits
+return — it fails loudly rather than falling back, so the staged path can never
+be measured under the text path's name.

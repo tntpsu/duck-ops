@@ -409,6 +409,23 @@ fires it, which is why its payload sat at 2026-11-03 for six days; the card that
 is not on the schedule. Second slice: point the 12 at a receipt-writing wrapper so they can be graded
 rather than merely counted.
 
+### Shipped 2026-11-09 — the duckvideo staged first frame (Surface 108)
+
+Measured 3 of 3 clean against 0 of 3 for the text prompt on the same concept, so
+the ai_motion lane now BUILDS its first frame (plate + per-product cutout at a
+depth-matched size + two-part contact shadow + one harmonize pass) and sends it
+as frame 1 via `image_to_video`, instead of describing the scene in words. The
+rule it generalises: for anything present at t=0, staging beats wording outright.
+
+Open follow-ups this created:
+- **Blocked:** the wired path has not generated a clip — Gemini prepayment
+  credits are depleted (402 RESOURCE_EXHAUSTED), which also stops the weekly
+  lane. `scripts/eval_duckvideo_motion.py --staged` re-measures it when topped up.
+- Only 1 of the 14 concepts has a plate. Each further plate is a one-off
+  erase + brightness scan + position sweep; the code is concept-agnostic.
+- Staging cannot pin an object that enters mid-clip, so Santa's cupped palm is
+  still wording-only and still fails. No lever identified.
+
 ### Priority 2: Outcome Learning Layer Expansion
 The social learning foundation is now live. The next high-value work is extending that same discipline into the remaining business outcomes:
 1. Feed weekly slot execution feedback into current learnings and change detection so the system shows what actually changed week over week.
