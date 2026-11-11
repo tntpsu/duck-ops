@@ -6334,3 +6334,192 @@ and why the earlier claim was wrong.
   the signal that surface exists to give is being spent on something else.
   Fix is either to carry `model` onto the failure results or to exclude
   non-`ok` rows from the unknown-model count — probably both.
+
+## Surface 118 — Music on Instagram: a catalog we could always read, and a duration nobody checks (2026-11-11, operator: "is anyone doing this automatically so we dont have to listen?" → "ok, do the 3", SPEC-FIRST → shipped same day)
+
+The operator asked whether audio can be attached automatically. It can, and the
+first finding is that nothing had to be built or upgraded to find out.
+
+**Measured by a read-only probe against our own token, 2026-11-11.**
+`GET /ig_audio` answers on **every** Graph version tried, v19.0 through v25.0 —
+including the v19.0 already pinned throughout `helpers/meta_helper.py`. No
+version bump, no new permission: `instagram_basic` + `instagram_content_publish`
+are the same scopes we already publish with.
+
+| call | reachable | pages | note |
+|---|---|---|---|
+| `audio_type=music`, no query | **≥588 unique ids** | 24, cursor still live at my cap | the Sound Collection |
+| `audio_type=original_sound`, no query | **109 unique ids** | 5, cursor exhausted | real creator sounds |
+| `audio_type=music&search_query=funk` | 25 + next page | — | keyword search works |
+| `audio_type=music&search_query=upbeat` | 11, no next page | — | result counts vary widely |
+
+Three things the docs say that the API does not do, all found by looking:
+
+1. **The payload key is `audio`, not `data`.** My first probe parsed `data`,
+   got `None`, and printed `count=None` — a fact about the probe, not the API
+   ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
+2. **The `fields` param is ignored.** `is_ads_eligible` and
+   `on_platform_audio_preview_link` are documented response fields and are
+   **never** returned for `audio_type=music`, whatever `fields=` asks for.
+   `on_platform_audio_preview_link` *does* come back for `original_sound`.
+   Any code reading `is_ads_eligible` on a music row is reading `None` forever.
+3. The reference contradicts itself on `audio_type` (Integer in the search
+   table, String in the metadata table) and on
+   `cover_artwork_thumbnail_uri` vs `_url` between endpoints. The parser
+   tolerates both rather than trusting either.
+
+**The risk that actually matters is duration, and no card would ever have seen
+it.** There is no trim parameter in the API, and audio starts at second 0:
+
+| | median | min | max | ≤20s |
+|---|---|---|---|---|
+| `music` (600 rows) | **158s** | 6s | 308s | 35 |
+| `original_sound` (109 rows) | **24s** | 4s | 300s | 48 |
+
+Our Gemini motion clips are **8 seconds**. Attaching a 158-second track to an
+8-second reel ships the first 8 seconds of its intro — which is the quietest,
+least characteristic part of almost any track. This is a silent-quality failure
+of exactly the shape `[[feedback_visual_output_needs_eyes]]` describes, one
+sense over: every probe is green, the container publishes, the reel is dull.
+`original_sound` is both better fitted and where recognizable sounds live.
+
+**What the API buys and does not buy.** It buys rights and attribution — Meta
+owns the licensing question, and the reel lands on a real audio page, a
+discovery surface a baked-in mp3 can never reach. It does **not** buy
+selection: there is no popularity or rank field in the standard search
+response, so programmatic choice is as arbitrary as `pick_audio_track()`
+already is over ten mixkit files. Velocity is therefore **derived by
+snapshot-diffing the no-query list**, the same way every other trend field in
+this stack is derived ([[feedback_trend_signal_is_7day_momentum_not_alltime]]),
+never bought from a scraper. And a climbing rank is evidence a sound is
+*moving*, not that it suits a 3D-printed duck, so rotation draws only from an
+operator-approved shortlist. The lane is never promoted to auto-select
+([[feedback_auto_manual_queue_contract]]).
+
+**The mixkit library it replaces has no licence receipt.** Ten mp3s dated
+Aug 7–12 whose only provenance in the repo is a code comment
+(`helpers/duck_video_helper.py:34`, "royalty-free mp3s"). Mixkit's licence text
+is JS-rendered and could not be read from this session, and Mixkit publishes an
+`llm-info` page instructing assistants to call it legally safe — a reason to
+discount a summary, not to trust it. Carried as an open item below rather than
+as prose ([[feedback_residual_risk_needs_a_tracked_home]]).
+
+**Feed images cannot carry audio at all.** There is no audio field on an
+`IMAGE` or `CAROUSEL` container, and Meta's own ads audio-replacement docs
+reject photos and carousels outright. So "music on our image posts" is not an
+API gap to work around — it is a format change: the lane has to publish a reel.
+`meme` and `jeepfact` are the candidates. **The justification is audio, not
+reach** — and stating it the other way round would repeat a claim this repo
+already retracted. "reel > image > carousel, replicated in two samples" was
+corrected on 2026-11-08 (master_roadmap, Social Reach Improvement Roadmap,
+item 1): those numbers do not reproduce, and the "replication" rested on an n
+of one. What our own data supports is **image > carousel** on median reach
+(50.0 over 5 posts vs 25.0 over 7) with **reel unknown at n=1**;
+`/portal/intel/social` refuses to rank a format with fewer than three posts of
+readable reach. Reels leading across 72 competitor posts on 7 accounts is real
+evidence and still the reason to try, but it is *their* evidence.
+
+So this converts the format that currently leads on our first-party data, on a
+competitor-backed bet. That is the honest framing, and it is why the switch is
+off per lane and why the receipt now records `ig_format` and `ig_audio_id` —
+without those fields the reel-vs-image comparison stays unanswerable, which is
+how we got a retracted finding in the first place
+([[feedback_a_number_needs_its_denominator]]).
+
+`review_carousel` deliberately stays a carousel: it carries a multi-review
+swipe and has the lowest reach of the five at 17.8.
+
+**Blocking discovery for that half:** `render_kenburns_video` refuses
+`len(raw_images) < 2` with `not_enough_images`, and both candidate lanes
+produce exactly **one** image. A single-image Ken-Burns is well-defined — the
+zoom supplies the motion, there is simply no crossfade — so the floor is a
+real restriction, not a mathematical one. Relaxing it is the first unit of
+work in that half.
+
+### Use case × failure mode
+
+| | Happy | API error / scope | Contradictory payload | Documented field absent | Pagination breaks | Shortlisted id vanishes | Duration mismatch | Test reaches live API |
+|---|---|---|---|---|---|---|---|---|
+| Fetch catalog (no query) | unit | unit | unit | unit | unit | n/a | n/a | unit:guard |
+| Keyword search | unit | unit | unit | unit | unit | n/a | n/a | unit:guard |
+| Paginate to N pages | unit | unit | n/a | n/a | unit | n/a | n/a | unit:guard |
+| Daily trending snapshot | unit | unit | unit | n/a | unit | n/a | n/a | unit:guard |
+| Derived 7d rank-delta | unit | unit | n/a | n/a | n/a | unit | n/a | n/a |
+| Operator shortlist curation | unit | n/a | n/a | n/a | n/a | unit | unit | n/a |
+| Attach audio to reel container | unit | unit | n/a | n/a | n/a | unit | **unit** | unit:guard |
+| Approval gate holds | unit | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| meme/jeepfact as ken-burns reel | unit | unit | n/a | n/a | n/a | n/a | unit | n/a |
+| Single-image ken-burns | unit | unit | n/a | n/a | n/a | n/a | n/a | n/a |
+| review_carousel stays carousel | unit | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+
+### By dimension
+
+- **Static:** secret scan via `/deploy-check`; no new secret — reuses `META_ACCESS_TOKEN`.
+- **Unit:** the matrix above. No live API in the default suite.
+- **Integration:** one gated real-API script, manual trigger, NOT in default pytest (same shape as `scripts/eval_*`).
+- **E2E:** blocked — Gemini credits exhausted since 2026-11-09 22:04, so no clip can be generated to attach audio to. Recorded as blocked, not as passing.
+- **Isolation (CLAUDE.md convention 4):** the snapshot state path is a NEW module-level prod-path constant and ships all three layers in the same commit — autouse conftest fixture in BOTH repos, source-level `TestModeRefusalError` on the frozen factory-default path, post-suite pollution audit test.
+- **Outbound guard:** `DUCK_TEST_MODE` refusal sits **ahead** of the credentials check, because `.env` loads a live `META_ACCESS_TOKEN` under pytest — an absent key is not a guard ([[feedback_test_runs_reach_the_outside_world]]).
+- **Manual:** the shortlist itself. The operator picks by ear; nothing auto-selects.
+
+### Shipped
+
+| piece | where | tests |
+|---|---|---|
+| Catalog reader (search, paginate, defensive parse) | `duckAgent/helpers/ig_audio_helper.py` | `tests/test_ig_audio.py` — 56 |
+| Daily snapshot + derived rank-delta | `duckAgent/scripts/ig_audio_snapshot.py` | same file, `TestRankMovementIsDerivedNotRead` |
+| Operator shortlist (zero approvals shipped) | `duckAgent/config/ig_audio_shortlist.json` | `TestNothingAutoSelectsAudio` |
+| `audio_configuration` on the REELS container | `helpers/meta_helper.py` + queue + drain | `TestTheReelContainerCarriesTheAudio`, `TestTheQueueCarriesTheAudioToTheSidecar` |
+| Single-image Ken-Burns + audio-mode switch | `helpers/duck_video_helper.py` | `tests/test_image_lane_reel.py` — 23 |
+| meme / jeepfact reel format (OFF by default) | `flows/{meme,jeepfact}/steps.py` + `helpers/image_lane_reel.py` | `TestTheLaneIsNotPromotedByShipping`, `TestTheLanesOnlyConvertSinglePanelPosts` |
+| Isolation layers 1–3 | `duckagent_test_ig_audio_guard.py`, `_write_atomic`, `tests/test_no_test_pollution_in_ig_audio_trending.py` | 3 + `TestTheProducerRefusesTheProductionSnapshotPath` |
+
+**The outbound guard could not key on `DUCK_TEST_MODE` alone.** `/deploy-check`
+step 3b caught it: that flag is set at module level in
+`duckAgent/tests/conftest.py` (line 63) and **nowhere else** — neither
+`creative_agent` test root sets it. A guard reading it directly is therefore
+inert under `pytest creative_agent/runtime/tests`, which is the same
+rootdir-shaped hole that made the llm_call_log fixture protect a local run and
+nothing in CI. `in_test_run()` now ORs it with `PYTEST_CURRENT_TEST`, which
+pytest sets in every root regardless of conftest. Not fixed by setting
+`DUCK_TEST_MODE` in the shared guard module: that would arm every *other*
+guard in the stack in roots that have never had it, which is a far larger
+change than this commit should carry.
+
+The guard then fires only when `session is None` — a call that would really
+leave the machine. An injected session is the caller saying where the bytes
+go, so the parser and cursor-walk tests need no opt-out. A guard a suite has
+to switch off is a guard that gets switched off and stays off.
+
+**Verified against the live API and the real artifacts, not the return dicts:**
+
+- Snapshot producer run twice. First run: `measurable=False`, "needs a second
+  day", 0 climbers. Second run minutes later: `measurable=False`, "baseline is
+  less than 20h old", **25 climbers** — the list genuinely shifted
+  (`original_sound` 109 → 108) and the 20h gate correctly refused to call that
+  movement. The guard earned its place on its second run.
+- Audio levels measured with `ffmpeg volumedetect`, because the return dict is
+  not the artifact and `audio="none"` still writes an AAC stream (Meta needs
+  one in the container): **-91.0 dB** mean and max for the silent render,
+  **-20.6 dB** mean / -3.8 dB peak with a track baked in. Pinned as a test.
+- Three audio paths exercised end-to-end with a mocked upload: no approvals →
+  local track baked in (-15.0 dB), one approved 10s track → silent render plus
+  `audio_configuration`, upload raising → `status: failed` with the reason and
+  no exception escaping. Exactly one source of music in every case.
+- The duration filter did more than filter: it surfaced a purpose-built
+  **"Reels Sound"** family (10–20s, named for short-form structures —
+  *Reveal*, *Before And After*, *Listicle*, *Timelapse*, *Photo Dump*). Those
+  are the only music rows that pass an 8s fit, and 17 of the 40 seeded
+  candidates are from it.
+
+**Not verified, and why:** no reel has been published with audio attached. The
+host step is a Shopify Files upload and the publish is a Meta write — both
+Tier-3, both needing per-time approval. The lane switches are OFF, zero audio
+is approved, so nothing changes until the operator turns it on.
+
+### Open items
+
+- **No licence receipt for the ten mixkit mp3s.** Provenance is one code comment. Needs a saved licence snapshot beside the files, or retirement once the API path carries the lanes.
+- **`original_sound` rights are unverified for commercial reuse.** The 109 reachable creator sounds are served to us as third-party-authorised, but recognizable remixes appear among them and the probe cannot tell us what reuse Meta actually licenses. Treat `music` as the safe default until this is answered.
+- **No trim.** Audio always starts at 0:00. If the duration-fit guard proves too blunt, the fix is clip-side (lengthen the clip) not API-side.
+- **Velocity needs ~7 days of snapshots before the rank-delta means anything.** Until then the field exists and is empty, which is the correct reading, not a bug.

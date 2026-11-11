@@ -125,6 +125,20 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
     if _duckagent_llm_log is not None:
         monkeypatch.setattr(_duckagent_llm_log, "_LLM_CALL_LOG_PATH", tmp_log)
 
+    # Same shape, same repo boundary: duckAgent's Instagram-audio snapshot
+    # producer writes duck-ops/state/ig_audio_trending.json (Surface 118).
+    # A duck-ops test that reaches it would overwrite the operator's real
+    # trending snapshot and the history the rank-delta is derived from.
+    try:
+        import helpers.ig_audio_helper as _duckagent_ig_audio
+    except Exception:
+        _duckagent_ig_audio = None
+    if _duckagent_ig_audio is not None:
+        monkeypatch.setattr(_duckagent_ig_audio, "IG_AUDIO_TRENDING_PATH",
+                            tmp_path / "ig_audio_trending.json")
+        monkeypatch.setattr(_duckagent_ig_audio, "IG_AUDIO_TRENDING_HISTORY_PATH",
+                            tmp_path / "ig_audio_trending_history.json")
+
     # The actual log_llm_call function reads LLM_CALL_LOG_PATH at
     # call time, so patching on the helpers module is sufficient
     # for the canonical path. Caller modules that did
