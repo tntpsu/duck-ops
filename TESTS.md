@@ -6080,3 +6080,125 @@ what the pin claims to have done.
 - **`governance_review_common.now_local_iso()` is the natural home** for an
   explicit operator zone if that migration is ever taken on. It is already
   imported across the modules that would need it.
+
+## Surface 114 — A test run could spend money on Gemini, and the only thing stopping it was luck (2026-11-11, operator: "What is 3 actually doing?" → "can u do 1 and 2?")
+
+`duckAgent/.env` puts a live `GEMINI_KEY` into the environment even under
+pytest, so every billed Gemini path was one unmocked test away from a real
+charge. Nothing refused. The reason it had never happened is that the six test
+files touching `helpers/gemini_helper.py` happen to monkeypatch the functions
+away — a property of those tests, not a guard
+([[feedback_test_runs_reach_the_outside_world]]: pytest has mailed the operator
+on two separate occasions by exactly this route).
+
+`_refuse_paid_generation_under_test_mode(surface)` now raises
+`TestModeRefusalError` under `DUCK_TEST_MODE=1` as the first statement of
+every method that reaches `client.models.generate_content` — the only thing
+here that costs money:
+
+| method | reached by |
+|---|---|
+| `cleanup_logo` | `enhance_for_stl` → `flows/logo/steps.py` (direct `GeminiHelper()`) |
+| `edit_image` | `gemini_edit_image` → studio image edits, weekly/social heroes |
+| `_generate_content_with_references` | `generate_image` **and** `generate_image_with_references` |
+| `analyze_image_json` | the vision judge |
+
+**Deliberately not in `__init__`.** Constructing a client is free, and
+`check_gemini_setup()` builds one to report readiness without ever calling the
+API. Refusing there would answer a different question than "did this spend",
+and a test asserts the guard stays out of the constructor.
+
+**The enumeration found two gaps after the guard went in, which is the point.**
+Listing methods that *call* `generate_content` is insufficient: a method that
+merely *delegates* to one and wraps it in a blanket `except Exception` turns
+the refusal into an ordinary `{'success': False}` — indistinguishable from a
+402, so the guard proves nothing. `generate_image` and
+`generate_image_with_references` both did exactly that. So did
+`flows/logo/steps.py` (fallback: "proceed with the original image") and
+`helpers/social_template_renderer.py::_generate_ai_background` (fallback: a
+static background plus a recorded `ai_background_unavailable`) — the busiest
+Gemini caller in the stack, since every internal template hero reaches a paid
+image edit through it. All four now re-raise.
+
+`test_gemini_paid_call_guard.py::test_nothing_on_the_way_out_swallows_the_refusal`
+computes the transitive closure of callers that can reach a billed call and
+fails if any of them has a blanket handler without either the guard at entry
+or a refusal re-raise. That is what makes the catching automatic rather than
+lucky ([[feedback_incomplete_fix_enumerate_all_branches]]).
+
+**The escape hatch is the other half.** `duckagent_test_gemini_guard.py`
+provides `reaches_a_mocked_gemini_client`, registered in all three conftests
+(tests touching this module live under both `tests/` and
+`creative_agent/tools/tests/`). It clears the flag and replaces
+`genai.Client` with a tripwire that raises rather than returning a plausible
+object, so a test that opts out still cannot reach the network by accident.
+Opt in with `pytestmark`, never autouse.
+
+**Verified:** 3393 passed / 1 xfailed across all three roots, against a 3379
+baseline measured at HEAD before the change — the only two failures are the
+pre-existing `test_weekly_sale_policy` pair (Surface 115), present identically
+in both runs.
+
+### Still open
+
+- **The guard depends on a key being present.** Without `GEMINI_KEY` the
+  constructor raises first and the wrappers return `{'success': False}`, so the
+  refusal never fires. Harmless — no key means no billed call — but it means
+  the guard's tests must set a fake key explicitly to exercise the path, and
+  they do.
+- **`cleanup_logo` is not on the cost ledger.** `_noted` decorates only the
+  three module-level functions, so the `flows/logo` →
+  `enhance_for_stl` → `cleanup_logo` path is now guarded but still invisible
+  to the cost card ([[feedback_instrumented_for_one_question_only]]).
+
+## Surface 115 — An optional input could block the lane, and a live file's age decided when (2026-11-11)
+
+Found while verifying Surface 114: two `test_weekly_sale_policy` tests had
+passed on 11-10 and failed on 11-11 with no code change between them. Both
+were failing at HEAD, so not from the guard — confirmed by running the full
+three-root suite with the change stashed.
+
+`build_input_freshness(..., optional_sources={"active_sales"})` computed
+
+```python
+is_fresh = (is_optional and is_missing) or (age_hours is not None and age_hours <= max_age_hours)
+```
+
+so `optional` exempted a source from being **missing** but not from being
+**stale**. A present-but-old optional source therefore landed in
+`stale_sources`, and `is_fresh` is `not stale_sources` — meaning an optional
+input could block the gate outright. `cache/active_sales.json` was last
+written 2026-11-08 12:01 and crossed the 72-hour window mid-morning on 11-11,
+at which point `step_weekly_sale_playbook` returned `False` and recorded
+`stale_input` — while its operator-facing next action said "Refresh weekly
+insights and sales cache inputs", naming two files that were both fresh. A
+lane that can run without a source entirely can certainly run with a stale
+copy of it: absent is strictly less information than old.
+
+Optional sources no longer contribute to `stale_sources`. They are reported in
+a new `stale_optional_sources` list instead, so the information is not
+silently dropped ([[feedback_no_silent_caps]] in spirit — the drop has to be
+visible). `active_sales` is the only optional source in either repo, and every
+consumer of `stale_sources` tests membership of a specific REQUIRED name
+(`blog_pkg`, `weekly_theme`, `sale_monitor_snapshot`, …), so no reader loses
+anything it used.
+
+**Two defects, one symptom.** The tests also read the real
+`cache/active_sales.json`: `ACTIVE_SALES_FILE` is resolved from `CACHE_DIR` at
+IMPORT time, so patching `CACHE_DIR` to a tmp dir does not move it, and a
+sibling test in the same file had already patched it explicitly. So the
+verdict of a unit test turned over because a production file aged
+([[feedback_test_isolation_from_production_state]],
+[[feedback_pin_the_rule_not_the_reading]] — a timed flake). Both tests now
+patch it, and the gate semantics have their own direct unit tests, including
+that a stale REQUIRED source still blocks.
+
+**Verified:** duckAgent 3399 passed / 1 xfailed across three roots (no
+failures, first fully green run of the day); duck-ops 1501 passed.
+
+### Still open
+
+- **Why is `active_sales.json` three days old at all?** The fix stops it
+  blocking the lane; it does not explain the staleness. If that file is only
+  rewritten when a sale is applied, it will routinely exceed 72h and the
+  freshness entry for it is close to meaningless.
