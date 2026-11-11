@@ -6196,9 +6196,141 @@ that a stale REQUIRED source still blocks.
 **Verified:** duckAgent 3399 passed / 1 xfailed across three roots (no
 failures, first fully green run of the day); duck-ops 1501 passed.
 
+### Answered by Surface 116
+
+- **Why is `active_sales.json` three days old at all?** It is not stale. It is
+  a weekly artifact graded on a 72-hour window. The guess recorded here — "if
+  that file is only rewritten when a sale is applied, it will routinely exceed
+  72h" — was right, and Surface 116 measures it.
+
+
+## Surface 116 — The weekly file was not stale; the window was wrong (2026-11-11, operator: "Do 2 and 3")
+
+Surface 115 left open *why* `cache/active_sales.json` was three days old. The
+answer is that nothing is broken, and the investigation is the finding.
+
+The file has exactly **one** writer: `step_weekly_sale_publish`, the step that
+applies the sale to Shopify, reached from
+`com.philtullai.duckagent.weekly.sunday` — `StartCalendarInterval` `Weekday 0,
+Hour 7`. Its mtime was Sunday 2026-11-08 07:01, which is that job working.
+
+The gate graded it, and its two siblings, against one window:
+
+| source | producer | cadence | 72h window |
+|---|---|---|---|
+| `weekly_insights` | daily refresh | 04:00 daily | correct |
+| `sales_cache` | daily refresh | 04:00 daily | correct |
+| `active_sales` | `step_weekly_sale_publish` | **Sunday 07:00** | **unsatisfiable** |
+
+A weekly artifact under a 72-hour window is stale from Wednesday 07:01 until
+the next rotation — **96 of every 168 hours, 57% of the time**, for a file
+behaving exactly as designed. Surface 115 stopped that from *blocking* the
+lane. It did not stop it being *reported* stale four days a week, which is how
+a field that is supposed to carry information gets trained into noise
+([[feedback_pin_the_rule_not_the_reading]]).
+
+`build_input_freshness` now takes `max_age_overrides`, so each input is graded
+against the cadence of the producer that writes it, and every entry carries the
+`max_age_hours` it was actually graded against — a reader never has to guess
+whether the default applied. `ACTIVE_SALES_FRESHNESS_HOURS` is 192h = one
+cadence (168h) + 24h grace, so "stale" starts meaning the thing worth knowing
+(the Sunday rotation did not run) within a day of it happening. Deliberately
+tighter than the 2×-cadence rule of thumb in `/new-flow` Part 2, which exists
+to absorb jitter; this producer is a fixed calendar job with none.
+
+No production reader consumed the payload's top-level `max_age_hours` (only a
+test fixture), so the shape change is additive.
+
+**Tested** (`tests/test_workflow_freshness_controls.py`,
+`TestEachSourceIsGradedOnItsOwnProducerCadence`): a weekly file mid-cycle is
+not stale; *the same age WOULD be stale on the default window* (pins that the
+override, not the age, changed the verdict); a genuinely missed rotation at 9
+days still IS stale (the half that matters — the window must not have been
+widened into blindness); the override does not leak to the other two sources;
+the window covers a full producer cadence as a **rule** rather than asserting
+192; and the writer really is the Sunday step, so if anything ever starts
+writing that file on a faster cadence the window's justification fails loudly.
+
+**Verified by calling the real gate** against live state: `active_sales` at
+77.8h now reads `fresh=True` under its 192h window with
+`stale_optional_sources: []`, while `weekly_insights` and `sales_cache` stay on
+72h at 8.8h old ([[feedback_call_the_function_not_grep_state]]).
+
+
+## Surface 117 — The logo lane billed Gemini on every run and wrote no cost row (2026-11-11, operator: "Do 2 and 3")
+
+Surface 112 instrumented the Gemini image and vision calls and recorded, in the
+`_noted` docstring and in the test module's docstring, that "every Gemini caller
+in both repos goes through these three functions."
+
+That was false when written. `flows/logo/steps.py:174` constructs
+`GeminiHelper()` directly and calls `enhance_for_stl`, which calls
+`cleanup_logo`, which reaches `client.models.generate_content` and bills. The
+enumeration behind that sentence had swept module **functions**; this path is a
+**method**, so it was invisible to the sweep that declared the work complete.
+
+On 2026-11-11 `cleanup_logo` was given the `DUCK_TEST_MODE` refusal guard
+(Surface 114) — so it could not be reached by a test — while still spending
+invisibly in production. **Guarded is not costed**
+([[feedback_instrumented_for_one_question_only]]): the same two-questions-one-
+answer trap as liveness-vs-cost, one layer in.
+
+Enumerated the real gap rather than inspecting for it. Of the four methods that
+reach `generate_content`, three (`edit_image`, `analyze_image_json`,
+`_generate_content_with_references`) are reachable only through a `_noted`
+module wrapper. `cleanup_logo` is the only one that is not, reached by
+`enhance_for_stl` and `batch_cleanup`.
+
+Two fixes:
+
+- `cleanup_logo`'s success result now carries `'model': self.model_name`, which
+  `edit_image`'s already did. Without it every row prices as `unknown` — firing
+  the cost card's unbudgeted-model alarm from our own omission, which would make
+  the one signal that surface exists to give unreadable.
+- `_noted` is attached to `GeminiHelper.cleanup_logo` after the class, because
+  `_noted` is defined below the class and a decorator is evaluated when the
+  class body runs. Logging inside the method instead would have meant three
+  separate return branches — the partial-coverage shape `_noted` exists to
+  avoid. `enhance_for_stl` and `batch_cleanup` are its only callers and neither
+  is noted, so one billed call still writes exactly one row.
+
+`gemini-2.5-flash-image` is already in both price tables at $0.039/image, so
+these rows price rather than estimate.
+
+**Tested** (`tests/test_gemini_call_accounting.py`,
+`TestTheLogoLaneIsOnTheLedgerToo`): a cleanup writes exactly one row, with the
+right surface and kind; the row names a priceable model; `enhance_for_stl` —
+the path production actually uses — produces the same single row and does not
+double-count; a failed call (`429 RESOURCE_EXHAUSTED`) is still recorded,
+because a 402 is the event the cost surface most needs to see.
+
+The sixth test is the one that matters: `_noted` now stamps a
+`_duck_noted_surface` marker, and `test_every_billed_method_reaches_the_ledger`
+derives the billed set from the AST, then checks that every path from a public
+entry point to each billed call crosses a noted function — stopping the walk at
+the first note rather than climbing past it. That is the check that would have
+caught `cleanup_logo` when it was written, instead of a sentence asserting
+coverage. **Verified it fails without the fix**: removing the attachment makes
+it report `cleanup_logo() bills and no noted function sits on its call paths`.
+
+Both false docstrings have been corrected in place to say what is actually true
+and why the earlier claim was wrong.
+
 ### Still open
 
-- **Why is `active_sales.json` three days old at all?** The fix stops it
-  blocking the lane; it does not explain the staleness. If that file is only
-  rewritten when a sale is applied, it will routinely exceed 72h and the
-  freshness entry for it is close to meaningless.
+- **Token capture on the image calls.** `kind: image` prices per call, so the
+  cost is right, but `prompt_tokens`/`completion_tokens` are 0 on every image
+  row. `analyze_image_json` captures real counts; the image paths discard them.
+- **~550 suspicious June `kind: image` rows** and back-filling historical
+  Gemini spend — both still unexamined, both predating this work.
+- **A failed call books as `unknown_model`, inflating the card's own alarm.**
+  Measured 2026-11-11: all six Gemini rows in the live ledger are
+  `model: "unknown"` because the `{'success': False}` result dicts do not carry
+  `model` the way the success dicts do, and `_add_to_bucket` in
+  `llm_cost_summary.py` increments `unknown_model_count` without filtering on
+  `status`. The cost is right — a 402 never ran, so it cost $0 — but the
+  unbudgeted-model alarm is currently reading 6 when the real count is 0, which
+  is the same class of problem as Surface 117's `model` omission one layer out:
+  the signal that surface exists to give is being spent on something else.
+  Fix is either to carry `model` onto the failure results or to exclude
+  non-`ok` rows from the unknown-model count — probably both.
