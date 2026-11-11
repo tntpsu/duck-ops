@@ -6008,3 +6008,75 @@ instrumentation writes nothing else.
   but capturing them would turn the $0.039 estimate into a measurement the way
   the video clip's 46,336 tokens did.
 - **Both prices are unverified.** Only the AI Studio billing page settles them.
+
+## Surface 113 — The first duck-ops CI test run graded the clock, not the code (2026-11-11, operator: "can you give me the exact steps you need me to run now?" → "continue")
+
+The `tests` job added in `804e154` (Surface 109) ran for the first time on the
+2026-11-11 push and reported **9 failed, 1462 passed**. None of the nine came
+from the nine commits in that push. Every one of them was a timezone, and the
+tell was that every diff was exactly four hours:
+
+| asserted | got | |
+|---|---|---|
+| `review email at Apr 12, 1:00 PM` | `5:00 PM` | `workflow_operator_summary` |
+| `Customer thread sync: 7:41 PM` | `11:41 PM` | `nightly_action_summary` |
+| `Etsy live at 12:07 AM` | `4:07 AM` | `nightly_action_summary` |
+| `start_hour=9` | `start_hour=13` | `etsy_browser_batch` |
+
+The runner is UTC; the Mac the whole stack runs on is `America/New_York`.
+Reproduced locally before anything was changed, which is what separated "CI is
+broken" from "the code is": `TZ=UTC pytest tests -q` → the identical 9
+failures; unset → 1499 passed. The suite had never run anywhere but one
+machine in one zone, so the assumption had never been tested rather than being
+newly broken ([[feedback_red_ci_is_no_ci]] — a job that never ran is not a
+green one).
+
+**Four of the nine were a real bug, and a half-applied fix.**
+`scheduler_health.py` pins its *schedule* side to
+`SCHEDULER_TZ = ZoneInfo("America/New_York")`, which is the 2026-11-01 DST fix
+recorded in [[feedback_schedule_math_needs_a_zone_not_an_offset]]. Its *event*
+side was never pinned: `_parse_log_timestamp` and `_parse_iso` called bare
+`.astimezone()` on a naive stamp, which means "interpret in whatever zone this
+host is set to." The log regex even captures the `EDT` abbreviation only to
+discard it. So an event and the window it belongs to were resolved in two
+different zones — identical on a machine set to `SCHEDULER_TZ`, four hours
+apart anywhere else, which is how a job with `exit=0` reads as `missed_run`.
+Both parsers now resolve in `SCHEDULER_TZ`, and the module is zone-independent:
+
+```
+TZ=UTC              35 passed
+TZ=America/New_York 35 passed
+TZ=Asia/Tokyo       35 passed
+```
+
+Passing under three zones is the check that distinguishes a fix from an
+accommodation; pinning the suite's zone alone would have made these four go
+green while leaving the inconsistency in place
+([[feedback_incomplete_fix_enumerate_all_branches]] — one branch of a
+multi-branch mechanism is presumed incomplete).
+
+**The other five were pinned, not fixed, deliberately.** They assert rendered
+Eastern wall-clock, and they are the visible tip of a convention: **~182 bare
+`.astimezone()` calls across 66 runtime modules treat system-local time as the
+operator's time.** That holds in production — the launchd jobs, the producers
+and the viewer all run on that one Mac — so the CI job is pinned to
+`TZ: America/New_York` at job level, testing the environment the code actually
+runs in. Migrating 66 files to an explicit operator zone is not justified by a
+CI runner's default and would be a large unreviewed change; it is also not
+what the pin claims to have done.
+
+### Still open
+
+- **duck-ops is not zone-portable, and that is now a known constraint rather
+  than an untested assumption.** Five tests still fail under `TZ=UTC`:
+  `test_etsy_browser_batch`, `test_nightly_action_summary` (×2),
+  `test_weekly_strategy_slot_window`, `test_workflow_operator_summary`. If
+  duck-ops ever runs off that Mac — a container, a second machine, a cloud
+  runner doing real work — this is the first thing that breaks, silently and
+  in rendered operator-facing times. Recorded here rather than left as prose
+  in a YAML comment ([[feedback_residual_risk_needs_a_tracked_home]]).
+- **No test asserts the CI pin exists.** If the `env:` block is dropped, the
+  nine failures come back and will read as a new regression.
+- **`governance_review_common.now_local_iso()` is the natural home** for an
+  explicit operator zone if that migration is ever taken on. It is already
+  imported across the modules that would need it.

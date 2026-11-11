@@ -42,6 +42,23 @@ jobs:
     # particular checkout; a probe run that day reported 1486 passing while
     # importing a DIFFERENT copy of the repo than the one under test.
     runs-on: ubuntu-latest
+    # The whole stack runs on one Mac set to America/New_York: the launchd
+    # jobs, the producers, the viewer the operator reads. ~182 call sites
+    # across 66 runtime modules treat system-local time AS the operator's
+    # time, so the suite is pinned to the zone the code actually runs in
+    # rather than inheriting the runner's UTC.
+    #
+    # What this does NOT prove: that duck-ops is zone-portable. It is not.
+    # Five tests still fail under TZ=UTC (etsy_browser_batch,
+    # nightly_action_summary x2, weekly_strategy_slot_window,
+    # workflow_operator_summary) because they assert rendered Eastern
+    # wall-clock. If duck-ops ever runs anywhere but that Mac, that is real
+    # work, tracked in TESTS.md -- not something this pin has handled.
+    #
+    # scheduler_health is the exception and needs no pin: it resolves every
+    # stamp in its own SCHEDULER_TZ and passes under any TZ.
+    env:
+      TZ: America/New_York
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

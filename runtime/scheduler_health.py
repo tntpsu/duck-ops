@@ -74,8 +74,12 @@ def _parse_iso(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.astimezone()
-    return parsed.astimezone()
+        # A naive stamp was written by a process on the scheduler's own
+        # machine, so it is SCHEDULER_TZ wall-clock -- NOT the zone of
+        # whatever host happens to be reading the file. Receipts carry an
+        # offset (date '+%z'), so this is the defensive path.
+        return parsed.replace(tzinfo=SCHEDULER_TZ)
+    return parsed.astimezone(SCHEDULER_TZ)
 
 
 def _parse_log_timestamp(value: str) -> datetime | None:
@@ -86,7 +90,15 @@ def _parse_log_timestamp(value: str) -> datetime | None:
         parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
-    return parsed.astimezone()
+    # The scheduler log is written by launchd jobs on the scheduler's machine
+    # and its stamps are SCHEDULER_TZ wall-clock -- the regex captures the zone
+    # abbreviation only to discard it. Reading them as system-local time made
+    # this module disagree with its OWN schedule side, which _schedule_datetime
+    # has pinned to SCHEDULER_TZ since 2026-11-01: an event and the window it
+    # belongs to were resolved in two different zones. Identical on a machine
+    # set to SCHEDULER_TZ, four hours apart anywhere else, which is how a
+    # healthy job with exit=0 reads as `missed_run` under a UTC runner.
+    return parsed.replace(tzinfo=SCHEDULER_TZ)
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
