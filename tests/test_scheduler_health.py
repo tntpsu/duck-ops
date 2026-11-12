@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import sys
 import unittest
@@ -533,3 +534,73 @@ class ScheduleShapeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeclaredAfterTheWindowTests(unittest.TestCase):
+    """2026-11-12: twelve jobs were wrapped to write receipts, and six of them
+    immediately reported `missed_run` / bad for windows that had closed hours
+    or days BEFORE the wrapper existed. A job cannot miss a window it had no
+    way to run in -- that is grading against evidence that could not exist,
+    the same shape as the phantom `scheduler_health_probe` one level up.
+
+    The `no_history` branch already said exactly the right thing and sat
+    BELOW `missed_run`, so it was unreachable for any job whose window had
+    passed. The declaration time is the plist's mtime; a mtime later than the
+    grading clock is not usable evidence and must not suppress a real miss
+    (the array-form fixtures above write their plists at real wall-clock time
+    while faking `now` into the past)."""
+
+    def _payload(self, *, plist_mtime: str | None, now: str):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            receipt_dir = root / "receipts"
+            launch_agents.mkdir()
+            receipt_dir.mkdir()
+            plist = launch_agents / "com.philtullai.duckops.review-carousel.tuesday.plist"
+            _write_duckops_plist(
+                plist,
+                label="com.philtullai.duckops.review-carousel.tuesday",
+                job_name="review_carousel_tuesday",
+                schedule={"Weekday": 3, "Hour": 16, "Minute": 0},
+            )
+            if plist_mtime is not None:
+                stamp = datetime.fromisoformat(plist_mtime).timestamp()
+                os.utime(plist, (stamp, stamp))
+            return scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat(now),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=root / "empty.log",
+                receipt_dir=receipt_dir,
+                write_outputs=False,
+            )
+
+    def test_a_job_declared_after_the_window_is_not_blamed_for_it(self) -> None:
+        """Tuesday 16:00 passed; the plist was written Thursday 18:00. No
+        receipt exists because none could."""
+        item = self._payload(
+            plist_mtime="2026-11-12T18:00:00-05:00",
+            now="2026-11-12T18:04:00-05:00",
+        )["items"][0]
+        self.assertEqual(item["status"], "no_history")
+        self.assertEqual(item["severity"], "warn")
+
+    def test_a_job_declared_before_the_window_still_reports_a_real_miss(self) -> None:
+        """The guard must not swallow the failure it was built around: same
+        job, same absent receipt, but declared a week before the window."""
+        item = self._payload(
+            plist_mtime="2026-11-04T09:00:00-05:00",
+            now="2026-11-12T18:04:00-05:00",
+        )["items"][0]
+        self.assertEqual(item["status"], "missed_run")
+        self.assertEqual(item["severity"], "bad")
+
+    def test_a_declaration_stamp_after_the_grading_clock_is_not_evidence(self) -> None:
+        """A mtime in the future relative to `now` tells us nothing, so it may
+        not downgrade a miss. This is what keeps the array-form fixtures --
+        which write real files against a faked past clock -- still graded."""
+        item = self._payload(
+            plist_mtime="2026-11-20T09:00:00-05:00",
+            now="2026-11-12T18:04:00-05:00",
+        )["items"][0]
+        self.assertEqual(item["status"], "missed_run")

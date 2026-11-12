@@ -6523,3 +6523,142 @@ is approved, so nothing changes until the operator turns it on.
 - **`original_sound` rights are unverified for commercial reuse.** The 109 reachable creator sounds are served to us as third-party-authorised, but recognizable remixes appear among them and the probe cannot tell us what reuse Meta actually licenses. Treat `music` as the safe default until this is answered.
 - **No trim.** Audio always starts at 0:00. If the duration-fit guard proves too blunt, the fix is clip-side (lengthen the clip) not API-side.
 - **Velocity needs ~7 days of snapshots before the rank-delta means anything.** Until then the field exists and is empty, which is the correct reading, not a bug.
+
+## Surface 119 — A mirror that leaves the machine, and a gate that would have passed without looking (2026-11-12, operator: "I want all data to be in a spot where it can sync with Google Drive" → "I think the pics should be in that shared spot with google too", SPEC-FIRST, PRE-EDIT)
+
+One local directory (`~/DuckData/`) that Google Drive for desktop syncs, so an
+external model can read sales, learnings, social performance and creative
+history. ~10.3 GB selected out of a ~17 GB / ~185,000-file footprint across
+three repos.
+
+This is the first surface in the stack whose **success condition is that data
+leaves the machine**. Every other guard here exists to keep things in. That
+inverts the usual failure analysis: the dangerous bug is not "the mirror is
+empty", it is "the mirror contains something nobody chose to publish".
+
+### Two findings from the pre-edit survey
+
+**1. The existing secret scanner would have passed this folder without reading
+a single byte.** `scripts/secret_scan.py` walks `_git_ls_files(repo)` and
+opens with `if not (repo / ".git").exists(): SKIP`. `~/DuckData/` is not a git
+repo, so the CLI would print `SKIP ... not a git repo`, find nothing, and
+**exit 0**. The gate would have reported clean on a folder it never looked at —
+fail-open, on the one surface where the gate is the only thing between a
+credential and a cloud upload. `PATTERNS`, `_is_scannable` and `_redact` are
+reusable; `scan_repo` and `main` are not. The gate must walk the staged
+filesystem directly, and must prove it scanned (file count > 0) before it is
+allowed to release.
+
+**2. The bulk is nearly all duplication, and the signal is tiny.**
+`output/customer_intelligence/` is 4.4 GB — a quarter of everything — and its
+8,072 files are timestamped re-dumps of exactly **two** reports (4,048
+`customer_interaction_queue` + 4,024 `customer_action_packets`). Meanwhile the
+aggregates an external model would actually reason over total **~8.3 MB**.
+Operator has chosen to sync everything regardless; recording the ratio so the
+choice stays visible rather than becoming an accident.
+
+### Use case × failure mode
+
+| | Happy | Source tree missing/empty | Credential in staged set | Pattern drift (lane renamed) | Partial / torn write | Gate cannot scan | Test run reaches prod path |
+|---|---|---|---|---|---|---|---|
+| Nightly mirror refresh (5 trees) | spec:unit | spec:unit — skip tree, record in manifest, never crash the schedule | spec:unit — refuse release | n/a | spec:unit — stage then atomic swap | spec:unit — refuse release | spec:guard + spec:audit |
+| Creative slice by filename pattern | spec:unit | spec:unit | spec:unit | **spec:unit — per-lane count, 0 is RED not silent** | spec:unit | n/a | spec:guard |
+| Product photos (all 1,320 `newduck*.png`) | spec:unit | spec:unit | n/a | spec:unit | spec:unit | n/a | spec:guard |
+| Exclusion enforcement (allowlist) | spec:unit | n/a | **spec:unit — positive control: planted fake key MUST be caught** | n/a | n/a | **spec:unit — zero-files-scanned MUST fail closed** | spec:audit |
+| Manifest (per-tree + per-lane counts) | spec:unit | spec:unit | spec:unit | spec:unit | spec:unit | spec:unit | spec:guard |
+| Secret-scan gate | spec:unit | n/a | spec:unit | n/a | n/a | **spec:unit** | spec:guard |
+| OS card — input sanity | spec:unit | spec:unit | n/a | spec:unit | n/a | spec:unit | spec:audit |
+| OS card — output throughput | spec:unit | spec:unit | n/a | spec:unit | spec:unit | n/a | spec:audit |
+| Drive-for-desktop pickup | manual:operator — only the real client proves it | manual:operator | n/a | n/a | manual:operator | n/a | n/a |
+
+### The cells that carry this surface
+
+- **Positive control on the gate.** A gate asserted only by "ran, exit 0" is
+  the bug in finding 1 wearing a test. The gate test plants a known fake
+  credential in a staging fixture and asserts it is *caught*, plus asserts
+  `files_scanned > 0`. A scanner that scans nothing must be indistinguishable
+  from a scanner that failed. ([[feedback_a_failed_probe_is_a_fact_about_the_probe]])
+- **Allowlist by construction, never a denylist.** The mirror copies trees and
+  patterns it was told to. A denylist is behaviourally identical today and
+  leaks the first file a future producer invents. Pin with a test that adds an
+  unlisted file to a source tree and asserts it does **not** appear.
+- **Per-lane counts, because pattern selection is the weak joint.** A lane that
+  renames its output stops syncing silently and the only symptom is a count
+  going to zero. Zero for a lane that had files yesterday is RED, not "quiet".
+  ([[feedback_no_silent_caps]])
+- **Stage then swap.** Drive uploads what it sees the moment it sees it, so a
+  half-written file is a half-published file. Build in `~/.DuckData.staging/`,
+  gate, then atomic swap.
+- **Test isolation is more severe here than anywhere else.** A test that runs
+  the producer against the frozen default doesn't just dirty a state file — it
+  rsyncs 10 GB into a folder that *uploads to Google*. `DRIVE_MIRROR_ROOT`
+  ships all three layers in the same commit: autouse fixture in both repos,
+  source-level `TestModeRefusalError` on the frozen factory-default path, and a
+  post-suite audit asserting the real `~/DuckData/` holds no fixture markers.
+
+### By dimension
+
+- **Static:** secret scan over the staged mirror (new, see finding 1); allowlist-vs-denylist pinned by test
+- **Unit:** selection rules, exclusion enforcement, manifest shape, gate decision — all spec, none written
+- **Integration:** stage → gate → swap round-trip on a tmp tree — spec
+- **E2E:** `manual:operator` — only the real Drive client proves pickup; no harness substitutes for it
+- **Performance:** rsync wall-clock and delta size per run; budget TBD after first real run. 185k-file trees are the risk, not bytes
+- **Stress:** disk — mirror roughly doubles 10.3 GB against 119 GB free; assert free space before staging, refuse rather than fill the disk
+- **Security:** `.env`, `etsy_tokens.json`, `test/.env.*`, `.env.example`, `.git`, `.venv` excluded by allowlist AND proven by the gate's positive control
+- **Privacy:** **4.4 GB of customer PII syncs by explicit operator decision** (`conversation_contact`, `customer_summary`, `latest_message_preview`, `draft_reply`, `order_enrichment`). Recorded as a decision, not a defect. Open: whether `output/operator/*.md` quotes customer names in prose — UNVERIFIED, scan before first sync
+- **Migration:** n/a — new surface, no prior shape
+- **Regression:** n/a yet
+
+### Open items
+
+- **Does `output/operator/*.md` name customers in prose?** The directory-level
+  classification says "operator reports"; the prose inside is unread. Scan
+  before the first sync, not after.
+- **No budget yet for rsync duration or delta size.** Set from the first real
+  run rather than guessed. ([[feedback_pin_the_rule_not_the_reading]])
+- **Drive-for-desktop behaviour at ~15,000 mirrored files is untested by us** and
+  cannot be tested without the real client. Operator-verified only.
+- **An external model reading this corpus will over-read it.** Our own social
+  sample is 27 posts, and a format ranking drawn from it was retracted on
+  2026-11-08. The rollup file carries confidence and evidence fields; they must
+  travel with the data, not be stripped for tidiness.
+
+## Surface 120 — A job cannot miss a window that closed before it existed (2026-11-12, operator: "go", after wrapping the 12 ungraded jobs)
+
+Wrapping the twelve ungraded launchd jobs so they write receipts immediately
+turned six of them **bad / `missed_run`** — for windows that had closed hours
+or days before the wrapper existed. None had a receipt, because none could.
+
+Same defect as the phantom `scheduler_health_probe` cleared the same
+afternoon, one level up: **the grader was judging evidence that could not have
+existed.** A card red for six days (the weekly carousel's next window is
+2026-11-18) is how an operator learns to stop reading it — the failure mode
+that produced the two-card rule in the first place.
+
+`no_history` / warn already said exactly the right thing, and sat BELOW
+`missed_run` in the branch chain, so it was unreachable for any job whose
+window had passed. The declaration timestamp is the plist's mtime.
+
+**The guard that keeps the guard honest:** a declaration stamp later than the
+grading clock is not usable evidence and may not downgrade a miss. The
+array-form schedule fixtures write real plists while faking `now` into the
+past, and they use `missed_run` as the *proof the schedule was parsed* — a
+naive mtime check would have silently flipped them to `no_history` and
+retired a real assertion. ([[feedback_pin_the_rule_not_the_reading]])
+
+| | Happy | No receipt, declared BEFORE window | No receipt, declared AFTER window | Declaration stamp in the future | Array-form schedule |
+|---|---|---|---|---|---|
+| `_evaluate_job` miss verdict | unit ✓ | **unit ✓ — still `missed_run`/bad** | **unit ✓ — `no_history`/warn** | **unit ✓ — `missed_run` survives** | unit ✓ (pre-existing, unbroken) |
+
+- **Verified live, not just in tests:** 6 bad → 6 warn, 0 bad, each carrying
+  "Declared after the last window closed; waiting for the first scheduled run."
+- **Tests:** 3 added to `tests/test_scheduler_health.py`; 38 pass across both
+  scheduler suites.
+
+### Open
+
+- **mtime is a proxy, not a record.** Any unrelated rewrite of a plist resets
+  it and would re-suppress one real miss on the next window only. Acceptable
+  today; a first-seen stamp written by the grader would be exact.
+- **The etsy-browser pair carries a guessed 3600s timeout.** Set from observed
+  duration once real receipts exist, not left as an estimate.

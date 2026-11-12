@@ -343,10 +343,19 @@ def _load_scheduled_jobs(launch_agents_dir: Path = LAUNCH_AGENTS_DIR) -> dict[st
         if not job_name:
             continue
         schedule = _normalize_schedule(payload.get("StartCalendarInterval"))
+        # 2026-11-12: the plist's mtime is when THIS declaration came into
+        # being. A job cannot have missed a window that closed before it, and
+        # without this the twelve jobs wrapped that afternoon all reported
+        # `missed_run` for windows predating the wrapper.
+        try:
+            declared_at = datetime.fromtimestamp(path.stat().st_mtime).astimezone(SCHEDULER_TZ)
+        except OSError:
+            declared_at = None
         jobs[job_name] = {
             "job_name": job_name,
             "label": str(payload.get("Label") or path.stem),
             "plist_path": str(path),
+            "declared_at": declared_at,
             "schedule": schedule,
             "command": " ".join(str(part) for part in args),
             "timeout_seconds": JOB_TIMEOUT_SECONDS.get(job_name, DEFAULT_TIMEOUT_SECONDS),
@@ -575,6 +584,18 @@ def _evaluate_job(
     latest_start_after_expected = bool(started_at and expected_at and started_at >= expected_at - timedelta(seconds=grace_seconds))
     expected_due = bool(expected_at and now >= expected_at + timedelta(seconds=grace_seconds))
 
+    # A job that has never run AND was declared after the window cannot have
+    # missed it. A declaration stamp later than the grading clock is not
+    # usable evidence and must not suppress a real miss, so it is ignored.
+    declared_at = job.get("declared_at")
+    usable_declaration = bool(declared_at and declared_at <= now)
+    declared_after_window = bool(
+        not started_at
+        and usable_declaration
+        and expected_at
+        and declared_at > expected_at
+    )
+
     if receipt_status.startswith("skipped_lock"):
         status = receipt_status
         severity = "warn"
@@ -634,7 +655,7 @@ def _evaluate_job(
         severity = "warn"
         summary = f"Last run completed, but took {_format_duration(duration_seconds)}."
         recommended_action = "Watch the next run and consider raising or splitting the timeout only if this is expected."
-    elif expected_due and not latest_start_after_expected:
+    elif expected_due and not latest_start_after_expected and not declared_after_window:
         status = "missed_run"
         severity = "bad"
         summary = "The expected schedule window passed without a matching START event."
@@ -642,7 +663,11 @@ def _evaluate_job(
     elif not started_at:
         status = "no_history"
         severity = "warn"
-        summary = "No scheduler history has been observed yet."
+        summary = (
+            "Declared after the last window closed; waiting for the first scheduled run."
+            if declared_after_window
+            else "No scheduler history has been observed yet."
+        )
         recommended_action = "Let the next scheduled window run or smoke-test the wrapper manually."
 
     # 2026-09-07: a missed_run verdict is only true until the job's NEXT
