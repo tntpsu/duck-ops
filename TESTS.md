@@ -6716,14 +6716,27 @@ in the mirror's own README.
 - **Drive-for-desktop behaviour at ~178,500 mirrored files is untested by us**
   and cannot be tested without the real client, which is **not installed**.
   Operator-verified only.
-- **No full-corpus gate timing yet.** `duck-ops/state` is measured (59,514
-  files / 25.7 s). `output` is 5.09 GB across 116,502 files and had not
-  finished a first cold scan when this was written, so the 7,200 s job timeout
-  in the prepared plist is a GUESS. Replace it with a measured budget after the
-  first real run. ([[feedback_pin_the_rule_not_the_reading]])
+- **Gate budget: MEASURED, cold.** A full first-pass scan of all five trees is
+  **176,090 files in 591 s**, zero findings:
+
+  | tree | eligible | binary skipped | seconds |
+  |---|---|---|---|
+  | `duckAgent/config` | 21 | 1 | 0.0 |
+  | `duckAgent/data` | 63 | 0 | 0.1 |
+  | `duckAgent/state` | 8 | 0 | 0.1 |
+  | `duck-ops/state` | 59,514 | 73 | 25.7 |
+  | `duck-ops/output` | 116,484 | 18 | **565.3** |
+
+  So ~10 minutes of CPU for the cold gate, plus the 9.9 GB rsync, on the first
+  run only — the carry ledger reduces every later run to the day's churn. The
+  7,200 s job timeout now has a measurement behind it rather than a guess, with
+  roughly 7x headroom over the cold gate. Re-measure if `output` grows
+  materially; at 10.6 MB/s the scan time tracks bytes, and
+  `customer_intelligence/` is 4.4 GB of it.
 - **The first real run has not happened.** Everything above is verified against
   tmp fixtures, real-corpus selection (`--dry-run`), and a real-corpus gate
-  pass over four of the five trees. Nothing has been published to `~/DuckData`.
+  pass over **all five** trees (0 findings / 176,090 files). Nothing has been
+  published to `~/DuckData`, and Drive for desktop is not installed.
 
 ## Surface 120 — A job cannot miss a window that closed before it existed (2026-11-12, operator: "go", after wrapping the 12 ungraded jobs)
 
