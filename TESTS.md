@@ -7346,3 +7346,87 @@ held by a genuinely live process, three firings:
   fingerprint here was a 1-second run of a 30-minute job, and that signal is
   still unused: a job could do a fraction of its work, exit 0 honestly, and
   read as healthy.
+
+## Surface 128 — The README is the integration contract, and it had gone stale in a day (2026-11-13, operator: "Is there a readme or anything that we save to that folder so my other agent knows what files these are")
+
+Two agent-facing READMEs exist: `~/DuckDrop/README.md` (how to write a post
+back) and `~/DuckData/README.md` (what the data is). Both were doing their job
+badly in ways that only show up as an outside agent silently getting things
+wrong.
+
+**The data README was a hardcoded string while the data moved under it.**
+Within hours of the Surface 125 thinning, two of its figures were wrong by
+three orders of magnitude:
+
+| README claimed | Actual |
+|---|---|
+| `customer_intelligence` is "~8,000 files … re-dumps of two reports" | **4** |
+| `output/operator` "1,135 of 1,175 files are per-customer" | **1,665** |
+
+The fix is not better numbers. Numbers were REMOVED from the README and live
+in `MANIFEST.json`, which is rewritten every run; the README now carries only
+claims that stay true between runs, and a test fails if a live-looking count
+creeps back inline ([[feedback_pin_the_rule_not_the_reading]],
+[[feedback_a_number_needs_its_denominator]]).
+
+**It had no map.** An agent faced ~19,500 files across six trees with no index
+and would read whatever it opened first. There is now a table of every
+published directory and what it holds, plus three named starting files.
+
+**Retention changed what the data MEANS, and nothing said so.** This is the
+hazard Surface 125 created: `trend_rankings/` now holds ONE snapshot per
+concept, so an agent computing a trend from it is confidently wrong;
+`customer_intelligence/` is a full re-dump so one file is the whole picture and
+the item counts inside it are the real sample size; `digests/` supports about a
+month of comparison. The README now has a Retention section saying which parts
+are a snapshot rather than a history, and `MANIFEST.json` carries
+`keep_newest_per_report` / `files_published` / `files_withheld` per rule so the
+caps are machine-readable too.
+
+**The drop README omitted the one field an agent cannot guess.** `lane` is
+validated against the flow registry and an unrecognised value is refused, but
+the contract never listed the valid set — an agent would have discovered it by
+collecting rejections. All eleven lanes are now rendered FROM
+`allowed_lanes()` at write time, so a lane added upstream cannot leave the
+contract claiming it is invalid.
+
+### Use case × failure mode
+
+| | Happy | Count goes stale | Lane added upstream | Placeholder unrendered | Snapshot read as series |
+|---|---|---|---|---|---|
+| Drop README | unit:1 | n/a | **unit:1** | **unit:1** | unit:1 |
+| Data README | unit:1 | **unit:1** | n/a | n/a | **unit:1** |
+| MANIFEST caps | unit:1 | n/a | n/a | n/a | unit:1 |
+
+7 tests: 3 in `tests/test_drop_intake.py::AgentFacingReadmeTests`, 4 in
+`tests/test_drive_mirror_retention.py::ManifestTellsTheReaderWhatIsASnapshotTests`.
+
+### What the tests defend
+
+- **Every lane the validator accepts appears in the README.** Derived from
+  `allowed_lanes()`, so the test cannot pass against a hand-kept list that has
+  drifted.
+- **No unrendered `{lanes}` placeholder.** Shipping the template instead of the
+  contract is a silent failure: the file looks present and says nothing.
+- **The drop README points at the data folder AND its caveats.** An agent told
+  only how to write will read the data naively.
+- **The data README quotes no live file counts.** The exact regression above.
+- **The README names every tree in `WHOLE_TREES` plus `CREATIVE_DEST`**, loaded
+  from a PRISTINE module copy — the autouse isolation fixture replaces
+  `WHOLE_TREES` with a single `fixture` tree, so asserting against the patched
+  value tests the harness rather than production. That trap caught this twice
+  in one session, so the pristine loader is now a shared helper.
+- **`MANIFEST.json` states the caps**, asserted through a real `run()`.
+
+### Open
+
+- **Nothing verifies the inbound direction.** Both READMEs describe a round
+  trip whose return leg has never been exercised: no file written on the Drive
+  side has ever been observed arriving in `~/DuckDrop/inbox/`. The Drive API
+  can write into a mirror root (confirmed: `DuckData` is visible with
+  `"syncFolder": true`), so this is testable as soon as `~/DuckDrop` scans —
+  it is currently stuck at `state: PENDING` with no `root_config` row.
+- **The map is hand-written prose.** It describes directories that exist today;
+  a producer inventing a new one will not appear in it, and only the tree-level
+  test would notice. Deriving the map from the tree would be the honest
+  version.

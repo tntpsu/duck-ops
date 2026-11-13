@@ -20,6 +20,29 @@ if str(RUNTIME_DIR) not in sys.path:
 import drive_mirror  # noqa: E402
 
 
+def _pristine_drive_mirror():
+    """A copy of the module with its REAL constants.
+
+    The autouse isolation fixture replaces WHOLE_TREES with a single `fixture`
+    tree, so any assertion about what production publishes has to load the
+    module fresh or it ends up testing the harness.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_drive_mirror_pristine", RUNTIME_DIR / "drive_mirror.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolves its own module out of sys.modules at class
+    # creation, so GateResult cannot be defined in an unregistered module.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
+
 def _touch(path: Path, body: str = "x") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
@@ -276,19 +299,7 @@ class RetentionRulesConfigTests(unittest.TestCase):
         against the patched value would compare the rules to the test
         harness rather than to what production stages.
         """
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location(
-            "_drive_mirror_pristine", RUNTIME_DIR / "drive_mirror.py"
-        )
-        pristine = importlib.util.module_from_spec(spec)
-        # dataclasses resolves its own module out of sys.modules at class
-        # creation, so GateResult cannot be defined in an unregistered module.
-        sys.modules[spec.name] = pristine
-        try:
-            spec.loader.exec_module(pristine)
-        finally:
-            sys.modules.pop(spec.name, None)
+        pristine = _pristine_drive_mirror()
 
         trees = [subdir for subdir, _ in pristine.WHOLE_TREES]
         trees.append(pristine.CREATIVE_DEST)
@@ -441,3 +452,80 @@ class RunIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManifestTellsTheReaderWhatIsASnapshotTests(unittest.TestCase):
+    """An external model reading this mirror must be able to tell a current
+    snapshot from a time series. `trend_rankings` now holds ONE file per
+    concept; computing a trend from it would be wrong, and the mirror is the
+    only thing that can say so."""
+
+    def test_the_published_manifest_states_the_retention_caps(self):
+        import shutil
+        import tempfile
+        import unittest.mock as mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            runs = root / "runs"
+            for day in ("2026-11-01", "2026-10-31"):
+                _touch(src / "digests" / f"observation_summary__{day}.json", "{}")
+            for lane, pattern in drive_mirror.CREATIVE_LANES.items():
+                _touch(runs / "r1" / pattern.replace("*", lane))
+            with mock.patch.object(
+                drive_mirror, "WHOLE_TREES", (("tree", src),)
+            ), mock.patch.object(
+                drive_mirror, "RETENTION_RULES",
+                ({"path": "tree/digests", "keep": 1,
+                  "split": drive_mirror.SPLIT_TRAILING_DATE},),
+            ):
+                drive_mirror.run(
+                    mirror_root=root / "DuckData",
+                    staging_root=root / "staging",
+                    state_path=root / "state" / "s.json",
+                    ledger_path=root / "state" / "l.json",
+                    runs_path=root / "state" / "r.jsonl",
+                    creative_source=runs,
+                )
+            manifest = json.loads(
+                (root / "DuckData" / "MANIFEST.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(drive_mirror.RETENTION_VERSION,
+                         manifest["retention_version"])
+        (rule,) = manifest["retention"]
+        self.assertEqual("tree/digests", rule["path"])
+        self.assertEqual(1, rule["keep_newest_per_report"])
+        self.assertEqual(1, rule["files_published"])
+        self.assertEqual(1, rule["files_withheld"])
+        self.assertIn("snapshot", manifest["note"])
+
+    def test_the_readme_warns_against_reading_a_snapshot_as_a_series(self):
+        text = drive_mirror.MIRROR_README
+        self.assertIn("Retention", text)
+        self.assertIn("ONE snapshot per concept", text)
+        self.assertIn("MANIFEST.json", text)
+
+    def test_the_readme_carries_a_map_of_every_published_tree(self):
+        """An agent facing ~19,500 files with no index reads whatever it
+        happens to open first."""
+        pristine = _pristine_drive_mirror()
+        text = pristine.MIRROR_README
+        for subdir, _ in pristine.WHOLE_TREES:
+            with self.subTest(tree=subdir):
+                self.assertIn(subdir.split("/")[-1], text)
+        self.assertIn(pristine.CREATIVE_DEST, text)
+
+    def test_the_readme_quotes_no_live_file_counts(self):
+        """It is a static constant and the data moves: an earlier version said
+        customer_intelligence was '~8,000 files' and it became 4 the same day
+        retention shipped. Counts belong in MANIFEST.json, which is rewritten
+        every run ([[feedback_pin_the_rule_not_the_reading]])."""
+        import re
+        text = drive_mirror.MIRROR_README
+        # Numbers that look like live file counts, excluding years and the
+        # historical figures the Retention section cites as past facts.
+        allowed = {"2026", "178,741", "161", "120", "30", "2200"}
+        found = {n for n in re.findall(r"\b[\d][\d,]{2,}\b", text)} - allowed
+        self.assertEqual(set(), found, f"live-looking counts inline: {found}")

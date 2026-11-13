@@ -702,13 +702,64 @@ MIRROR_README = """# myJeepDuck data mirror
 
 Generated automatically by duck-ops/runtime/drive_mirror.py. Do not edit:
 every file here is overwritten from the source repositories on each run, and
-anything added by hand is deleted on the next one.
+anything added by hand is deleted on the next one. To hand something BACK to
+this system, write it to the separate `~/DuckDrop/` sync folder, never here.
 
 ## What this is
 
 A selected slice of the myJeepDuck automation system's business data, mirrored
 so an external model can read sales, learnings, social performance and
 creative history.
+
+**Counts live in `MANIFEST.json`, not in this file.** Per-tree file counts,
+per-lane counts and the retention caps actually applied are written there on
+every run. This README carries only things that stay true between runs --
+earlier versions quoted figures inline and two of them were off by three
+orders of magnitude within a day of a retention change.
+
+## Where things are
+
+| Path | What it holds |
+|---|---|
+| `duckAgent/runs/` | **The creative archive, and most of the bytes.** Per-run folders plus `studio_assets/`. Product photographs of printed ducks, meme images, jeepfact images, generated videos, weekly hero images, and `*_posts.json` publish receipts. |
+| `duck-ops/output/operator/` | Operator-facing reports: the review queue, per-review detail, the weekly strategy packet, sale monitoring, social insights. Mostly one file per topic or per customer. |
+| `duck-ops/output/digests/` | Dated digest reports: nightly action summaries, observation summaries, trend digests, review queues, weekly phase readiness. |
+| `duck-ops/output/trend_rankings/` | Per-concept trend scoring, one `.json` + `.md` per duck concept. |
+| `duck-ops/output/customer_intelligence/` | The customer interaction queue and action packets. **Real customer PII** -- see Privacy. |
+| `duck-ops/output/quality_gates/` | Per-publish gate decisions: what was allowed out and why. |
+| `duck-ops/output/execution/` + `discovery/` | Etsy review-reply attempts and the discovery passes behind them. |
+| `duck-ops/state/` | The machine's working state: ~120 JSON files at the top level (build-next queue, business desk, calibration, SEO review and writeback, social performance, competitor snapshots) plus `workflow_control/` and `workflow_receipts/`. |
+| `duckAgent/config/` | Shipped configuration: taxonomies, style libraries, scoring rules, category policy. The system's declared rules rather than its observations. |
+| `duckAgent/data/` | Style memory, the creative feedback ledger, quality receipts. |
+| `duckAgent/state/` | Small liveness and drift files. |
+
+Start with `duck-ops/state/social_performance_posts.json` and
+`social_performance_rollups.json` for post outcomes,
+`duck-ops/output/operator/` for what the operator is being asked to decide,
+and `duckAgent/runs/` for the images and video.
+
+## Retention -- read this before treating anything as a time series
+
+Most of this tree is a current snapshot, not a history. As of 2026-11-13 the
+mirror publishes only the newest files per report, because publishing every
+historical re-dump meant 178,741 files for 9.89 GB and Google Drive could not
+finish uploading it. `MANIFEST.json` lists the exact caps under `retention`.
+
+What that means for a reader:
+
+- **`trend_rankings/` holds ONE snapshot per concept, not a series.** Do not
+  compute a trend from it. The dated filename is when that snapshot was taken,
+  and consecutive historical snapshots differed only in their timestamp and a
+  staleness counter anyway -- the underlying market observation was 161 days
+  old when this cap was introduced.
+- **`customer_intelligence/` holds the newest complete pair of reports.** Each
+  file is a FULL re-dump of the whole queue, so one file is the whole picture,
+  and the item counts inside it are the real sample size.
+- **`digests/` holds roughly the last 30 of each report shape**, so it supports
+  a month of comparison and no more.
+- **`workflow_receipts/ops/` holds the last 30 records only.** The rest of
+  `workflow_receipts/` is per-run and complete.
+- Everything not named above is published in full.
 
 ## Reading this honestly
 
@@ -720,16 +771,16 @@ creative history.
   them for tidiness.
 - **A count and a statistic here may have different denominators.** Check what
   each one is computed over before putting them in the same sentence.
-- **`output/customer_intelligence/` is ~8,000 files that are timestamped
-  re-dumps of two reports.** It is not 8,000 independent observations.
+- **A timestamped filename is when the file was written, not when the event
+  happened.** Several producers re-dump unchanged content on a schedule.
 
 ## Privacy
 
 This mirror contains real customer data by explicit decision of the shop
 operator: names, Etsy handles, message previews, draft replies and order
 details, in `output/customer_intelligence/` and in `output/operator/` (where
-1,135 of 1,175 files are per-customer). Treat it as personal data. Do not
-redistribute it, and do not use it to contact anyone.
+most files are per-customer). Treat it as personal data. Do not redistribute
+it, and do not use it to contact anyone.
 
 ## Not in here
 
@@ -757,8 +808,24 @@ def write_mirror_readme(staging_root: Path, manifest: dict) -> None:
         ],
         "creative_lane_counts": manifest.get("lane_counts", {}),
         "creative_files": manifest.get("creative", {}).get("files"),
+        # The caps a reader needs in order to know what is a snapshot and what
+        # is a series. The README explains what they MEAN; these are the
+        # numbers, here rather than inline so they cannot go stale.
+        "retention_version": manifest.get("retention_version"),
+        "retention": [
+            {
+                "path": r.get("path"),
+                "keep_newest_per_report": r.get("keep"),
+                "files_published": r.get("files_after"),
+                "files_withheld": r.get("deleted"),
+                "status": r.get("status"),
+            }
+            for r in (manifest.get("retention") or [])
+            if isinstance(r, dict)
+        ],
         "note": "Counts describe what this run selected. See README.md before "
-                "drawing conclusions from any of it.",
+                "drawing conclusions from any of it, especially the Retention "
+                "section: most of this tree is a snapshot, not a time series.",
     }, indent=2, sort_keys=True))
 
 

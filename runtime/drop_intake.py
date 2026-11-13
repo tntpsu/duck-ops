@@ -368,6 +368,17 @@ The sidecar:
       "notes": "optional, for the operator"
     }
 
+`lane` must be one of the lanes this system actually publishes. An
+unrecognised lane is refused, so the valid set is listed below rather than
+left to guess -- it is read from the live flow registry when this file is
+written, so it cannot drift out of date:
+
+{lanes}
+
+The source data these posts should be built from is the separate `~/DuckData/`
+sync folder. Read its README.md first: most of that tree is a current
+snapshot, not a history, and its Retention section says which parts are which.
+
 Accepted files move to `accepted/`. Refused files move to `rejected/` beside
 a `.reason.txt` saying why -- read that rather than guessing.
 
@@ -387,7 +398,13 @@ def init_drop_root(drop_root: Path | None = None) -> Path:
     _refuse_if_inside_mirror(drop_root)
     for sub in (INBOX_DIR, ACCEPTED_DIR, REJECTED_DIR):
         (drop_root / sub).mkdir(parents=True, exist_ok=True)
-    (drop_root / "README.md").write_text(MIRROR_DROP_README, encoding="utf-8")
+    # The lane list is rendered from the registry rather than typed into the
+    # template: a lane added upstream would otherwise be refused here while
+    # the contract an agent reads still said it was invalid.
+    lanes = "\n".join(f"    - {lane}" for lane in sorted(allowed_lanes()))
+    (drop_root / "README.md").write_text(
+        MIRROR_DROP_README.replace("{lanes}", lanes), encoding="utf-8"
+    )
     return drop_root
 
 

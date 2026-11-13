@@ -16,6 +16,7 @@ The three incidents this was written against, before any of them happened:
 from __future__ import annotations
 
 import json
+import tempfile
 import os
 import sys
 import time
@@ -300,3 +301,35 @@ class MissingFolderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentFacingReadmeTests(unittest.TestCase):
+    """The README IS the contract an outside agent reads. A stale or broken
+    one is a silent integration failure: the agent writes something plausible,
+    the validator refuses it, and nobody is watching either end."""
+
+    def test_the_readme_lists_every_lane_the_validator_accepts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = drop_intake.init_drop_root(Path(tmp) / "DuckDrop")
+            text = (root / "README.md").read_text(encoding="utf-8")
+        for lane in drop_intake.allowed_lanes():
+            with self.subTest(lane=lane):
+                self.assertIn(lane, text)
+
+    def test_the_readme_has_no_unrendered_placeholder(self):
+        """`{lanes}` surviving into the published file would hand the agent a
+        template instead of a contract."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = drop_intake.init_drop_root(Path(tmp) / "DuckDrop")
+            text = (root / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("{lanes}", text)
+        self.assertNotIn("{", text.replace('{\n', '').split('`lane`')[0] or "{")
+
+    def test_the_readme_points_at_the_data_folder_and_its_caveats(self):
+        """An agent told only how to WRITE will read the data folder naively.
+        Most of that tree is a snapshot, not a history."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = drop_intake.init_drop_root(Path(tmp) / "DuckDrop")
+            text = (root / "README.md").read_text(encoding="utf-8")
+        self.assertIn("DuckData", text)
+        self.assertIn("snapshot", text)
