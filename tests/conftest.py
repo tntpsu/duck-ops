@@ -94,6 +94,49 @@ def _redirect_provider_health_state(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _redirect_drive_mirror_paths(tmp_path, monkeypatch):
+    """Layer 1 of the 3-layer isolation for the Google Drive mirror (Surface 119).
+
+    More consequential than the other redirects in this file. Elsewhere a missed
+    patch dirties a state file and lies to an OS card. Here the producer rsyncs
+    ~10 GB into ~/DuckData/, which Google Drive for desktop uploads, so a test
+    that reached the real root would publish fixture data to the operator's
+    Drive and --delete whatever the last real run had put there.
+
+    This is not hypothetical: on 2026-11-12 a mutation run that disarmed the
+    source-level guard, before this fixture existed, rsynced /tmp into
+    ~/DuckData and staged 10 GB / 178,139 files in 90 seconds.
+
+    SOURCES are redirected as well as destinations. WHOLE_TREES points at
+    duck-ops/output (5.3 GB) and CREATIVE_SOURCE at duckAgent/runs, so an
+    unpatched test spends minutes copying real data even when it never reaches
+    the real mirror root.
+    """
+    try:
+        import drive_mirror
+    except ImportError:
+        yield
+        return
+    monkeypatch.setattr(drive_mirror, "DRIVE_MIRROR_ROOT", tmp_path / "DuckData")
+    monkeypatch.setattr(
+        drive_mirror, "DRIVE_MIRROR_STAGING_ROOT", tmp_path / "DuckData.staging"
+    )
+    monkeypatch.setattr(
+        drive_mirror, "DRIVE_MIRROR_STATE_PATH", tmp_path / "drive_mirror.json"
+    )
+    monkeypatch.setattr(
+        drive_mirror,
+        "DRIVE_MIRROR_GATE_LEDGER_PATH",
+        tmp_path / "drive_mirror_gate_ledger.json",
+    )
+    monkeypatch.setattr(
+        drive_mirror, "WHOLE_TREES", (("fixture", tmp_path / "fixture_source"),)
+    )
+    monkeypatch.setattr(drive_mirror, "CREATIVE_SOURCE", tmp_path / "fixture_runs")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _redirect_llm_call_log(tmp_path, monkeypatch):
     """Redirect llm_call_helpers.LLM_CALL_LOG_PATH to a tmp file so
     no test write reaches the production log. Autouse: applies to

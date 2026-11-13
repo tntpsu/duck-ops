@@ -6524,7 +6524,7 @@ is approved, so nothing changes until the operator turns it on.
 - **No trim.** Audio always starts at 0:00. If the duration-fit guard proves too blunt, the fix is clip-side (lengthen the clip) not API-side.
 - **Velocity needs ~7 days of snapshots before the rank-delta means anything.** Until then the field exists and is empty, which is the correct reading, not a bug.
 
-## Surface 119 — A mirror that leaves the machine, and a gate that would have passed without looking (2026-11-12, operator: "I want all data to be in a spot where it can sync with Google Drive" → "I think the pics should be in that shared spot with google too", SPEC-FIRST, PRE-EDIT)
+## Surface 119 — A mirror that leaves the machine, and a gate that would have passed without looking (2026-11-12, operator: "I want all data to be in a spot where it can sync with Google Drive" → "I think the pics should be in that shared spot with google too" → "Do 1", SHIPPED)
 
 One local directory (`~/DuckData/`) that Google Drive for desktop syncs, so an
 external model can read sales, learnings, social performance and creative
@@ -6559,17 +6559,109 @@ choice stays visible rather than becoming an accident.
 
 ### Use case × failure mode
 
+Shipped: `runtime/drive_mirror.py`, `tests/test_drive_mirror.py` (34 tests),
+`tests/test_no_test_pollution_in_drive_mirror.py`, the
+`_redirect_drive_mirror_paths` autouse fixture in `tests/conftest.py`, plus
+`duckAgent_runtime/run_drive_mirror.sh` and the prepared
+`com.philtullai.duckops.drive-mirror.plist` (03:20 daily, NOT installed).
+
 | | Happy | Source tree missing/empty | Credential in staged set | Pattern drift (lane renamed) | Partial / torn write | Gate cannot scan | Test run reaches prod path |
 |---|---|---|---|---|---|---|---|
-| Nightly mirror refresh (5 trees) | spec:unit | spec:unit — skip tree, record in manifest, never crash the schedule | spec:unit — refuse release | n/a | spec:unit — stage then atomic swap | spec:unit — refuse release | spec:guard + spec:audit |
-| Creative slice by filename pattern | spec:unit | spec:unit | spec:unit | **spec:unit — per-lane count, 0 is RED not silent** | spec:unit | n/a | spec:guard |
-| Product photos (all 1,320 `newduck*.png`) | spec:unit | spec:unit | n/a | spec:unit | spec:unit | n/a | spec:guard |
-| Exclusion enforcement (allowlist) | spec:unit | n/a | **spec:unit — positive control: planted fake key MUST be caught** | n/a | n/a | **spec:unit — zero-files-scanned MUST fail closed** | spec:audit |
-| Manifest (per-tree + per-lane counts) | spec:unit | spec:unit | spec:unit | spec:unit | spec:unit | spec:unit | spec:guard |
-| Secret-scan gate | spec:unit | n/a | spec:unit | n/a | n/a | **spec:unit** | spec:guard |
-| OS card — input sanity | spec:unit | spec:unit | n/a | spec:unit | n/a | spec:unit | spec:audit |
-| OS card — output throughput | spec:unit | spec:unit | n/a | spec:unit | spec:unit | n/a | spec:audit |
-| Drive-for-desktop pickup | manual:operator — only the real client proves it | manual:operator | n/a | n/a | manual:operator | n/a | n/a |
+| Nightly mirror refresh (5 trees) | unit:clean_run_publishes | unit:missing_source_tree_recorded | unit:credential_stops_whole_publish | n/a | unit:release_is_per_file_rename | unit:nothing_scannable_fails_closed | guard + audit |
+| Creative slice by filename pattern | unit:clean_run_publishes | unit:missing_runs_tree_no_raise | unit:credential_stops_whole_publish | **unit:zero_file_lane_refuses** | unit:prune_after_zero_check | n/a | guard |
+| Product photos (all 1,320 `newduck*.png`) | unit:clean_run_publishes (1,320 measured via `--dry-run`) | unit:missing_runs_tree_no_raise | n/a | unit:zero_file_lane_refuses | unit:file_removed_is_removed | n/a | guard |
+| Exclusion enforcement (allowlist) | unit:unlisted_file_not_selected | n/a | **unit:planted_credential_is_caught** | unit:include_does_not_publish_excluded | n/a | **unit:nothing_scannable_fails_closed** | audit |
+| Manifest + README (per-tree + per-lane counts) | unit:mirror_carries_readme_and_manifest | unit:missing_source_tree_recorded | unit:readme_and_manifest_pass_gate | unit:mirror_carries_readme_and_manifest | n/a | unit:readme_and_manifest_pass_gate | guard |
+| Secret-scan gate | unit:clean_tree_releases_and_reports | n/a | unit:planted_credential_is_caught | **unit:union_prefilter_covers_every_pattern** | n/a | **unit:nothing_scannable_fails_closed** + unit:missing_staging_fails_closed | guard |
+| Incremental carry ledger | unit:unchanged_file_is_carried | n/a | **unit:carry_cannot_mask_a_new_credential** | n/a | unit:ledger_not_written_on_refusal | unit:unreadable_file_is_a_finding | guard |
+| Credential-shaped NAMES vs credentials | **unit:workflow_token_record_not_excluded** (402 files) | n/a | unit:real_credential_filenames_excluded | n/a | n/a | n/a | n/a |
+| Refusal reaches the operator | manual:verified — exit 1 → `run_with_receipt.sh` writes `failed` → `scheduler_health` grades bad | same | same | same | same | same | n/a |
+| Drive-for-desktop pickup | manual:operator — only the real client proves it; **Drive for desktop is NOT installed** | manual:operator | n/a | n/a | manual:operator | n/a | n/a |
+
+**Every guard is mutation-verified.** Ten mutations, each breaking one guard,
+each confirmed to fail the test that names it; the module was restored
+byte-identical. A test suite that passes on first write proves nothing about
+the guards it claims to assert — on this surface, a green suite over a
+fail-open gate is the entire failure mode.
+
+### Three deliberate departures from the spec
+
+1. **Release is a delta rsync out of gated staging, not a directory rename.**
+   The spec said "stage, gate, then atomic swap". A swap presents Drive with
+   ~178,500 deletions and ~178,500 creations every run and re-uploads the full
+   ~9.9 GB nightly. The safety property is unchanged — nothing enters the
+   published directory that has not passed the gate — because rsync renames
+   each file into place individually, so Drive never observes a partial file.
+2. **The gate is incremental, with a carry ledger.** A full scan is the cost
+   driver (`duck-ops/state` alone: 59,514 files in 25.7 s). The accounting rule
+   is what keeps it honest: release requires `files_scanned + files_carried ==
+   files_eligible` AND `files_eligible > 0`, so "nothing was read" can never be
+   mistaken for "nothing was found". A file whose size or mtime moved is
+   re-read; `unit:carry_cannot_mask_a_new_credential` pins it.
+3. **The mirror carries its own `README.md` and `MANIFEST.json`**, written into
+   staging BEFORE the gate so they are scanned like any other file. The spec's
+   last open item asked that confidence and evidence travel with the data; a
+   caveat in a document the reader never opens is not a caveat. The README
+   states the sample sizes, the denominator rule, the PII decision, and that
+   `customer_intelligence/` is 8,000 re-dumps of two reports.
+
+### Four findings from the build
+
+1. **`*token*.json` in the exclusion list silently dropped 402 legitimate
+   files.** `duck-ops/state/workflow_control/etsy-token-auth-*.json` are
+   workflow HEALTH records (`auth_healthy`, `etsy_auth_probe`) — scanned clean,
+   and exactly the operational history an external model wants. The wildcard
+   reads as obviously safe. A credential-shaped NAME is not a credential;
+   narrowed to `*oauth_token*.json` / `*_credentials.json` / `client_secret*`
+   and pinned by `unit:workflow_token_record_not_excluded`.
+   ([[feedback_no_silent_caps]])
+2. **Include patterns swallow 269 files the exclusion list rejects.**
+   `meme_*.png` matches 37 `meme_*_subject.png` and `jeepfact*.png` matches 232
+   more. Exclusion must be evaluated after inclusion and win, which is not what
+   "allowlist" implies on its own.
+3. **My own mutation harness performed the publish it was asserting against.**
+   The isolation tests passed the live `~/DuckData` as their argument on the
+   reasoning that the guard would refuse it. When the mutation run disarmed that
+   guard to prove the assertion had teeth, the test rsynced `/tmp` into
+   `~/DuckData` (15,662 files) and staged 10 GB / 178,139 files in ~90 seconds.
+   Nothing was uploaded only because Drive for desktop is not installed, and
+   nothing was lost only because `~/DuckData` was born that minute (birth
+   21:35:51, verified). **A test that asserts a refusal must not be capable of
+   performing the action when the refusal breaks**: test the comparison against
+   a relocated frozen constant, never against the live destination. The harness
+   now aborts if either real directory appears.
+   ([[feedback_test_runs_reach_the_outside_world]])
+4. **Every credential file lives outside every published tree** —
+   `duckAgent/.env`, `etsy_tokens.json`, `test/.env.*` are all at repo root or
+   in `test/`. The allowlist excludes them structurally; the name patterns are
+   defense-in-depth against a future producer writing one into a published
+   tree.
+
+### Two corrections to the spec's own numbers
+
+- **File count is ~178,500, not ~15,000.** The spec's open item guessed the
+  latter. 116,502 (`output`) + 59,587 (`state`) + 93 (duckAgent config/data/
+  state) + 2,361 (creative slice) = 178,543 files / 9.89 GB. Drive for desktop
+  at 178k files is a materially different proposition from 15k and remains
+  operator-verified only.
+- **The published trees contain no credential-shaped key names.** Independently
+  checked (`access_token`, `refresh_token`, `client_secret`, `api_key`,
+  `private_key`, `password`, `secret` as JSON keys): zero files across all five
+  trees. This is a separate check from the regex gate, which matches value
+  shapes rather than key names.
+
+### Open item CLOSED: yes, `output/operator/*.md` names customers in prose
+
+Extensively. **1,135 of the 1,175 markdown files are per-customer**: 672
+`customer_action__*.md` and 463 `review__*.md`, with titles of the literal form
+`Customer action C811: Etsy conversation - <name>`. All 224 probed contact names
+appear; full names (`Jamie Exline`, `Maribel Rosado`) and durable Etsy handles
+(`krowsey383151`, `jessicastanchak`) are among them, and
+`business_operator_desk.md` lists them too. This does not change the operator's
+decision that the data syncs — it widens its scope, from "4.4 GB of customer
+PII in `customer_intelligence/`" to "and essentially all of
+`output/operator/` as well". Recorded as a decision, not a defect, and stated
+in the mirror's own README.
 
 ### The cells that carry this surface
 
@@ -6611,17 +6703,27 @@ choice stays visible rather than becoming an accident.
 
 ### Open items
 
-- **Does `output/operator/*.md` name customers in prose?** The directory-level
-  classification says "operator reports"; the prose inside is unread. Scan
-  before the first sync, not after.
-- **No budget yet for rsync duration or delta size.** Set from the first real
-  run rather than guessed. ([[feedback_pin_the_rule_not_the_reading]])
-- **Drive-for-desktop behaviour at ~15,000 mirrored files is untested by us** and
-  cannot be tested without the real client. Operator-verified only.
-- **An external model reading this corpus will over-read it.** Our own social
-  sample is 27 posts, and a format ranking drawn from it was retracted on
-  2026-11-08. The rollup file carries confidence and evidence fields; they must
-  travel with the data, not be stripped for tidiness.
+- **A lane that SHRINKS rather than collapsing is still invisible.** Zero is
+  fatal; 1,320 product photos dropping to 3 is not. The manifest records
+  per-lane counts every run, so the detector is cheap — compare against the
+  previous manifest and refuse on a drop past a threshold. Not built; recorded
+  here rather than left as prose. ([[feedback_residual_risk_needs_a_tracked_home]])
+- **The two OS cards are not built.** The refusal path IS covered end to end
+  (exit 1 → `failed` receipt → `scheduler_health` bad), which is why this was
+  not blocking. What the scheduler cannot see is the shrink case above, i.e.
+  "the job succeeded and published less than it should have" — that is the
+  output-throughput half of the bracket and belongs with the shrink detector.
+- **Drive-for-desktop behaviour at ~178,500 mirrored files is untested by us**
+  and cannot be tested without the real client, which is **not installed**.
+  Operator-verified only.
+- **No full-corpus gate timing yet.** `duck-ops/state` is measured (59,514
+  files / 25.7 s). `output` is 5.09 GB across 116,502 files and had not
+  finished a first cold scan when this was written, so the 7,200 s job timeout
+  in the prepared plist is a GUESS. Replace it with a measured budget after the
+  first real run. ([[feedback_pin_the_rule_not_the_reading]])
+- **The first real run has not happened.** Everything above is verified against
+  tmp fixtures, real-corpus selection (`--dry-run`), and a real-corpus gate
+  pass over four of the five trees. Nothing has been published to `~/DuckData`.
 
 ## Surface 120 — A job cannot miss a window that closed before it existed (2026-11-12, operator: "go", after wrapping the 12 ungraded jobs)
 

@@ -1,0 +1,766 @@
+#!/usr/bin/env python3
+"""Mirror the chosen slice of business data into one directory Google Drive syncs.
+
+This is the first producer in the stack whose SUCCESS condition is that data
+leaves the machine. Every other guard here exists to keep things in, which
+inverts the failure analysis: the dangerous bug is not "the mirror is empty",
+it is "the mirror contains something nobody chose to publish".
+
+Three properties carry the whole surface:
+
+1. **Allowlist, never a denylist.** `WHOLE_TREES` and `CREATIVE_LANES` name
+   what goes. A denylist would behave identically today and leak the first
+   file a future producer invents.
+
+2. **Nothing reaches the published directory before the gate passes.** Work is
+   staged in `~/.DuckData.staging/`, scanned there, and only then released.
+   Drive uploads a file the instant it appears, so a file that appears is a
+   file that is published.
+
+3. **The gate must prove it looked.** `scripts/secret_scan.py` would have
+   passed this folder without reading a byte -- it walks `git ls-files` and
+   returns 0 on a non-git directory, and `~/DuckData/` is not a repo. So the
+   gate here walks the staged filesystem itself and refuses to release unless
+   every eligible file is accounted for. A scanner that scanned nothing must
+   not be mistakable for a scanner that found nothing.
+   ([[feedback_a_failed_probe_is_a_fact_about_the_probe]])
+
+Release is a delta rsync out of the gated staging tree, NOT a directory
+rename. A rename would present Drive with ~178,000 deletions and ~178,000
+creations on every run and re-upload the full ~10.3 GB nightly. The safety
+property is unchanged -- every byte in the published directory has passed the
+gate -- and rsync renames each file into place individually, so Drive never
+sees a half-written file.
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DUCK_OPS_ROOT = REPO_ROOT
+DUCKAGENT_ROOT = Path(
+    os.environ.get("DUCKAGENT_ROOT") or (REPO_ROOT.parent / "duckAgent")
+)
+
+#: Where Drive for desktop watches. Overridable for operators with a different
+#: Drive layout; the test-mode guard below keys on the factory default.
+DRIVE_MIRROR_ROOT = Path(
+    os.environ.get("DRIVE_MIRROR_ROOT") or (Path.home() / "DuckData")
+)
+#: Staging lives OUTSIDE the mirror root on purpose. A staging directory nested
+#: inside the synced folder would upload every ungated intermediate.
+DRIVE_MIRROR_STAGING_ROOT = Path(
+    os.environ.get("DRIVE_MIRROR_STAGING_ROOT")
+    or (Path.home() / ".DuckData.staging")
+)
+#: State the grader and the OS card read.
+DRIVE_MIRROR_STATE_PATH = REPO_ROOT / "state" / "drive_mirror.json"
+#: Which (path, size, mtime) tuples have already cleared the gate, so a nightly
+#: run scans the delta instead of re-reading 5 GB of JSON.
+DRIVE_MIRROR_GATE_LEDGER_PATH = REPO_ROOT / "state" / "drive_mirror_gate_ledger.json"
+
+# Frozen at import: the FACTORY-DEFAULT published path, never moved by
+# monkeypatch. The guard compares the LIVE value against this, so a test whose
+# fixture redirects the root sails through while a test that bypasses isolation
+# is refused.
+_FROZEN_PRODUCTION_MIRROR_ROOT = (Path.home() / "DuckData").resolve()
+_TEST_MODE_REFUSAL_ENV = "DUCK_TEST_MODE"
+
+
+class TestModeRefusalError(RuntimeError):
+    """Raised when a mirror run under DUCK_TEST_MODE=1 would write to the real
+    published directory. Everywhere else in the stack this guard protects a
+    state file; here it protects ~10 GB of rsync into a folder that uploads to
+    Google."""
+
+
+# ---------------------------------------------------------------------------
+# The allowlist
+# ---------------------------------------------------------------------------
+
+#: (published subdirectory, source directory). Copied whole.
+WHOLE_TREES: tuple[tuple[str, Path], ...] = (
+    ("duck-ops/output", DUCK_OPS_ROOT / "output"),
+    ("duck-ops/state", DUCK_OPS_ROOT / "state"),
+    ("duckAgent/data", DUCKAGENT_ROOT / "data"),
+    ("duckAgent/config", DUCKAGENT_ROOT / "config"),
+    ("duckAgent/state", DUCKAGENT_ROOT / "state"),
+)
+
+#: Creative output selected out of duckAgent/runs by filename. Pattern
+#: selection is the weak joint of this design: a lane that renames its output
+#: stops syncing and the only symptom is a count going to zero, which is why
+#: every lane is counted separately and a lane collapsing to zero is fatal
+#: rather than quiet. ([[feedback_no_silent_caps]])
+CREATIVE_LANES: dict[str, str] = {
+    "meme": "meme_*.png",
+    "jeepfact": "jeepfact*.png",
+    "video": "*.mp4",
+    "weekly_hero": "weekly_hero*",
+    "post_receipts": "*_posts.json",
+    "product_photos": "newduck*.png",
+}
+CREATIVE_SOURCE = DUCKAGENT_ROOT / "runs"
+CREATIVE_DEST = "duckAgent/runs"
+
+#: Filenames that never leave, even when an include pattern matches them.
+#: Exclusion is evaluated AFTER inclusion and wins: `meme_*.png` matches 37
+#: `meme_*_subject.png` intermediates and `jeepfact*.png` matches 232 more, so
+#: an include-only implementation would publish 269 files this list rejects.
+EXCLUDE_NAME_PATTERNS: tuple[str, ...] = (
+    ".env",
+    ".env.*",
+    "*.env",
+    "etsy_tokens.json",
+    # NOT `*token*.json`. That wildcard reads as obviously safe and silently
+    # drops 402 legitimate files: duck-ops/state/workflow_control/
+    # etsy-token-auth-*.json are workflow HEALTH records ("auth_healthy",
+    # "etsy_auth_probe"), scanned clean, and exactly the operational history an
+    # external model would want. Measured 2026-11-12.
+    # ([[feedback_no_silent_caps]])
+    "*oauth_token*.json",
+    "*_credentials.json",
+    "client_secret*",
+    "*.pem",
+    "*.key",
+    "*_subject.png",
+    "template_render.png",
+    "background_scene.png",
+    "*_lab_option*",
+    "state_newduck.json",
+    # Internal bookkeeping that happens to live in a published tree: one entry
+    # per scanned file, meaningless to a reader of the mirror, and rewritten
+    # every run so it would re-upload nightly for nothing.
+    "drive_mirror_gate_ledger.json",
+)
+#: Directories never walked. `.git` and `.venv` carry credentials and churn;
+#: the rest are caches.
+EXCLUDE_DIR_NAMES: frozenset[str] = frozenset(
+    {".git", ".venv", "__pycache__", "node_modules", ".pytest_cache", ".mypy_cache"}
+)
+
+#: Headroom required over the measured staging size before anything is copied.
+#: The mirror holds a full second copy by design, so a run that would fill the
+#: disk must refuse rather than discover it at 98%.
+DISK_HEADROOM_FACTOR = 1.25
+
+
+# ---------------------------------------------------------------------------
+# The gate
+# ---------------------------------------------------------------------------
+
+# Patterns and redaction come from scripts/secret_scan.py, which stays the
+# authority for WHAT a credential looks like. What is NOT reused is its
+# traversal: scan_repo walks `git ls-files` and main() returns 0 on a
+# non-git directory, so pointing the CLI at the mirror would report clean on a
+# folder it never opened.
+def _load_scanner():
+    scripts_dir = REPO_ROOT / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import secret_scan
+
+    return secret_scan
+
+
+_SCANNER = _load_scanner()
+PATTERNS = _SCANNER.PATTERNS
+_is_scannable = _SCANNER._is_scannable
+_redact = _SCANNER._redact
+
+# One alternation over every credential shape, so the common case (no secret)
+# costs a single pass per file instead of nineteen. A hit re-reads that one
+# file line by line to name the pattern and locate it.
+#
+# A leading `(?i)` is a GLOBAL flag and is a syntax error anywhere but the
+# start of a pattern, so the Bearer/Authorization rule has to be rewritten as
+# the scoped `(?i:...)` to survive being nested in the alternation.
+def _as_union_branch(pattern: re.Pattern) -> str:
+    text = pattern.pattern
+    if text.startswith("(?i)"):
+        return f"(?i:{text[4:]})"
+    return f"(?:{text})"
+
+
+_UNION_PATTERN = re.compile(
+    "|".join(_as_union_branch(pattern) for pattern, _ in PATTERNS)
+)
+
+
+@dataclass
+class GateResult:
+    """Why the gate did or did not release. `released` is never inferred from
+    an empty findings list -- a scan that read nothing also finds nothing."""
+
+    released: bool
+    reason: str
+    files_eligible: int = 0
+    files_scanned: int = 0
+    files_carried: int = 0
+    files_skipped_binary: int = 0
+    findings: list[dict] = field(default_factory=list)
+
+
+def _gate_key(path: Path, rel: str) -> str:
+    st = path.stat()
+    return f"{rel}|{st.st_size}|{st.st_mtime_ns}"
+
+
+def _scan_one(path: Path, rel: str) -> list[dict]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        # An unreadable file is NOT a clean file. Surface it as a finding so a
+        # permissions problem cannot look like a pass.
+        return [{"path": rel, "line": 0, "pattern": "unreadable", "redacted_excerpt": str(exc)[:120]}]
+    if not _UNION_PATTERN.search(text):
+        return []
+    findings = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        for pattern, name in PATTERNS:
+            match = pattern.search(line)
+            if match:
+                findings.append({
+                    "path": rel,
+                    "line": lineno,
+                    "pattern": name,
+                    "redacted_excerpt": _redact(match.group(0)),
+                })
+    return findings
+
+
+def gate_staged_tree(
+    staging_root: Path,
+    ledger: dict | None = None,
+) -> tuple[GateResult, dict]:
+    """Scan the staged tree and decide whether it may be released.
+
+    Release requires all three of: at least one eligible file exists, every
+    eligible file is accounted for (read now, or proven identical to one that
+    passed before), and no findings. The middle condition is the one that makes
+    a broken scanner loud -- `findings == []` on its own is exactly what a
+    scanner that never opened a file reports.
+    """
+    ledger = dict(ledger or {})
+    fresh_ledger: dict[str, str] = {}
+    eligible = scanned = carried = skipped_binary = 0
+    findings: list[dict] = []
+
+    if not staging_root.is_dir():
+        return GateResult(False, f"staging tree missing: {staging_root}"), fresh_ledger
+
+    for dirpath, dirnames, filenames in os.walk(staging_root):
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR_NAMES]
+        for name in filenames:
+            path = Path(dirpath) / name
+            rel = str(path.relative_to(staging_root))
+            if not _is_scannable(path):
+                skipped_binary += 1
+                continue
+            eligible += 1
+            try:
+                key = _gate_key(path, rel)
+            except OSError:
+                findings.append({"path": rel, "line": 0, "pattern": "unstattable",
+                                 "redacted_excerpt": ""})
+                continue
+            fresh_ledger[rel] = key
+            if ledger.get(rel) == key:
+                carried += 1
+                continue
+            scanned += 1
+            findings.extend(_scan_one(path, rel))
+
+    accounted = scanned + carried
+    if eligible == 0:
+        return GateResult(
+            False,
+            "refusing to release: zero scannable files in the staged tree, so "
+            "the gate has no evidence it scanned anything",
+            eligible, scanned, carried, skipped_binary, findings,
+        ), fresh_ledger
+    if accounted != eligible:
+        return GateResult(
+            False,
+            f"refusing to release: {eligible} eligible file(s) but only "
+            f"{accounted} accounted for ({scanned} scanned, {carried} carried)",
+            eligible, scanned, carried, skipped_binary, findings,
+        ), fresh_ledger
+    if findings:
+        return GateResult(
+            False,
+            f"refusing to release: {len(findings)} credential finding(s) in the "
+            f"staged tree",
+            eligible, scanned, carried, skipped_binary, findings,
+        ), fresh_ledger
+    return GateResult(
+        True,
+        f"clean: {eligible} eligible file(s) accounted for "
+        f"({scanned} scanned, {carried} unchanged since the last pass)",
+        eligible, scanned, carried, skipped_binary, findings,
+    ), fresh_ledger
+
+
+# ---------------------------------------------------------------------------
+# Selection
+# ---------------------------------------------------------------------------
+
+def is_excluded(name: str) -> bool:
+    """True if this filename never leaves, whatever matched it."""
+    return any(fnmatch.fnmatch(name, pat) for pat in EXCLUDE_NAME_PATTERNS)
+
+
+def select_creative_files(source: Path | None = None) -> dict[str, list[Path]]:
+    """Per-lane selection out of the runs tree, exclusions already applied.
+
+    A file matching two lanes is counted under both -- the counts answer "is
+    this lane still producing?", which a de-duplicated total cannot.
+    """
+    source = Path(source) if source is not None else CREATIVE_SOURCE
+    selected: dict[str, list[Path]] = {lane: [] for lane in CREATIVE_LANES}
+    if not source.is_dir():
+        return selected
+    for dirpath, dirnames, filenames in os.walk(source):
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR_NAMES]
+        for name in filenames:
+            if is_excluded(name):
+                continue
+            for lane, pattern in CREATIVE_LANES.items():
+                if fnmatch.fnmatch(name, pattern):
+                    selected[lane].append(Path(dirpath) / name)
+    return selected
+
+
+def _tree_size_bytes(paths: list[Path]) -> int:
+    total = 0
+    for p in paths:
+        try:
+            total += p.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _dir_size_bytes(root: Path) -> tuple[int, int]:
+    total = count = 0
+    if not root.is_dir():
+        return 0, 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR_NAMES]
+        for name in filenames:
+            try:
+                total += (Path(dirpath) / name).stat().st_size
+            except OSError:
+                continue
+            count += 1
+    return total, count
+
+
+# ---------------------------------------------------------------------------
+# Copying
+# ---------------------------------------------------------------------------
+
+def _rsync(args: list[str]) -> tuple[int, str]:
+    proc = subprocess.run(
+        ["rsync", *args], capture_output=True, text=True, check=False
+    )
+    return proc.returncode, (proc.stderr or proc.stdout or "").strip()[:400]
+
+
+def _exclusion_args() -> list[str]:
+    args = []
+    for pat in EXCLUDE_NAME_PATTERNS:
+        args += ["--exclude", pat]
+    for name in sorted(EXCLUDE_DIR_NAMES):
+        args += ["--exclude", f"{name}/"]
+    return args
+
+
+def stage_whole_trees(staging_root: Path) -> list[dict]:
+    """rsync each allowlisted tree into staging. A missing source tree is
+    recorded and skipped, never fatal -- one absent directory must not stop the
+    other four from syncing, and must not look like a clean empty mirror
+    either."""
+    results = []
+    for subdir, source in WHOLE_TREES:
+        dest = staging_root / subdir
+        entry = {"tree": subdir, "source": str(source)}
+        if not source.is_dir():
+            entry.update(status="source_missing", files=0, bytes=0)
+            results.append(entry)
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        code, err = _rsync([
+            "-a", "--delete", *_exclusion_args(),
+            f"{source}/", f"{dest}/",
+        ])
+        nbytes, nfiles = _dir_size_bytes(dest)
+        entry.update(
+            status="ok" if code == 0 else "rsync_failed",
+            files=nfiles,
+            bytes=nbytes,
+            rsync_exit=code,
+        )
+        if code != 0:
+            entry["error"] = err
+        results.append(entry)
+    return results
+
+
+def stage_creative_slice(
+    staging_root: Path,
+    source: Path | None = None,
+) -> tuple[dict[str, int], dict]:
+    """rsync the pattern-selected creative files, preserving run-relative paths
+    so provenance (which run produced which image) survives the mirror."""
+    source = Path(source) if source is not None else CREATIVE_SOURCE
+    selected = select_creative_files(source)
+    counts = {lane: len(paths) for lane, paths in selected.items()}
+    dest = staging_root / CREATIVE_DEST
+    info: dict = {"source": str(source), "dest": CREATIVE_DEST, "lane_counts": counts}
+
+    rel_paths = sorted({
+        str(p.relative_to(source)) for paths in selected.values() for p in paths
+    })
+    info["files"] = len(rel_paths)
+    info["bytes"] = _tree_size_bytes(
+        [source / r for r in rel_paths]
+    )
+    if not rel_paths:
+        info["status"] = "nothing_selected"
+        return counts, info
+
+    dest.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", suffix=".files-from", delete=False) as fh:
+        fh.write("\n".join(rel_paths) + "\n")
+        list_path = fh.name
+    try:
+        code, err = _rsync([
+            "-a", f"--files-from={list_path}", f"{source}/", f"{dest}/",
+        ])
+    finally:
+        os.unlink(list_path)
+    info["status"] = "ok" if code == 0 else "rsync_failed"
+    info["rsync_exit"] = code
+    if code != 0:
+        info["error"] = err
+        return counts, info
+
+    # Prune staged creative files no longer selected. This runs only after the
+    # zero-lane check in run(), because a lane that renamed its output selects
+    # nothing and this loop would otherwise delete the lane's whole history.
+    expected = set(rel_paths)
+    pruned = 0
+    for dirpath, dirnames, filenames in os.walk(dest):
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR_NAMES]
+        for name in filenames:
+            p = Path(dirpath) / name
+            if str(p.relative_to(dest)) not in expected:
+                try:
+                    p.unlink()
+                    pruned += 1
+                except OSError:
+                    continue
+    info["pruned"] = pruned
+    return counts, info
+
+
+#: Travels with the data by design. An external model reading this corpus will
+#: over-read it -- the social sample is 27 posts, and a format ranking drawn
+#: from it was retracted on 2026-11-08 -- so the caveats have to be IN the
+#: mirror, not in a document the reader never sees.
+MIRROR_README = """# myJeepDuck data mirror
+
+Generated automatically by duck-ops/runtime/drive_mirror.py. Do not edit:
+every file here is overwritten from the source repositories on each run, and
+anything added by hand is deleted on the next one.
+
+## What this is
+
+A selected slice of the myJeepDuck automation system's business data, mirrored
+so an external model can read sales, learnings, social performance and
+creative history.
+
+## Reading this honestly
+
+- **Sample sizes are small.** The social performance data covers tens of posts,
+  not thousands. A ranking drawn from it is a hypothesis, not a finding. One
+  such ranking was retracted on 2026-11-08 after it failed to reproduce.
+- **`confidence` and `evidence` fields are load-bearing.** Where a rollup
+  carries them, they qualify the number next to them. Do not strip or ignore
+  them for tidiness.
+- **A count and a statistic here may have different denominators.** Check what
+  each one is computed over before putting them in the same sentence.
+- **`output/customer_intelligence/` is ~8,000 files that are timestamped
+  re-dumps of two reports.** It is not 8,000 independent observations.
+
+## Privacy
+
+This mirror contains real customer data by explicit decision of the shop
+operator: names, Etsy handles, message previews, draft replies and order
+details, in `output/customer_intelligence/` and in `output/operator/` (where
+1,135 of 1,175 files are per-customer). Treat it as personal data. Do not
+redistribute it, and do not use it to contact anyone.
+
+## Not in here
+
+Credentials of any kind. Every staged file is scanned before publication and
+the run refuses to publish if anything matching a credential is found, or if
+the scanner cannot prove it read the files it was asked to read.
+"""
+
+
+def write_mirror_readme(staging_root: Path, manifest: dict) -> None:
+    """Drop the README and the selection manifest into staging, where the gate
+    will scan them before anything is published."""
+    staging_root.mkdir(parents=True, exist_ok=True)
+    # Write the README only when it actually differs. An unconditional write
+    # bumps its mtime every run, which re-scans it at the gate and makes Drive
+    # re-upload an identical file nightly.
+    readme = staging_root / "README.md"
+    if not readme.is_file() or readme.read_text() != MIRROR_README:
+        readme.write_text(MIRROR_README)
+    (staging_root / "MANIFEST.json").write_text(json.dumps({
+        "generated_at": manifest.get("generated_at"),
+        "trees": [
+            {k: v for k, v in tree.items() if k in {"tree", "status", "files", "bytes"}}
+            for tree in manifest.get("trees", [])
+        ],
+        "creative_lane_counts": manifest.get("lane_counts", {}),
+        "creative_files": manifest.get("creative", {}).get("files"),
+        "note": "Counts describe what this run selected. See README.md before "
+                "drawing conclusions from any of it.",
+    }, indent=2, sort_keys=True))
+
+
+def release(staging_root: Path, mirror_root: Path) -> tuple[bool, str]:
+    """Publish the gated staging tree with a delta rsync.
+
+    Deliberately not a directory rename: a rename shows Drive the entire
+    mirror as deleted-and-recreated and re-uploads ~10 GB every run. Each file
+    rsync writes lands via a rename inside the destination, so Drive never
+    observes a partially written file, and nothing enters here that the gate
+    has not already cleared.
+    """
+    if _refusing_test_mode_prod_write(mirror_root):
+        raise TestModeRefusalError(
+            f"drive_mirror refused to publish: {_TEST_MODE_REFUSAL_ENV}=1 and the "
+            f"destination is the frozen production mirror "
+            f"({_FROZEN_PRODUCTION_MIRROR_ROOT}). A test that reaches this would "
+            f"rsync the staged tree into a folder that uploads to Google Drive."
+        )
+    mirror_root.mkdir(parents=True, exist_ok=True)
+    code, err = _rsync([
+        "-a", "--delete", f"{staging_root}/", f"{mirror_root}/",
+    ])
+    if code != 0:
+        return False, f"release rsync failed (exit {code}): {err}"
+    return True, "released"
+
+
+def _refusing_test_mode_prod_write(mirror_root: Path | None) -> bool:
+    flag = str(os.environ.get(_TEST_MODE_REFUSAL_ENV) or "").strip()
+    if flag not in {"1", "true", "TRUE", "yes"}:
+        return False
+    resolved = Path(mirror_root or DRIVE_MIRROR_ROOT).resolve()
+    return resolved == _FROZEN_PRODUCTION_MIRROR_ROOT
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+def _load_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    os.replace(tmp, path)
+
+
+def _free_bytes(path: Path) -> int:
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return shutil.disk_usage(probe).free
+
+
+def run(
+    mirror_root: Path | None = None,
+    staging_root: Path | None = None,
+    state_path: Path | None = None,
+    ledger_path: Path | None = None,
+    creative_source: Path | None = None,
+    allow_zero_lanes: bool = False,
+) -> dict:
+    """Stage, gate, release, and write the manifest. Returns the manifest; the
+    caller turns `ok` into an exit code."""
+    started = time.time()
+    mirror_root = Path(mirror_root) if mirror_root is not None else DRIVE_MIRROR_ROOT
+    staging_root = (
+        Path(staging_root) if staging_root is not None else DRIVE_MIRROR_STAGING_ROOT
+    )
+    state_path = Path(state_path) if state_path is not None else DRIVE_MIRROR_STATE_PATH
+    ledger_path = (
+        Path(ledger_path) if ledger_path is not None else DRIVE_MIRROR_GATE_LEDGER_PATH
+    )
+
+    manifest: dict = {
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "mirror_root": str(mirror_root),
+        "staging_root": str(staging_root),
+        "ok": False,
+        "status": "unknown",
+        "failures": [],
+    }
+
+    # Refuse before any copying, not after staging 10 GB.
+    if _refusing_test_mode_prod_write(mirror_root):
+        raise TestModeRefusalError(
+            f"drive_mirror refused to run: {_TEST_MODE_REFUSAL_ENV}=1 and the "
+            f"destination is the frozen production mirror "
+            f"({_FROZEN_PRODUCTION_MIRROR_ROOT})."
+        )
+
+    staging_root.mkdir(parents=True, exist_ok=True)
+
+    manifest["trees"] = stage_whole_trees(staging_root)
+    lane_counts, creative = stage_creative_slice(staging_root, creative_source)
+    manifest["creative"] = creative
+    manifest["lane_counts"] = lane_counts
+
+    for tree in manifest["trees"]:
+        if tree["status"] == "rsync_failed":
+            manifest["failures"].append(f"tree {tree['tree']}: rsync failed")
+        elif tree["status"] == "source_missing":
+            manifest["failures"].append(f"tree {tree['tree']}: source directory missing")
+    if creative.get("status") == "rsync_failed":
+        manifest["failures"].append("creative slice: rsync failed")
+
+    # A lane at zero is the signature of a renamed output, and it is fatal
+    # rather than quiet: the only other symptom is a count silently dropping.
+    empty_lanes = sorted(lane for lane, n in lane_counts.items() if n == 0)
+    manifest["empty_lanes"] = empty_lanes
+    if empty_lanes and not allow_zero_lanes:
+        manifest["failures"].append(
+            "lane(s) selected zero files (renamed output?): " + ", ".join(empty_lanes)
+        )
+
+    # Before the gate, so the README and manifest are scanned and published
+    # like every other file instead of appearing in the mirror ungated.
+    write_mirror_readme(staging_root, manifest)
+
+    staged_bytes, staged_files = _dir_size_bytes(staging_root)
+    manifest["staged_bytes"] = staged_bytes
+    manifest["staged_files"] = staged_files
+    free = _free_bytes(mirror_root)
+    manifest["free_bytes_at_destination"] = free
+    needed = int(staged_bytes * DISK_HEADROOM_FACTOR)
+    if free < needed:
+        manifest["failures"].append(
+            f"insufficient free space: need ~{needed} bytes "
+            f"({DISK_HEADROOM_FACTOR}x staged), have {free}"
+        )
+
+    ledger = _load_json(ledger_path)
+    gate, fresh_ledger = gate_staged_tree(staging_root, ledger.get("entries"))
+    manifest["gate"] = {
+        "released": gate.released,
+        "reason": gate.reason,
+        "files_eligible": gate.files_eligible,
+        "files_scanned": gate.files_scanned,
+        "files_carried": gate.files_carried,
+        "files_skipped_binary": gate.files_skipped_binary,
+        "finding_count": len(gate.findings),
+        "findings": gate.findings[:25],
+    }
+    if not gate.released:
+        manifest["failures"].append(f"gate: {gate.reason}")
+
+    if manifest["failures"]:
+        manifest["status"] = "refused"
+        manifest["duration_seconds"] = round(time.time() - started, 2)
+        _write_json_atomic(state_path, manifest)
+        return manifest
+
+    ok, reason = release(staging_root, mirror_root)
+    manifest["release"] = {"ok": ok, "reason": reason}
+    if not ok:
+        manifest["failures"].append(reason)
+        manifest["status"] = "refused"
+    else:
+        manifest["ok"] = True
+        manifest["status"] = "released"
+        # The ledger records only what was published. Persisting it on a
+        # refused run would let the next run "carry" a file that never cleared.
+        _write_json_atomic(
+            ledger_path,
+            {"generated_at": manifest["generated_at"], "entries": fresh_ledger},
+        )
+
+    manifest["duration_seconds"] = round(time.time() - started, 2)
+    _write_json_atomic(state_path, manifest)
+    return manifest
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--mirror-root", default=None)
+    ap.add_argument("--staging-root", default=None)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="select and report counts without copying anything")
+    ap.add_argument("--allow-zero-lanes", action="store_true",
+                    help="do not fail when a creative lane selects zero files")
+    args = ap.parse_args(argv)
+
+    if args.dry_run:
+        selected = select_creative_files()
+        total = 0
+        for lane, paths in sorted(selected.items()):
+            size = _tree_size_bytes(paths)
+            total += size
+            print(f"{lane:16} {len(paths):6} files  {size / 2**30:7.2f} GB")
+        print(f"{'CREATIVE SLICE':16} "
+              f"{sum(len(p) for p in selected.values()):6} files  "
+              f"{total / 2**30:7.2f} GB")
+        for subdir, source in WHOLE_TREES:
+            nbytes, nfiles = _dir_size_bytes(source)
+            state = "ok" if source.is_dir() else "MISSING"
+            print(f"{subdir:22} {nfiles:7} files  {nbytes / 2**30:7.2f} GB  {state}")
+        return 0
+
+    manifest = run(
+        mirror_root=args.mirror_root,
+        staging_root=args.staging_root,
+        allow_zero_lanes=args.allow_zero_lanes,
+    )
+    print(f"status={manifest['status']} "
+          f"staged_files={manifest.get('staged_files')} "
+          f"gate={manifest.get('gate', {}).get('reason')}")
+    for failure in manifest["failures"]:
+        print(f"  FAILURE: {failure}", file=sys.stderr)
+    return 0 if manifest["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
