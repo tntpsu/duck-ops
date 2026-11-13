@@ -6888,3 +6888,90 @@ Three changes, in the order they matter:
 - **A paused lane stops refreshing its pool.** Deliberate — it is what keeps
   the card honest — but a resume after a long pause does its first backfill
   on that run rather than arriving warm.
+
+## Surface 123 — The mirror could shrink, or stop leaving the machine, and nothing watched either (2026-11-13, operator: "Do number 2", following Surface 119)
+
+Surface 119 shipped the Drive mirror without its two-card bracket, which the
+house rule says lands in the SAME commit as the lane
+([[feedback_two_card_observability_bracket]]). Two failure modes had no
+observer, and neither covers the other:
+
+1. **The mirror publishes by ALLOWLIST** — named trees plus filename-pattern
+   lanes. Rename an output upstream and the pattern stops matching: the lane
+   selects fewer files, the run still succeeds, the gate still passes, and any
+   completion signal stays green. A mirror quietly losing a slice of the
+   business has no other symptom. The producer already refused a lane at
+   *exactly* zero; the case with no symptom at all is 1320 product photos
+   becoming 12.
+2. **The lane's success condition is that data LEAVES the machine**, and the
+   producer's own view stops at the local directory.
+
+### The false positive that set the upload card's design
+
+On the first real run I armed a watch that called the upload complete when
+Drive's `queued_uploads` and `pending_uploads` both reached zero. It fired in
+15 minutes. Drive had uploaded **4,938 of 178,731 files — 3%**.
+
+Drive discovers files incrementally and enqueues in batches, so between
+batches both queues legitimately read zero. **A queue depth of zero cannot
+distinguish finished from barely started.** It is the same shape as the gate's
+own founding lesson: an empty findings list is also what a scanner that never
+opened a file reports ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
+
+The card therefore grades on the count of files carrying a **cloud checksum**,
+never on queue depth. Pinned by
+`test_empty_upload_queues_do_not_mean_the_upload_finished`.
+
+### What shipped
+
+- `drive_mirror.py` keeps **run history** (`state/drive_mirror_runs.jsonl`,
+  60 rows) — the baseline the shrink detector needs, which a single-run
+  manifest cannot provide. A **refused** run is recorded too: a week of
+  refusals is exactly the shape the throughput question exists to catch.
+- `drive_mirror.py` probes **Drive's own mirror database** through a read-only
+  copy. It is machine-local and not a contract Google owes us, so every
+  failure reports `readable: false` and the probe NEVER raises — evidence
+  capture must not be able to fail the action it documents
+  ([[feedback_receipts_never_load_bearing]]). An unreadable probe takes the
+  card to **yellow, never red**: losing the instrument must not manufacture an
+  outage.
+- **`drive_mirror_selection`** (input sanity) — red at a zero lane, an
+  unreadable source tree, or any lane below 50% of a median baseline; yellow
+  below 80%. Green with the reason *"shrink detection needs 2 prior runs and
+  has N"* until the baseline fills, rather than grading a lane against itself
+  and calling that a pass.
+- **`drive_mirror_throughput`** (output) — red on a refused run, at 48h (2×
+  the daily cadence), or on an upload still short 24h after release; yellow at
+  24h or mid-upload inside the grace window. A 10 GB first upload runs for
+  hours, so the grace is sized to the lane's own pacing.
+- Both registered unconditionally with a yellow fallback
+  ([[feedback_loader_and_registration_both_need_tests]]).
+
+| | Never run | Lane at zero | Lane collapses | Lane shrinks | Tree unreadable | No baseline | Run refused | 24h / 48h stale | Upload short | Probe unreadable | Registration |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `drive_mirror_selection` | **unit ✓ green** | **unit ✓ red** | **unit ✓ red** | **unit ✓ yellow** | **unit ✓ red** | **unit ✓ says so** | n/a | n/a | n/a | n/a | **unit ✓ incl. empty payload** |
+| `drive_mirror_throughput` | **unit ✓ green** | n/a | n/a | n/a | n/a | n/a | **unit ✓ red** | **unit ✓ yellow / red** | **unit ✓ red + grace** | **unit ✓ yellow** | **unit ✓ incl. empty payload** |
+| `_append_run_history` | — | — | **unit ✓ counts kept** | — | — | — | **unit ✓ recorded** | — | — | — | — |
+| `_probe_drive_upload_state` | — | — | — | — | — | — | — | — | **unit ✓ checksum not depth** | **unit ✓ 3 ways, never raises** | — |
+
+- **Tests:** 25 in `duckAgent/creative_agent/runtime/tests/test_drive_mirror_cards.py`,
+  10 in `duck-ops/tests/test_drive_mirror_history.py`.
+- **Mutation-tested, 5/5 caught:** disabling the upload-incomplete alarm, the
+  lane-collapse alarm, shrink detection, the zero-lane flag, and making the
+  probe count every row as uploaded each turned the suite red.
+- Growth is never an alarm, and a brand-new lane with no history is not
+  flagged — both pinned, so the detector cannot cry wolf on a good change
+  ([[feedback_pin_the_rule_not_the_reading]]).
+
+### Open
+
+- **The upload probe reads a private schema.** `mirror_sqlite.db` is Google's,
+  not ours, and a Drive update may rename a column without notice. The failure
+  is soft by construction (yellow, "upload state unreadable"), but a silent
+  downgrade from *measured* to *unverified* is still a downgrade, and nothing
+  currently alarms on a probe that has been unreadable for weeks. Candidate
+  home: a staleness check on `readable` across the run history.
+- **The mirror still has no scheduled run**, so both cards grade a lane driven
+  by hand. `com.philtullai.duckops.drive-mirror.plist` is prepared and not
+  installed (Tier 3); until it is, the throughput card's 24h/48h thresholds
+  describe a cadence that does not exist.

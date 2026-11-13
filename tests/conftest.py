@@ -107,6 +107,14 @@ def _redirect_drive_mirror_paths(tmp_path, monkeypatch):
     source-level guard, before this fixture existed, rsynced /tmp into
     ~/DuckData and staged 10 GB / 178,139 files in 90 seconds.
 
+    Every production path the module names belongs here, and the list is only
+    complete until someone adds a constant. DRIVE_MIRROR_RUNS_PATH was added
+    on 2026-11-13 and missed this fixture for one commit: thirteen fixture rows
+    reached the real history before the audit test below caught them. Fixture
+    rows in that file are not cosmetic — they are the baseline the selection
+    card grades against, so they teach a shrink detector that nine files is a
+    normal run ([[feedback_test_isolation_from_production_state]]).
+
     SOURCES are redirected as well as destinations. WHOLE_TREES points at
     duck-ops/output (5.3 GB) and CREATIVE_SOURCE at duckAgent/runs, so an
     unpatched test spends minutes copying real data even when it never reaches
@@ -128,6 +136,11 @@ def _redirect_drive_mirror_paths(tmp_path, monkeypatch):
         drive_mirror,
         "DRIVE_MIRROR_GATE_LEDGER_PATH",
         tmp_path / "drive_mirror_gate_ledger.json",
+    )
+    monkeypatch.setattr(
+        drive_mirror,
+        "DRIVE_MIRROR_RUNS_PATH",
+        tmp_path / "drive_mirror_runs.jsonl",
     )
     monkeypatch.setattr(
         drive_mirror, "WHOLE_TREES", (("fixture", tmp_path / "fixture_source"),)

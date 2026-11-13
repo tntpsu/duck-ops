@@ -40,6 +40,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -72,12 +73,33 @@ DRIVE_MIRROR_STATE_PATH = REPO_ROOT / "state" / "drive_mirror.json"
 #: Which (path, size, mtime) tuples have already cleared the gate, so a nightly
 #: run scans the delta instead of re-reading 5 GB of JSON.
 DRIVE_MIRROR_GATE_LEDGER_PATH = REPO_ROOT / "state" / "drive_mirror_gate_ledger.json"
+#: One compact row per run. The manifest holds only the LATEST run, which is
+#: enough to see a lane at zero and blind to a lane that merely collapsed --
+#: 1320 product photos becoming 12 is the same selection bug with no symptom a
+#: single-run view can show. The selection-sanity card reads this for a
+#: baseline; without it the card can only ever grade against itself.
+DRIVE_MIRROR_RUNS_PATH = REPO_ROOT / "state" / "drive_mirror_runs.jsonl"
+#: Rows retained. Enough for a baseline that survives a bad week, small enough
+#: that the card's read stays a cheap read.
+DRIVE_MIRROR_RUNS_KEPT = 60
+#: Drive for desktop's private state. Machine-local and not a contract Google
+#: owes us, which is why every read of it is allowed to fail.
+DRIVEFS_SUPPORT_ROOT = (
+    Path.home() / "Library" / "Application Support" / "Google" / "DriveFS"
+)
 
 # Frozen at import: the FACTORY-DEFAULT published path, never moved by
 # monkeypatch. The guard compares the LIVE value against this, so a test whose
 # fixture redirects the root sails through while a test that bypasses isolation
 # is refused.
 _FROZEN_PRODUCTION_MIRROR_ROOT = (Path.home() / "DuckData").resolve()
+#: The run history is a second production state file, so it needs the same
+#: frozen-path guard as the mirror root. A test that reaches this would
+#: append fixture rows to the baseline the selection card grades against,
+#: which is how a shrink detector learns that nine files is normal.
+_FROZEN_PRODUCTION_RUNS_PATH = (
+    Path(__file__).resolve().parents[1] / "state" / "drive_mirror_runs.jsonl"
+).resolve()
 _TEST_MODE_REFUSAL_ENV = "DUCK_TEST_MODE"
 
 
@@ -572,6 +594,17 @@ def release(staging_root: Path, mirror_root: Path) -> tuple[bool, str]:
     return True, "released"
 
 
+def _refusing_test_mode_runs_write(runs_path: Path | None) -> bool:
+    flag = str(os.environ.get(_TEST_MODE_REFUSAL_ENV) or "").strip()
+    if flag not in {"1", "true", "TRUE", "yes"}:
+        return False
+    try:
+        resolved = Path(runs_path or DRIVE_MIRROR_RUNS_PATH).resolve()
+    except Exception:  # pragma: no cover - defensive
+        return False
+    return resolved == _FROZEN_PRODUCTION_RUNS_PATH
+
+
 def _refusing_test_mode_prod_write(mirror_root: Path | None) -> bool:
     flag = str(os.environ.get(_TEST_MODE_REFUSAL_ENV) or "").strip()
     if flag not in {"1", "true", "TRUE", "yes"}:
@@ -605,11 +638,145 @@ def _free_bytes(path: Path) -> int:
     return shutil.disk_usage(probe).free
 
 
+def _probe_drive_upload_state(mirror_root: Path) -> dict:
+    """How much of the released mirror has Drive actually uploaded?
+
+    The producer's own success condition stops at "the bytes are in the mirror
+    root". Whether they LEFT the machine is Drive's business, and on
+    2026-11-13 that difference was the whole story: both of Drive's upload
+    queues read zero while 96% of the run was still undiscovered, because
+    Drive enqueues in batches and an empty queue is also exactly what a
+    mid-scan lull looks like. So the signal here is the count of files
+    carrying a cloud checksum, never the queue depth -- a depth of zero cannot
+    distinguish finished from barely started.
+
+    Reads Drive's private sqlite through a copy, read-only. Every failure is
+    reported as `readable: false` and this NEVER raises: evidence capture must
+    not be able to fail the action it documents
+    ([[feedback_receipts_never_load_bearing]]).
+    """
+    out: dict = {
+        "readable": False,
+        "error": None,
+        "uploaded": None,
+        "local_files": None,
+        "queued": None,
+        "pending": None,
+    }
+    try:
+        local = 0
+        for dirpath, dirnames, filenames in os.walk(mirror_root):
+            # Drive's own in-flight scratch dir is not published content.
+            dirnames[:] = [d for d in dirnames if d != ".tmp.driveupload"]
+            local += len(filenames)
+        out["local_files"] = local
+    except Exception as exc:  # pragma: no cover - defensive
+        out["error"] = f"could not count mirror files: {exc}"
+        return out
+
+    try:
+        if not DRIVEFS_SUPPORT_ROOT.is_dir():
+            out["error"] = "Drive for desktop is not installed on this machine"
+            return out
+        db = None
+        for account in sorted(DRIVEFS_SUPPORT_ROOT.iterdir()):
+            candidate = account / "mirror_sqlite.db"
+            if account.is_dir() and candidate.exists():
+                db = candidate
+                break
+        if db is None:
+            out["error"] = "no Drive mirror database found (is a folder synced?)"
+            return out
+
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "mirror_sqlite.db"
+            shutil.copy2(db, copy)
+            # Without the write-ahead log the copy reports a stale snapshot.
+            for suffix in ("-wal", "-shm"):
+                side = db.with_name(db.name + suffix)
+                if side.exists():
+                    shutil.copy2(side, copy.with_name(copy.name + suffix))
+            con = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
+            try:
+                cur = con.cursor()
+                out["uploaded"] = cur.execute(
+                    "select count(*) from mirror_item where "
+                    "cloud_md5_checksum is not null and cloud_md5_checksum != ''"
+                ).fetchone()[0]
+                out["queued"] = cur.execute(
+                    "select count(*) from queued_uploads"
+                ).fetchone()[0]
+                out["pending"] = cur.execute(
+                    "select count(*) from pending_uploads"
+                ).fetchone()[0]
+            finally:
+                con.close()
+        out["readable"] = True
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def _append_run_history(
+    path: Path,
+    manifest: dict,
+    *,
+    kept: int = DRIVE_MIRROR_RUNS_KEPT,
+) -> None:
+    """Append one compact row per run and trim to the retention cap.
+
+    A REFUSED run is recorded too. The throughput card's question is "is work
+    completing", and a run that refused every night for a week is the exact
+    shape that question exists to catch.
+
+    Never raises EXCEPT on the test-mode guard below, which is a programming
+    error rather than an I/O failure and must be loud.
+    """
+    if _refusing_test_mode_runs_write(path):
+        raise TestModeRefusalError(
+            f"drive_mirror refused to append run history: "
+            f"{_TEST_MODE_REFUSAL_ENV}=1 and the destination is the frozen "
+            f"production history ({_FROZEN_PRODUCTION_RUNS_PATH}). Fixture rows "
+            f"here poison the baseline the selection card grades against."
+        )
+    row = {
+        "generated_at": manifest.get("generated_at"),
+        "status": manifest.get("status"),
+        "ok": bool(manifest.get("ok")),
+        "staged_files": manifest.get("staged_files"),
+        "staged_bytes": manifest.get("staged_bytes"),
+        "lane_counts": dict(manifest.get("lane_counts") or {}),
+        "tree_files": {
+            str(tree.get("tree")): tree.get("files")
+            for tree in (manifest.get("trees") or [])
+            if isinstance(tree, dict)
+        },
+        "failure_count": len(manifest.get("failures") or []),
+        "upload": dict(manifest.get("upload") or {}),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        if path.exists():
+            lines = [
+                line
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        lines.append(json.dumps(row, sort_keys=True))
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text("\n".join(lines[-kept:]) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:  # pragma: no cover - defensive
+        return
+
+
 def run(
     mirror_root: Path | None = None,
     staging_root: Path | None = None,
     state_path: Path | None = None,
     ledger_path: Path | None = None,
+    runs_path: Path | None = None,
     creative_source: Path | None = None,
     allow_zero_lanes: bool = False,
 ) -> dict:
@@ -624,6 +791,7 @@ def run(
     ledger_path = (
         Path(ledger_path) if ledger_path is not None else DRIVE_MIRROR_GATE_LEDGER_PATH
     )
+    runs_path = Path(runs_path) if runs_path is not None else DRIVE_MIRROR_RUNS_PATH
 
     manifest: dict = {
         "generated_at": datetime.now().astimezone().isoformat(),
@@ -700,6 +868,8 @@ def run(
     if manifest["failures"]:
         manifest["status"] = "refused"
         manifest["duration_seconds"] = round(time.time() - started, 2)
+        manifest["upload"] = _probe_drive_upload_state(mirror_root)
+        _append_run_history(runs_path, manifest)
         _write_json_atomic(state_path, manifest)
         return manifest
 
@@ -719,6 +889,8 @@ def run(
         )
 
     manifest["duration_seconds"] = round(time.time() - started, 2)
+    manifest["upload"] = _probe_drive_upload_state(mirror_root)
+    _append_run_history(runs_path, manifest)
     _write_json_atomic(state_path, manifest)
     return manifest
 
