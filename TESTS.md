@@ -2847,8 +2847,8 @@ Dismissing in the view and leaving the store is the zombie of [[feedback_retire_
 **Verified live, against the real API** ([[feedback_real_generation_test_beats_mocks]] — mocks would never have caught a model-parameter rejection): after the one-line normalize, `--flow reviews --only select_story_review --force` picked a candidate in 10s (AI score 8/10, first in 17 days), `generate_story_image` synced it into the pool, and `review_carousel_queue.json` moved **`waiting_for_tuesday_or_threshold` → `ready_threshold`**, 5 of 5 selected. The lane auto-builds and auto-schedules on its next scheduled run with no further input.
 
 **Still open:**
-- **The plist weekday is still `3` (Wednesday).** Fixing it is the only thing that makes the ≥3 Tuesday valve real, and it needs a Tier-3 launchd write: `/usr/libexec/PlistBuddy -c "Set :StartCalendarInterval:Weekday 2" ~/Library/LaunchAgents/com.philtullai.duckagent.review-carousel.tuesday.plist` then `launchctl bootout`/`bootstrap`. Until then the lane builds on the ≥5 threshold only, and the new input card is the thing that catches a stall.
-- **The scheduled day is hardcoded in two places** — the plist and `review_social_pool.py`'s `weekday == "Tuesday"`. That duplication is what let them disagree silently for months; one of them should derive from the other.
+- ~~**The plist weekday is still `3` (Wednesday).**~~ **FIXED 2026-11-13** (operator: "Do 3"). `Weekday` is now `2`; installed and prepared plists are byte-identical, `launchctl print` shows the calendar trigger as `Weekday => 2`, and `next_expected_at` moved to **2026-11-17T16:00** — a Tuesday. Two dead branches come back with it: the ≥3 Tuesday valve at `review_social_pool.py:473`, and the Tuesday-only approval-resend at `:67`, which has also never fired. The lane is paused (Surface 121) so neither runs until it resumes. Regrading cost nothing: the plist mtime moved past the last window, so Surface 120's `declared_after_window` holds the job at `no_history`/warn instead of inventing a miss — 0 bad, 3 warn, 45 healthy.
+- **The scheduled day is still hardcoded in two places** — the plist and `review_social_pool.py`'s `weekday == "Tuesday"` (twice: lines 67 and 473). They agree again as of 2026-11-13, but nothing makes them agree; the next edit to either can re-open the same silent gap, and the only evidence it happened would be a valve that stops firing. The duplication cannot be closed by a CI test, because one side is a machine-local launchd fact that no committed test can read. The honest homes are (a) `scheduler_health`, which already parses every plist's `StartCalendarInterval` and could assert this one pairing, or (b) deleting the weekday check entirely and letting the weekly job's firing *be* the weekly slot — which needs the caller to declare it, since `rebuild_review_social_pool` is also called from the backfill.
 - `_load_review_carousel_health` ages off last **scheduled** rather than last **posted**, so it read 18d while the real social gap was 12d. Cosmetic, but it overstates the outage.
 
 ---
@@ -6819,10 +6819,13 @@ carousel-specific. ([[feedback_a_number_needs_its_denominator]])
 
 ### Open
 
-- **The job named `tuesday` fires Wednesdays.** `StartCalendarInterval`
-  `Weekday 3` is Wednesday; the run schedules Instagram for the following
-  Tuesday, which is why the receipts read Tuesday. Harmless while paused,
-  misleading in every log line and card that names it.
+- ~~**The job named `tuesday` fires Wednesdays.**~~ **FIXED 2026-11-13** — and
+  not by the rename this entry implied. Surface 83 had already diagnosed it on
+  2026-10-11 with the opposite verdict: the name was right and the *schedule*
+  was wrong, because `review_social_pool.py` gates a ≥3 candidate valve on the
+  day being Tuesday. Renaming the job to match Wednesday would have made the
+  log honest and left that valve dead forever. The plist now fires Tuesday.
+  ([[feedback_verify_roadmap_against_code_before_building]])
 - **stdout contamination silently skipped the 2026-11-11 run — FIXED
   2026-11-13.** The wrapper captured the preflight's stdout into `$preflight`
   and tested `!= RUN*`. An Etsy token-refresh banner printed ahead of
