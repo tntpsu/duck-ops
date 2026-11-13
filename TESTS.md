@@ -6777,3 +6777,59 @@ retired a real assertion. ([[feedback_pin_the_rule_not_the_reading]])
   today; a first-seen stamp written by the grader would be exact.
 - **The etsy-browser pair carries a guessed 3600s timeout.** Set from observed
   duration once real receipts exist, not left as an estimate.
+
+## Surface 121 — The pause switch that only paused half the lane (2026-11-13, operator: "Can we pause the flow where we are putting our review carousel posts up? No one looks at them", SHIPPED)
+
+`review_carousel` is the only one of the seven workflows-card flows whose
+scheduled job invokes `duck_creative_agent.runner` **directly** instead of
+`main_agent --flow ... --all`. Every other pausable lane enters through
+`run_all` / `run_only` / `run_from`, where `_off_mode_guard` short-circuits it.
+This one never passed that door.
+
+So `mode=off` did only what the *publish* policy happened to enforce: with the
+mode no longer `auto_schedule_instagram`, `evaluate_review_carousel_execution_policy`
+fell through to `manual_review_required`. The lane still woke every week, still
+built the slides, and still emailed the operator an approval request. Pausing a
+lane nobody wants would have **converted a silent auto-post into a weekly
+chore** — strictly worse than leaving it on.
+
+The guard now lives at the runner's entry, before `get_config`, keyed on an
+explicit task→flow map rather than on the task name matching a flow name.
+Name-matching would have worked today and coupled nine unrelated creative tasks
+to the execution-config namespace forever.
+
+| | Flow paused | Flow on | Task with no flow entry | Config map drift |
+|---|---|---|---|---|
+| `runner.main` dispatch | **unit ✓ — exits 0, runs root never created** | **unit ✓ — task still runs** | **unit ✓ — `review_story` unaffected by an "off" reader** | **unit ✓ — every pausable flow has a config** |
+
+- **Mutation-checked:** disarming the guard (`if False:`) fails the pause test.
+  A suite that passes on first write proves nothing about the guard it asserts.
+- **Verified with the production command shape** (`--send-email`, real config,
+  `DUCK_TEST_MODE=1` as a belt): `skipped_flow_off`, exit 0, no runs root, no
+  email. Exit 0 keeps `run_with_receipt.sh` writing `succeeded`, so
+  `scheduler_health` reads the paused job as healthy rather than red —
+  it ran, and correctly did nothing.
+- **Tests:** 4 added to `creative_agent/runtime/tests/test_runner.py`; 24 pass.
+
+**Why it was paused** (4 tracked posts, so a reading, not a law): reach
+24 / 20 / 22 / 7 against memes 53–93, Thursday 37–40 and the duckvideo reel
+127; engagement 2 / 2 / 3 / 1, the lowest of any lane. Reach is falling
+account-wide in November (jeepfact hit 9 on 11-11), so part of the 7 is not
+carousel-specific. ([[feedback_a_number_needs_its_denominator]])
+
+### Open
+
+- **The job named `tuesday` fires Wednesdays.** `StartCalendarInterval`
+  `Weekday 3` is Wednesday; the run schedules Instagram for the following
+  Tuesday, which is why the receipts read Tuesday. Harmless while paused,
+  misleading in every log line and card that names it.
+- **stdout contamination silently skipped the 2026-11-11 run.** The wrapper
+  captures the preflight's stdout into `$preflight` and tests `!= RUN*`. An
+  Etsy token-refresh banner printed ahead of `RUN ready`, so the prefix test
+  failed and the job exited 0 having done nothing — `succeeded` receipt, no
+  queue entry, no post. The control channel needs to be the exit code or the
+  last line, not the whole stream. Affects the lane whether or not it is
+  paused. ([[feedback_swallowed_errors_lie]])
+- **Resuming is one portal click** (`mode` → `auto_schedule_instagram` on
+  /portal/workflows-status) and the config carries the dated
+  `operator_mode_history` entry explaining the pause.

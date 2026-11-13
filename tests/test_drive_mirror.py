@@ -233,12 +233,15 @@ class GateTests(unittest.TestCase):
             "Shopify access token": "shpat_" + "a" * 32,
             "Shopify private app token": "shppa_" + "a" * 32,
             "Shopify shared secret": "shpss_" + "a" * 32,
-            "Slack token": "xoxb-123-456-abcdef",
+            "Slack token": "xoxb" + "-123-456-abcdef",
             "SendGrid API key": "SG." + "a" * 22 + "." + "b" * 22,
             "Twilio Account SID": "AC" + "0" * 32,
-            "Private key block": "-----BEGIN RSA PRIVATE KEY-----",
+            "Private key block": "-----BEGIN RSA " + "PRIVATE KEY-----",
             "Bearer/Authorization header (verify)": "Authorization: " + "z" * 35,
         }
+        # Every probe is BUILT, never written whole: a contiguous literal here
+        # is a real hit for secret_scan.py --all, and a scan that always reports
+        # two findings is a scan nobody reads. ([[feedback_red_ci_is_no_ci]])
         names = [name for _, name in drive_mirror.PATTERNS]
         self.assertEqual(
             sorted(names), sorted(probes),
