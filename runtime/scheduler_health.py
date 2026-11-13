@@ -43,9 +43,27 @@ ATTENTION_STATUSES = {
     "slow",
     "skipped_lock_active",
     "skipped_lock_unavailable",
+    "skipped_lock_stuck",
     "unknown",
 }
-BAD_STATUSES = {"missed_run", "failed", "timeout", "hung", "orphaned"}
+BAD_STATUSES = {
+    "missed_run",
+    "failed",
+    "timeout",
+    "hung",
+    "orphaned",
+    "skipped_lock_stuck",
+}
+
+#: Consecutive lock-skips before a job stops being "busy" and becomes stuck.
+#: ONE skip is a legitimate overlap -- a run that outlived its own interval.
+#: A RUN of them is a lock nobody owns, which is the 2026-11-01 sidecar
+#: incident: eight steps dead for twelve days while every firing reported
+#: success. Three is deliberately cadence-independent: no schedule in this
+#: stack has a reason to decline work three times running, and anchoring the
+#: rule to a count rather than to today's 6h interval keeps it true if the
+#: interval changes ([[feedback_pin_the_rule_not_the_reading]]).
+SKIPPED_LOCK_STUCK_THRESHOLD = 3
 WARN_STATUSES = {
     "dependency_blocked_recent",
     "fixed_pending_next_run",
@@ -172,6 +190,52 @@ def _unwind_own_in_flight_run(
                            "note": "previous completed run; this run is still in flight"}
             return merged
     return receipts
+
+
+def _consecutive_lock_skips(
+    job_name: str,
+    *,
+    history_dir: Path = HISTORY_DIR,
+) -> int:
+    """How many of the job's most recent FINISHED runs declined to work.
+
+    Reads the job's own history rather than the receipt, because a receipt
+    holds only the latest run and cannot distinguish "busy once" from "has
+    not worked since November". Counts backwards from the newest terminal row
+    and stops at the first run that did something, so the number is a current
+    streak and not a lifetime total.
+
+    `running` rows are skipped, not counted and not treated as a break: every
+    run writes one on start and a terminal row on finish, so counting them
+    would halve the streak.
+
+    Never raises -- an unreadable history reads as no streak, which keeps a
+    lost instrument from manufacturing a red card
+    ([[feedback_receipts_never_load_bearing]]).
+    """
+    path = history_dir / f"{job_name}.jsonl"
+    try:
+        if not path.is_file():
+            return 0
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except Exception:
+        return 0
+    streak = 0
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").strip()
+        if status == "running":
+            continue
+        if status.startswith("skipped_lock"):
+            streak += 1
+            continue
+        break
+    return streak
 
 
 def _load_receipts(receipt_dir: Path = RECEIPT_DIR) -> dict[str, dict[str, Any]]:
@@ -542,6 +606,7 @@ def _evaluate_job(
     events: list[dict[str, Any]],
     now: datetime,
     scheduler_log_path: Path,
+    history_dir: Path = HISTORY_DIR,
 ) -> dict[str, Any]:
     job_name = str(job.get("job_name") or "").strip()
     timeout_seconds = _safe_int((receipt or {}).get("timeout_seconds"), _safe_int(job.get("timeout_seconds"), DEFAULT_TIMEOUT_SECONDS))
@@ -597,10 +662,26 @@ def _evaluate_job(
     )
 
     if receipt_status.startswith("skipped_lock"):
+        skips = _consecutive_lock_skips(job_name, history_dir=history_dir)
         status = receipt_status
         severity = "warn"
         summary = "The latest run skipped because another scheduler lock was present."
         recommended_action = "Inspect the active lock and receipt before manually rerunning this job."
+        if skips >= SKIPPED_LOCK_STUCK_THRESHOLD:
+            status = "skipped_lock_stuck"
+            severity = "bad"
+            summary = (
+                f"The last {skips} scheduled runs all declined to start because a "
+                f"lock was present, so this job has done no work since before them. "
+                f"A lock held across that many firings is usually owned by a process "
+                f"that is already gone."
+            )
+            recommended_action = (
+                "Check whether the lock holder is alive (the lock directory should "
+                "carry a pid); if not, the lock is orphaned and the next run will "
+                "reclaim it. Then confirm the job's work actually resumed rather "
+                "than trusting its exit code."
+            )
     elif receipt_status == "running" and started_at and not finished_at:
         if elapsed_seconds is not None and elapsed_seconds > timeout_seconds:
             status = "hung" if pid_alive else "orphaned"
@@ -755,6 +836,7 @@ def build_scheduler_health(
     scheduler_log_path: Path = SCHEDULER_LOG_PATH,
     receipt_dir: Path = RECEIPT_DIR,
     resolution_dir: Path = SCHEDULER_RESOLUTION_DIR,
+    history_dir: Path = HISTORY_DIR,
     write_outputs: bool = True,
 ) -> dict[str, Any]:
     current = now or datetime.now().astimezone()
@@ -783,6 +865,7 @@ def build_scheduler_health(
             events=events,
             now=current,
             scheduler_log_path=scheduler_log_path,
+            history_dir=history_dir,
         )
         for job_name, job in sorted(jobs.items())
     ]

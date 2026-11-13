@@ -604,3 +604,164 @@ class DeclaredAfterTheWindowTests(unittest.TestCase):
             now="2026-11-12T18:04:00-05:00",
         )["items"][0]
         self.assertEqual(item["status"], "missed_run")
+
+
+class ConsecutiveLockSkipTests(unittest.TestCase):
+    """A job that declines to work must not be able to report health.
+
+    2026-11-01: a sidecar run was killed mid-step and left an ownerless lock.
+    Every firing for the next twelve days logged `SKIP :: another run is
+    already in progress` and exited 0, so `run_with_receipt.sh` wrote
+    `succeeded`, launchd recorded `last exit code = 0`, and this card graded
+    the job healthy while eight steps — including the reader for the
+    operator's email approvals — did nothing.
+
+    `skipped_lock_active` was already in this module's vocabulary and nothing
+    could produce it. The producer is now exit 75 (EX_TEMPFAIL) from the
+    sidecar, mapped by the wrapper; these tests cover the escalation from
+    "busy once" to "stuck".
+    """
+
+    def _history(self, root: Path, job_name: str, statuses: list[str]) -> Path:
+        history = root / "history"
+        history.mkdir(exist_ok=True)
+        rows = []
+        for i, status in enumerate(statuses):
+            # Every run writes a `running` row then a terminal row, exactly as
+            # run_with_receipt.sh does. Counting the running rows would halve
+            # any streak, so the fixture includes them on purpose.
+            rows.append({"job_name": job_name, "run_id": f"r{i}", "status": "running"})
+            rows.append({"job_name": job_name, "run_id": f"r{i}", "status": status})
+        (history / f"{job_name}.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+        )
+        return history
+
+    def test_one_skip_is_a_busy_lock_and_stays_a_warning(self):
+        """A run that outlived its own interval legitimately blocks the next
+        firing. Calling that an outage would cry wolf on normal overlap."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history = self._history(
+                root, "duck_ops_sidecar", ["succeeded", "succeeded", "skipped_lock_active"]
+            )
+            self.assertEqual(
+                1, scheduler_health._consecutive_lock_skips(
+                    "duck_ops_sidecar", history_dir=history
+                ),
+            )
+
+    def test_the_streak_counts_only_back_to_the_last_run_that_worked(self):
+        """A lifetime total would stay red forever after one bad week. The
+        number has to be a CURRENT streak."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history = self._history(
+                root,
+                "duck_ops_sidecar",
+                ["skipped_lock_active"] * 9 + ["succeeded"] + ["skipped_lock_active"] * 2,
+            )
+            self.assertEqual(
+                2, scheduler_health._consecutive_lock_skips(
+                    "duck_ops_sidecar", history_dir=history
+                ),
+            )
+
+    def test_running_rows_neither_count_nor_break_the_streak(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history = self._history(
+                root, "duck_ops_sidecar", ["skipped_lock_active"] * 3
+            )
+            rows = (history / "duck_ops_sidecar.jsonl").read_text().splitlines()
+            self.assertEqual(6, len(rows), "fixture must include the running rows")
+            self.assertEqual(
+                3, scheduler_health._consecutive_lock_skips(
+                    "duck_ops_sidecar", history_dir=history
+                ),
+            )
+
+    def test_a_missing_or_unreadable_history_reads_as_no_streak(self):
+        """Losing the instrument must not manufacture a red card
+        ([[feedback_receipts_never_load_bearing]])."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(
+                0, scheduler_health._consecutive_lock_skips(
+                    "never_ran", history_dir=root / "nope"
+                ),
+            )
+            history = root / "history"
+            history.mkdir()
+            (history / "garbled.jsonl").write_text("{not json\n\n[]\n", encoding="utf-8")
+            self.assertEqual(
+                0, scheduler_health._consecutive_lock_skips(
+                    "garbled", history_dir=history
+                ),
+            )
+
+    def _payload(self, *, statuses: list[str], now: str):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            receipt_dir = root / "receipts"
+            launch_agents.mkdir()
+            receipt_dir.mkdir()
+            _write_duckops_plist(
+                launch_agents / "com.philtullai.duckops.sidecar.plist",
+                label="com.philtullai.duckops.sidecar",
+                job_name="duck_ops_sidecar",
+                schedule={"Hour": 12, "Minute": 0},
+            )
+            (receipt_dir / "duck_ops_sidecar.json").write_text(
+                json.dumps({
+                    "job_name": "duck_ops_sidecar",
+                    "status": statuses[-1],
+                    "exit_code": 75,
+                    "started_at": "2026-11-13T12:00:04-05:00",
+                    "finished_at": "2026-11-13T12:00:05-05:00",
+                }),
+                encoding="utf-8",
+            )
+            history = self._history(root, "duck_ops_sidecar", statuses)
+            payload = scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat(now),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=root / "empty.log",
+                receipt_dir=receipt_dir,
+                history_dir=history,
+                write_outputs=False,
+            )
+        return {i["job_name"]: i for i in payload["items"]}["duck_ops_sidecar"]
+
+    def test_a_single_skip_grades_warn_not_bad(self):
+        item = self._payload(
+            statuses=["succeeded", "skipped_lock_active"],
+            now="2026-11-13T13:00:00-05:00",
+        )
+        self.assertEqual("skipped_lock_active", item["status"])
+        self.assertEqual("warn", item["severity"])
+
+    def test_three_consecutive_skips_grade_bad(self):
+        """The twelve-day incident. Three firings at a 6h cadence is 18 hours
+        of no work, past the 2x-cadence freshness rule."""
+        item = self._payload(
+            statuses=["skipped_lock_active"] * 3,
+            now="2026-11-13T13:00:00-05:00",
+        )
+        self.assertEqual("skipped_lock_stuck", item["status"])
+        self.assertEqual("bad", item["severity"])
+        self.assertIn("3", item["summary"])
+        self.assertIn("lock", item["recommended_action"].lower())
+
+    def test_the_stuck_status_is_graded_bad_and_demands_attention(self):
+        """A status absent from these sets would render as an unknown colour
+        and never reach the operator ([[feedback_loader_and_registration_both_need_tests]])."""
+        self.assertIn("skipped_lock_stuck", scheduler_health.BAD_STATUSES)
+        self.assertIn("skipped_lock_stuck", scheduler_health.ATTENTION_STATUSES)
+
+    def test_a_healthy_job_is_untouched_by_any_of_this(self):
+        item = self._payload(
+            statuses=["succeeded"], now="2026-11-13T13:00:00-05:00",
+        )
+        self.assertNotIn("skipped_lock", item["status"])

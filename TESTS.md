@@ -7217,16 +7217,110 @@ seeing even though recovery is automatic.
 
 ### Open
 
-- **`SKIP … exit 0` is still invisible to the scheduler card.** The lock fix
-  stops THIS cause, but any future reason the sidecar declines to work will
-  again report success. The missing signal is consecutive-skip count, or a
-  `last_meaningful_progress_at` for the sidecar distinct from its last exit —
-  the same shape as [[feedback_alive_status_is_not_progress]]. Not built.
-- **No test.** `run_duck_ops_sidecar.sh` lives in `openclaw_runtime/`, which is
-  not a git repo and has no test harness. The lock logic was verified by
-  `zsh -n` and by reading the sibling script it was ported from. A shell-level
-  test for "an orphaned lock is reclaimed, a live one is respected" has no home
-  yet, and that is the gap that let this ship unguarded in the first place.
+- **`SKIP … exit 0` — CLOSED, see below.** A job that declines to work can no
+  longer claim it succeeded.
+- **Shell-level tests have no home.** `run_duck_ops_sidecar.sh` lives in
+  `openclaw_runtime/`, which is not a git repo and has no test harness. Both
+  scripts were verified by extracting the real lock block into a harness and
+  exercising all four cases (no lock → acquire; live pid → respect; dead pid →
+  reclaim; empty lock with no pid, the actual 2026-11-01 bug → reclaim), plus
+  the end-to-end run below. None of that is a REGRESSION test: nothing re-runs
+  it. That absence is what let this ship unguarded, and it is still true.
 - **The 12-day backlog has not been flushed.** The hardened lock means the next
   firing reclaims it and runs all eight steps, including outward-facing ones
   (`notifier`, `inbox_poller`). Left to the operator to time.
+
+## Surface 127 — A job that declines to work must not be able to report success (2026-11-13, operator: "Do 3", following Surface 126)
+
+The Surface 126 lock fix stopped one cause. It did not stop the shape: the
+sidecar's `SKIP` path called `exit 0`, `run_with_receipt.sh` maps exit code to
+status, and `0` means `succeeded`. So every reason a job might decline to work
+would again be recorded as health. The receipt for the 12:00 firing on
+2026-11-13 reads `"status": "succeeded", "exit_code": 0` with `started_at` and
+`finished_at` **one second apart**, for a job whose real runs take 25–40
+minutes.
+
+`scheduler_health` already had `skipped_lock_active` in both
+`ATTENTION_STATUSES` and `WARN_STATUSES`, and an `_evaluate_job` branch that
+read it. **Nothing in the stack could produce it.** The vocabulary for this
+failure existed; the producer never did
+([[feedback_instrumented_for_one_question_only]]).
+
+What was added, three small pieces rather than a new card:
+
+1. **`run_duck_ops_sidecar.sh`** exits **75** (`EX_TEMPFAIL`, "declined, retry
+   later") from both lock-skip paths instead of 0. Verified statically that
+   those are the only two exit-75 sites.
+2. **`run_with_receipt.sh`** maps exit 75 to `skipped_lock_active`, ahead of
+   the 0/nonzero split. This is now a stack-wide convention: any wrapped job
+   can declare "I declined to work" and have it recorded as neither success
+   nor failure. Nothing previously used 75, so no existing job changes
+   behaviour.
+3. **`scheduler_health`** counts the streak and escalates. One skip stays
+   `warn`; `SKIPPED_LOCK_STUCK_THRESHOLD` (3) consecutive skips becomes a new
+   `skipped_lock_stuck` in `BAD_STATUSES`, which turns the card red.
+
+### Use case × failure mode
+
+| | Happy | One skip | Streak | Streak broken | History gone | Instrument lost |
+|---|---|---|---|---|---|---|
+| Streak counter | unit:1 | unit:1 | unit:1 | **unit:1** | **unit:1** | **unit:1** |
+| Card grading | unit:1 | unit:1 | unit:1 | n/a | n/a | n/a |
+| Status registration | unit:1 | n/a | n/a | n/a | n/a | n/a |
+| Script chain, end to end | manual:verified | manual:verified | manual:verified | n/a | n/a | n/a |
+
+9 tests in `tests/test_scheduler_health.py::ConsecutiveLockSkipTests`.
+
+### What the tests defend, and why each one exists
+
+- **One skip is normal and stays a warning.** A run that outlives its own
+  interval legitimately blocks the next firing. Grading that as an outage
+  would cry wolf on ordinary overlap, and a card that cries wolf is a card
+  nobody reads.
+- **The streak counts back only to the last run that worked.** A lifetime
+  total would stay red forever after one bad week. Pinned with a fixture
+  holding nine old skips, a success, then two recent skips → the answer is 2.
+- **`running` rows neither count nor break the streak.** Every run writes a
+  `running` row and then a terminal row, so counting them would halve the
+  streak and a threshold of 3 would need 6 skips. The fixture asserts the
+  running rows are present, so the test cannot pass against a fixture that
+  quietly omitted them.
+- **A missing or garbled history reads as NO streak.** Losing the instrument
+  must not manufacture a red card
+  ([[feedback_receipts_never_load_bearing]]).
+- **The new status is in `BAD_STATUSES` and `ATTENTION_STATUSES`.** A status
+  absent from those sets renders as an unknown colour and never reaches the
+  operator — the registration half of
+  [[feedback_loader_and_registration_both_need_tests]], at the status level.
+- **Three is a count, not a cadence.** Anchoring the rule to "3 × 6h = 18h"
+  would silently weaken if the interval changed. No schedule in this stack has
+  a reason to decline work three times running
+  ([[feedback_pin_the_rule_not_the_reading]]).
+
+### Verified end to end
+
+The real scripts, with `RUNTIME_ROOT` rewritten to a temp directory so no
+production receipt was touched (a stray probe receipt under a fake job name is
+what caused a permanent false `missed_run` earlier the same session). A lock
+held by a genuinely live process, three firings:
+
+- sidecar → exit **75**
+- wrapper → receipt `status: skipped_lock_active`, `exit_code: 75`
+- `_consecutive_lock_skips` → **3** → `skipped_lock_stuck` / `bad`
+- production `duck_ops_sidecar.json` unchanged at `succeeded` / exit 0
+
+### Open
+
+- **The two fixes cover different failures and neither is redundant.** Surface
+  126's pid check means an ORPHANED lock is now reclaimed, so it never
+  produces skips. This alarm catches the other case: a lock held by a process
+  that is alive but wedged — a sidecar run that hangs rather than dies. That
+  case previously looked like success forever and is the more likely sequel.
+- **Only the sidecar produces exit 75.** The convention is stack-wide but has
+  one adopter. Any other job with a lock (the Etsy browser batch, the review
+  carousel) still exits 0 when it declines, and would need the same one-line
+  change to become visible.
+- **Nothing grades a run whose DURATION is implausible.** The clearest
+  fingerprint here was a 1-second run of a 30-minute job, and that signal is
+  still unused: a job could do a fraction of its work, exit 0 honestly, and
+  read as healthy.
