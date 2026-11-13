@@ -6975,3 +6975,89 @@ never on queue depth. Pinned by
   by hand. `com.philtullai.duckops.drive-mirror.plist` is prepared and not
   installed (Tier 3); until it is, the throughput card's 24h/48h thresholds
   describe a cadence that does not exist.
+
+## Surface 124 — The return leg: finished posts dropped in by an outside agent (2026-11-13, operator: "have other agents prep posts for us using our data… put a video or pick back in a folder for you to grab and use", SHIPPED phase 1)
+
+Surface 119 lets business data OUT so an external agent can read it. This is
+the way back in, and it inverts the threat model a second time. The mirror's
+danger was publishing something nobody chose. Here the danger is **accepting**
+something nobody chose: the drop folder is an untrusted channel whose contents
+are pointed at the operator's public feed.
+
+### The three failures designed against, before any of them happened
+
+1. **`rsync --delete` eats the drop folder.** `drive_mirror.release()` publishes
+   with `rsync -a --delete` into `~/DuckData`, so anything an agent wrote there
+   is erased on the next mirror run — no error, no trace, no symptom but
+   missing work. `~/DuckDrop` is a SEPARATE Drive sync root, and
+   `_refuse_if_inside_mirror` makes the mistake a hard refusal rather than a
+   comment nobody reads.
+2. **A file read while Drive is still writing it.** Drive downloads
+   progressively, so a mid-sync file is a truncated file that passes every
+   check applied to the bytes that arrived. Nothing is parsed until it has been
+   QUIESCENT for 45s — asset *and* sidecar, because a half-arrived sidecar
+   reads as malformed json and would be refused on the agent's behalf.
+3. **An extension that lies.** The suffix is a claim; the magic bytes are the
+   check. A `.png` holding a shell script is refused by content, not by name.
+
+### What shipped
+
+- `duck-ops/runtime/drop_intake.py` — validate → quarantine → propose.
+  `--init` creates `~/DuckDrop/{inbox,accepted,rejected}` plus a README that
+  **is** the agent-facing contract.
+- **Nothing auto-publishes.** An accepted drop carries
+  `approval: operator_required` / `status: awaiting_operator` explicitly, so no
+  later reader can mistake it for approved work
+  ([[feedback_auto_manual_queue_contract]]).
+- **Rejection is never deletion.** A refused drop moves to `rejected/` beside a
+  `.reason.txt` that Drive syncs back up, so the agent that wrote it can read
+  why without anyone relaying it by hand.
+- **Lane names come from the flow registry**, not a private second list that
+  drifts when a lane is renamed.
+- Two cards, **same commit as the lane**: `drop_intake_sanity` (red when EVERY
+  drop was refused — the contract-mismatch shape, which from the operator's
+  side is indistinguishable from an agent that stopped) and
+  `drop_intake_throughput` (red once the oldest pending approval passes 3 days
+  — an agent producing into a queue nobody reads, at generation cost, with
+  every component green).
+
+| | Well-formed drop | Still arriving | Disguised contents | Unknown lane | No sidecar | Bad json | No caption / too long | No source agent | Empty / oversized | Symlink | Inside the mirror | Folder missing |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `validate_drop` / `scan_inbox` | **unit ✓ accepted** | **unit ✓ waits** | **unit ✓ refused** | **unit ✓** | **unit ✓** | **unit ✓** | **unit ✓ both** | **unit ✓** | **unit ✓ both** | **unit ✓ ×2 sites** | **unit ✓ raises** | **unit ✓ reported** |
+| `drop_intake_sanity` | **unit ✓ green** | — | **unit ✓ red all-refused** | — | — | — | — | — | — | — | — | **unit ✓ yellow** |
+| `drop_intake_throughput` | **unit ✓ yellow pending** | — | — | — | — | — | — | — | — | — | — | **unit ✓ green idle** |
+
+- **Tests:** 29 in `duck-ops/tests/test_drop_intake.py`, 16 in
+  `duckAgent/creative_agent/runtime/tests/test_drop_intake_cards.py`.
+- **Positive control included.** A validator asserted only by "it rejected
+  something" is the fail-closed bug wearing a test, so a well-formed image and
+  a well-formed video are both pinned as ACCEPTED.
+- **Proven on real media**, not fixtures: a real 1.4 MB meme PNG and a real
+  5.6 MB duckvideo MP4 pulled from the mirror became proposals, while a text
+  file named `.png` was refused with its reason written back
+  ([[feedback_real_generation_test_beats_mocks]]).
+- **Mutation-tested 6/6** after two survivors were fixed. The symlink refusal
+  exists at two sites that covered each other, so a mutation to either survived
+  until each got its own test — including one pinning the ORDERING, since a
+  symlink must be refused *before* the settle gate or one pointing at a
+  changing file waits forever. A seventh "survivor" was a malformed mutation:
+  `if False and X or Y` reduces to `Y`, so only half the condition was
+  disabled.
+
+### Open
+
+- **Phase 2 is the publish half**, and it is the larger one. An accepted drop
+  is currently a record in `state/drop_intake.json` and nothing reads it. To
+  become a post it needs: the asset hosted to the Shopify CDN (the publish
+  queue carries `image_urls`/`video_url`, never local paths), an approval email
+  with reply buttons, a `handle_mail_event` branch, and a FlowSpec — the
+  `/new-flow` checklist, ~16 sites.
+- **No schedule.** `drop_intake.py` runs by hand; both cards therefore grade a
+  lane nobody fires. A plist is prepared work, not installed (Tier 3).
+- **Replacing an existing post is deliberately out of scope.** The operator
+  chose new-candidate-only. `flows/meme/replace.py` already does the hard part
+  (unschedule the FB post, quarantine the IG queue entry, refuse inside the
+  30-minute grace) but only for meme and only from a duck choice, not a
+  supplied asset. Generalizing it is the phase-3 question.
+- **The drop folder is not yet a Drive sync root.** Until the operator adds
+  `~/DuckDrop` in Drive's preferences, nothing an agent writes can arrive.
