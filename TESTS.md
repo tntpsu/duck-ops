@@ -7242,8 +7242,18 @@ minutes.
 
 `scheduler_health` already had `skipped_lock_active` in both
 `ATTENTION_STATUSES` and `WARN_STATUSES`, and an `_evaluate_job` branch that
-read it. **Nothing in the stack could produce it.** The vocabulary for this
-failure existed; the producer never did
+read it.
+
+**Correction to this surface as first written (2026-11-13):** the claim
+"nothing in the stack could produce it" was too broad.
+`run_scheduled_flow.sh` writes its own receipts and has always written
+`skipped_lock_active` / `skipped_lock_unavailable` on its two lock paths —
+that is where the vocabulary came from. What is true, and still the point: it
+has never actually fired. **Zero rows across every file in
+`state/scheduler_history/` carry a skipped_lock status.** So the only
+implemented producer sat on one runner whose condition never occurred, while
+every job going through `run_with_receipt.sh` — including the sidecar —
+physically could not report it, because that wrapper only knew 0/nonzero
 ([[feedback_instrumented_for_one_question_only]]).
 
 What was added, three small pieces rather than a new card:
@@ -7316,10 +7326,22 @@ held by a genuinely live process, three firings:
   produces skips. This alarm catches the other case: a lock held by a process
   that is alive but wedged — a sidecar run that hangs rather than dies. That
   case previously looked like success forever and is the more likely sequel.
-- **Only the sidecar produces exit 75.** The convention is stack-wide but has
-  one adopter. Any other job with a lock (the Etsy browser batch, the review
-  carousel) still exits 0 when it declines, and would need the same one-line
-  change to become visible.
+- **CLOSED: all 13 lock-bearing scripts now exit 75.** 23 sites across
+  `duckAgent_runtime/` and `openclaw_runtime/`. BUSINESS skips were
+  deliberately left at exit 0 — `flow paused by operator (mode=off)`, `Etsy
+  browser guard active`, and the review-carousel preflight's not-due paths are
+  the job working correctly, and routing them through a lock status would turn
+  every paused lane red, which is the cry-wolf failure that makes a card
+  unreadable.
+- **Three of the twelve are still invisible to the card, and honestly so.**
+  Only 13 launchd jobs are receipt-wrapped. Of the scripts changed, eight are
+  reached by a wrapped plist (status becomes visible), `run_scheduled_flow.sh`
+  writes its own receipt already, and three — `run_duck_ops_etsy_browser_batch`,
+  `run_duck_ops_customer_inbox_refresh`, `run_duck_ops_whatsapp_bridge` — plus
+  `run_duck_ops_observe_review` have no receipt at all, so their exit 75 lands
+  only in `launchctl list`. That is strictly better than exit 0 (it stops
+  claiming success) but the scheduler card cannot see it. Wrapping them is the
+  remaining work, and it is a Tier-3 launchd change, not a script edit.
 - **Nothing grades a run whose DURATION is implausible.** The clearest
   fingerprint here was a 1-second run of a 30-minute job, and that signal is
   still unused: a job could do a fraction of its work, exit 0 honestly, and
