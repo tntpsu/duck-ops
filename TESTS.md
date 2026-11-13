@@ -6823,13 +6823,65 @@ carousel-specific. ([[feedback_a_number_needs_its_denominator]])
   `Weekday 3` is Wednesday; the run schedules Instagram for the following
   Tuesday, which is why the receipts read Tuesday. Harmless while paused,
   misleading in every log line and card that names it.
-- **stdout contamination silently skipped the 2026-11-11 run.** The wrapper
-  captures the preflight's stdout into `$preflight` and tests `!= RUN*`. An
-  Etsy token-refresh banner printed ahead of `RUN ready`, so the prefix test
-  failed and the job exited 0 having done nothing — `succeeded` receipt, no
-  queue entry, no post. The control channel needs to be the exit code or the
-  last line, not the whole stream. Affects the lane whether or not it is
-  paused. ([[feedback_swallowed_errors_lie]])
+- **stdout contamination silently skipped the 2026-11-11 run — FIXED
+  2026-11-13.** The wrapper captured the preflight's stdout into `$preflight`
+  and tested `!= RUN*`. An Etsy token-refresh banner printed ahead of
+  `RUN ready`, so the prefix test failed and the job exited 0 having done
+  nothing — `succeeded` receipt, no queue entry, no post. See below.
+  ([[feedback_swallowed_errors_lie]])
 - **Resuming is one portal click** (`mode` → `auto_schedule_instagram` on
   /portal/workflows-status) and the config carries the dated
   `operator_mode_history` entry explaining the pause.
+
+
+## Surface 122 — A control channel anything can write to is not a control channel (2026-11-13, operator: "Do 1", following Surface 121)
+
+The review-carousel Tuesday job ran its preflight as an inline heredoc and
+branched on that heredoc's **stdout**. Every module on the import path shares
+that stream. On 2026-11-11 `backfill_daily_reviews_to_carousel_pool` refreshed
+an expired Etsy token and printed five lines of banner ahead of the decision;
+`[[ "$preflight" != RUN* ]]` saw `🔑 Etsy API token…`, took the skip branch and
+exited 0. Succeeded receipt, no queue entry, no post, nothing red.
+
+**Swept first:** of the 21 runtime wrappers, exactly one captures a Python
+heredoc into a variable it branches on, and `$preflight` is the only such
+variable. The fix is this lane's, not a class-wide rewrite.
+([[feedback_incomplete_fix_enumerate_all_branches]])
+
+Three changes, in the order they matter:
+
+1. **The decision travels in a file of its own.** The logic moved out of the
+   heredoc into `helpers/review_carousel_bridge.review_carousel_preflight_decision`,
+   where it is testable; the CLI computes the decision first and writes it
+   second, so an exception leaves **no file** and the caller fails closed.
+2. **An unwritten decision is a FAULT, not a skip.** The wrapper now exits 1,
+   so `run_with_receipt.sh` records `failed` and the job appears on the
+   scheduler card. The old `|| preflight="SKIP preflight_failed"` graded a
+   crashed preflight as a healthy week.
+3. **The operator pause moved ahead of the preflight**, and travels as an
+   **exit code**, never stdout. A paused lane no longer calls the Etsy API to
+   refresh a pool nobody will publish — and so cannot turn its own card red.
+
+| | Decision per queue state | Dependency prints a banner | Refresh raises | Empty pending + reminder due | Decision file shape |
+|---|---|---|---|---|---|
+| `review_carousel_preflight_decision` / CLI | **unit ✓ — 7 states** | **unit ✓ — file holds the decision alone** | **unit ✓ — no file written** | **unit ✓ — no blank-id `REMIND `** | **unit ✓ — exactly one line** |
+
+- **Proven against the real failure, not a reconstruction.** A live run of the
+  new module printed that same Etsy banner again, and the decision file held
+  `RUN ready\n` — one line, 10 bytes. The shell read it and resolved to RUN.
+- **Fail-closed branch exercised end to end** with a failing interpreter:
+  exit 1, `PREFLIGHT … FAILED -- no decision written` in the log, temp file
+  removed by the trap.
+- **Tests:** 12 in `duckAgent/tests/test_review_carousel_preflight.py`. The
+  banner fixture is the outage's five lines copied verbatim from
+  `logs/review_carousel_scheduler.log`.
+
+### Open
+
+- **The wrapper itself is still untested shell**, by the repo's own boundary
+  (`duckAgent_runtime/` is machine-local, not git). The decision logic is in
+  git and tested; the ~15 lines of glue around it are not. That boundary is
+  what let this bug live, and it still holds for the other 20 wrappers.
+- **A paused lane stops refreshing its pool.** Deliberate — it is what keeps
+  the card honest — but a resume after a long pause does its first backfill
+  on that run rather than arriving warm.
