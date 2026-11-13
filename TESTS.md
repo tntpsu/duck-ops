@@ -7061,3 +7061,172 @@ are pointed at the operator's public feed.
   supplied asset. Generalizing it is the phase-3 question.
 - **The drop folder is not yet a Drive sync root.** Until the operator adds
   `~/DuckDrop` in Drive's preferences, nothing an agent writes can arrive.
+
+## Surface 125 — The mirror's file COUNT was the problem, not its size (2026-11-13, operator: "Ok, do first two", following Surface 123)
+
+Google Drive uploaded 4,938 of 178,741 mirrored files in about three hours and
+then stopped. Its own sync engine reported `active_uploads: 0`,
+`operation_queue_size: 0`, `change_ids_up_to_date: true` — it believed it was
+finished. Its mirror index held 7,186 items: 4,938 uploaded, 2,248 discovered
+and never uploaded, ~171,000 never enumerated. `queued_uploads` and
+`pending_uploads` were both empty, the `[MIRR]` subsystem had logged nothing
+for three hours, and the process was alive and healthy. It had also already
+auto-restarted itself once that day and got 28 minutes of progress out of it,
+so "restart it" was never the fix.
+
+The cause was ours. Two directories were 88% of the file count and 8.5% of the
+bytes: `output/trend_rankings` (100,140 files / 396 MB) and
+`state/workflow_receipts/ops` (47,624 / 19 MB). We were asking Drive to make
+157,815 separate upload round trips to move 840 MB of near-duplicate
+snapshots, in front of the 4.65 GB of product photos and videos — 2,361 files —
+that an external model is actually there to read.
+
+**What the data actually was**, measured rather than assumed:
+
+- `trend_rankings`: 338 concepts × 209 daily snapshots. Two consecutive days
+  differ in the timestamp and one derived counter and nothing else; the files
+  state their own market observation is 161 days old. Checksum dedup finds
+  nothing here, because the timestamp always changes — the redundancy is
+  semantic, not byte-level.
+- `customer_intelligence`: 8,088 files, 4.48 GB, every one a COMPLETE re-dump
+  of the same two reports (432 and 475 items, 3.5 MB for the newest pair).
+- `workflow_receipts/ops`: 47,624 files whose entire payload is one integer
+  (`review_pending`). ~400 bytes of content each in a 4 KB disk block each.
+- `digests`: ten report shapes re-dumped daily, `nightly_action_summary` at
+  2.25 MB a copy.
+
+One rule covers all four: keep the newest N per filename *group* per
+directory. Measured result, applied to the live tree through hardlinks so the
+source could not be touched: **178,741 files / 9.89 GB → 19,515 / 4.90 GB**,
+89% of the round trips gone, and `duckAgent/runs` becomes 95% of the remaining
+bytes.
+
+### Use case × failure mode
+
+| | Happy | Group key merges two reports | Name unreadable | Rule points at nothing | Ordering wrong | Reaches the source |
+|---|---|---|---|---|---|---|
+| Split `name__date.ext` | unit:3 | **unit:2** | unit:2 | n/a | n/a | n/a |
+| Split `ts-kind.json` | unit:1 | unit:1 | unit:1 | n/a | n/a | n/a |
+| Prune a directory | unit:2 | unit:1 | unit:1 | unit:1 | **unit:1** | **unit:1** |
+| Rule config | unit:3 | n/a | n/a | unit:1 | n/a | unit:1 |
+| `run()` end to end | unit:2 | n/a | unit:1 | unit:1 | n/a | **unit:1** |
+| Card baseline reset | unit:2 | n/a | n/a | unit:2 | n/a | n/a |
+
+28 tests in `tests/test_drive_mirror_retention.py`, 6 added to
+`creative_agent/runtime/tests/test_drive_mirror_cards.py`. Mutation-tested
+8/8.
+
+### What the tests defend, and why each one exists
+
+- **The group key is the only thing here that can destroy data.** The obvious
+  implementation — collapse digit runs to a placeholder — merges
+  `2026-graduation-duck` with `2026-custom-graduation-duck`, two real
+  products, and newest-1 then deletes one of them permanently. Seven live
+  concepts carry digits in their own names (`10-000-lakes-duck`,
+  `39-s-magnetic-duck`, `blazing-420-duck`, `2-quot-duck`,
+  `sister-39-s-duck`). The splitter instead cuts on the separator the producer
+  actually writes, declared in `config/output_naming.json`, and a test pins
+  the two graduation ducks apart ([[feedback_pin_the_rule_not_the_reading]]).
+- **A name the splitter cannot read is KEPT and counted**, never deleted.
+  Deleting on a parse failure turns a producer renaming its output into silent
+  data loss; keeping turns it into an `unparsed` number that can be alarmed
+  on. Four live files take this path (`learning_change_digest.*`,
+  `promotion_readiness.*`).
+- **Ordering comes from the version token in the NAME, not mtime.** An rsync
+  into fresh staging can restamp mtimes, which would quietly redefine "newest"
+  as "most recently copied". Verified against the live tree: the two orders
+  agree in all 697 groups today, so the choice costs nothing now and holds
+  when staging changes.
+- **Both extensions of one report are separate groups**, or newest-1 keeps the
+  `.json` and deletes the `.md` and the mirror holds half of every report.
+- **`phase_readiness__2026-15` is YYYY-WW, not a date.** A date regex would
+  not match it; the separator split does. Pinned.
+- **Pruning happens before the gate and before the counts are taken.** A file
+  deleted after being scanned would be counted as published when it is not,
+  and one deleted after the ledger was written would be "carried" next run.
+  `stage_whole_trees` counts after the rsync, so the trees are re-measured
+  post-prune — otherwise the manifest reports a file count the mirror does not
+  contain and the selection card could never see a thinning at all.
+- **Retention prunes STAGING only.** A test asserts the source tree still holds
+  every file. This is the worst possible version of the feature and it gets its
+  own assertion at both the unit and `run()` level.
+- **The baseline resets with the rules, and the threshold does not move.**
+  Thinning drops `duck-ops/output` by 96% on purpose, which is exactly what
+  the Surface 123 selection card exists to catch. Reconciling those by
+  loosening the threshold would have disarmed the card; instead the card builds
+  its baseline only from history rows carrying the current
+  `RETENTION_VERSION`. A row with no version counts as a different version, so
+  pre-retention history ages out rather than being trusted. A test proves a
+  genuine collapse still goes red once two runs exist under the new rules —
+  the reset must not become a permanent amnesty.
+- **A rule that stops applying is yellow, not silently green.** A
+  `path_missing` rule is deliberately NOT a run failure: nothing wrong is
+  published, and refusing would hold 4.9 GB of good data hostage to a renamed
+  directory. But the cap not applying has no other symptom than the mirror
+  growing back by ~2,700 files a day until Drive stalls again, so the card
+  grades it — including during the first two runs after a version bump, when
+  the no-baseline branch returns early and a mistyped path would otherwise be
+  invisible.
+
+### Open
+
+- **`trend_rankings` is also load-bearing going forward, not just a cleanup.**
+  It grew ~2,700 files/day while its producer ran. The retention rule is what
+  keeps the mirror from returning to 178,741 files.
+- **`workflow_receipts/ops` should be one JSONL, not 47,624 files.** Capping it
+  at 30 is the cheap half of the fix; the real fix is in the producer, and the
+  remaining 10,051 per-run receipts outside `ops/` are genuinely distinct and
+  deliberately untouched.
+- **No alarm on `unparsed` yet.** The count is recorded per rule and in the
+  history row, but nothing grades it. A producer renaming its output would show
+  up as a rising `unparsed` and a mirror that stops shrinking, and today only a
+  human reading the manifest would notice.
+
+## Surface 126 — A lock with no owner is a brake with no release (2026-11-13, found while answering "why did trend_rankings stop on 11-01")
+
+`output/trend_rankings` stopped being written on 2026-11-01 at 12:24. The
+producer was fine. The sidecar that runs it had not completed a run in twelve
+days.
+
+The run that started 2026-11-01 12:00 was killed mid-step: no `END` line, 837
+lines of output then silence, no process alive, and its `trap cleanup EXIT`
+never fired — `EXIT` does not run on `SIGKILL`. It left behind
+`openclaw_runtime/.duck_ops_sidecar.lock`, an empty directory dated
+2026-11-01 12:00.
+
+The lock was a bare `mkdir` with **no pid file and no staleness check**, so
+nothing could tell an orphan from a live run. Every firing after the plist was
+reinstalled on 2026-11-12 18:02 logged `SKIP :: another sidecar run is already
+in progress` and **exited 0** — `launchctl print` reports `runs = 4`,
+`last exit code = 0`, and the scheduler card graded the job healthy throughout.
+Eight steps were dead for twelve days: `cooldown_sweep`, `observer`,
+`inbox_poller`, `trend_ranker`, `quality_gate`, `review_queue`,
+`operator_surface_refresh`, `notifier`.
+
+This also retires an item logged as a card bug in Surface 123's Open section:
+`operator_surface_refresh` was red while its own reason read "completed"
+because the step genuinely had not run, not because the card was wrong.
+
+The sibling `run_review_carousel_tuesday.sh` has carried the correct pattern —
+pid file, `ps -p` check, reclaim — for months. The sidecar never got it. Ported
+now, plus a `STALE` log line when a lock is reclaimed, because a run that had
+to break a lock is evidence the previous one was killed and that is worth
+seeing even though recovery is automatic.
+([[feedback_swallowed_errors_lie]], [[feedback_alive_status_is_not_progress]],
+[[feedback_verify_the_job_is_firing_first]])
+
+### Open
+
+- **`SKIP … exit 0` is still invisible to the scheduler card.** The lock fix
+  stops THIS cause, but any future reason the sidecar declines to work will
+  again report success. The missing signal is consecutive-skip count, or a
+  `last_meaningful_progress_at` for the sidecar distinct from its last exit —
+  the same shape as [[feedback_alive_status_is_not_progress]]. Not built.
+- **No test.** `run_duck_ops_sidecar.sh` lives in `openclaw_runtime/`, which is
+  not a git repo and has no test harness. The lock logic was verified by
+  `zsh -n` and by reading the sibling script it was ported from. A shell-level
+  test for "an orphaned lock is reclaimed, a live one is respected" has no home
+  yet, and that is the gap that let this ship unguarded in the first place.
+- **The 12-day backlog has not been flushed.** The hardened lock means the next
+  firing reclaims it and runs all eight steps, including outward-facing ones
+  (`notifier`, `inbox_poller`). Left to the operator to time.

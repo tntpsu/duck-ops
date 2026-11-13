@@ -182,6 +182,199 @@ DISK_HEADROOM_FACTOR = 1.25
 
 
 # ---------------------------------------------------------------------------
+# Retention
+# ---------------------------------------------------------------------------
+
+#: Bumped whenever RETENTION_RULES changes what the mirror keeps. The
+#: selection card builds its shrink baseline only from history rows carrying
+#: the CURRENT version, so a deliberate thinning resets that baseline by
+#: construction rather than by loosening a threshold. Thinning drops
+#: `duck-ops/output` by 96%, which is precisely what that card exists to
+#: catch -- it has to stay able to catch the NEXT one.
+RETENTION_VERSION = 2
+
+#: Names of the two filename conventions retention knows how to read. A rule
+#: declares which one its directory uses; anything else is left alone.
+SPLIT_TRAILING_DATE = "trailing_date"
+SPLIT_LEADING_TIMESTAMP = "leading_timestamp"
+
+
+def _split_trailing_date(name: str) -> tuple[str, str] | None:
+    r"""`trend__wolf-duck__2026-11-01.json` -> (`trend__wolf-duck.json`, `2026-11-01`).
+
+    Splits on the LAST `__`, which is the convention declared in
+    config/output_naming.json (`trend__<theme>__<date>`,
+    `customer_action_packets__<date>`, `nightly_action_summary__YYYY-MM-DD`,
+    `phase_readiness__YYYY-WW`).
+
+    The split is deliberately NOT "collapse digit runs to a placeholder",
+    which is the obvious implementation and silently destroys data: seven
+    trend concepts carry digits in their own names
+    (`2026-graduation-duck`, `2026-custom-graduation-duck`,
+    `10-000-lakes-duck`, `39-s-magnetic-duck`, `2-quot-duck`,
+    `blazing-420-duck`, `sister-39-s-duck`), so a `\d+ -> N` rule merges the
+    first two into one group and then deletes one of the two concepts.
+    Splitting on the separator the producer actually writes keeps every digit
+    that belongs to a name on the name side.
+    ([[feedback_pin_the_rule_not_the_reading]])
+
+    `urgent__<date>__<artifact_slug>` therefore groups per artifact rather
+    than per report, so those files are effectively never pruned. That is
+    correct-but-inert, visible in the rule's `groups` count, and left alone:
+    there are four of them.
+    """
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        return None
+    head, sep, version = stem.rpartition("__")
+    if not sep or not head or not version:
+        return None
+    return f"{head}.{ext}", version
+
+
+def _split_leading_timestamp(name: str) -> tuple[str, str] | None:
+    """`202604121531590852790400-state-sync.json` -> (`state-sync.json`, `2026...`)."""
+    version, sep, rest = name.partition("-")
+    if not sep or not version.isdigit() or not rest:
+        return None
+    return rest, version
+
+
+_SPLITTERS = {
+    SPLIT_TRAILING_DATE: _split_trailing_date,
+    SPLIT_LEADING_TIMESTAMP: _split_leading_timestamp,
+}
+
+#: Per-directory retention, applied to the STAGED copy and nothing else. The
+#: source trees under duck-ops/ are never touched -- thinning what Google
+#: Drive uploads must not delete the operator's own data.
+#:
+#: Measured 2026-11-13 against the live mirror: Drive had uploaded 4,938 of
+#: 178,741 files and then stalled with an empty operation queue and no errors.
+#: 88% of that file count was two directories re-dumping unchanged reports.
+#: The byte count was never the problem; 157,815 upload round trips to move
+#: 840 MB was. Applying these four rules takes the mirror to 19,515 files /
+#: 4.90 GB, of which duckAgent/runs -- the product photos and videos, the data
+#: an external model is actually here to read -- is 95% of the bytes.
+RETENTION_RULES: tuple[dict, ...] = (
+    # 338 concepts x 209 daily snapshots. Two consecutive days differ in the
+    # timestamp and one derived counter, nothing else; the files state their
+    # own market observation is 161 days old. ~2,700 files/day while the
+    # producer runs, so this is load-bearing and not a one-off cleanup.
+    {
+        "path": "duck-ops/output/trend_rankings",
+        "keep": 1,
+        "split": SPLIT_TRAILING_DATE,
+    },
+    # Every file is a COMPLETE re-dump of the same two reports (432 and 475
+    # items). 4.48 GB of history for 4.3 MB of current state -- and this is
+    # the customer PII, so holding less of it in the cloud is a second win.
+    {
+        "path": "duck-ops/output/customer_intelligence",
+        "keep": 1,
+        "split": SPLIT_TRAILING_DATE,
+    },
+    # 47,624 files whose entire payload is one integer (`review_pending`).
+    # ~400 bytes of content each, one 4 KB disk block each. This one is not
+    # really a retention problem -- it should have been a single JSONL -- but
+    # capping it is the cheap half of that fix.
+    {
+        "path": "duck-ops/state/workflow_receipts/ops",
+        "keep": 30,
+        "split": SPLIT_LEADING_TIMESTAMP,
+    },
+    # Ten report shapes re-dumped daily, `nightly_action_summary` at 2.25 MB
+    # a copy. Note `phase_readiness__2026-15` is YYYY-WW rather than a date,
+    # which is another reason the group key comes from the separator split and
+    # not from a date regex that would fail to match it.
+    {
+        "path": "duck-ops/output/digests",
+        "keep": 30,
+        "split": SPLIT_TRAILING_DATE,
+    },
+)
+
+
+def prune_staged_retention(staging_root: Path) -> list[dict]:
+    """Apply RETENTION_RULES to the staged tree: newest `keep` per group.
+
+    Five properties this function has to keep, each one a way to lose data:
+
+    1. It prunes STAGING ONLY. A source path here would delete duck-ops data.
+    2. A name the splitter cannot read is KEPT and counted in `unparsed`.
+       Deleting on a parse failure turns a producer renaming its output into
+       silent data loss; keeping turns it into a number that can be alarmed on.
+    3. A configured directory that is ABSENT is recorded as `path_missing`
+       rather than skipped quietly, because retention silently not applying is
+       how the mirror reached 178,741 files in the first place.
+    4. Ordering comes from the version token in the NAME, not from mtime. An
+       rsync into a fresh staging root can restamp mtimes, which would quietly
+       redefine "newest" as "most recently copied". Verified 2026-11-13: the
+       two orders agree in every one of the 697 live groups, so this choice
+       costs nothing today and holds when staging changes.
+    5. `keep` is >= 1 per group, so a directory that had files cannot come out
+       empty. If it does anyway, that is `emptied` and the run must see it.
+    """
+    results: list[dict] = []
+    for rule in RETENTION_RULES:
+        entry = {
+            "path": rule["path"],
+            "keep": rule["keep"],
+            "files_before": 0,
+            "files_after": 0,
+            "bytes_before": 0,
+            "bytes_after": 0,
+            "deleted": 0,
+            "unparsed": 0,
+            "groups": 0,
+            "status": "ok",
+        }
+        base = staging_root / rule["path"]
+        if not base.is_dir():
+            entry["status"] = "path_missing"
+            results.append(entry)
+            continue
+        splitter = _SPLITTERS[rule["split"]]
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR_NAMES]
+            here = Path(dirpath)
+            groups: dict[str, list[tuple[str, Path, int]]] = {}
+            for name in filenames:
+                path = here / name
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                entry["files_before"] += 1
+                entry["bytes_before"] += size
+                split = splitter(name)
+                if split is None:
+                    entry["unparsed"] += 1
+                    entry["files_after"] += 1
+                    entry["bytes_after"] += size
+                    continue
+                groups.setdefault(split[0], []).append((split[1], path, size))
+            entry["groups"] += len(groups)
+            for items in groups.values():
+                items.sort(key=lambda it: it[0], reverse=True)
+                for _, _path, size in items[: rule["keep"]]:
+                    entry["files_after"] += 1
+                    entry["bytes_after"] += size
+                for _, path, size in items[rule["keep"] :]:
+                    try:
+                        path.unlink()
+                        entry["deleted"] += 1
+                    except OSError as exc:
+                        entry["status"] = "delete_failed"
+                        entry["error"] = str(exc)[:200]
+                        entry["files_after"] += 1
+                        entry["bytes_after"] += size
+        if entry["files_before"] and not entry["files_after"]:
+            entry["status"] = "emptied"
+        results.append(entry)
+    return results
+
+# ---------------------------------------------------------------------------
 # The gate
 # ---------------------------------------------------------------------------
 
@@ -753,6 +946,21 @@ def _append_run_history(
         },
         "failure_count": len(manifest.get("failures") or []),
         "upload": dict(manifest.get("upload") or {}),
+        # The baseline the selection card grades shrink against is computed
+        # only over rows matching the CURRENT retention version, so a
+        # deliberate thinning resets it instead of reading as an outage.
+        "retention_version": manifest.get("retention_version"),
+        "retention": [
+            {
+                "path": r.get("path"),
+                "status": r.get("status"),
+                "deleted": r.get("deleted"),
+                "unparsed": r.get("unparsed"),
+                "files_after": r.get("files_after"),
+            }
+            for r in (manifest.get("retention") or [])
+            if isinstance(r, dict)
+        ],
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -833,6 +1041,37 @@ def run(
         manifest["failures"].append(
             "lane(s) selected zero files (renamed output?): " + ", ".join(empty_lanes)
         )
+
+    # Retention runs BEFORE the gate and before the counts are taken, so what
+    # the gate scans and what the manifest reports are both the tree that is
+    # actually published. Pruning after the gate would publish a count for
+    # files that were then deleted.
+    manifest["retention_version"] = RETENTION_VERSION
+    manifest["retention"] = prune_staged_retention(staging_root)
+    for pruned in manifest["retention"]:
+        # `path_missing` is deliberately NOT a failure. Nothing wrong is
+        # published when a cap does not apply -- the mirror is merely fatter
+        # than intended -- and refusing the whole publish over it would hold
+        # 4.9 GB of good data hostage to a renamed directory. It still has to
+        # be seen, because the only other symptom is the mirror growing back
+        # by ~2,700 files a day, so the selection card grades it instead.
+        # (`delete_failed` and `emptied` DO mean the published tree is wrong,
+        # and stay fatal.)
+        if pruned["status"] in ("delete_failed", "emptied"):
+            manifest["failures"].append(
+                f"retention {pruned['path']}: {pruned['status']}"
+                + (f" ({pruned['error']})" if pruned.get("error") else "")
+            )
+
+    # stage_whole_trees counted the tree as rsynced, which is before pruning.
+    # Re-measure so `tree_files` in the manifest and in the run history is
+    # what was published, not what was copied -- the selection card grades
+    # that number and would otherwise never see the thinning at all.
+    for tree in manifest["trees"]:
+        dest = staging_root / str(tree.get("tree"))
+        if dest.is_dir():
+            tbytes, tfiles = _dir_size_bytes(dest)
+            tree["bytes"], tree["files"] = tbytes, tfiles
 
     # Before the gate, so the README and manifest are scanned and published
     # like every other file instead of appearing in the mirror ungated.
