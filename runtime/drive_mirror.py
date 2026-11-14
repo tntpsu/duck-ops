@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -784,6 +785,148 @@ def stage_creative_slice(
     return counts, info
 
 
+# ---------------------------------------------------------------------------
+# Source code bundles
+# ---------------------------------------------------------------------------
+
+#: Published subdirectory holding one zip per repository.
+CODE_BUNDLE_DEST = "code"
+
+#: (bundle name, repository root). Each is zipped from `git ls-files`, so the
+#: boundary of "our code" is the boundary git already draws: `.env`, `.venv`
+#: and every other untracked or ignored file is outside it by construction
+#: rather than by a pattern someone has to remember to maintain.
+CODE_REPOS: tuple[tuple[str, Path], ...] = (
+    ("duck-ops", DUCK_OPS_ROOT),
+    ("duckAgent", DUCKAGENT_ROOT),
+    ("paint-to-print-3d", REPO_ROOT.parent / "paint-to-print-3d"),
+)
+
+
+def _tracked_files(repo: Path) -> list[str]:
+    """Repo-relative paths of every tracked file, newest index state.
+
+    Tracked, not committed: the working-tree content is what the reader should
+    see, and these repos run dirty for days at a time. A non-repo returns [],
+    which the caller records as a skip rather than an empty bundle.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "-z"],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        return []
+    return [rel for rel in proc.stdout.split("\0") if rel]
+
+
+def _bundle_members(repo: Path, rel_paths: list[str]) -> list[str]:
+    """The subset of `rel_paths` allowed into a bundle."""
+    keep = []
+    for rel in rel_paths:
+        parts = Path(rel).parts
+        if any(part in EXCLUDE_DIR_NAMES for part in parts):
+            continue
+        if is_excluded(parts[-1]):
+            continue
+        if not (repo / rel).is_file():
+            continue
+        keep.append(rel)
+    return keep
+
+
+def _write_bundle(repo: Path, name: str, members: list[str], dest: Path) -> bool:
+    """Write `dest` only if its bytes would change. Returns True if rewritten.
+
+    A zip rebuilt from identical inputs must be byte-identical or rsync sees a
+    new file every run and Drive re-uploads the whole bundle nightly. Member
+    order is sorted and each timestamp comes from the file's own mtime, so the
+    only thing that moves the bytes is the code moving.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as fh:
+        tmp = Path(fh.name)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for rel in sorted(members):
+                src = repo / rel
+                st = src.stat()
+                info = zipfile.ZipInfo(
+                    f"{name}/{rel}",
+                    date_time=time.localtime(st.st_mtime)[:6],
+                )
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (st.st_mode & 0o7777) << 16
+                zf.writestr(info, src.read_bytes())
+        if dest.exists() and dest.read_bytes() == tmp.read_bytes():
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(tmp, dest)
+        return True
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def stage_code_bundles(staging_root: Path) -> list[dict]:
+    """Zip each repository's tracked source into the staged `code/` directory.
+
+    Every member is scanned BEFORE the zip is written, and a finding refuses
+    that bundle. This is not belt-and-braces over the release gate: the release
+    gate reads the staged filesystem, a zip is binary, and binary files are
+    skipped there by design -- so a credential inside a bundle would reach
+    Drive without any gate ever having read it. The scan has to happen here or
+    it does not happen at all.
+
+    A refused bundle deletes any bundle already staged under that name. A
+    previously clean zip is not evidence about the tree that just failed, and
+    leaving it published would keep serving code while reporting a refusal.
+    """
+    results = []
+    dest_dir = staging_root / CODE_BUNDLE_DEST
+    for name, repo in CODE_REPOS:
+        dest = dest_dir / f"{name}-source.zip"
+        entry: dict = {"bundle": name, "source": str(repo)}
+        tracked = _tracked_files(repo)
+        if not tracked:
+            entry.update(status="source_missing", files=0, bytes=0)
+            results.append(entry)
+            continue
+
+        members = _bundle_members(repo, tracked)
+        entry["files"] = len(members)
+        entry["excluded"] = len(tracked) - len(members)
+
+        findings: list[dict] = []
+        for rel in members:
+            path = repo / rel
+            if not _is_scannable(path):
+                continue
+            findings.extend(_scan_one(path, f"{name}/{rel}"))
+        entry["scanned"] = sum(
+            1 for rel in members if _is_scannable(repo / rel)
+        )
+        if findings:
+            entry.update(
+                status="refused",
+                findings=findings[:20],
+                finding_count=len(findings),
+                bytes=0,
+            )
+            if dest.exists():
+                dest.unlink()
+                entry["removed_stale_bundle"] = True
+            results.append(entry)
+            continue
+
+        rewritten = _write_bundle(repo, name, members, dest)
+        entry.update(
+            status="ok",
+            rewritten=rewritten,
+            bytes=dest.stat().st_size,
+        )
+        results.append(entry)
+    return results
+
+
 #: Travels with the data by design. An external model reading this corpus will
 #: over-read it -- the social sample is 27 posts, and a format ranking drawn
 #: from it was retracted on 2026-11-08 -- so the caveats have to be IN the
@@ -822,6 +965,7 @@ orders of magnitude within a day of a retention change.
 | `duckAgent/config/` | Shipped configuration: taxonomies, style libraries, scoring rules, category policy. The system's declared rules rather than its observations. |
 | `duckAgent/data/` | Style memory, the creative feedback ledger, quality receipts. |
 | `duckAgent/state/` | Small liveness and drift files. |
+| `code/` | **The source code**, one zip per repository: `duck-ops-source.zip`, `duckAgent-source.zip`, `paint-to-print-3d-source.zip`. Each holds every git-tracked file in that repo at mirror time, so it is the code that produced the data beside it. See *Reading the code* below. |
 
 Start with `duck-ops/state/social_performance_posts.json` and
 `social_performance_rollups.json` for post outcomes,
@@ -851,6 +995,29 @@ What that means for a reader:
   `workflow_receipts/` is per-run and complete.
 - Everything not named above is published in full.
 
+## Reading the code
+
+`code/*.zip` is each repository's git-tracked files, which is why it is small
+next to the data: untracked and ignored content -- `.env`, `.venv/`, `.git/`,
+caches, local runtime wrappers -- is outside what git tracks and so outside the
+bundle. No credential is in here. Every text file is scanned for credential
+shapes before the zip is written, and a finding refuses that bundle rather than
+publishing it.
+
+Three things to know before drawing conclusions from it:
+
+- **The bundles carry working-tree content, not the last commit.** These repos
+  run with uncommitted changes for days, so the code here can be ahead of any
+  commit and is not guaranteed to be a state that was ever tested as a whole.
+- **`duckAgent_runtime/` and `openclaw_runtime/` are not repositories and are
+  not here.** They hold the launchd wrappers that actually start these jobs, so
+  the schedule the code implies is not proof of the schedule that runs. The
+  observed cadence in `duck-ops/state/scheduler_health.json` is the better
+  source for what fires when.
+- **A module existing does not mean it is called.** Several surfaces in here
+  are fallbacks, retired paths, or written-but-unwired. Check for a call site
+  before describing something as part of the live system.
+
 ## Reading this honestly
 
 - **Sample sizes are small.** The social performance data covers tens of posts,
@@ -874,9 +1041,14 @@ it, and do not use it to contact anyone.
 
 ## Not in here
 
-Credentials of any kind. Every staged file is scanned before publication and
-the run refuses to publish if anything matching a credential is found, or if
-the scanner cannot prove it read the files it was asked to read.
+Credentials of any kind. Every staged data file is scanned before publication
+and the run refuses to publish if anything matching a credential is found, or
+if the scanner cannot prove it read the files it was asked to read.
+
+The `code/*.zip` bundles are covered by a separate scan, because a zip is
+binary and the gate that scans the staged tree skips binary files. Each
+bundle's members are scanned individually before the zip is written, and a
+finding refuses that one bundle.
 """
 
 
@@ -898,6 +1070,18 @@ def write_mirror_readme(staging_root: Path, manifest: dict) -> None:
         ],
         "creative_lane_counts": manifest.get("lane_counts", {}),
         "creative_files": manifest.get("creative", {}).get("files"),
+        # Published without the `findings` list: those carry redacted
+        # credential excerpts, and this file is published.
+        "code_bundles": [
+            {
+                "bundle": b.get("bundle"),
+                "status": b.get("status"),
+                "files": b.get("files"),
+                "bytes": b.get("bytes"),
+            }
+            for b in (manifest.get("code_bundles") or [])
+            if isinstance(b, dict)
+        ],
         # The caps a reader needs in order to know what is a snapshot and what
         # is a series. The README explains what they MEAN; these are the
         # numbers, here rather than inline so they cannot go stale.
@@ -1252,6 +1436,26 @@ def run(
             tbytes, tfiles = _dir_size_bytes(dest)
             tree["bytes"], tree["files"] = tbytes, tfiles
 
+    # After retention (which never touches `code/`) and before the gate, so a
+    # bundle is counted in `staged_files` and sits under the same headroom
+    # check as everything else.
+    manifest["code_bundles"] = stage_code_bundles(staging_root)
+    refused_bundles = [
+        b["bundle"] for b in manifest["code_bundles"] if b["status"] == "refused"
+    ]
+    manifest["code_bundles_refused"] = refused_bundles
+    # Deliberately NOT a run failure. The refusal already achieved the only
+    # thing that matters -- no bundle was written, so no credential reached
+    # Drive -- and failing the run would hold ~5 GB of good data hostage to a
+    # repository that is not even part of the data slice. It is reported on its
+    # own loud channel instead: the manifest, the run history, and the one line
+    # main() prints. ([[feedback_swallowed_errors_lie]])
+    for bundle in manifest["code_bundles"]:
+        if bundle["status"] == "source_missing":
+            manifest["failures"].append(
+                f"code bundle {bundle['bundle']}: not a git repository"
+            )
+
     # Before the gate, so the README and manifest are scanned and published
     # like every other file instead of appearing in the mirror ungated.
     write_mirror_readme(staging_root, manifest)
@@ -1347,8 +1551,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"status={manifest['status']} "
           f"staged_files={manifest.get('staged_files')} "
           f"gate={manifest.get('gate', {}).get('reason')}")
+    bundles = manifest.get("code_bundles") or []
+    if bundles:
+        print("code=" + " ".join(
+            f"{b['bundle']}:{b['status']}({b.get('files', 0)})" for b in bundles
+        ))
     for failure in manifest["failures"]:
         print(f"  FAILURE: {failure}", file=sys.stderr)
+    # A refused bundle does not fail the run, so it has to be said somewhere a
+    # reader of the log will see it.
+    for bundle in manifest.get("code_bundles_refused") or []:
+        print(
+            f"  CREDENTIAL FINDING: code bundle {bundle} refused; "
+            f"see state/drive_mirror.json for the redacted locations",
+            file=sys.stderr,
+        )
     return 0 if manifest["ok"] else 1
 
 

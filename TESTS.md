@@ -7522,3 +7522,99 @@ clean, Drive folder id `1j1Nd0MrOS5os8In0Lao8VHpQMEU1EPZ2` with parent
   nothing uploads — a successful publish to nowhere, which is this surface's
   own failure mode wearing different clothes. A card asserting the live root
   sits inside a Drive mount would close it.
+
+## Surface 130 — The code went out, and the scanner guarding it had a nine-month blind spot (2026-11-13, operator: "Can u zip our repos and put it in the folder too? I want it to see our code", following Surface 129)
+
+The data mirror published what the system *produced*. Reading it without the
+code that produced it means guessing at provenance, so the bundles ship beside
+it: `code/duck-ops-source.zip`, `code/duckAgent-source.zip`,
+`code/paint-to-print-3d-source.zip`.
+
+Two design decisions carry this.
+
+**The boundary of "our code" is `git ls-files`.** Not a copy of the tree minus
+patterns. Everything dangerous here — `.env`, `.venv/`, `.git/`, OAuth token
+files, browser profiles, the local `*_runtime/` launchd wrappers — is untracked
+or ignored, so it is outside the bundle *by construction* rather than by a
+denylist someone has to remember to extend. `EXCLUDE_NAME_PATTERNS` still wins
+over the include, because git tracking is not by itself a safety property (see
+below).
+
+**A zip is invisible to the release gate.** `gate_staged_tree` scans the staged
+filesystem and skips binary files, which is right for a 3 MB PNG and wrong for
+an archive: a credential inside a bundle would reach Drive without any gate
+having read a byte of it. So `stage_code_bundles` scans every member *before*
+the zip exists, and a finding refuses that one bundle. This is not
+belt-and-braces over the gate — it is the only scan that happens.
+
+A refused bundle deletes any bundle already staged under that name. A clean zip
+from a previous run is not evidence about the tree that just failed, and leaving
+it staged would keep publishing code while the run reported a refusal.
+
+A refusal is deliberately **not** a run failure. The refusal already achieved
+the only thing that matters — no bundle was written, so nothing leaked — and
+failing the run would hold ~5 GB of good data hostage to a repository that is
+not part of the data slice. It goes out on its own loud channel instead: the
+manifest, the run history, and a `CREDENTIAL FINDING:` line on stderr.
+([[feedback_swallowed_errors_lie]])
+
+### What building the gate found
+
+`duckAgent` tracks three files — `test/.env.clean`, `test/.env.clean2`,
+`test/.env.final` — that hold the **live** Shopify access token, Etsy API key
+and OpenAI project key. Verified by comparing values against the running
+`.env`: identical. They have been in `origin/master` since the 2026-02-24
+initial commit. The repo is private, which is the only reason this is a finding
+and not an incident.
+
+`scripts/secret_scan.py` reported **clean** on all three for nine months, and
+the mechanism is worth stating precisely because the first reading was wrong.
+`.env` *is* in `TEXT_EXTENSIONS` — the scanner was never told to skip env
+files. But that list is matched against `path.suffix`, and the suffix of
+`.env.clean` is `.clean`. So the scan skipped them for having an unrecognised
+extension. A derived name (`.clean`, `.final`, `.bak`, `.orig`) is the normal
+way a file like this gets made, which means the blind spot was shaped exactly
+like the leak. `_is_scannable` now matches on the basename as well, and the
+scan goes red on all six locations.
+
+This is the third time a guard has been found grading something other than what
+it appeared to grade ([[feedback_a_failed_probe_is_a_fact_about_the_probe]], and
+Surface 129's "no check asked *which* directory succeeded"). The common shape:
+the guard ran, exited 0, and reported on a set that silently excluded the thing
+it existed to catch.
+
+### Covered
+
+| Use case | Happy | Tracked secret | Untracked file | Not a repo | Credential planted | Repeat run |
+|---|---|---|---|---|---|---|
+| Bundle contents | unit:1 (members named `<repo>/<rel>`) | unit:1 (4 `.env*` excluded though tracked) | unit:1 | unit:1 (`source_missing`, no `code/` dir) | — | — |
+| Pre-zip scan | unit:1 (count scanned) | — | — | — | unit:1 (refused, no zip) | — |
+| Refusal hygiene | — | — | — | — | unit:2 (stale bundle removed; excerpt never echoed) | — |
+| Scanner reach | unit:6 subtests (`.env` variants scannable) | unit:1 (finding in `.env.clean`) | — | — | unit:1 (`.zip` not scannable — why this scan exists) | — |
+| Byte stability | unit:1 (binary still skipped) | — | — | — | — | unit:2 (unchanged → not rewritten; changed → rewritten) |
+
+`tests/test_drive_mirror_code_bundles.py`, 13 tests + 6 subtests. Measured:
+duck-ops 310 files / 1.57 MB, duckAgent 792 files (4 excluded) / 11.46 MB,
+paint-to-print-3d 108 files / 4.40 MB — 17.4 MB total against the data's 5.0 GB.
+
+Bundle bytes are deterministic (sorted members, each timestamp from the file's
+own mtime) and the zip is only replaced when its bytes change, so an unchanged
+repo does not make Drive re-upload 17 MB nightly.
+
+### Open
+
+- **The live keys are still live and still in git history.** Removing the three
+  files from HEAD does not purge the blobs, and `origin/master` already has
+  them. Only rotation closes it: Shopify Admin API token, Etsy API key, OpenAI
+  project key. Tier 3, operator's call — not done here.
+- **`secret_scan.py` has no test file in any repo.** The scanner every commit
+  depends on is itself unguarded; this surface pins `_is_scannable` only
+  through `drive_mirror`'s re-export. A planted-credential fixture per pattern
+  is the missing piece.
+- **The bundles are working-tree content, not a commit.** Both repos run dirty
+  for days, so the published code can be ahead of every commit and is not
+  guaranteed to be a state that was ever tested as a whole. The README says so;
+  nothing enforces it.
+- **Nothing grades bundle freshness.** A bundle that stops being rewritten
+  because `git ls-files` started failing looks identical to a repo nobody
+  edited.

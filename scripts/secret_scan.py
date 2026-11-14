@@ -98,11 +98,22 @@ def _git_ls_files(repo: Path) -> list[Path]:
     return [repo / line for line in result.stdout.splitlines() if line.strip()]
 
 
+# Basenames that are config text whatever follows the first dot. `.env` is in
+# TEXT_EXTENSIONS, which only ever matched a file whose SUFFIX is `.env`;
+# `.env.clean` has suffix `.clean`, so the three tracked `test/.env.*` copies
+# of the live environment were skipped by this function and the scan reported
+# clean on them from the 2026-02-24 initial commit until 2026-11-13. A derived
+# name is the normal way these files are made, so match on the basename.
+SCAN_BASENAME_PREFIXES = (".env", "env.")
+
+
 def _is_scannable(path: Path) -> bool:
     """Decide if a tracked file is worth running regex against."""
     s = str(path)
     if any(frag in s for frag in SKIP_PATH_FRAGMENTS):
         return False
+    if path.name.lower().startswith(SCAN_BASENAME_PREFIXES):
+        return True
     if path.suffix.lower() in TEXT_EXTENSIONS:
         return True
     # No extension — try anyway (might be a script or dotfile)
