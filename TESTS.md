@@ -7430,3 +7430,95 @@ contract claiming it is invalid.
   a producer inventing a new one will not appear in it, and only the tree-level
   test would notice. Deriving the map from the tree would be the honest
   version.
+
+## Surface 129 — Published to the right-looking folder in the wrong place (2026-11-13, operator: "It needs to be in mydrive", following Surface 128)
+
+Every publish since Surface 119 succeeded, and every one of them put the data
+somewhere the external agent could not use.
+
+`~/DuckData` was registered with Drive for desktop as a **mirror root** —
+Preferences → "Folders from your computer". That is a different destination
+wearing the same clothes:
+
+| | mirror root | folder inside the mounted My Drive |
+|---|---|---|
+| Uploads to | `Computers → <machine>` | My Drive |
+| `folderProperties` | `syncFolder: true`, parent `syncedComputer: true` | neither |
+| Reachable from My Drive | only via a *shortcut* | directly |
+| Needs registration | yes, and it can silently fail | no |
+
+So an agent told to read "the DuckData folder in Drive" found, in My Drive, a
+**shortcut** that Drive for desktop mounts locally as a symlink into
+`.shortcut-targets-by-id/` and whose target lives outside My Drive entirely.
+
+Nothing in the stack could have caught this, and that is the lesson rather than
+the bug: every check asked *did the publish succeed*, and the answer was always
+yes. No check asked *which directory succeeded*. A destination is as much a
+contract as a payload, and this one had no test.
+
+The mirror-root approach was unreliable on its own terms too. The DuckDrop root
+was allocated `max_root_id` 6 and then went missing from Drive's `roots` table
+across a restart — we restarted Drive twice waiting for a scan that could never
+happen. Publishing into the My Drive mount needs no registration, no restart and
+no Computers section.
+
+### The trap that was caught before it fired
+
+With the shortcut present, `My Drive/DuckData` *was a symlink*, and
+`rsync -a --delete` follows a symlinked destination. The first publish after the
+move would have written all 4.9 GB back into the read-only Computers backup and
+reported `status=released`. `release()` now refuses a symlinked destination
+outright — there is no case where the published root is legitimately a symlink.
+
+### Covered
+
+| Use case | Happy | Drive absent | Two accounts | Shortcut present | Renamed folder |
+|---|---|---|---|---|---|
+| Resolve the published root | unit:4 | unit:1 (falls back to a local dir) | unit:1 (sorted, deterministic) | unit:1 (both spellings guarded) | n/a |
+| Root is inside My Drive | unit:2 (asserts the *parent*, not the path) | skip:no mount | — | — | — |
+| Test-mode write guard | unit:6 | — | unit:structural | unit:1 | unit:1 (structural CloudStorage check) |
+| `release()` destination | unit:1 (real dir publishes) | — | — | unit:1 (symlink refused, target untouched) | — |
+| Pollution audit target | unit:2 (legacy root + never follows a shortcut) | — | — | — | — |
+
+`tests/test_drive_mirror_my_drive_destination.py`, 14 tests. Measured after the
+move: 19,687 files / 5.0 GB released into `My Drive/DuckData` in 1m56s, gate
+clean, Drive folder id `1j1Nd0MrOS5os8In0Lao8VHpQMEU1EPZ2` with parent
+`0AOEun7ESRM5-Uk9PVA` (My Drive root) and no `syncFolder` property.
+
+### Three things this broke, all of them mine
+
+1. **A second copy of the path.** `drop_intake` carried its own
+   `_MIRROR_ROOT` literal, used to refuse a drop folder placed inside the
+   published mirror. Moving the mirror left that guard pointed at a directory
+   the mirror no longer publishes to — the refusal would have passed its own
+   tests while guarding nothing. It now reads the root from `drive_mirror`.
+   A constant duplicated across two modules is a constant that will disagree.
+2. **A frozen set killed the test seam.** The guard's refusal list was computed
+   once at import. `TestModeIsolationTests` exercises that guard by patching
+   `_FROZEN_PRODUCTION_MIRROR_ROOT` to a tmp stand-in — deliberately, so a test
+   asserting "this is refused" can never perform the action when the refusal
+   breaks. Against a frozen set the patch applied and the guard ignored it. The
+   list is now derived at call time.
+3. **A cleanup that popped a shared env var.** The new tests set
+   `DUCK_TEST_MODE=1` and cleaned up with `os.environ.pop`. conftest sets that
+   flag for the whole session, so popping it disarmed the test-mode guards in
+   four unrelated test files downstream in the run — they failed as "refusal
+   not raised" with nothing wrong in their own code. Save and restore the prior
+   value; never pop shared process state.
+
+### Open
+
+- **`canEdit` is not the discriminator.** It reads `false` on an ordinary
+  My Drive folder too, so it cannot distinguish a Computers backup from a
+  My Drive folder. Use the parent id and the absence of `syncFolder`.
+- **`DROP_ROOT` has not moved yet.** The inbound lane still points at
+  `~/DuckDrop`, whose sync root is gone from Drive's `roots` table, so the
+  return leg is currently dead. The same fix applies and the semantics it needs
+  are verified (`os.replace` across subdirectories and `lstat` both work on the
+  mount), but it is deliberately a separate change from this one.
+- **Nothing grades the destination on an ongoing basis.** The tests pin the
+  resolution rule at build time. If an operator un-signs-in from Drive, the
+  root silently falls back to `~/DuckData` and publishes to a local folder
+  nothing uploads — a successful publish to nowhere, which is this surface's
+  own failure mode wearing different clothes. A card asserting the live root
+  sits inside a Drive mount would close it.

@@ -254,31 +254,31 @@ class RefusalTests(_DropRoot):
 
 class MirrorCollisionTests(unittest.TestCase):
     def test_a_drop_root_inside_the_mirror_is_refused_loudly(self) -> None:
-        # ~/DuckData is published with `rsync --delete`. A drop folder under
+        # The mirror is published with `rsync --delete`. A drop folder under
         # it would be erased on the next mirror run, silently.
         with TemporaryDirectory() as tmp:
             mirror = Path(tmp) / "DuckData"
             (mirror / "inbound").mkdir(parents=True)
-            original = drop_intake._MIRROR_ROOT
-            drop_intake._MIRROR_ROOT = mirror
+            original = drop_intake._mirror_root
+            drop_intake._mirror_root = lambda: mirror
             try:
                 with self.assertRaises(drop_intake.DropRefused) as caught:
                     drop_intake.scan_inbox(mirror / "inbound")
                 self.assertIn("rsync --delete", str(caught.exception))
             finally:
-                drop_intake._MIRROR_ROOT = original
+                drop_intake._mirror_root = original
 
     def test_the_mirror_root_itself_is_refused(self) -> None:
         with TemporaryDirectory() as tmp:
             mirror = Path(tmp) / "DuckData"
             mirror.mkdir(parents=True)
-            original = drop_intake._MIRROR_ROOT
-            drop_intake._MIRROR_ROOT = mirror
+            original = drop_intake._mirror_root
+            drop_intake._mirror_root = lambda: mirror
             try:
                 with self.assertRaises(drop_intake.DropRefused):
                     drop_intake.scan_inbox(mirror)
             finally:
-                drop_intake._MIRROR_ROOT = original
+                drop_intake._mirror_root = original
 
 
 class LaneRegistryTests(unittest.TestCase):

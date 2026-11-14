@@ -16,7 +16,7 @@ Three properties carry the surface, and the first one is the whole point:
    to auto-action is the reason ([[feedback_auto_manual_queue_contract]]).
 
 2. **It is a SEPARATE sync root from the mirror.** `drive_mirror.release()`
-   publishes with `rsync -a --delete` into ~/DuckData, so a file dropped
+   publishes with `rsync -a --delete` into the mirror root, so a file dropped
    there is deleted on the next run with no error and no trace. ~/DuckDrop is
    its own Drive folder for that reason, and `_refuse_if_inside_mirror` makes
    the mistake loud rather than silent if anyone ever repoints it.
@@ -52,10 +52,25 @@ INBOX_DIR = "inbox"
 ACCEPTED_DIR = "accepted"
 REJECTED_DIR = "rejected"
 
-#: The mirror's published root. Used only to refuse a catastrophic misconfig.
-_MIRROR_ROOT = Path(
-    os.environ.get("DRIVE_MIRROR_ROOT") or (Path.home() / "DuckData")
-)
+def _mirror_root() -> Path:
+    """The mirror's published root. Used only to refuse a catastrophic misconfig.
+
+    Read from drive_mirror rather than re-derived here. This file carried its
+    own copy of the default until 2026-11-13, and when the mirror moved into the
+    mounted My Drive the copy stayed pointed at `~/DuckData` -- so the refusal
+    below would have been guarding a directory the mirror no longer publishes
+    to, and a drop root placed inside the real one would have sailed through.
+    Resolved lazily so importing this module never depends on drive_mirror
+    importing cleanly, and so a test redirecting the root is honoured.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import drive_mirror
+        return drive_mirror.DRIVE_MIRROR_ROOT
+    except Exception:
+        return Path(
+            os.environ.get("DRIVE_MIRROR_ROOT") or (Path.home() / "DuckData")
+        )
 
 DROP_INTAKE_STATE_PATH = REPO_ROOT / "state" / "drop_intake.json"
 
@@ -125,7 +140,7 @@ def _refuse_if_inside_mirror(drop_root: Path) -> None:
     warning nobody reads."""
     try:
         resolved = drop_root.resolve()
-        mirror = _MIRROR_ROOT.resolve()
+        mirror = _mirror_root().resolve()
     except Exception:
         return
     if resolved == mirror or mirror in resolved.parents:
@@ -375,7 +390,7 @@ written, so it cannot drift out of date:
 
 {lanes}
 
-The source data these posts should be built from is the separate `~/DuckData/`
+The source data these posts should be built from is the separate `DuckData`
 sync folder. Read its README.md first: most of that tree is a current
 snapshot, not a history, and its Retention section says which parts are which.
 
@@ -388,7 +403,7 @@ approves by hand, the same as every other post in this system.
 Types: .png .jpg .jpeg (max 25 MB), .mp4 .mov (max 300 MB). The contents
 must actually be that type; the extension alone is not enough.
 
-Do not write into ~/DuckData. That folder is published with `rsync --delete`
+Do not write into the `DuckData` folder. It is published with `rsync --delete`
 and anything left there is erased on the next run.
 """
 

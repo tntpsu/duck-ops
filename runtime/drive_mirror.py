@@ -19,7 +19,7 @@ Three properties carry the whole surface:
 
 3. **The gate must prove it looked.** `scripts/secret_scan.py` would have
    passed this folder without reading a byte -- it walks `git ls-files` and
-   returns 0 on a non-git directory, and `~/DuckData/` is not a repo. So the
+   returns 0 on a non-git directory, and the published root is not a repo. So the
    gate here walks the staged filesystem itself and refuses to release unless
    every eligible file is accounted for. A scanner that scanned nothing must
    not be mistakable for a scanner that found nothing.
@@ -57,10 +57,60 @@ DUCKAGENT_ROOT = Path(
     os.environ.get("DUCKAGENT_ROOT") or (REPO_ROOT.parent / "duckAgent")
 )
 
-#: Where Drive for desktop watches. Overridable for operators with a different
-#: Drive layout; the test-mode guard below keys on the factory default.
+#: Drive for desktop mounts the signed-in account's My Drive under here. A
+#: directory created inside that mount IS a My Drive directory -- the files land
+#: in My Drive itself, searchable and shareable like anything else the operator
+#: put there.
+DRIVEFS_CLOUDSTORAGE_ROOT = Path.home() / "Library" / "CloudStorage"
+
+
+def _my_drive_dir() -> Path | None:
+    """The mounted `My Drive` of the signed-in Google account, or None.
+
+    Returns None instead of raising when Drive for desktop is absent or signed
+    out: that is a legitimate operator state, and the caller falls back to a
+    plain local directory rather than failing the run.
+
+    Sorted so that two signed-in accounts resolve to the same mount every run
+    instead of whichever one the filesystem happened to list first.
+    """
+    try:
+        candidates = sorted(DRIVEFS_CLOUDSTORAGE_ROOT.glob("GoogleDrive-*"))
+    except Exception:  # pragma: no cover - defensive
+        return None
+    for mount in candidates:
+        my_drive = mount / "My Drive"
+        if my_drive.is_dir():
+            return my_drive
+    return None
+
+
+def _default_mirror_root() -> Path:
+    """The factory-default published directory, env overrides excluded.
+
+    Separate from DRIVE_MIRROR_ROOT so the test-mode guard can key on the
+    factory default even when an operator has pointed the live root elsewhere.
+    """
+    return (_my_drive_dir() or Path.home()) / "DuckData"
+
+
+#: Where the mirror publishes: a folder INSIDE the mounted My Drive, not a Drive
+#: "mirror root" (Preferences -> "Folders from your computer").
+#:
+#: It was a mirror root until 2026-11-13, and that is a different destination
+#: wearing the same clothes. A mirror root uploads to `Computers -> <machine>`,
+#: whose folders report `canEdit: false`, and My Drive can only reference one
+#: through a shortcut that resolves into `.shortcut-targets-by-id/`. So an
+#: external agent told to read "the DuckData folder in Drive" found a shortcut
+#: to a read-only backup living outside My Drive, which is both the wrong place
+#: and the wrong permissions. Registering a root was unreliable on its own
+#: terms too: the DuckDrop root was allocated id 6 and then went missing from
+#: Drive's `roots` table across a restart.
+#:
+#: Publishing into the My Drive mount needs no registration, no app restart and
+#: no Computers section -- rsync writes a file, Drive uploads it to My Drive.
 DRIVE_MIRROR_ROOT = Path(
-    os.environ.get("DRIVE_MIRROR_ROOT") or (Path.home() / "DuckData")
+    os.environ.get("DRIVE_MIRROR_ROOT") or _default_mirror_root()
 )
 #: Staging lives OUTSIDE the mirror root on purpose. A staging directory nested
 #: inside the synced folder would upload every ungated intermediate.
@@ -92,7 +142,47 @@ DRIVEFS_SUPPORT_ROOT = (
 # monkeypatch. The guard compares the LIVE value against this, so a test whose
 # fixture redirects the root sails through while a test that bypasses isolation
 # is refused.
-_FROZEN_PRODUCTION_MIRROR_ROOT = (Path.home() / "DuckData").resolve()
+def _path_spellings(path: Path) -> set[Path]:
+    """Both the symlink-following and non-following spellings of `path`.
+
+    `My Drive/DuckData` can legitimately already exist as a Drive *shortcut*,
+    which Drive for desktop mounts as a symlink into
+    `.shortcut-targets-by-id/`. `resolve()` then reports the shortcut's target
+    rather than the directory being guarded, so a guard holding only one
+    spelling misses the other. Holding both means it matches whichever spelling
+    the caller hands it.
+    """
+    out = {Path(os.path.normpath(str(path)))}
+    try:
+        out.add(path.resolve())
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return out
+
+
+#: The published directory as written, NOT followed through any symlink -- this
+#: is the one the pollution audit scans, and it must name the My Drive folder
+#: rather than whatever a shortcut there happens to point at.
+_FROZEN_PRODUCTION_MIRROR_ROOT = Path(os.path.normpath(str(_default_mirror_root())))
+#: The pre-2026-11-13 destination, still guarded. Un-mirroring a folder in
+#: Drive's preferences leaves the local directory behind, so it keeps existing
+#: after the move and a test that rsynced into it would still hand 5 GB to
+#: whatever is watching it.
+_FROZEN_LEGACY_MIRROR_ROOT = (Path.home() / "DuckData").resolve()
+def _guarded_mirror_roots() -> set[Path]:
+    """Every spelling of every destination the guard refuses.
+
+    Derived at call time from the two named constants above, deliberately NOT
+    frozen into a module-level set. The isolation tests exercise this guard by
+    patching `_FROZEN_PRODUCTION_MIRROR_ROOT` to a tmp stand-in -- a test that
+    asserts "this is refused" must never be able to perform the action when the
+    refusal breaks ([[feedback_test_runs_reach_the_outside_world]]). A frozen
+    set reads the constant once at import, so the patch would still appear to
+    work while the guard quietly ignored it.
+    """
+    return _path_spellings(_FROZEN_PRODUCTION_MIRROR_ROOT) | _path_spellings(
+        _FROZEN_LEGACY_MIRROR_ROOT
+    )
 #: The run history is a second production state file, so it needs the same
 #: frozen-path guard as the mirror root. A test that reaches this would
 #: append fixture rows to the baseline the selection card grades against,
@@ -703,7 +793,7 @@ MIRROR_README = """# myJeepDuck data mirror
 Generated automatically by duck-ops/runtime/drive_mirror.py. Do not edit:
 every file here is overwritten from the source repositories on each run, and
 anything added by hand is deleted on the next one. To hand something BACK to
-this system, write it to the separate `~/DuckDrop/` sync folder, never here.
+this system, write it to the separate `DuckDrop` folder in My Drive, never here.
 
 ## What this is
 
@@ -845,6 +935,18 @@ def release(staging_root: Path, mirror_root: Path) -> tuple[bool, str]:
             f"({_FROZEN_PRODUCTION_MIRROR_ROOT}). A test that reaches this would "
             f"rsync the staged tree into a folder that uploads to Google Drive."
         )
+    if mirror_root.is_symlink():
+        # A Drive *shortcut* sitting in My Drive is mounted as a symlink into
+        # `.shortcut-targets-by-id/`, and its target is typically a read-only
+        # `Computers -> <machine>` backup. rsync would follow it and publish
+        # into that backup instead, which looks like success and puts the data
+        # back in the place this mirror was moved out of on 2026-11-13. There is
+        # no case where the published root legitimately is a symlink.
+        return False, (
+            f"release refused: {mirror_root} is a symlink (-> "
+            f"{os.readlink(mirror_root)}). Delete the Drive shortcut so the "
+            f"published root is a real directory in My Drive."
+        )
     mirror_root.mkdir(parents=True, exist_ok=True)
     code, err = _rsync([
         "-a", "--delete", f"{staging_root}/", f"{mirror_root}/",
@@ -869,8 +971,18 @@ def _refusing_test_mode_prod_write(mirror_root: Path | None) -> bool:
     flag = str(os.environ.get(_TEST_MODE_REFUSAL_ENV) or "").strip()
     if flag not in {"1", "true", "TRUE", "yes"}:
         return False
-    resolved = Path(mirror_root or DRIVE_MIRROR_ROOT).resolve()
-    return resolved == _FROZEN_PRODUCTION_MIRROR_ROOT
+    try:
+        resolved = Path(mirror_root or DRIVE_MIRROR_ROOT).resolve()
+    except Exception:  # pragma: no cover - defensive
+        return False
+    if resolved in _guarded_mirror_roots():
+        return True
+    # Anything inside a Drive-for-desktop mount uploads to Google whatever it is
+    # called, so this is checked structurally rather than against the two
+    # literals above: a renamed published folder, or a second signed-in account,
+    # must not be able to open a hole an equality check cannot see.
+    cloudstorage = DRIVEFS_CLOUDSTORAGE_ROOT.resolve()
+    return resolved == cloudstorage or cloudstorage in resolved.parents
 
 
 # ---------------------------------------------------------------------------

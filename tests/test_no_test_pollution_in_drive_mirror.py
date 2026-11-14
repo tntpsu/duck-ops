@@ -38,6 +38,11 @@ if str(RUNTIME_DIR) not in sys.path:
 import drive_mirror  # noqa: E402
 
 PRODUCTION_MIRROR_ROOT = drive_mirror._FROZEN_PRODUCTION_MIRROR_ROOT
+#: The pre-2026-11-13 destination. The mirror moved into the mounted My Drive,
+#: but un-mirroring in Drive's preferences leaves the old local directory
+#: behind, so it is still a place a test can pollute -- and still a place
+#: something could be watching.
+LEGACY_MIRROR_ROOT = drive_mirror._FROZEN_LEGACY_MIRROR_ROOT
 PRODUCTION_STAGING_ROOT = Path.home() / ".DuckData.staging"
 PRODUCTION_RUNS_PATH = drive_mirror._FROZEN_PRODUCTION_RUNS_PATH
 
@@ -85,6 +90,22 @@ class DriveMirrorPollutionAuditTests(unittest.TestCase):
             f"test fixtures found in the PUBLISHED mirror {PRODUCTION_MIRROR_ROOT} "
             f"-- Google Drive uploads this directory. First 40: {hits[:40]}",
         )
+
+    def test_the_legacy_mirror_root_holds_no_test_fixtures(self):
+        """Absent is a pass: once Drive stops mirroring it and the operator
+        clears it, there is nothing to audit."""
+        hits = _offenders(LEGACY_MIRROR_ROOT)
+        self.assertEqual(
+            [], hits,
+            f"test fixtures found in the legacy mirror {LEGACY_MIRROR_ROOT}. "
+            f"First 40: {hits[:40]}",
+        )
+
+    def test_the_audit_does_not_follow_a_drive_shortcut(self):
+        """`My Drive/<name>` can exist as a Drive shortcut, which mounts as a
+        symlink into `.shortcut-targets-by-id/`. An audit that followed it would
+        scan the Computers backup and pass on a My Drive it never read."""
+        self.assertNotIn(".shortcut-targets-by-id", str(PRODUCTION_MIRROR_ROOT))
 
     def test_the_production_staging_root_holds_no_test_fixtures(self):
         hits = _offenders(PRODUCTION_STAGING_ROOT)
