@@ -333,3 +333,75 @@ class AgentFacingReadmeTests(unittest.TestCase):
             text = (root / "README.md").read_text(encoding="utf-8")
         self.assertIn("DuckData", text)
         self.assertIn("snapshot", text)
+
+
+class TheOnScreenHookIsAContractFieldTests(_DropRoot):
+    """2026-11-16: the text burned INTO the clip, separate from the caption.
+
+    Until this landed, `post_ready: true` required the pixels to be final,
+    because overlay text in `notes` was prose with nothing to execute it. A
+    structured field is executable, so the lane composites it -- which makes
+    the field part of the safety contract, not a convenience.
+    """
+
+    def _accept(self, sidecar: dict) -> dict:
+        self.drop("clip.mp4", MP4, sidecar)
+        manifest = self.scan()
+        self.assertEqual(len(manifest["accepted"]), 1,
+                         manifest.get("proposals") or manifest)
+        return manifest["proposals"][0]
+
+    def test_the_hook_is_carried_through_to_the_proposal(self) -> None:
+        hook = "POV: someone honks 0.02 seconds after the light turns green"
+        prop = self._accept({**GOOD_SIDECAR, "on_screen_hook_text": hook})
+        self.assertEqual(prop["on_screen_hook_text"], hook)
+
+    def test_an_absent_hook_is_empty_not_missing(self) -> None:
+        # The lane reads this field unconditionally; absent must mean "no text
+        # to burn", never a KeyError on Monday morning.
+        prop = self._accept(dict(GOOD_SIDECAR))
+        self.assertEqual(prop["on_screen_hook_text"], "")
+
+    def test_a_non_string_hook_is_refused(self) -> None:
+        # Refused, never coerced: str(12) would silently burn "12" onto the
+        # frame, and True would burn "True". Same reasoning as post_ready.
+        for value in (12, ["a"], {"text": "a"}, True):
+            with self.subTest(value=value):
+                self.drop("clip.mp4", MP4,
+                          {**GOOD_SIDECAR, "on_screen_hook_text": value})
+                out = self.scan()
+                self.assertEqual(out["rejected_count"], 1, out)
+                self.assertIn("on_screen_hook_text",
+                              out["rejected"][0]["reason"])
+
+    def test_a_hook_too_long_to_stay_legible_is_refused(self) -> None:
+        self.drop("clip.mp4", MP4,
+                  {**GOOD_SIDECAR,
+                   "on_screen_hook_text": "x" * (drop_intake.MAX_HOOK_CHARS + 1)})
+        out = self.scan()
+        self.assertEqual(out["rejected_count"], 1, out)
+        self.assertIn("legible", out["rejected"][0]["reason"])
+        # ...and exactly at the limit is fine, so the boundary is pinned on
+        # both sides rather than only on the loud one.
+        self.drop("clip2.mp4", MP4,
+                  {**GOOD_SIDECAR,
+                   "on_screen_hook_text": "x" * drop_intake.MAX_HOOK_CHARS})
+        self.assertEqual(len(self.scan()["accepted"]), 1)
+
+    def test_control_characters_are_stripped_from_the_hook(self) -> None:
+        # This string is composited into an ffmpeg filter and rendered to a
+        # text card; a stray control byte has no legitimate place in it.
+        prop = self._accept({**GOOD_SIDECAR,
+                             "on_screen_hook_text": "clean\x00\x07 text  "})
+        self.assertEqual(prop["on_screen_hook_text"], "clean text")
+
+    def test_the_readme_documents_the_field_and_its_limit(self) -> None:
+        # An integration contract the counterparty cannot read is not a
+        # contract -- the whole reason Gemini's first drop was malformed.
+        readme = drop_intake.MIRROR_DROP_README
+        self.assertIn("on_screen_hook_text", readme)
+        self.assertIn(str(drop_intake.MAX_HOOK_CHARS), readme)
+        # The old rule said the pixels had to be final. If that sentence
+        # survives beside the new field the contract reads as self-
+        # contradictory to whoever has to follow it.
+        self.assertNotIn("ALREADY BURNED INTO THE FRAMES", readme)

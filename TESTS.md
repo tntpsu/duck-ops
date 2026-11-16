@@ -7758,30 +7758,71 @@ shipped together per the architectural convention: conftest redirect, frozen-pat
 Measured today: drop accepted, proposal recorded, `--list` reports
 `awaiting operator (operator_required)`.
 
-### Open — and this is where the operator's question actually lands
+### Surface 132 — the claimed drop takes Monday's slot (2026-11-16)
 
-**The meme lane cannot publish a video.** It renders image panels and publishes a
-carousel; substituting an mp4 into `data["image_path"]` would reach a Shopify
-Files image upload and a carousel post. So "take the video instead of generating
-one" is not a wiring change to the meme lane.
+**Correction first.** This section previously stated that *"the meme lane cannot
+publish a video"* and that automatic audio was impossible. Both were wrong, and
+the second was argued from a retracted finding.
 
-The pieces already exist in **duckvideo**, which is the lane built for this:
+`flows/meme/steps.py` has carried a reel branch since Surface 118 (2026-11-11),
+gated on `MEME_REEL_FORMAT`: `image_lane_reel.build_lane_reel` renders a still
+to an 8s clip, hosts it, and posts it through `schedule_instagram_reel_post`.
+And `image_lane_reel.choose_audio` already attaches an approved Instagram track
+automatically — `helpers/ig_audio_helper` reads `GET /ig_audio` on the scopes we
+publish with, ≥588 music ids. The 2026-11-04 "I will put it up myself with
+audio" decision governs **duckvideo**, whose publish step refuses outright under
+`DUCKVIDEO_MANUAL_POST`; it was never a statement about the meme lane. The claim
+that reels out-perform was also cited here in support — it was **retracted
+2026-11-08** (reel n=1; `/portal/intel/social` refuses to rank below n=3).
 
-- `duck_video_helper.overlay_hook_line(video, hook, out, closing_line, closing_at)`
-  burns text into the frames with ffmpeg — and Gemini's sidecar already supplies
-  exactly its inputs (hook text, top-center placement, 0.0–6.0s).
-- `schedule_instagram_reel_post` publishes the result as a Reel.
-- `DUCKVIDEO_MANUAL_POST=1` exists because the operator decided on 2026-11-04:
-  *"I also don't want the video posted to social media. I will put it up myself
-  with audio."* Trending audio can only come from the native sound picker, which
-  is what Gemini's own sidecar recommends. So the song is not an automation gap —
-  it is a decision already made, and `post_ready` for a video should mean *text
-  burned in*, with audio remaining the operator's step.
+**What shipped.** A drop claimed from the ledger replaces generation:
 
-The unbuilt piece is therefore: route a **video** drop to duckvideo, run the
-sidecar's `on_screen_hook_text` through `overlay_hook_line`, and let that
-conversion be what makes a drop `post_ready`. Not started — it needs the
-operator's call on whether a video Meme Monday posts as a Reel.
+- `step_meme_prepare` consults `_claim_agent_drop` **before** product selection
+  and copy generation — the point is to not spend the image credits when the
+  post already exists. Fails open in three directions (no duck-ops checkout, no
+  claimable drop, raising ledger) and the lane generates exactly as today.
+- `image_lane_reel.build_lane_reel_from_video` is the sibling of
+  `build_lane_reel`: same `choose_audio` decision, same upload, same return
+  shape, so the publish branch cannot tell which one built the reel. It burns
+  the hook in first — the operator's *"the video also needs the caption on it
+  anyways"* — and returns a poster frame.
+- The poster is the answer to the platform question. It stands in as the lane's
+  panel, so the review email's attachment and the **Facebook photo post keep
+  working unchanged**: Facebook gets the still, Instagram gets the reel, and
+  nothing is lost to the format change.
+- `on_screen_hook_text` is now a validated sidecar field (≤180 chars, non-string
+  refused, control characters stripped). It had been prose in `notes`, which is
+  why `post_ready` previously demanded the pixels be final: prose has nothing to
+  execute it. A structured field is executable, and the README now says so
+  instead of contradicting itself.
+
+**The dangerous edge, and what pins it.** duck-ops writes a claim *before* the
+caller uses the drop, so a render failure cannot un-claim it. If render fell
+back to generating, an approved post would be consumed and silently swapped for
+a machine-made one — which this lane would then **auto-publish**. So a failed
+drop sets `meme_render_blocker` and returns None; it never generates.
+
+Four mutations were run against the suite and all four are caught: render
+falling back to generating, publish ignoring the claimed reel (this one
+**survived the first pass** — the branch was unreachable from any test until
+`_select_reel_for_publish` was extracted, and a drop would have gone out as a
+feed photo of its own poster), a claim that stops naming its run, and doubled
+hashtags.
+
+| Use case | Happy | No drop | Asset gone | Conversion fails | Switched off | Wrong format |
+|---|---|---|---|---|---|---|
+| Claiming | unit:2 (payload, run-scoped claim) | unit:3 (no checkout / nothing claimable / raising ledger) | — | — | unit:1 (`MEME_AGENT_DROPS=0`, loader never called) | — |
+| Video → reel | unit:4 (hook burned, audio decision, poster, no double-caption) | — | unit:1 | unit:4 (burn-in, upload raises, no URL, missing file) | — | — |
+| Render wiring | unit:2 (image drop, video drop) | unit:1 (generator still reached) | unit:1 (blocker) | unit:2 (reel/poster blockers) | — | — |
+| Publish choice | unit:1 (posts as reel) | unit:1 (normal decision untouched) | — | unit:1 (no video_url) | unit:1 (ignores `MEME_REEL_FORMAT`) | unit:1 (never beside a carousel) |
+| Sidecar hook | unit:1 | unit:1 (absent → empty) | — | — | — | unit:4 subtests + length bounds |
+
+`duckAgent/tests/test_meme_agent_drop.py` (29 tests) and the hook field in
+`duck-ops/tests/test_drop_intake.py` (38 tests). Today's live drop was
+backfilled with the hook lifted from its own `notes` — nothing invented — and
+remains `post_ready: false, operator_required`, so nothing claims it yet.
+
+### Open
 
 Also open:
 - **Nothing runs `drop_intake` on a schedule.** It is manual today, so a drop

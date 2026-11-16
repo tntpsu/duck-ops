@@ -156,6 +156,9 @@ _VIDEO_EXTS = frozenset({".mp4", ".mov"})
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_VIDEO_BYTES = 300 * 1024 * 1024
 MAX_CAPTION_CHARS = 2200          # Instagram's own ceiling
+#: A hook is composited over the frame, so the ceiling is legibility on a
+#: phone, not a platform limit. `_scrim_text_card` wraps to a few lines.
+MAX_HOOK_CHARS = 180
 MAX_SIDECAR_BYTES = 64 * 1024
 
 #: A candidate must be unchanged for this long before it is read, so a file
@@ -334,12 +337,30 @@ def validate_drop(asset: Path, sidecar: Path, *,
             f'{type(post_ready).__name__}'
         )
 
+    # The text burned INTO the video, as distinct from the caption posted
+    # beside it. A dropped clip arrives without it: the agent writes the words
+    # and the lane composites them, because a reel with no on-screen text reads
+    # as an unfinished repost. Optional -- a clip whose maker already rendered
+    # text into the frames should leave this out rather than get two copies.
+    hook = meta.get("on_screen_hook_text", "")
+    if not isinstance(hook, str):
+        raise DropRefused(
+            '"on_screen_hook_text" must be a string, not '
+            f'{type(hook).__name__}')
+    hook = "".join(ch for ch in hook if ch >= " ").strip()
+    if len(hook) > MAX_HOOK_CHARS:
+        raise DropRefused(
+            f"\"on_screen_hook_text\" is {len(hook)} characters; the limit is "
+            f"{MAX_HOOK_CHARS} because it has to stay legible burned over a "
+            "phone-sized frame")
+
     return {
         "lane": lane,
         "caption": cleaned.strip(),
         "media_type": "image" if suffix in _IMAGE_EXTS else "video",
         "source_agent": source_agent,
         "notes": str(meta.get("notes") or "")[:2000],
+        "on_screen_hook_text": hook,
         "bytes": size,
         "post_ready": post_ready,
     }
@@ -603,16 +624,31 @@ The sidecar:
       "lane": "meme",
       "source_agent": "who or what made this",
       "post_ready": false,
+      "on_screen_hook_text": "optional, up to 180 chars -- see below",
       "notes": "optional, for the operator"
     }
 
-`post_ready` is the important one. Set it to `true` ONLY if the file is
-finished exactly as it should appear publicly -- for a video that means any
-on-screen text is ALREADY BURNED INTO THE FRAMES and the audio track is the
-one that should play. Overlay text written in `notes` is an instruction, not a
-rendered video, and a drop like that is a proposal for the operator to finish
-rather than something a scheduled flow may post. It defaults to `false`, and
-`false` is the right answer whenever you are unsure.
+`post_ready` is the important one. Set it to `true` ONLY if this is finished
+CONTENT: the caption is exactly what should be posted, and the on-screen text
+is settled -- either already burned into the frames, or written in
+`on_screen_hook_text` as the exact words to composite. It defaults to `false`,
+and `false` is the right answer whenever you are unsure.
+
+`on_screen_hook_text` is the text that goes INTO the video, as distinct from
+the `caption` posted beside it. Leave it out if the frames already carry their
+text; filling in both gets two copies on screen. Up to 180 characters, because
+it has to stay legible burned over a phone-sized frame.
+
+Why this is a field and not a line in `notes`: until 2026-11-16 the rule here
+was that `post_ready: true` required the pixels to be final, because overlay
+text in `notes` was an instruction with nothing to execute it -- prose a human
+had to read and act on. A structured field is executable, so the lane now
+composites it with the same ffmpeg pass duckvideo uses. `notes` is still prose
+for the operator and nothing reads it as an instruction.
+
+Audio is not yours to set. A reel gets its track from the approved Instagram
+audio catalog at publish time, or a local bed if nothing fits; do not count on
+music baked into the file surviving.
 
 A drop with `post_ready: true` that the operator then approves can be taken by
 that lane's scheduled run INSTEAD of the post it would have generated itself.
