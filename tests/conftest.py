@@ -150,6 +150,31 @@ def _redirect_drive_mirror_paths(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_drop_intake(monkeypatch, tmp_path):
+    """Keep every test off the real drop folder and proposal ledger.
+
+    A fixture row in `drop_proposals.json` is not an inert fake: a proposal
+    that reads approved + post_ready is one a scheduled flow will PUBLISH. The
+    source guard refuses a write to the frozen path under DUCK_TEST_MODE, and
+    this redirect is the layer that means the guard is never the thing standing
+    between a test and a public post.
+    """
+    try:
+        import drop_intake
+    except ImportError:
+        yield
+        return
+    monkeypatch.setattr(drop_intake, "DROP_ROOT", tmp_path / "DuckDrop")
+    monkeypatch.setattr(
+        drop_intake, "DROP_PROPOSALS_PATH", tmp_path / "drop_proposals.json"
+    )
+    monkeypatch.setattr(
+        drop_intake, "DROP_INTAKE_STATE_PATH", tmp_path / "drop_intake.json"
+    )
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _redirect_llm_call_log(tmp_path, monkeypatch):
     """Redirect llm_call_helpers.LLM_CALL_LOG_PATH to a tmp file so
     no test write reaches the production log. Autouse: applies to

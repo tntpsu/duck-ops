@@ -7618,3 +7618,124 @@ repo does not make Drive re-upload 17 MB nightly.
 - **Nothing grades bundle freshness.** A bundle that stops being rewritten
   because `git ls-files` started failing looks identical to a repo nobody
   edited.
+
+## Surface 131 — The return leg was dead, and the lane it feeds publishes without asking (2026-11-16, operator: "Gemini just put its first video and json file in the folder", then "can u change the code such that if we already have a meme Monday scheduled thru video that we take that post instead of generating one?")
+
+Gemini wrote its first drop into `My Drive/DuckDrop` — a video, a sidecar, and
+one stray 936 KB HTML file with no extension. It put them in the right place by
+luck rather than by instruction: `DROP_ROOT` was still `~/DuckDrop`, whose Drive
+mirror-root registration had silently vanished (Surface 129), so the folder the
+contract described was not in Drive at all and the README stating the rules was
+unreachable. The lane had been dead since the day it shipped.
+
+`DROP_ROOT` now resolves into the mounted My Drive, derived through
+`drive_mirror._my_drive_dir()` rather than re-derived — the duplicate-literal
+bug from Surface 129, not repeated. The inbound direction could never have used
+a mirror root anyway: a mirror root uploads *from* the machine, and this lane
+needs an external agent to write *to* it.
+
+### What the drop looked like against the contract
+
+| Contract | Gemini's drop |
+|---|---|
+| `inbox/<stem>.mp4` + `inbox/<stem>.mp4.json` | both at the folder root, stems unrelated |
+| sidecar `caption` | present, 145 chars |
+| sidecar `lane` | absent |
+| sidecar `source_agent` | absent |
+| media is a real video | yes — 5.21 MB, magic verified |
+
+The sidecar declared `"video_filename": "mid_november_holiday_horror_dash_standoff.mp4"`,
+so the pairing Gemini *intended* was unambiguous and the relabel used that stem
+rather than an invented one. `lane: meme` and `source_agent` came from the
+operator's own message, not from inference. Gemini's full original sidecar is
+preserved verbatim under `source_metadata` so nothing it decided was lost in
+translation — it carries the on-screen hook, overlay placement and timing, cover
+frame, and the audio recommendation, all of which are instructions for work that
+still has to happen.
+
+### Why a claim needs a ledger
+
+`state/drop_intake.json` is the **last scan's manifest** and is rewritten whole
+on every run. A proposal accepted on Monday is gone from it the moment Tuesday's
+scan finds an empty inbox. Nothing could have claimed from it, and nothing read
+it except the OS cards. `state/drop_proposals.json` is the durable record; a
+rescan never resets an approval or a claim.
+
+### The gate that matters
+
+The meme lane **auto-publishes**. On 2026-11-09 the 09:00 run reached
+`policy_decision: auto_schedule_allowed`, wrote `meme_fb_id`, and scheduled a
+real Facebook post for 18:00 — no human in the loop. So a file an external agent
+writes into a Drive folder is one wiring step away from a public post, and
+closing that gap by default would be exactly the silent promotion from manual
+approval to auto-action the governance policy forbids.
+
+Three conditions gate a claim, and the middle one is the only one that is about
+governance rather than correctness:
+
+1. the sidecar declared `post_ready: true` — the **agent** says it is finished
+2. the operator approved it — a **human** says it may go out
+3. nothing has claimed it yet — it goes out at most once
+
+`post_ready` defaults to `false` and a non-boolean is **refused rather than
+coerced**: the string `"false"` would have been truthy, and this is the field
+that decides whether something gets published unseen. Today's drop is not
+claimable on two of the three counts, which is correct — the overlay text is an
+instruction, not burned frames.
+
+The claim is written *before* the caller uses the result, so a flow that crashes
+mid-publish leaves the drop claimed rather than claimable. Re-publishing
+something that may already be public is the worse of the two failures.
+
+### Covered
+
+| Use case | Happy | Unapproved | Not ready | Wrong lane | Already used | Asset gone |
+|---|---|---|---|---|---|---|
+| Claim for a lane | unit:1 | unit:2 (pending + declined) | unit:1 | unit:1 | unit:1 | unit:1 |
+| Ledger durability | unit:1 | — | — | — | unit:1 (rescan keeps approval) | unit:1 (empty scan keeps entry) |
+| `post_ready` contract | unit:1 (explicit true) | — | unit:1 (absent → false) | — | — | unit:6 subtests (non-boolean refused) |
+| Approval | unit:1 | unit:1 (unknown stem refused) | — | — | unit:1 (claimed is refused) | — |
+| Backlog order | unit:1 (FIFO) | — | — | — | — | — |
+| Test-mode guard | unit:1 (tmp allowed) | — | — | — | — | unit:1 (frozen path refused) |
+| Drop root | unit:1 (named DuckDrop) | — | — | — | — | unit:2 (symlink refused, real dir passes) |
+
+`tests/test_drop_proposal_ledger.py` (22 tests + 17 subtests),
+`tests/test_no_test_pollution_in_drop_proposals.py` (2). Three isolation layers
+shipped together per the architectural convention: conftest redirect, frozen-path
+`DUCK_TEST_MODE` guard, post-suite pollution audit.
+
+Measured today: drop accepted, proposal recorded, `--list` reports
+`awaiting operator (operator_required)`.
+
+### Open — and this is where the operator's question actually lands
+
+**The meme lane cannot publish a video.** It renders image panels and publishes a
+carousel; substituting an mp4 into `data["image_path"]` would reach a Shopify
+Files image upload and a carousel post. So "take the video instead of generating
+one" is not a wiring change to the meme lane.
+
+The pieces already exist in **duckvideo**, which is the lane built for this:
+
+- `duck_video_helper.overlay_hook_line(video, hook, out, closing_line, closing_at)`
+  burns text into the frames with ffmpeg — and Gemini's sidecar already supplies
+  exactly its inputs (hook text, top-center placement, 0.0–6.0s).
+- `schedule_instagram_reel_post` publishes the result as a Reel.
+- `DUCKVIDEO_MANUAL_POST=1` exists because the operator decided on 2026-11-04:
+  *"I also don't want the video posted to social media. I will put it up myself
+  with audio."* Trending audio can only come from the native sound picker, which
+  is what Gemini's own sidecar recommends. So the song is not an automation gap —
+  it is a decision already made, and `post_ready` for a video should mean *text
+  burned in*, with audio remaining the operator's step.
+
+The unbuilt piece is therefore: route a **video** drop to duckvideo, run the
+sidecar's `on_screen_hook_text` through `overlay_hook_line`, and let that
+conversion be what makes a drop `post_ready`. Not started — it needs the
+operator's call on whether a video Meme Monday posts as a Reel.
+
+Also open:
+- **Nothing runs `drop_intake` on a schedule.** It is manual today, so a drop
+  sits until someone runs it. A launchd job is Tier 3.
+- **`DROP_INTAKE_STATE_PATH` predates the three-layer convention** and has no
+  source guard of its own; only the new ledger does.
+- **The stray `QcYjMhPH3VWz`** (HTML, no extension) sits in the drop root
+  untouched. Only `inbox/` is scanned, so it is inert, but nothing reports it.
