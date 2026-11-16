@@ -8001,6 +8001,57 @@ The feedback ledger got all three isolation layers because a fixture row here
 is worse than ordinary pollution: it reads as an unanswered question from a
 real agent.
 
+## Surface 135 — approving without a shell (2026-11-16)
+
+Three drops sat awaiting the operator on a day they had no terminal, and the
+only thing that could surface them was a CLI flag. Every other gated lane here
+is approvable by replying to an email: `operator_inbox_poller` already pulls
+the reply text out of the message and hands it to
+`review_loop.handle_operator_text`. Nothing new had to be plumbed — the lane
+simply had no words it understood.
+
+`runtime/drop_operator.py` adds them, namespaced under `drop `/`drops` for the
+same reason the business desk is namespaced under `desk `: **`approve` already
+appears 27 times in review_loop's scope**, and a bare `approve <stem>` would
+collide with the review queue's numbered approvals
+([[feedback_edits_into_shared_scope_collide]] — grep every name you add to a
+big scope). A unique PREFIX is accepted because stems are long and get typed
+on a phone, but an ambiguous one is refused rather than guessed: the live
+stems differ only by a `_v2`/`_v3` suffix, so guessing publishes the wrong cut
+of the same video.
+
+`drop approve` on a `post_ready:false` drop is refused, because approving
+something the AGENT never declared finished makes the operator's half of a
+two-key gate carry both halves.
+
+`runtime/drop_digest.py` is the prompt. It sends on CHANGE, not on non-empty
+state — the scan runs 4-hourly, so mailing whenever something is pending would
+send six identical emails a day and be filtered inside a week
+([[feedback_cadence_bypass_keys_must_be_rare]]). It speaks when something new
+arrives, when the oldest item crosses 1/3/7 days, or once when the queue
+clears — the all-clear exists so a resolved queue does not read as a dead job
+([[feedback_alive_status_is_not_progress]]).
+
+Nothing in either file is reachable from the drop folder. An agent can ask for
+something in `feedback/`; a human still types the word that acts on it.
+
+### Covered
+
+| Use case | Happy | Ambiguous | Not ready | No change | Guarded |
+|---|---|---|---|---|---|
+| Routing | unit:5 subtests (own namespace) | — | — | unit:8 subtests (does not swallow `approve 240`, `desk`, `status`) | — |
+| Approve / decline | unit:3 (names lane + next step, prefix, decline permanent) | unit:1 (refused, lists matches) | unit:1 (refused with why) | unit:2 (bare verb, unknown verb) | — |
+| Status text | unit:4 (reply line per item, not-ready flagged, empty, notes beside drops) | — | — | — | — |
+| Digest cadence | unit:4 (new drop, second drop, milestone, all-clear) | — | — | unit:3 (repeat silent, between milestones, always-empty) | unit:1 frozen-path state guard |
+| Email shape | unit:3 (MJD subject, notify vs approve, reply lines in body) | — | — | — | — |
+
+`tests/test_drop_operator_and_digest.py` (28 tests). duck-ops 1783 passed.
+
+Writing the tests found a real flaw: `render_email` re-derived its body by
+calling `_status()`, a SECOND read of live state, so the email could disagree
+with the decision it was sent for — three drops in the body, two in the count.
+It now renders from the decision it was handed.
+
 ### Open
 
 - ~~Nine lanes still cannot take a drop.~~ **duckvideo wired 2026-11-16**, so

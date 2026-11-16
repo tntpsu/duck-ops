@@ -2572,6 +2572,14 @@ def parse_command(text: str) -> tuple[str, str | None, str]:
     return command, target_token, note
 
 
+def should_delegate_to_drops(text: str) -> bool:
+    """Namespaced under `drop `/`drops` because `approve` is already taken in
+    this scope by the review queue's numbered approvals."""
+    from drop_operator import should_delegate_to_drops as _impl
+
+    return _impl(text)
+
+
 def should_delegate_to_customer_operator(text: str) -> bool:
     raw = (text or "").strip()
     if not raw:
@@ -3311,6 +3319,12 @@ def operator_help(current_item: dict[str, Any] | None = None) -> str:
         "desk show stock",
         "desk show reviews",
         "desk show workflow",
+        "",
+        "Agent drop commands:",
+        "drops",
+        "drop approve <stem>",
+        "drop decline <stem>",
+        "drop answer <file> <text>",
     ]
     if current_item:
         lines.extend(["", "Current review:", "", render_operator_card(current_item)])
@@ -3383,6 +3397,10 @@ def handle_operator_text(
         from customer_operator import handle_customer_text
 
         return handle_customer_text(text)
+    if should_delegate_to_drops(text):
+        from drop_operator import handle_drop_text
+
+        return handle_drop_text(text)
 
     all_items = build_review_items(state_bundle)
     assign_short_ids(all_items, operator_state)

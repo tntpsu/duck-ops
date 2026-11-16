@@ -931,6 +931,38 @@ verbatim. Nothing is appended, so a caption with no hashtags gets none.
 deck or a carousel.
 
 
+## What tends to work
+
+Measured on our own posts, with the confidence stated so you can weigh it.
+Treat these as priors, not rules -- and if your own reasoning says otherwise,
+say so in `feedback/` rather than quietly complying.
+
+**Ask an A-or-B question, not an open one.** MEDIUM confidence, and the
+strongest copy finding we have: six open-question posts earned zero comments
+between them, while two that named two options earned five. 6.58 comments per
+100 reach against 0.00. Naming the two things is what does the work -- "Santa
+duck or the doll duck?" beats "what do you think?".
+
+**Keep the duck the subject.** The ducks are the operator's own 3D prints,
+photographed in their own vehicle. The product is the duck, not the scenery,
+the vehicle or the weather.
+
+**No hashtags in `on_screen_hook_text`.** They would be burned into the
+frame. Hashtags belong in the caption.
+
+**Do not claim things we cannot stand behind** -- no invented specs, prices,
+review counts, shipping promises or superlatives.
+
+**What we do NOT know**, stated so you do not optimise for it: whether reels
+outperform images here. "reel > image > carousel" was retracted on
+2026-11-08 because it does not reproduce -- our reel sample was a single post,
+and the surface that reports it refuses to rank a format with fewer than three.
+What our own data supports is only image > carousel on median reach, 50.0 over
+5 posts against 25.0 over 7. Reels leading across 72 competitor posts is real
+evidence and a fair reason to try the format, but it is THEIR evidence. Do not
+treat "make it a reel" as a known win.
+
+
 ## Talking back
 
 This is not a one-way contract. Three channels run the other direction, and

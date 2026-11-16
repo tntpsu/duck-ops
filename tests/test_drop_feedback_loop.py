@@ -226,6 +226,28 @@ class TheReadmeExplainsTheLoopTests(unittest.TestCase):
         self.assertIn("ambiguous", text)
         self.assertIn("a rule here is wrong", text)
 
+    def test_it_states_what_we_do_NOT_know(self):
+        """The retracted format finding is in here on purpose. An agent told
+        only what works will optimise for a claim we withdrew -- and this one
+        was withdrawn for resting on a sample of one."""
+        import re, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = drop_intake.init_drop_root(Path(tmp) / "D")
+            text = re.sub(r"\s+", " ", (root / "README.md").read_text())
+        self.assertIn("retracted", text.lower())
+        self.assertIn("THEIR evidence", text)
+        self.assertIn("do not optimise for it", text.lower())
+
+    def test_priors_carry_their_confidence_not_just_their_conclusion(self):
+        """A prior with no confidence reads as a rule, and an agent cannot
+        tell which ones to push back on."""
+        import re, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = drop_intake.init_drop_root(Path(tmp) / "D")
+            text = re.sub(r"\s+", " ", (root / "README.md").read_text())
+        self.assertIn("MEDIUM confidence", text)
+        self.assertIn("priors, not rules", text)
+
     def test_the_folders_it_names_actually_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = drop_intake.init_drop_root(Path(tmp) / "D")
