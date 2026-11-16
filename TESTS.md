@@ -7815,6 +7815,42 @@ falling back to generating, publish ignoring the claimed reel (this one
 feed photo of its own poster), a claim that stops naming its run, and doubled
 hashtags.
 
+**What the first real preview found, before anything was approved.** The
+operator asked to see the post before approving it — and rendering it exposed
+three defects, none of which raised and all of which `overlay_hook_line`
+reported as `ready`:
+
+1. **The hook card was cropped.** `VIDEO_WIDTH = 1080` is duckvideo's own
+   render size; the dropped clip is **720x1280**. ffmpeg pins the overlay at
+   `x=0`, so a 1080-wide card on a 720-wide clip loses its right third and
+   every centered line runs off the frame. `_scrim_text_card` and
+   `overlay_hook_line` now take `card_width`, defaulting to `VIDEO_WIDTH` so
+   duckvideo is untouched.
+2. **The audio fit used the wrong length.** `REEL_SECONDS = 8.0` is our render
+   length; the clip is **10.0s**. The catalog was being searched for a track
+   fitting a duration the clip does not have. `choose_audio` now takes
+   `clip_seconds`.
+3. **Truncation was silent.** With the width fixed the text fit the frame but
+   `lines[:max_lines]` still dropped everything past line 4 — the hook ended
+   mid-sentence at "after the light turns". It is now recorded and
+   `build_lane_reel_from_video` REFUSES, because half a sentence burned into a
+   post this lane auto-publishes is worse than no post.
+
+All three are the same assumption: that a clip from an outside agent has our
+geometry. The new `probe_video` is the answer, and a drop's render dict now
+carries the measured `width` and `duration`.
+
+`MAX_HOOK_CHARS` went 180 → 120. 180 was a guess and roughly double the truth:
+measured against the renderer, four lines hold ~84 characters at 720 wide and
+~100 at 1080. 120 is a generous sanity bound and deliberately NOT the real
+gate, because the true limit depends on a clip width the sidecar validator
+cannot know — the render-time refusal is what decides.
+
+This is the clearest instance yet of [[feedback_visual_output_needs_eyes]]:
+every status was green, the suite was green, and the output was broken. It was
+caught because a human asked to look at it. The lane now has eyes of its own in
+the form of the truncation refusal, but the width bug would have shipped.
+
 | Use case | Happy | No drop | Asset gone | Conversion fails | Switched off | Wrong format |
 |---|---|---|---|---|---|---|
 | Claiming | unit:2 (payload, run-scoped claim) | unit:3 (no checkout / nothing claimable / raising ledger) | — | — | unit:1 (`MEME_AGENT_DROPS=0`, loader never called) | — |
@@ -7823,8 +7859,13 @@ hashtags.
 | Publish choice | unit:1 (posts as reel) | unit:1 (normal decision untouched) | — | unit:1 (no video_url) | unit:1 (ignores `MEME_REEL_FORMAT`) | unit:1 (never beside a carousel) |
 | Sidecar hook | unit:1 | unit:1 (absent → empty) | — | — | — | unit:4 subtests + length bounds |
 
-`duckAgent/tests/test_meme_agent_drop.py` (29 tests) and the hook field in
-`duck-ops/tests/test_drop_intake.py` (38 tests). Today's live drop was
+| Outside geometry | unit:2 (card sized to clip; default unchanged) | — | unit:1 (probe failure falls back) | unit:1 (refuses a truncated hook, naming the width and the dropped words) | — | unit:3 (text inside a narrow card; overflow recorded; no false overflow) |
+| Real duration | unit:1 (10.0s reaches choose_audio, not REEL_SECONDS) | — | — | — | — | — |
+
+`duckAgent/tests/test_meme_agent_drop.py` (37 tests) and the hook field in
+`duck-ops/tests/test_drop_intake.py` (38 tests). Eight mutations run in total,
+all caught: the four wiring ones, plus card-ignores-clip-width,
+silent-truncation, hardcoded-8s and width-not-passed. Today's live drop was
 backfilled with the hook lifted from its own `notes` — nothing invented — and
 remains `post_ready: false, operator_required`, so nothing claims it yet.
 

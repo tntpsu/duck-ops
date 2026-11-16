@@ -157,8 +157,13 @@ MAX_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_VIDEO_BYTES = 300 * 1024 * 1024
 MAX_CAPTION_CHARS = 2200          # Instagram's own ceiling
 #: A hook is composited over the frame, so the ceiling is legibility on a
-#: phone, not a platform limit. `_scrim_text_card` wraps to a few lines.
-MAX_HOOK_CHARS = 180
+#: phone, not a platform limit. 180 was a guess and roughly double the truth:
+#: measured against the renderer, four lines hold ~84 characters on a 720-wide
+#: clip and ~100 on a 1080-wide one. This is a generous SANITY bound, not the
+#: real gate -- how much fits depends on the clip's width, which is unknowable
+#: here, so `build_lane_reel_from_video` refuses a hook that would be cut off
+#: and that refusal is what actually decides.
+MAX_HOOK_CHARS = 120
 MAX_SIDECAR_BYTES = 64 * 1024
 
 #: A candidate must be unchanged for this long before it is read, so a file
@@ -624,7 +629,7 @@ The sidecar:
       "lane": "meme",
       "source_agent": "who or what made this",
       "post_ready": false,
-      "on_screen_hook_text": "optional, up to 180 chars -- see below",
+      "on_screen_hook_text": "optional, up to 120 chars -- see below",
       "notes": "optional, for the operator"
     }
 
@@ -636,8 +641,15 @@ and `false` is the right answer whenever you are unsure.
 
 `on_screen_hook_text` is the text that goes INTO the video, as distinct from
 the `caption` posted beside it. Leave it out if the frames already carry their
-text; filling in both gets two copies on screen. Up to 180 characters, because
-it has to stay legible burned over a phone-sized frame.
+text; filling in both gets two copies on screen.
+
+**Keep it SHORT -- around 80 characters is the practical ceiling.** 120 is the
+hard limit here, but what actually fits depends on how wide your clip is: the
+text is composited onto a card and centred, and four lines hold roughly 84
+characters on a 720-wide clip and 100 on a 1080-wide one. A hook that does not
+fit is REFUSED at render time rather than cut off mid-sentence, so an
+over-long hook costs you the post, not just the tail of the sentence. If you
+have a two-beat line, send the first beat only.
 
 Why this is a field and not a line in `notes`: until 2026-11-16 the rule here
 was that `post_ready: true` required the pixels to be final, because overlay
