@@ -7932,6 +7932,27 @@ claimed anything, including meme. Its positive control is what caught it
 rather than letting both direction checks pass vacuously
 ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
 
+**The contract is now per-lane, and the prose is derived from what is
+enforced.** A generic README was not enough once three lanes could take drops:
+they differ on the day they publish, the media they accept, and — the one that
+matters most — whether the operator's approval ALONE sends the post or a
+second reply is still required. An agent cannot guess any of that.
+
+`LANE_DROP_SPECS` holds it, and the README is generated from it, so wiring a
+lane forces documenting it in the same change (a contract test fails
+otherwise). `media_types` is a TUPLE that `validate_drop` enforces and the
+README's wording is derived from — writing "video only" beside a validator
+that accepted images would have been the same lie this surface was just fixed
+for. An image dropped for duckvideo is now refused with *"the duckvideo lane
+publishes video only, and this is an image. It would be accepted here and then
+fail when the lane tried to use it."*
+
+The README also carries the four production rules that actually bit, in the
+order they bit: portrait and we measure the width (the 720-vs-1080 card crop),
+~80 characters of hook (refused rather than cut off), audio is taken at
+publish time so a baked track may not survive, and the caption posts verbatim
+with no hashtags appended.
+
 ### Open
 
 - ~~Nine lanes still cannot take a drop.~~ **duckvideo wired 2026-11-16**, so

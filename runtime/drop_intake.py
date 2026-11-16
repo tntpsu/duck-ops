@@ -210,6 +210,76 @@ class DropRecord:
 DROP_CONSUMING_LANES = frozenset({"meme", "jeepfact", "duckvideo"})
 
 
+#: What each consuming lane actually wants, written for the agent that has to
+#: produce it. A generic contract was not enough: the lanes differ on the day
+#: they publish, the media they accept, and -- the one that matters most --
+#: whether the operator's approval ALONE sends the post or a second reply is
+#: still required. An agent cannot guess any of that, and guessing wrong means
+#: a Wednesday post published on Monday.
+#:
+#: `tests/test_drop_lane_consumers.py` fails if a consuming lane has no entry
+#: here, so wiring a lane forces documenting it in the same change.
+LANE_DROP_SPECS: dict[str, dict[str, Any]] = {
+    "meme": {
+        "what": "Meme Monday — one joke panel, or one clip.",
+        "day": "Mondays (MEME_DOW, default MON)",
+        "media_types": ("image", "video"),
+        "publishes": ("the operator's approval is the LAST human step; the "
+                      "Monday run schedules it to Facebook and Instagram "
+                      "with no further review"),
+    },
+    "jeepfact": {
+        "what": "Jeep Fact Wednesday — normally a 5-slide deck; a drop is one panel or clip.",
+        "day": "Wednesdays (JEEPFACT_DOW, default WED)",
+        "media_types": ("image", "video"),
+        "publishes": ("the operator's approval is the LAST human step; the "
+                      "Wednesday run schedules it with no further review"),
+    },
+    "duckvideo": {
+        "what": "The weekly duck reel.",
+        "day": "Fridays (DUCKVIDEO_DOW, default FRI)",
+        "media_types": ("video",),
+        "publishes": ("approval is NOT enough — the operator must also reply "
+                      "to the review email before anything is posted, so a "
+                      "drop here passes two human gates"),
+    },
+}
+
+
+def accepted_media_types(lane: str) -> tuple[str, ...]:
+    """What this lane can actually publish. Empty tuple = unknown lane."""
+    spec = LANE_DROP_SPECS.get(lane) or {}
+    return tuple(spec.get("media_types") or ())
+
+
+def _media_phrase(types: tuple[str, ...]) -> str:
+    """Prose DERIVED from the enforced tuple, never written beside it -- the
+    README claiming "video only" while the validator accepted images is the
+    same shape of lie this whole surface was just fixed for."""
+    if not types:
+        return "unknown"
+    if len(types) == 1:
+        return f"{types[0]} only"
+    return " or ".join(types)
+
+
+def lane_spec_block() -> str:
+    """Render LANE_DROP_SPECS for the lanes that can actually take a drop."""
+    out = []
+    for lane in sorted(consuming_lanes()):
+        spec = LANE_DROP_SPECS.get(lane)
+        if not spec:  # pragma: no cover - the contract test forbids this
+            out.append(f"    - {lane}\n        (undocumented — ask before using)")
+            continue
+        out.append(
+            f"    - {lane}\n"
+            f"        {spec['what']}\n"
+            f"        posts: {spec['day']}\n"
+            f"        accepts: {_media_phrase(tuple(spec['media_types']))}\n"
+            f"        after approval: {spec['publishes']}")
+    return "\n".join(out)
+
+
 def consuming_lanes() -> frozenset[str]:
     """Lanes a drop can actually be used by, which is what the agent needs."""
     return DROP_CONSUMING_LANES
@@ -354,6 +424,14 @@ def validate_drop(asset: Path, sidecar: Path, *,
         raise DropRefused(
             f"\"lane\": {lane or '(missing)'} is not a known lane "
             f"({', '.join(sorted(lanes))})")
+    media_type = "image" if suffix in _IMAGE_EXTS else "video"
+    accepted = accepted_media_types(lane)
+    if accepted and media_type not in accepted:
+        raise DropRefused(
+            f"the \"{lane}\" lane publishes {_media_phrase(accepted)}, and "
+            f"this is {'an' if media_type == 'image' else 'a'} {media_type}. "
+            "It would be accepted here and then fail when the lane tried to "
+            "use it.")
     consuming = consuming_lanes()
     if lane not in consuming:
         # Refused rather than accepted, because accepting is the worse
@@ -722,6 +800,40 @@ If the lane you want is not listed, say so rather than picking one that is.
 A meme-lane drop that was really meant for jeepfact publishes to the wrong
 audience on the wrong day, which is worse than not publishing.
 
+Read "after approval" above carefully. On two of these lanes the operator's
+approval is the LAST human step and the post then goes out unseen, so
+`post_ready: true` on an unfinished file is not a draft -- it is a published
+mistake.
+
+
+## Making the file
+
+These are the rules that actually bit us, in the order they bit:
+
+**Portrait, and tell us nothing about size -- we measure it.** The on-screen
+hook is composited onto a card built at YOUR clip's width. The first real
+drop was 720x1280 against a renderer that assumed 1080, and a third of every
+caption line fell off the right edge of the frame while every status said
+"ready". That is fixed, but it means an unusual aspect ratio is still your
+clip's problem to get right: send something that looks like a phone video.
+
+**Keep `on_screen_hook_text` to about 80 characters.** 120 is the hard limit
+but what FITS depends on the clip's width -- four lines hold roughly 84
+characters at 720 wide. A hook that does not fit is refused at render time
+rather than cut off mid-sentence, so an over-long hook costs the whole post,
+not just the tail. A two-beat line should send the first beat only.
+
+**Do not count on audio you baked in.** A reel takes its track at publish
+time from an operator-approved catalog, or a local bed when nothing fits. If
+the sound is essential to the joke, say so in `notes` and expect a human to
+handle it.
+
+**Write the caption as it should appear, hashtags included.** It is posted
+verbatim. Nothing is appended, so a caption with no hashtags gets none.
+
+**One asset per drop.** A drop is a single panel or a single clip, never a
+deck or a carousel.
+
 The source data these posts should be built from is the separate `DuckData`
 sync folder. Read its README.md first: most of that tree is a current
 snapshot, not a history, and its Retention section says which parts are which.
@@ -751,7 +863,7 @@ def init_drop_root(drop_root: Path | None = None) -> Path:
     # The lane list is rendered from the registry rather than typed into the
     # template: a lane added upstream would otherwise be refused here while
     # the contract an agent reads still said it was invalid.
-    lanes = "\n".join(f"    - {lane}" for lane in sorted(consuming_lanes()))
+    lanes = lane_spec_block()
     (drop_root / "README.md").write_text(
         MIRROR_DROP_README.replace("{lanes}", lanes), encoding="utf-8"
     )

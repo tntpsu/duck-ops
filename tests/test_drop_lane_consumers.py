@@ -172,5 +172,100 @@ class TheContractRefusesAnUnconsumableLaneTests(unittest.TestCase):
         self.assertIn("meme", reason, "name the lanes that DO work")
 
 
+class TheReadmeTellsTheAgentWhatEachLaneWantsTests(unittest.TestCase):
+    """A generic contract was not enough.
+
+    The lanes differ on the day they publish, the media they accept, and --
+    the one that matters most -- whether the operator's approval ALONE sends
+    the post or a second reply is still required. An agent cannot guess any of
+    it, and guessing wrong publishes Wednesday's content on Monday.
+    """
+
+    def _readme(self) -> str:
+        """Whitespace-normalised: the file is hard-wrapped, so asserting a
+        phrase that happens to straddle a line break tests the wrapping
+        rather than the contract."""
+        import re, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = drop_intake.init_drop_root(Path(tmp) / "DuckDrop")
+            raw = (root / "README.md").read_text(encoding="utf-8")
+        return re.sub(r"\s+", " ", raw)
+
+    def test_every_consuming_lane_is_documented(self):
+        """Wiring a lane forces documenting it in the same change -- the
+        alternative is a lane an agent can use but knows nothing about."""
+        for lane in sorted(drop_intake.consuming_lanes()):
+            with self.subTest(lane=lane):
+                self.assertIn(lane, drop_intake.LANE_DROP_SPECS,
+                              f"{lane} takes drops but has no LANE_DROP_SPECS entry")
+
+    def test_each_spec_carries_every_field_the_readme_renders(self):
+        for lane, spec in drop_intake.LANE_DROP_SPECS.items():
+            for field in ("what", "day", "media_types", "publishes"):
+                with self.subTest(lane=lane, field=field):
+                    self.assertTrue(spec.get(field), f"{lane} is missing {field}")
+
+    def test_the_readme_says_which_lanes_publish_without_a_second_look(self):
+        text = self._readme()
+        self.assertIn("LAST human step", text)
+        self.assertIn("published mistake", text)
+
+    def test_the_readme_carries_the_production_rules_that_bit_us(self):
+        text = self._readme().lower()
+        for rule in ("80 characters", "portrait", "verbatim", "one asset per drop"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, text)
+
+
+class TheMediaTypeClaimIsEnforcedTests(unittest.TestCase):
+    """The README says duckvideo is "video only". A README that claims
+    something the validator does not check is the exact shape of lie this
+    surface was just fixed for, so the prose is DERIVED from the enforced
+    tuple rather than written beside it."""
+
+    def _drop(self, lane: str, name: str, data: bytes):
+        import json, os, tempfile, time
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = drop_intake.init_drop_root(Path(tmp.name) / "DuckDrop")
+        asset = root / drop_intake.INBOX_DIR / name
+        asset.write_bytes(data)
+        side = asset.with_suffix(asset.suffix + ".json")
+        side.write_text(json.dumps({
+            "caption": "x", "lane": lane, "source_agent": "test",
+        }), encoding="utf-8")
+        old = time.time() - 300
+        for f in (asset, side):
+            os.utime(f, (old, old))
+        return drop_intake.scan_inbox(root)
+
+    def test_an_image_for_a_video_only_lane_is_refused(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        out = self._drop("duckvideo", "still.png", png)
+        self.assertEqual(out["rejected_count"], 1, out)
+        reason = out["rejected"][0]["reason"]
+        self.assertIn("video only", reason)
+        self.assertIn("fail when the lane tried to use it", reason)
+
+    def test_a_video_for_a_video_only_lane_is_accepted(self):
+        mp4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64
+        out = self._drop("duckvideo", "clip.mp4", mp4)
+        self.assertEqual(len(out["accepted"]), 1, out)
+
+    def test_an_image_is_fine_for_a_lane_that_takes_both(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+        out = self._drop("meme", "panel.png", png)
+        self.assertEqual(len(out["accepted"]), 1, out)
+
+    def test_the_prose_is_derived_from_the_enforced_tuple(self):
+        # Not asserted as a string pair: the point is that one produces the
+        # other, so they cannot drift.
+        for lane, spec in drop_intake.LANE_DROP_SPECS.items():
+            with self.subTest(lane=lane):
+                phrase = drop_intake._media_phrase(tuple(spec["media_types"]))
+                for t in spec["media_types"]:
+                    self.assertIn(t, phrase)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
