@@ -7831,8 +7831,20 @@ remains `post_ready: false, operator_required`, so nothing claims it yet.
 ### Open
 
 Also open:
-- **Nothing runs `drop_intake` on a schedule.** It is manual today, so a drop
-  sits until someone runs it. A launchd job is Tier 3.
+- ~~Nothing runs `drop_intake` on a schedule.~~ **Scheduled 2026-11-16**:
+  `com.philtullai.duckops.drop-intake`, 4-hourly at :15, wrapped in
+  `run_with_receipt.sh` with `DUCK_JOB_NAME=drop_intake_scan`, so the scheduler
+  grades it (49 jobs; verified healthy on a kickstart rather than on being
+  loaded — a job that has never run is not evidence,
+  [[feedback_verify_the_job_is_firing_first]]). `RunAtLoad` is FALSE because the
+  scan MOVES files inside Google Drive and a login should not rearrange the
+  operator's Drive. 4-hourly rather than daily so an overnight drop reaches the
+  ledger with hours of approval lead time before a 09:00 Monday claim, not
+  minutes. A refused drop still exits 0 — refusals go to stderr, because
+  grading a malformed agent file as a broken job is how a card gets ignored
+  ([[feedback_swallowed_errors_lie]]). The plist lives in
+  `duckAgent_runtime/prepared_plists/` which is not git, so this row is the
+  only tracked record that it exists.
 - **`DROP_INTAKE_STATE_PATH` predates the three-layer convention** and has no
   source guard of its own; only the new ledger does.
 - **The stray `QcYjMhPH3VWz`** (HTML, no extension) sits in the drop root
