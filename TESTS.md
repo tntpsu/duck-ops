@@ -142,7 +142,7 @@ Remaining `manual:cron-cadence-race` cells (observer discovery only): the observ
 | **Hardware** | n/a | This stack is Python automation; no glasses/devices |
 | **Performance** | ⚠️  manual:observed | Sidecar cycle ~14min for phase1_observer (Etsy browser ops). No regression budget set. |
 | **Stress** | 🔴 MISSING | No soak test for prolonged sidecar runs or accumulating publish_candidates. |
-| **Security** | ⚠️ `scripts/secret_scan.py --all` — **currently exits 1** | Tracked-file secret-leak scanner, now with its own tests (`tests/test_secret_scan.py`, Surface 130). Zero install (pure stdlib + git). 2026-11-16: duck-ops clean (314 files), paint-to-print-3d clean (108), **duckAgent 6 findings** — `test/.env.clean|.env.clean2|.env.final` hold live Shopify + OpenAI credentials, tracked since the 2026-02-24 initial commit. Rotation is Tier 3 and deferred by the operator, so `--all` stays non-zero and `/deploy-check` will BLOCK on it until the keys are rotated or the files leave HEAD. Do not read a prior "clean" line as current — this row asserted 0 findings for nine months while the scanner was skipping those files ([[feedback_pin_the_rule_not_the_reading]]). |
+| **Security** | ⚠️ `scripts/secret_scan.py --all` — **currently exits 1** | Tracked-file secret-leak scanner, now with its own tests (`tests/test_secret_scan.py`, Surface 130). Zero install (pure stdlib + git). 2026-11-16: duck-ops clean (314 files), paint-to-print-3d clean (108), **duckAgent 18 findings** — `test/.env.clean|.env.clean2|.env.final` each hold FIVE live credentials (Shopify access token, OpenAI project key, Etsy API key, PhotoRoom API key, SMTP password), tracked since the 2026-02-24 initial commit. The count was 6 until the secret-named-key rule landed the same day; the three prefixless keys had no pattern. Rotation is Tier 3 and deferred by the operator, so `--all` stays non-zero and `/deploy-check` will BLOCK on it until the keys are rotated or the files leave HEAD. Do not read a prior "clean" line as current — this row asserted 0 findings for nine months while the scanner was skipping those files ([[feedback_pin_the_rule_not_the_reading]]). |
 | **Privacy** | ⚠️  manual | Customer message capture is staged-for-approval only; no automated check that ensures no PII leaks to logs. |
 | **Compatibility** | n/a | Single-machine deployment |
 | **Migration** | ✅ workflow_cooldown_sweeper auto-clears legacy stuck states | Today's bulk-dismiss of 46 stuck items is a one-time data migration |
@@ -161,7 +161,7 @@ Remaining `manual:cron-cadence-race` cells (observer discovery only): the observ
 2. ✅ **CLOSED 2026-05-26: Reject-after-schedule** — product decision 1A + `test_reject_after_schedule_is_no_op` pins it.
 3. ✅ **CLOSED 2026-05-26: Concurrent observer + email-reply race** — product decision 2A + race_detected flag on `publish_review_carousel_run`.
 4. **🔴 Stress / soak** — sidecar runs every 6h × multiple weeks. publish_candidates.json grows. Run a synthetic week-of-data soak test once.
-5. ⚠️ **REOPENED 2026-11-13: Secret-leak automation** — `scripts/secret_scan.py --all` shipped 2026-05-26 and was marked closed on a clean scan of 795 files. That scan was clean because `_is_scannable` matched `.env` against `path.suffix`, so three tracked copies of the live environment were never opened; the "closed" mark rested on the bug. Selection fixed and tested 2026-11-13/16 (Surface 130). Still open: the leaked keys are unrotated and in `origin/master`, and the PATTERN list matches only 2 of the ~5 credentials in those files (`ETSY_API_KEY`, `PHOTOROOM_API_KEY`, `SMTP_PASS` have no pattern). A gap is closed when it is *tested*, not when a run comes back green.
+5. ⚠️ **REOPENED 2026-11-13: Secret-leak automation** — `scripts/secret_scan.py --all` shipped 2026-05-26 and was marked closed on a clean scan of 795 files. That scan was clean because `_is_scannable` matched `.env` against `path.suffix`, so three tracked copies of the live environment were never opened; the "closed" mark rested on the bug. Selection fixed and tested 2026-11-13/16 (Surface 130). Detection widened 2026-11-16 (secret-named-key rule, below): all five credentials in those files are now reported, 6 findings → 18. Still open: the leaked keys are unrotated and in `origin/master`. A gap is closed when it is *tested*, not when a run comes back green.
 
 ---
 
@@ -7608,6 +7608,33 @@ subtests plus the end-to-end `test/.env.clean` regression), and a `_redact` that
 returns its input turns all 4 redaction tests red. Both mutants are caught, so
 the suite defends the fix rather than describing it ([[feedback_pin_the_rule_not_the_reading]]).
 
+**A credential with no prefix (2026-11-16).** `PATTERNS` is a prefix list, so
+`ETSY_API_KEY`, `PHOTOROOM_API_KEY` and `SMTP_PASS` — three of the five real
+credentials in the leak — matched nothing. The rule that closes it keys on the
+VARIABLE NAME (`(^|_)(KEY|SECRET|TOKEN|PASS|PASSWORD|CREDENTIAL|AUTH)$`), with
+length ≥ 16 and entropy ≥ 3.0 as tiebreakers, scoped to env-shaped files.
+
+That ordering is measured, not assumed, and the measurement overturned the
+obvious design. **Entropy alone would have been useless here:** in
+`test/.env.clean` the real `SMTP_PASS` scores H=3.88 while the harmless
+`PHOTOROOM_BG_PROMPT` scores 4.09 and 25 template strings outrank it, so an
+H ≥ 3.5 rule would have reported ~25 non-secrets and been switched off inside a
+week. The name is the discriminator: of 97 assignments in that file exactly 6
+are keyed on a secret word and **all 6 are credentials**, and the tracked
+`.env.example`, whose values are placeholders, has **none**. Scoped to env
+files because `TOKEN = os.getenv(...)` and `{"api_key_env": "OPENAI_API_KEY"}`
+are everywhere in .py/.json and carry no secret.
+
+| Use case | Prefixless credential | Harmless high entropy | Placeholder | Identifier-named | Wrong file type | Duplicate |
+|---|---|---|---|---|---|---|
+| Secret-named key rule | unit:5 subtests (Etsy/PhotoRoom/SMTP/AWS/Shopify-secret) | unit:1 (3 real values that out-score the real password) | unit:10 subtests (`.env.example` shapes, `${VAR}`, repeats) | unit:8 subtests (`*_TEMPLATE_ID`, `_DOMAIN`, `SMTP_USER`) | unit:2 (.py/.json quiet, .env.staging flagged) | unit:1 (prefix match wins, one finding) |
+
+Mutation-verified against the four designs that were rejected: entropy-only
+(name scope removed) → 9 red, no placeholder rejection → 6 red, rule not scoped
+to env files → 2 red, min length 8 → 1 red. The `.env.example` case is the one
+that matters most — a rule that fires on placeholders gets muted, and a muted
+guard protects nothing.
+
 The fixtures are real token shapes, and they stay invisible to the live `--all`
 scan only because `SKIP_PATH_FRAGMENTS` carries the fragment `test_secret_scan`.
 `test_the_live_scan_skips_this_very_file` pins that, and it was confirmed
@@ -7629,17 +7656,12 @@ repo does not make Drive re-upload 17 MB nightly.
   files from HEAD does not purge the blobs, and `origin/master` already has
   them. Only rotation closes it: Shopify Admin API token, Etsy API key, OpenAI
   project key. Tier 3, operator's call — not done here.
-- **The scanner's PATTERN list sees only part of this leak.** Closing the
-  selection gap exposed a detection gap underneath it: of the credential-shaped
-  values in those three tracked files, only `SHOPIFY_TOKEN` (`shpat_`) and
-  `OPENAI_API_KEY` (`sk-proj-`) match any pattern. `ETSY_API_KEY` (24 chars),
-  `PHOTOROOM_API_KEY` (56 chars) and `SMTP_PASS` (16 chars) are real
-  credentials that no pattern matches, so the scan reports 6 findings for a
-  leak that is wider than 6. These keys have no distinctive prefix, and a bare
-  length/entropy rule would fire on the ~30 UUID template ids sitting in the
-  same file — so this needs a `KEY|SECRET|TOKEN|PASS=<high-entropy>` rule
-  scoped to env-shaped files, not another prefix. Until then the scan's silence
-  about a credential is not evidence.
+- **The scanner cannot see a credential inside a BINARY tracked file.** The
+  pre-zip bundle scan covers the Drive path, but a credential committed inside
+  a `.xlsx`, a `.sqlite` or a notebook's stored output is invisible to a
+  repo-wide `--all` run, and nothing grades that. Lower risk than the env gap
+  (nothing currently commits such a file) and left open deliberately rather
+  than guessed at.
 - **The bundles are working-tree content, not a commit.** Both repos run dirty
   for days, so the published code can be ahead of every commit and is not
   guaranteed to be a state that was ever tested as a whole. The README says so;

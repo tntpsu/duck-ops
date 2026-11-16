@@ -396,3 +396,121 @@ class OwnedReposTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class SecretNamedKeysWithoutAPrefixTests(unittest.TestCase):
+    """The 2026-11-16 addition: credentials with no distinctive prefix.
+
+    The leak had five credentials and PATTERNS matched two. These tests pin the
+    rule that closes the other three, and -- more importantly -- pin WHY it is
+    keyed on the variable name rather than on entropy.
+    """
+
+    def _scan(self, files: dict[str, str]) -> list[dict]:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp) / "repo", tracked=files)
+            return secret_scan.scan_repo(repo)
+
+    def test_the_three_prefixless_credentials_are_found(self):
+        # Real names and real lengths from test/.env.clean; fake values.
+        for key, value in (("ETSY_API_KEY", "v7fq8x2mz0kd4ptw9r3o"),
+                           ("PHOTOROOM_API_KEY", "sk_p" + "7bq3mz8xv2ld9ktw" * 2),
+                           ("SMTP_PASS", "vheoqxzlmrktpqmb"),
+                           ("AWS_SECRET_ACCESS_KEY", "9f2kqz7mxv3bld8twr4npc6h"),
+                           ("SHOPIFY_TOKEN_SECRET", "q8mz3xv7bld9ktwr2npc")):
+            with self.subTest(key=key):
+                self.assertGreaterEqual(len(value), 16, "fixture too short to qualify")
+                findings = self._scan({".env.leaked": f"{key}={value}\n"})
+                self.assertEqual(len(findings), 1, f"{key} not flagged")
+                self.assertIn(key, findings[0]["pattern"])
+                self.assertNotIn(value, findings[0]["redacted_excerpt"])
+
+    def test_entropy_alone_would_have_flagged_the_harmless_values(self):
+        # The measurement that decided the design, kept as a test so nobody
+        # "simplifies" the rule into a bare entropy threshold later. These are
+        # real values from the same file as the real SMTP_PASS, and they score
+        # HIGHER than it does.
+        real_secret = "vheoqxzlmrktpqmb"                    # SMTP_PASS, H=3.88
+        harmless = {
+            "PHOTOROOM_BG_PROMPT": "a clean studio backdrop, soft light, no props",
+            "MEME_TPL_SPLIT_CTA": "meme_split_cta_template_v2_final_x",
+            "WEEKLY_TOP_DUCKS_TEMPLATE_ID": "d41d8cd98f00b204e9800998",
+        }
+        for name, value in harmless.items():
+            with self.subTest(name=name):
+                self.assertGreaterEqual(
+                    secret_scan._shannon_entropy(value),
+                    secret_scan.MIN_SECRET_VALUE_ENTROPY,
+                    "fixture should clear the entropy floor -- that is the point")
+        self.assertGreater(
+            secret_scan._shannon_entropy(harmless["PHOTOROOM_BG_PROMPT"]),
+            secret_scan._shannon_entropy(real_secret),
+            "the harmless prompt really does out-score the real password")
+        # ...and none of them is flagged, because none is keyed on a secret word.
+        body = "".join(f"{k}={v}\n" for k, v in harmless.items())
+        self.assertEqual(self._scan({".env.harmless": body}), [])
+
+    def test_placeholder_values_stay_quiet(self):
+        # A tracked `.env.example` is normal and its values are placeholders.
+        # If this rule fires there it gets switched off, and then it protects
+        # nothing ([[feedback_no_silent_caps]] -- a muted guard is no guard).
+        for value in ("your_token_here_goes_here", "CHANGEME_CHANGEME_CHANGEME",
+                      "${SHOPIFY_TOKEN}", "$SHOPIFY_TOKEN",
+                      "<insert-your-key-here>", "xxxxxxxxxxxxxxxxxxxx",
+                      "aaaaaaaaaaaaaaaaaaaaaa", "replace-with-real-key",
+                      "example-key-not-real-value", "sk-ant-REDACTED-example"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self._scan({".env.example": f"SHOPIFY_TOKEN={value}\n"}), [],
+                    f"placeholder {value!r} must not be reported")
+
+    def test_a_short_value_is_not_key_material(self):
+        fifteen = "q8mz3xv7bld9ktw"
+        self.assertEqual(len(fifteen), 15)
+        self.assertEqual(self._scan({".env.x": f"API_KEY={fifteen}\n"}), [])
+        sixteen = fifteen + "r"
+        self.assertEqual(len(self._scan({".env.x": f"API_KEY={sixteen}\n"})), 1)
+
+    def test_the_rule_is_scoped_to_env_shaped_files(self):
+        # `TOKEN = os.getenv(...)` and `{"api_key_env": "OPENAI_API_KEY"}` are
+        # everywhere in .py/.json and carry no secret, so the generic rule must
+        # not run there. The prefix PATTERNS still do.
+        body = "SHOPIFY_TOKEN=q8mz3xv7bld9ktwr2npc6h\n"
+        self.assertEqual(self._scan({"settings.py": body}), [])
+        self.assertEqual(self._scan({"settings.json": body}), [])
+        self.assertEqual(len(self._scan({".env.staging": body})), 1)
+
+    def test_a_prefix_match_is_not_reported_twice(self):
+        # shpat_ is both a PATTERN match and a secret-named assignment. One
+        # line, one finding, and it is the specific one.
+        token = "shpat_" + "ab" * 16
+        findings = self._scan({".env.dup": f"SHOPIFY_TOKEN={token}\n"})
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["pattern"], "Shopify access token")
+
+    def test_export_and_quoting_forms_are_handled(self):
+        value = "q8mz3xv7bld9ktwr2npc6h"
+        for line in (f'export ETSY_API_KEY={value}',
+                     f'ETSY_API_KEY="{value}"',
+                     f"ETSY_API_KEY='{value}'",
+                     f"ETSY_API_KEY = {value}"):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    len(self._scan({".env.forms": line + "\n"})), 1, line)
+
+    def test_comments_and_blank_lines_are_ignored(self):
+        value = "q8mz3xv7bld9ktwr2npc6h"
+        body = f"# ETSY_API_KEY={value}\n\n   \n#SMTP_PASS={value}\n"
+        self.assertEqual(self._scan({".env.commented": body}), [])
+
+    def test_a_key_named_for_an_identifier_is_not_a_secret(self):
+        # TEMPLATE_ID / API_VERSION / _DOMAIN are the shapes that share a file
+        # with the real keys. The name anchor is what keeps them out.
+        for key in ("WEEKLY_TOP_DUCKS_TEMPLATE_ID", "GTDF_TEMPLATE_ID",
+                    "SHOPIFY_API_VERSION", "SHOPIFY_DOMAIN", "SMTP_USER",
+                    "EMAIL_TO", "MEME_TEMPLATES_ALLOWED", "ETSY_KEYSTRING_ID"):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    self._scan({".env.ids": f"{key}=q8mz3xv7bld9ktwr2npc6h\n"}), [],
+                    f"{key} is an identifier, not a credential")

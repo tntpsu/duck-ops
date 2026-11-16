@@ -26,9 +26,11 @@ swap in gitleaks (brew install gitleaks; gitleaks detect --source .).
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 # Patterns curated from gitleaks' default ruleset. Each is conservative
@@ -120,6 +122,95 @@ def _is_scannable(path: Path) -> bool:
     return path.suffix == ""
 
 
+# A credential with no distinctive prefix is invisible to PATTERNS. The
+# 2026-11-13 leak had five: `shpat_` and `sk-proj-` matched, while
+# ETSY_API_KEY (24 chars), PHOTOROOM_API_KEY (56) and SMTP_PASS (16) matched
+# nothing, so the scan reported 6 findings for a wider leak.
+#
+# Entropy alone cannot close that, and measuring it said so loudly: in
+# `test/.env.clean` the real SMTP_PASS scores H=3.88 while the harmless
+# PHOTOROOM_BG_PROMPT scores 4.09 and 25 template strings outrank it. A bare
+# H>=3.5 rule would have flagged ~25 non-secrets and been muted within a week.
+#
+# The NAME is the discriminator. Of the 97 assignments in that file exactly 6
+# are keyed on a secret word, and all 6 are credentials; `.env.example`, whose
+# values are placeholders, has none at all. So entropy is only a tiebreaker
+# here, and the rule is scoped to env-shaped files because `TOKEN =
+# os.getenv(...)` and `{"api_key_env": "OPENAI_API_KEY"}` are everywhere in
+# .py/.json and carry no secret.
+SECRET_KEY_NAME = re.compile(
+    r"(?i)(?:^|_)(KEY|SECRET|TOKEN|PASS|PASSWORD|CREDENTIAL|CREDENTIALS|AUTH)\s*$")
+
+#: Below this length a value cannot hold meaningful key material; the shortest
+#: real credential in the known leak is SMTP_PASS at exactly 16.
+MIN_SECRET_VALUE_LEN = 16
+
+#: Shannon entropy floor. Deliberately low (3.0) because the NAME has already
+#: done the filtering -- this only rejects a repetitive or obviously structured
+#: value that slipped through on a secret-sounding key.
+MIN_SECRET_VALUE_ENTROPY = 3.0
+
+#: Values that are shaped like a credential but are not one. A placeholder is
+#: the normal content of a tracked `.env.example`, which must stay quiet or
+#: the rule gets switched off.
+_PLACEHOLDER_MARKERS = (
+    "your_", "your-", "yourkey", "changeme", "change_me", "change-me",
+    "example", "placeholder", "redacted", "dummy", "sample", "insert",
+    "todo", "fixme", "xxxx", "<", "replace", "notreal", "fake",
+)
+
+
+def _shannon_entropy(value: str) -> float:
+    """Bits per character. Used only as a tiebreaker -- see SECRET_KEY_NAME."""
+    if not value:
+        return 0.0
+    counts = Counter(value)
+    length = len(value)
+    return -sum((n / length) * math.log2(n / length) for n in counts.values())
+
+
+def _looks_like_a_placeholder(value: str) -> bool:
+    low = value.lower()
+    if any(marker in low for marker in _PLACEHOLDER_MARKERS):
+        return True
+    # `${VAR}` / `$VAR` / `$(cmd)` is a reference to a secret, not a secret.
+    if value.startswith("$"):
+        return True
+    # A single repeated character carries no key material.
+    return len(set(value)) <= 2
+
+
+def _is_env_shaped(path: Path) -> bool:
+    """Is this a file whose lines are `NAME=value` environment assignments?"""
+    name = path.name.lower()
+    return name.startswith(SCAN_BASENAME_PREFIXES) or path.suffix.lower() == ".env"
+
+
+def _secret_named_assignments(text: str) -> list[tuple[int, str, str]]:
+    """Return `(lineno, key, value)` for every assignment whose KEY names a
+    secret and whose VALUE is long and varied enough to be one."""
+    hits: list[tuple[int, str, str]] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        if stripped.lower().startswith("export "):
+            stripped = stripped[len("export "):].lstrip()
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not SECRET_KEY_NAME.search(key):
+            continue
+        if len(value) < MIN_SECRET_VALUE_LEN:
+            continue
+        if _looks_like_a_placeholder(value):
+            continue
+        if _shannon_entropy(value) < MIN_SECRET_VALUE_ENTROPY:
+            continue
+        hits.append((lineno, key, value))
+    return hits
+
+
 def _redact(snippet: str) -> str:
     """Replace the middle of a matched secret with a placeholder so the
     scan output is safe to paste / log without re-leaking the value."""
@@ -142,17 +233,33 @@ def scan_repo(repo: Path) -> list[dict]:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        matched_lines: set[int] = set()
         for lineno, line in enumerate(text.splitlines(), start=1):
             for pattern, name in PATTERNS:
                 match = pattern.search(line)
                 if not match:
                     continue
+                matched_lines.add(lineno)
                 findings.append({
                     "repo": str(repo),
                     "path": str(path.relative_to(repo)),
                     "line": lineno,
                     "pattern": name,
                     "redacted_excerpt": _redact(match.group(0)),
+                })
+        if _is_env_shaped(path):
+            for lineno, key, value in _secret_named_assignments(text):
+                # A prefix match on the same line is the more specific and more
+                # actionable finding ("this is a Shopify token"), so the generic
+                # rule yields to it rather than reporting the line twice.
+                if lineno in matched_lines:
+                    continue
+                findings.append({
+                    "repo": str(repo),
+                    "path": str(path.relative_to(repo)),
+                    "line": lineno,
+                    "pattern": f"Secret-named key with a high-entropy value ({key})",
+                    "redacted_excerpt": _redact(value),
                 })
     return findings
 
