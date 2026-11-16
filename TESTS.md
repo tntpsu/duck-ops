@@ -7953,6 +7953,54 @@ order they bit: portrait and we measure the width (the 720-vs-1080 card crop),
 publish time so a baked track may not survive, and the caption posts verbatim
 with no hashtags appended.
 
+## Surface 134 — the return channel, so the two agents can correct each other (2026-11-16, operator: "I also want u to write how it can give u feedback so between both of you can communicate more effectively to improve each other")
+
+The contract was one-way. We published a README, the agent published files,
+and the only thing it could ever learn was that ONE file had been refused —
+by finding a `.reason.txt` it had to know to look for. It could not ask what a
+field meant, say a rule was ambiguous, or find out whether anything it sent
+was ever posted. So the same misunderstanding could repeat every week with
+neither side able to name it, which is exactly how the first drop arrived
+malformed and sat unnoticed for days.
+
+**`status.json`**, rewritten in the drop root on every scan, is the half that
+was missing entirely: per-stem `waiting_for_a_human` / `approved` /
+`published` / `declined` / `not_ready`, each with a plain-language detail, the
+refusals from that scan, and the open lanes. States are phrased for the
+PRODUCER — "waiting on a human" tells an agent something it can act on, while
+`approval=operator_required` tells it only that we have fields. It is written
+even when nothing changed, because "nothing changed" is an answer and an agent
+with no answer repeats itself. A run of `declined` or a pile of `not_ready` is
+the signal to ask rather than send more of the same.
+
+**`feedback/`** is agent → us, and is deliberately NOT validated the way a drop
+is: a refused drop is safe, a refused question is a channel nobody uses twice.
+JSON is read structurally (`from`/`subject`/`about`/`body`), anything else as
+prose, and unparseable JSON is surfaced rather than rejected — a note we cannot
+parse is itself a message about the contract. The README asks for
+disagreement, not just questions: "including that a rule here is wrong".
+
+**`answers/`** is us → agent. `answer_feedback` writes the reply into the
+SYNCED folder as well as the ledger, because recording it only on our side
+would be the same one-way failure the channel exists to fix.
+
+### Covered
+
+| Use case | Happy | Absent | Malformed | Duplicate | Isolation |
+|---|---|---|---|---|---|
+| status.json | unit:5 subtests (every state) + claim-outranks-approval | unit:1 (says to look in rejected/) | — | — | — |
+| feedback in | unit:2 (json, prose) | unit:1 (unknown extension ignored) | unit:2 (unparseable surfaced, oversized) | unit:1 (filed once, not re-collected) | — |
+| answers out | unit:2 (published to answers/, ledger marked) | unit:1 (unknown note refused) | — | unit:1 (older note never dropped) | — |
+| README | unit:5 subtests (names every channel + state) | — | — | — | — |
+| Ledger | — | — | — | — | unit:1 frozen-path guard + conftest redirect + post-suite audit (3 layers) |
+
+`tests/test_drop_feedback_loop.py` (21 tests) and the new class in
+`tests/test_no_test_pollution_in_drop_proposals.py`. duck-ops 1753 passed.
+
+The feedback ledger got all three isolation layers because a fixture row here
+is worse than ordinary pollution: it reads as an unanswered question from a
+real agent.
+
 ### Open
 
 - ~~Nine lanes still cannot take a drop.~~ **duckvideo wired 2026-11-16**, so

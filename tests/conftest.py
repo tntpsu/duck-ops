@@ -171,6 +171,12 @@ def _isolate_drop_intake(monkeypatch, tmp_path):
     monkeypatch.setattr(
         drop_intake, "DROP_INTAKE_STATE_PATH", tmp_path / "drop_intake.json"
     )
+    # Feedback is a durable prod-path constant like the ledger, so it gets the
+    # same redirect. A fixture note in the live file is worse than noise: it
+    # would read as an unanswered question from a real agent.
+    monkeypatch.setattr(
+        drop_intake, "DROP_FEEDBACK_PATH", tmp_path / "drop_feedback.json"
+    )
     yield
 
 

@@ -78,6 +78,24 @@ INBOX_DIR = "inbox"
 ACCEPTED_DIR = "accepted"
 REJECTED_DIR = "rejected"
 
+#: The return channel. Until now this was a one-way contract: we published a
+#: README and the agent published files, and the only thing it could learn was
+#: whether one file was refused. It could not ask what a field meant, say a
+#: rule was ambiguous, or find out whether anything it sent was ever posted --
+#: so the same misunderstanding could repeat weekly with nobody able to name
+#: it. These three close the loop.
+FEEDBACK_DIR = "feedback"      # agent -> us: questions, problems, suggestions
+ANSWERS_DIR = "answers"        # us -> agent: replies, and changes we made
+FEEDBACK_READ_DIR = "feedback/read"
+STATUS_FILE = "status.json"    # what happened to every drop, machine-readable
+
+#: Feedback is deliberately NOT validated the way a drop is. A refused drop is
+#: safe; a refused question is a channel nobody uses. Anything readable is
+#: accepted and surfaced -- the worst case is a note we cannot parse, which is
+#: itself worth seeing.
+FEEDBACK_EXTS = {".json", ".md", ".txt"}
+MAX_FEEDBACK_BYTES = 256 * 1024
+
 def _mirror_root() -> Path:
     """The mirror's published root. Used only to refuse a catastrophic misconfig.
 
@@ -106,6 +124,12 @@ DROP_INTAKE_STATE_PATH = REPO_ROOT / "state" / "drop_intake.json"
 #: Tuesday's scan finds an empty inbox. A claim has to outlive the scan that
 #: created it, so it lives here instead.
 DROP_PROPOSALS_PATH = REPO_ROOT / "state" / "drop_proposals.json"
+#: Feedback goes in a durable ledger for the same reason proposals do: the
+#: per-scan manifest is rewritten whole, so a note would vanish on the next
+#: empty scan and nobody would ever answer it.
+DROP_FEEDBACK_PATH = REPO_ROOT / "state" / "drop_feedback.json"
+_FROZEN_PRODUCTION_FEEDBACK_PATH = (
+    REPO_ROOT / "state" / "drop_feedback.json").resolve()
 
 _FROZEN_PRODUCTION_PROPOSALS_PATH = (
     REPO_ROOT / "state" / "drop_proposals.json"
@@ -127,11 +151,16 @@ def _refuse_test_mode_prod_write(path: Path) -> None:
         resolved = Path(path).resolve()
     except Exception:  # pragma: no cover - defensive
         return
-    if resolved == _FROZEN_PRODUCTION_PROPOSALS_PATH:
+    frozen = {
+        _FROZEN_PRODUCTION_PROPOSALS_PATH: "proposal ledger",
+        _FROZEN_PRODUCTION_FEEDBACK_PATH: "feedback ledger",
+    }
+    which = frozen.get(resolved)
+    if which:
         raise TestModeRefusalError(
             f"drop_intake refused to write {resolved}: "
             f"{_TEST_MODE_REFUSAL_ENV}=1 and this is the frozen production "
-            f"proposal ledger."
+            f"{which}."
         )
 
 #: Lanes a drop may name, from the flow registry rather than a second list
@@ -617,6 +646,16 @@ def scan_inbox(drop_root: Path | None = None, *,
 # 2 is governance, and it is why a drop cannot reach the public by itself.
 
 
+def _read_json_file(path: Path) -> dict:
+    """Whole-document read. `_read_ledger` returns only the proposals map, so
+    the feedback ledger -- which has a different shape -- needs its own."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _read_ledger(path: Path) -> dict:
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -661,6 +700,63 @@ def record_proposals(manifest: dict, ledger_path: Path | None = None) -> dict:
         _write_ledger(path, proposals)
     manifest["ledger_added"] = added
     return proposals
+
+
+def record_feedback(notes: list[dict], *,
+                    ledger_path: Path | None = None) -> dict:
+    """Append notes to the durable feedback ledger. Never drops an older one."""
+    path = Path(ledger_path) if ledger_path is not None else DROP_FEEDBACK_PATH
+    _refuse_test_mode_prod_write(path)
+    existing = _read_json_file(path) if path.exists() else {}
+    items = existing.get("notes")
+    items = items if isinstance(items, list) else []
+    seen = {(n.get("file"), n.get("received_at")) for n in items
+            if isinstance(n, dict)}
+    for note in notes:
+        if (note.get("file"), note.get("received_at")) in seen:
+            continue
+        items.append({**note, "answered_at": None, "answer": None})
+    payload = {"generated_at": datetime.now().astimezone().isoformat(),
+               "note_count": len(items), "notes": items}
+    _write_json_atomic(path, payload)
+    return payload
+
+
+def answer_feedback(file_name: str, answer: str, *,
+                    drop_root: Path | None = None,
+                    ledger_path: Path | None = None) -> dict:
+    """Record an answer AND publish it where the agent will actually see it.
+
+    Writing it only into our ledger would be the same one-way failure this
+    channel exists to fix, so the reply is also written into the synced
+    answers/ folder.
+    """
+    path = Path(ledger_path) if ledger_path is not None else DROP_FEEDBACK_PATH
+    _refuse_test_mode_prod_write(path)
+    payload = _read_json_file(path) if path.exists() else {}
+    items = payload.get("notes")
+    items = items if isinstance(items, list) else []
+    match = next((n for n in items if n.get("file") == file_name), None)
+    if match is None:
+        raise DropRefused(f"no feedback note named {file_name!r}")
+    stamp = datetime.now().astimezone().isoformat()
+    match["answered_at"] = stamp
+    match["answer"] = answer
+    payload.update({"generated_at": stamp, "note_count": len(items),
+                    "notes": items})
+    _write_json_atomic(path, payload)
+
+    root = Path(drop_root) if drop_root is not None else DROP_ROOT
+    out = root / ANSWERS_DIR
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"{Path(file_name).stem}.answer.md").write_text(
+            f"# Re: {match.get('subject') or file_name}\n\n"
+            f"Answered {stamp}\n\n{answer}\n", encoding="utf-8")
+    except OSError as exc:  # pragma: no cover
+        print(f"[drop-intake] answer not published to {out}: {exc}",
+              file=sys.stderr)
+    return match
 
 
 def set_approval(stem: str, approved: bool, *, by: str = "operator",
@@ -834,6 +930,44 @@ verbatim. Nothing is appended, so a caption with no hashtags gets none.
 **One asset per drop.** A drop is a single panel or a single clip, never a
 deck or a carousel.
 
+
+## Talking back
+
+This is not a one-way contract. Three channels run the other direction, and
+using them is how this gets better instead of repeating the same
+misunderstanding every week.
+
+**`status.json`** — read this first, every time. It is rewritten on every
+scan and says what happened to every file you have sent:
+
+    waiting_for_a_human   accepted, the operator has not decided yet
+    approved              approved, waiting for its lane's next run
+    published             a run took it; it is on the lane
+    declined              the operator said no; it will never be posted
+    not_ready             accepted, but post_ready was false, so no run
+                          will ever take it
+
+If a file you sent is not listed at all, it was refused before it became a
+proposal: look in `rejected/` for a `.reason.txt` with the same name. Those
+reasons are written for you, not for us -- they say what to change.
+
+A run of `declined`, or a pile of `not_ready`, is the signal to ask rather
+than to send more of the same.
+
+**`feedback/`** — write a `.json`, `.md` or `.txt` file here to ask a
+question, say a rule is ambiguous, report that something did not work, or
+propose a change. For JSON we read `from`, `subject`, `about` and `body`;
+anything else is read as prose. It is deliberately NOT validated the way a
+drop is -- a refused drop is safe, a refused question is a channel nobody
+uses twice. Say what you actually think, including that a rule here is wrong.
+
+Worth sending: a field whose meaning you had to guess, a refusal you did not
+understand, a constraint that made you produce something worse, or a pattern
+you noticed in what gets approved.
+
+**`answers/`** — replies land here as `<your-file>.answer.md`. When an answer
+changes a rule, this README changes too, so re-read it when an answer says so.
+
 The source data these posts should be built from is the separate `DuckData`
 sync folder. Read its README.md first: most of that tree is a current
 snapshot, not a history, and its Retention section says which parts are which.
@@ -854,11 +988,141 @@ and anything left there is erased on the next run.
 """
 
 
+def _drop_state(entry: dict) -> tuple[str, str]:
+    """(state, detail) for one ledger entry, in the agent's terms.
+
+    Deliberately phrased for the producer, not for us: "waiting for a human"
+    tells an agent something it can act on, while `approval=operator_required`
+    tells it only that we have fields.
+    """
+    if entry.get("claimed_by"):
+        return ("published", "a scheduled run took it; it is on the lane")
+    approval = str(entry.get("approval") or "")
+    if approval == "declined":
+        return ("declined", "the operator declined it; it will never be posted")
+    if approval == "approved":
+        return ("approved", "approved and waiting for its lane's next run")
+    if not entry.get("post_ready"):
+        return ("not_ready",
+                "accepted, but the sidecar said post_ready:false, so no run "
+                "will take it")
+    return ("waiting_for_a_human", "accepted and waiting on the operator")
+
+
+def write_status_file(drop_root: Path, proposals: dict,
+                      *, refused: list[dict] | None = None,
+                      now: datetime | None = None) -> Path:
+    """Publish what happened to every drop, where the agent can read it.
+
+    This is the half of the loop that was missing. The agent could learn that
+    ONE file was refused, by finding a .reason.txt it had to know to look for,
+    and nothing at all about whether a file it sent was ever posted. So it had
+    no way to tell a good drop from an ignored one, and no reason to change
+    anything.
+    """
+    now = now or datetime.now().astimezone()
+    drops = {}
+    for stem, entry in (proposals or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        state, detail = _drop_state(entry)
+        drops[stem] = {
+            "lane": entry.get("lane"),
+            "state": state,
+            "detail": detail,
+            "received_at": entry.get("received_at"),
+            "claimed_by": entry.get("claimed_by"),
+            "claimed_at": entry.get("claimed_at"),
+        }
+    payload = {
+        "generated_at": now.isoformat(),
+        "doc": ("What happened to each file you dropped. Rewritten every scan. "
+                "`state` is one of: waiting_for_a_human, approved, published, "
+                "declined, not_ready. If something you sent is not listed at "
+                "all it was refused before it became a proposal -- look in "
+                f"{REJECTED_DIR}/ for a .reason.txt with the same name."),
+        "lanes_open_for_drops": sorted(consuming_lanes()),
+        "drops": drops,
+        "refused_this_scan": [
+            {"asset": r.get("asset"), "reason": r.get("reason")}
+            for r in (refused or []) if isinstance(r, dict)
+        ],
+        "how_to_reply": (
+            f"Write a .json, .md or .txt file into {FEEDBACK_DIR}/ to ask a "
+            f"question or flag a problem. Answers appear in {ANSWERS_DIR}/."),
+    }
+    path = Path(drop_root) / STATUS_FILE
+    _write_json_atomic(path, payload)
+    return path
+
+
+def collect_feedback(drop_root: Path, *, now: datetime | None = None) -> list[dict]:
+    """Pick up notes the agent left for us, and file them.
+
+    Not validated the way a drop is, on purpose: a refused drop is safe, a
+    refused question is a channel nobody uses twice. Anything readable is
+    taken. A note we cannot parse is still surfaced, because an unparseable
+    note is itself a message about the contract.
+    """
+    now = now or datetime.now().astimezone()
+    inbox = Path(drop_root) / FEEDBACK_DIR
+    read_dir = Path(drop_root) / FEEDBACK_READ_DIR
+    if not inbox.is_dir():
+        return []
+    collected: list[dict] = []
+    for path in sorted(inbox.iterdir()):
+        if path.is_dir() or path.name.startswith("."):
+            continue
+        if path.suffix.lower() not in FEEDBACK_EXTS:
+            continue
+        try:
+            if path.stat().st_size > MAX_FEEDBACK_BYTES:
+                body, parsed = "(note too large to read)", None
+            else:
+                body = path.read_text(encoding="utf-8", errors="replace")
+                parsed = None
+                if path.suffix.lower() == ".json":
+                    try:
+                        parsed = json.loads(body)
+                    except Exception:
+                        parsed = None
+        except OSError as exc:  # pragma: no cover - unreadable file
+            body, parsed = f"(could not read: {exc})", None
+        note = {
+            "file": path.name,
+            "received_at": now.isoformat(),
+            "from": (parsed or {}).get("from") if isinstance(parsed, dict) else None,
+            "subject": (parsed or {}).get("subject") if isinstance(parsed, dict) else None,
+            "about": (parsed or {}).get("about") if isinstance(parsed, dict) else None,
+            "body": ((parsed or {}).get("body") if isinstance(parsed, dict) else None)
+                    or body[:MAX_FEEDBACK_BYTES],
+            "parsed": isinstance(parsed, dict),
+        }
+        collected.append(note)
+        try:
+            read_dir.mkdir(parents=True, exist_ok=True)
+            os.replace(path, _unique_dest(read_dir, path.name))
+        except OSError as exc:  # pragma: no cover
+            print(f"[drop-intake] could not file feedback {path.name}: {exc}",
+                  file=sys.stderr)
+    return collected
+
+
+def _unique_dest(dest_dir: Path, name: str) -> Path:
+    dest = dest_dir / name
+    n = 2
+    while dest.exists():
+        dest = dest_dir / f"{Path(name).stem}_{n}{Path(name).suffix}"
+        n += 1
+    return dest
+
+
 def init_drop_root(drop_root: Path | None = None) -> Path:
     drop_root = Path(drop_root) if drop_root is not None else DROP_ROOT
     _refuse_if_inside_mirror(drop_root)
     _refuse_if_symlinked(drop_root)
-    for sub in (INBOX_DIR, ACCEPTED_DIR, REJECTED_DIR):
+    for sub in (INBOX_DIR, ACCEPTED_DIR, REJECTED_DIR,
+                FEEDBACK_DIR, FEEDBACK_READ_DIR, ANSWERS_DIR):
         (drop_root / sub).mkdir(parents=True, exist_ok=True)
     # The lane list is rendered from the registry rather than typed into the
     # template: a lane added upstream would otherwise be refused here while
@@ -891,7 +1155,39 @@ def main(argv: list[str] | None = None) -> int:
                     help="approve a proposal so a flow may publish it")
     ap.add_argument("--decline", metavar="STEM",
                     help="decline a proposal so no flow ever takes it")
+    ap.add_argument("--feedback", action="store_true",
+                    help="show notes the agent has left for us")
+    ap.add_argument("--answer", nargs=2, metavar=("FILE", "TEXT"),
+                    help="answer a feedback note; the reply is published "
+                         "into the synced answers/ folder")
     args = ap.parse_args(argv)
+
+    if args.feedback:
+        payload = _read_json_file(DROP_FEEDBACK_PATH) if DROP_FEEDBACK_PATH.exists() else {}
+        notes = payload.get("notes") or []
+        if not notes:
+            print("[drop-intake] no feedback")
+            return 0
+        for n in notes:
+            mark = "ANSWERED" if n.get("answered_at") else "UNANSWERED"
+            print(f"  [{mark}] {n.get('file')} — {n.get('subject') or '(no subject)'}"
+                  f" (from {n.get('from') or 'unknown'})")
+            body = str(n.get("body") or "").strip().splitlines()
+            for line in body[:6]:
+                print(f"      {line}")
+            if len(body) > 6:
+                print(f"      ... {len(body) - 6} more line(s)")
+        return 0
+
+    if args.answer:
+        try:
+            note = answer_feedback(args.answer[0], args.answer[1])
+        except DropRefused as exc:
+            print(f"[drop-intake] {exc}", file=sys.stderr)
+            return 1
+        print(f"[drop-intake] answered {note.get('file')}; "
+              f"reply published to {ANSWERS_DIR}/")
+        return 0
 
     ledger_path = Path(args.ledger_path) if args.ledger_path else DROP_PROPOSALS_PATH
 
@@ -934,12 +1230,28 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     manifest = scan_inbox(drop_root, settle=args.settle_seconds)
-    record_proposals(manifest, ledger_path=ledger_path)
+    proposals = record_proposals(manifest, ledger_path=ledger_path)
     state_path = Path(args.state_path) if args.state_path else DROP_INTAKE_STATE_PATH
     _write_json_atomic(state_path, manifest)
+
+    notes = collect_feedback(drop_root)
+    if notes:
+        record_feedback(notes)
+
+    # Publish the outcome of every drop where the agent can read it. Written
+    # on every scan, including an empty one, because "nothing changed" is also
+    # an answer and an agent with no answer assumes the worst or repeats
+    # itself.
+    write_status_file(drop_root, proposals,
+                      refused=manifest.get("rejected") or [])
+
     print(f"[drop-intake] accepted={manifest.get('accepted_count', 0)} "
           f"rejected={manifest.get('rejected_count', 0)} "
-          f"waiting={manifest.get('waiting_count', 0)}")
+          f"waiting={manifest.get('waiting_count', 0)} "
+          f"feedback={len(notes)}")
+    for note in notes:
+        print(f"  FEEDBACK from {note.get('from') or 'an agent'}: "
+              f"{note.get('subject') or note.get('file')}")
     for rec in manifest.get("rejected", []):
         print(f"  REFUSED {rec['asset']}: {rec['reason']}", file=sys.stderr)
     return 0

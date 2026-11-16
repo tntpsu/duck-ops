@@ -63,3 +63,37 @@ class TheLiveLedgerHoldsNoFixturesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheLiveFeedbackLedgerIsCleanTests(unittest.TestCase):
+    """Layer 3 for the feedback ledger (2026-11-16).
+
+    A fixture row here is worse than ordinary test pollution: a note in this
+    file reads as an unanswered question from a real agent, so it would either
+    get answered into the void or make a genuine question harder to spot among
+    the noise.
+    """
+
+    def _notes(self) -> list:
+        path = drop_intake._FROZEN_PRODUCTION_FEEDBACK_PATH
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        notes = payload.get("notes")
+        return notes if isinstance(notes, list) else []
+
+    def test_no_fixture_marker_appears_in_the_live_feedback(self):
+        blob = json.dumps(self._notes()).lower()
+        for marker in FIXTURE_MARKERS:
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker.lower(), blob)
+
+    def test_every_live_note_names_the_file_it_came_from(self):
+        """A note with no source file cannot be answered -- answer_feedback
+        matches on it -- so one would sit unanswerable forever."""
+        for note in self._notes():
+            with self.subTest(note=str(note)[:60]):
+                self.assertTrue(str(note.get("file") or "").strip())
