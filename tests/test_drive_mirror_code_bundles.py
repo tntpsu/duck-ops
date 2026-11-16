@@ -88,8 +88,8 @@ class BundleContentsTests(unittest.TestCase):
         )
 
     def test_a_tracked_env_file_is_excluded_even_though_git_tracks_it(self):
-        """The real case: duckAgent tracks test/.env.clean, which holds the
-        live Shopify and OpenAI keys. `git ls-files` is the INCLUDE boundary;
+        """The real case: a private sibling repo tracks derived `.env` copies
+        holding real credentials. `git ls-files` is the INCLUDE boundary;
         EXCLUDE_NAME_PATTERNS still wins over it."""
         results, _ = self._stage({
             "a.py": "x = 1\n",

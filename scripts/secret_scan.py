@@ -102,10 +102,10 @@ def _git_ls_files(repo: Path) -> list[Path]:
 
 # Basenames that are config text whatever follows the first dot. `.env` is in
 # TEXT_EXTENSIONS, which only ever matched a file whose SUFFIX is `.env`;
-# `.env.clean` has suffix `.clean`, so the three tracked `test/.env.*` copies
-# of the live environment were skipped by this function and the scan reported
-# clean on them from the 2026-02-24 initial commit until 2026-11-13. A derived
-# name is the normal way these files are made, so match on the basename.
+# `.env.clean` has suffix `.clean`, so tracked `.env.*` copies of a live
+# environment file were skipped by this function and the scan reported clean on
+# them for nine months, until 2026-11-13. A derived name is the normal way such
+# a file gets made, so match on the basename.
 SCAN_BASENAME_PREFIXES = (".env", "env.")
 
 
@@ -122,19 +122,20 @@ def _is_scannable(path: Path) -> bool:
     return path.suffix == ""
 
 
-# A credential with no distinctive prefix is invisible to PATTERNS. The
-# 2026-11-13 leak had five: `shpat_` and `sk-proj-` matched, while
-# ETSY_API_KEY (24 chars), PHOTOROOM_API_KEY (56) and SMTP_PASS (16) matched
-# nothing, so the scan reported 6 findings for a wider leak.
+# A credential with no distinctive prefix is invisible to PATTERNS. In the
+# 2026-11-13 finding only two of the five credentials present carried a
+# recognisable prefix; the other three matched nothing, so the scan reported a
+# count well short of the real exposure.
 #
-# Entropy alone cannot close that, and measuring it said so loudly: in
-# `test/.env.clean` the real SMTP_PASS scores H=3.88 while the harmless
-# PHOTOROOM_BG_PROMPT scores 4.09 and 25 template strings outrank it. A bare
+# Entropy alone cannot close that, and measuring it said so loudly: in the real
+# file a genuine 16-character password scores H=3.88 while a harmless prose
+# prompt value scores 4.09 and 25 template-id strings outrank it. A bare
 # H>=3.5 rule would have flagged ~25 non-secrets and been muted within a week.
 #
 # The NAME is the discriminator. Of the 97 assignments in that file exactly 6
-# are keyed on a secret word, and all 6 are credentials; `.env.example`, whose
-# values are placeholders, has none at all. So entropy is only a tiebreaker
+# are keyed on a secret word, and all 6 are credentials; a tracked
+# `.env.example`, whose values are placeholders, has none at all. So entropy is
+# only a tiebreaker
 # here, and the rule is scoped to env-shaped files because `TOKEN =
 # os.getenv(...)` and `{"api_key_env": "OPENAI_API_KEY"}` are everywhere in
 # .py/.json and carry no secret.

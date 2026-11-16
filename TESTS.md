@@ -142,7 +142,7 @@ Remaining `manual:cron-cadence-race` cells (observer discovery only): the observ
 | **Hardware** | n/a | This stack is Python automation; no glasses/devices |
 | **Performance** | ⚠️  manual:observed | Sidecar cycle ~14min for phase1_observer (Etsy browser ops). No regression budget set. |
 | **Stress** | 🔴 MISSING | No soak test for prolonged sidecar runs or accumulating publish_candidates. |
-| **Security** | ⚠️ `scripts/secret_scan.py --all` — **currently exits 1** | Tracked-file secret-leak scanner, now with its own tests (`tests/test_secret_scan.py`, Surface 130). Zero install (pure stdlib + git). 2026-11-16: duck-ops clean (314 files), paint-to-print-3d clean (108), **duckAgent 18 findings** — `test/.env.clean|.env.clean2|.env.final` each hold FIVE live credentials (Shopify access token, OpenAI project key, Etsy API key, PhotoRoom API key, SMTP password), tracked since the 2026-02-24 initial commit. The count was 6 until the secret-named-key rule landed the same day; the three prefixless keys had no pattern. Rotation is Tier 3 and deferred by the operator, so `--all` stays non-zero and `/deploy-check` will BLOCK on it until the keys are rotated or the files leave HEAD. Do not read a prior "clean" line as current — this row asserted 0 findings for nine months while the scanner was skipping those files ([[feedback_pin_the_rule_not_the_reading]]). |
+| **Security** | ⚠️ `scripts/secret_scan.py --all` — **currently exits 1** | Tracked-file secret-leak scanner, now with its own tests (`tests/test_secret_scan.py`, Surface 130). Zero install (pure stdlib + git). 2026-11-16: duck-ops clean (314 files), paint-to-print-3d clean (108), **one private repo non-zero** — an open finding is tracked there, not named here (see "Why specifics are absent" in Surface 130). Run `--all` locally for the detail. `/deploy-check` BLOCKS on a non-zero scan by design, so that repo's multi-file commits are gated until it clears. Do not read a prior "clean" line as current — this row asserted 0 findings for nine months while the scanner was skipping files it should have read ([[feedback_pin_the_rule_not_the_reading]]). |
 | **Privacy** | ⚠️  manual | Customer message capture is staged-for-approval only; no automated check that ensures no PII leaks to logs. |
 | **Compatibility** | n/a | Single-machine deployment |
 | **Migration** | ✅ workflow_cooldown_sweeper auto-clears legacy stuck states | Today's bulk-dismiss of 46 stuck items is a one-time data migration |
@@ -161,7 +161,7 @@ Remaining `manual:cron-cadence-race` cells (observer discovery only): the observ
 2. ✅ **CLOSED 2026-05-26: Reject-after-schedule** — product decision 1A + `test_reject_after_schedule_is_no_op` pins it.
 3. ✅ **CLOSED 2026-05-26: Concurrent observer + email-reply race** — product decision 2A + race_detected flag on `publish_review_carousel_run`.
 4. **🔴 Stress / soak** — sidecar runs every 6h × multiple weeks. publish_candidates.json grows. Run a synthetic week-of-data soak test once.
-5. ⚠️ **REOPENED 2026-11-13: Secret-leak automation** — `scripts/secret_scan.py --all` shipped 2026-05-26 and was marked closed on a clean scan of 795 files. That scan was clean because `_is_scannable` matched `.env` against `path.suffix`, so three tracked copies of the live environment were never opened; the "closed" mark rested on the bug. Selection fixed and tested 2026-11-13/16 (Surface 130). Detection widened 2026-11-16 (secret-named-key rule, below): all five credentials in those files are now reported, 6 findings → 18. Still open: the leaked keys are unrotated and in `origin/master`. A gap is closed when it is *tested*, not when a run comes back green.
+5. ⚠️ **REOPENED 2026-11-13: Secret-leak automation** — `scripts/secret_scan.py --all` shipped 2026-05-26 and was marked closed on a clean scan of 795 files. That scan was clean because `_is_scannable` matched `.env` against `path.suffix`, so tracked copies of a live environment file were never opened; the "closed" mark rested on the bug. Selection fixed and tested 2026-11-13/16 (Surface 130), detection widened the same day by the secret-named-key rule below. An unresolved finding remains, tracked privately. A gap is closed when it is *tested*, not when a run comes back green.
 
 ---
 
@@ -7560,12 +7560,18 @@ manifest, the run history, and a `CREDENTIAL FINDING:` line on stderr.
 
 ### What building the gate found
 
-`duckAgent` tracks three files — `test/.env.clean`, `test/.env.clean2`,
-`test/.env.final` — that hold the **live** Shopify access token, Etsy API key
-and OpenAI project key. Verified by comparing values against the running
-`.env`: identical. They have been in `origin/master` since the 2026-02-24
-initial commit. The repo is private, which is the only reason this is a finding
-and not an incident.
+A private sibling repo tracks several derived copies of its live environment
+file, and they hold real credentials — verified by comparing the values against
+the running `.env`: identical. They have been committed since that repo's
+initial commit. That repo is private, which is the only reason this is a
+finding and not an incident.
+
+**Why specifics are absent.** This file is in a PUBLIC repo. Naming the paths,
+the key types and the rotation status would publish a precise, permanently
+indexed map of unresolved exposure in a private one, which is worth more to an
+attacker than it is to us. The mechanism below is the reusable part and is
+stated in full; the inventory is one `secret_scan.py --all` away for anyone with
+the checkouts, which is exactly the audience that needs it.
 
 `scripts/secret_scan.py` reported **clean** on all three for nine months, and
 the mechanism is worth stating precisely because the first reading was wrong.
@@ -7590,7 +7596,7 @@ it existed to catch.
 | Bundle contents | unit:1 (members named `<repo>/<rel>`) | unit:1 (4 `.env*` excluded though tracked) | unit:1 | unit:1 (`source_missing`, no `code/` dir) | — | — |
 | Pre-zip scan | unit:1 (count scanned) | — | — | — | unit:1 (refused, no zip) | — |
 | Refusal hygiene | — | — | — | — | unit:2 (stale bundle removed; excerpt never echoed) | — |
-| Scanner reach | unit:6 subtests (`.env` variants scannable) | unit:1 (finding in `.env.clean`) | — | — | unit:1 (`.zip` not scannable — why this scan exists) | — |
+| Scanner reach | unit:6 subtests (`.env` variants scannable) | unit:1 (finding in a derived `.env` copy) | — | — | unit:1 (`.zip` not scannable — why this scan exists) | — |
 | Byte stability | unit:1 (binary still skipped) | — | — | — | — | unit:2 (unchanged → not rewritten; changed → rewritten) |
 
 | Scanner itself | unit:10 subtests (text/extensionless scanned) | unit:13 subtests (`.env` + 12 derived names) | unit:2 (untracked, gitignored) | unit:1 (skip message, exit 0) | unit:18 subtests (one fake per pattern) | unit:1 (deleted-but-indexed file) |
@@ -7604,7 +7610,7 @@ a fake, so the 18 cannot silently become 19-with-one-untested.
 
 Verified by mutation rather than by passing: restoring the pre-fix
 suffix-matching `_is_scannable` turns 13 assertions red (10 derived-name
-subtests plus the end-to-end `test/.env.clean` regression), and a `_redact` that
+subtests plus the end-to-end tracked-env-copy regression), and a `_redact` that
 returns its input turns all 4 redaction tests red. Both mutants are caught, so
 the suite defends the fix rather than describing it ([[feedback_pin_the_rule_not_the_reading]]).
 
@@ -7616,7 +7622,7 @@ length ≥ 16 and entropy ≥ 3.0 as tiebreakers, scoped to env-shaped files.
 
 That ordering is measured, not assumed, and the measurement overturned the
 obvious design. **Entropy alone would have been useless here:** in
-`test/.env.clean` the real `SMTP_PASS` scores H=3.88 while the harmless
+the real file, a genuine 16-character password scores H=3.88 while a harmless
 `PHOTOROOM_BG_PROMPT` scores 4.09 and 25 template strings outrank it, so an
 H ≥ 3.5 rule would have reported ~25 non-secrets and been switched off inside a
 week. The name is the discriminator: of 97 assignments in that file exactly 6
@@ -7652,10 +7658,10 @@ repo does not make Drive re-upload 17 MB nightly.
 
 ### Open
 
-- **The live keys are still live and still in git history.** Removing the three
-  files from HEAD does not purge the blobs, and `origin/master` already has
-  them. Only rotation closes it: Shopify Admin API token, Etsy API key, OpenAI
-  project key. Tier 3, operator's call — not done here.
+- **The finding is unresolved, and removing the files from HEAD would not
+  resolve it** — the blobs stay in history and the remote already has them, so
+  only rotation closes it. Tier 3, operator's call, deliberately not detailed
+  in this public file; the scan names everything locally.
 - **The scanner cannot see a credential inside a BINARY tracked file.** The
   pre-zip bundle scan covers the Drive path, but a credential committed inside
   a `.xlsx`, a `.sqlite` or a notebook's stored output is invisible to a

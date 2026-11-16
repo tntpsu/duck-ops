@@ -3,9 +3,11 @@
 That absence is why the leak below survived nine months: `.env` IS in
 `TEXT_EXTENSIONS`, so nothing in the config said "skip env files", but the list
 is matched against `path.suffix` and the suffix of `.env.clean` is `.clean`.
-Three git-tracked files in duckAgent (`test/.env.clean`, `.env.clean2`,
-`.env.final`) held the live Shopify / Etsy / OpenAI credentials and the scan
-called the repo clean from the 2026-02-24 initial commit until 2026-11-13.
+Several git-tracked derived copies of a live environment file, in a private
+sibling repo, held real credentials and the scan called that repo clean for
+nine months. The paths and key types are deliberately not written here: this
+repo is public, the finding is unresolved, and `secret_scan.py --all` names
+every one of them locally for anyone who needs them.
 
 So the bulk of this file tests the SELECTION predicate, not the patterns. A
 scan reporting zero findings is a statement about which files it chose to open;
@@ -413,7 +415,7 @@ class SecretNamedKeysWithoutAPrefixTests(unittest.TestCase):
             return secret_scan.scan_repo(repo)
 
     def test_the_three_prefixless_credentials_are_found(self):
-        # Real names and real lengths from test/.env.clean; fake values.
+        # Real variable names and real value lengths; fake values.
         for key, value in (("ETSY_API_KEY", "v7fq8x2mz0kd4ptw9r3o"),
                            ("PHOTOROOM_API_KEY", "sk_p" + "7bq3mz8xv2ld9ktw" * 2),
                            ("SMTP_PASS", "vheoqxzlmrktpqmb"),
