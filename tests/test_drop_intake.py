@@ -308,13 +308,40 @@ class AgentFacingReadmeTests(unittest.TestCase):
     one is a silent integration failure: the agent writes something plausible,
     the validator refuses it, and nobody is watching either end."""
 
-    def test_the_readme_lists_every_lane_the_validator_accepts(self):
+    def _readme(self) -> str:
         with tempfile.TemporaryDirectory() as tmp:
             root = drop_intake.init_drop_root(Path(tmp) / "DuckDrop")
-            text = (root / "README.md").read_text(encoding="utf-8")
-        for lane in drop_intake.allowed_lanes():
+            return (root / "README.md").read_text(encoding="utf-8")
+
+    def test_the_readme_lists_every_lane_that_can_take_a_drop(self):
+        text = self._readme()
+        for lane in drop_intake.consuming_lanes():
             with self.subTest(lane=lane):
                 self.assertIn(lane, text)
+
+    def test_the_readme_does_not_advertise_a_lane_that_cannot_take_one(self):
+        """The defect this replaced. The README listed every lane the system
+        PUBLISHES -- eleven of them -- while exactly one could consume a drop.
+        An agent reading it would write a jeepfact post in good faith, the
+        operator would approve it, and it would never run."""
+        text = self._readme()
+        listed = {ln.strip(" -") for ln in text.splitlines()
+                  if ln.strip().startswith("- ") and " " not in ln.strip(" -")}
+        unconsumable = drop_intake.allowed_lanes() - drop_intake.consuming_lanes()
+        for lane in sorted(unconsumable):
+            with self.subTest(lane=lane):
+                self.assertNotIn(
+                    lane, listed,
+                    f"README offers {lane}, which would be accepted and then "
+                    "never published")
+
+    def test_the_readme_says_what_to_do_when_your_lane_is_missing(self):
+        """A refusal with no next step is how an agent guesses -- and the
+        cheapest wrong guess here is naming a lane that IS listed, which
+        publishes to the wrong audience on the wrong day."""
+        text = self._readme().lower()
+        self.assertIn("not listed", text)
+        self.assertIn("wired", text)
 
     def test_the_readme_has_no_unrendered_placeholder(self):
         """`{lanes}` surviving into the published file would hand the agent a

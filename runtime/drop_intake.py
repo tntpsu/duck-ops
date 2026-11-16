@@ -190,9 +190,38 @@ class DropRecord:
     received_at: str = ""
 
 
+#: Lanes that actually CONSUME a drop -- i.e. whose scheduled run calls the
+#: claim and publishes the dropped file in place of its own work.
+#:
+#: This is separate from `allowed_lanes()` on purpose, and the gap between
+#: them was a real defect: the contract accepted eleven lanes and exactly one
+#: of them could use a drop, so a jeepfact post would validate, enter the
+#: ledger, be approved by the operator -- and then nothing would ever claim
+#: it. It sat forever while the lane generated its own post as usual. The
+#: README promised the opposite in as many words.
+#:
+#: That is the shape of a gate whose reason names a destination with no
+#: rendering consumer ([[feedback_fold_defer_is_a_handoff_contract]]): nothing
+#: errors, nothing logs, and the operator believes the post is scheduled.
+#:
+#: Adding a name here is a CLAIM about duckAgent's code, so
+#: tests/test_drop_lane_consumers.py checks it against the flows themselves
+#: and fails if the two drift apart in either direction.
+DROP_CONSUMING_LANES = frozenset({"meme", "jeepfact"})
+
+
+def consuming_lanes() -> frozenset[str]:
+    """Lanes a drop can actually be used by, which is what the agent needs."""
+    return DROP_CONSUMING_LANES
+
+
 def allowed_lanes() -> frozenset[str]:
-    """Lane names a drop may claim. Read from the flow registry when it is
-    importable so this cannot drift into a private second list."""
+    """Every lane name this system publishes. Read from the flow registry when
+    it is importable so this cannot drift into a private second list.
+
+    NOT the set a drop may name -- see DROP_CONSUMING_LANES. This stays wide
+    so an unconsumable lane gets the specific "cannot take a drop yet" refusal
+    rather than a misleading "not a known lane"."""
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import duck_flows  # noqa: PLC0415
@@ -325,6 +354,17 @@ def validate_drop(asset: Path, sidecar: Path, *,
         raise DropRefused(
             f"\"lane\": {lane or '(missing)'} is not a known lane "
             f"({', '.join(sorted(lanes))})")
+    consuming = consuming_lanes()
+    if lane not in consuming:
+        # Refused rather than accepted, because accepting is the worse
+        # failure: the operator approves it and believes it is scheduled,
+        # and it never runs. Say what to do instead of just saying no.
+        raise DropRefused(
+            f"the \"{lane}\" lane cannot take a drop yet -- nothing in it "
+            "claims one, so this file would be approved and then never "
+            "published. Lanes that can take a drop today: "
+            f"{', '.join(sorted(consuming))}. Ask for \"{lane}\" to be "
+            "wired if you need it.")
 
     source_agent = str(meta.get("source_agent") or "").strip()
     if not source_agent:
@@ -667,12 +707,20 @@ that lane's scheduled run INSTEAD of the post it would have generated itself.
 That is the whole point of the field, which is why it is a deliberate claim
 rather than a default.
 
-`lane` must be one of the lanes this system actually publishes. An
-unrecognised lane is refused, so the valid set is listed below rather than
-left to guess -- it is read from the live flow registry when this file is
-written, so it cannot drift out of date:
+`lane` must be one of the lanes that can actually TAKE a drop. That is a
+smaller set than the lanes this system publishes, and the difference matters:
+a lane with no claim wired into it would accept your file, let the operator
+approve it, and then never publish it -- so a drop naming one is refused, with
+a message saying which lane you named and asking for it to be wired.
+
+The set is read from the live code when this file is written, so it cannot
+drift out of date:
 
 {lanes}
+
+If the lane you want is not listed, say so rather than picking one that is.
+A meme-lane drop that was really meant for jeepfact publishes to the wrong
+audience on the wrong day, which is worse than not publishing.
 
 The source data these posts should be built from is the separate `DuckData`
 sync folder. Read its README.md first: most of that tree is a current
@@ -703,7 +751,7 @@ def init_drop_root(drop_root: Path | None = None) -> Path:
     # The lane list is rendered from the registry rather than typed into the
     # template: a lane added upstream would otherwise be refused here while
     # the contract an agent reads still said it was invalid.
-    lanes = "\n".join(f"    - {lane}" for lane in sorted(allowed_lanes()))
+    lanes = "\n".join(f"    - {lane}" for lane in sorted(consuming_lanes()))
     (drop_root / "README.md").write_text(
         MIRROR_DROP_README.replace("{lanes}", lanes), encoding="utf-8"
     )

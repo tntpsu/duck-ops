@@ -7869,6 +7869,81 @@ silent-truncation, hardcoded-8s and width-not-passed. Today's live drop was
 backfilled with the hook lifted from its own `notes` — nothing invented — and
 remains `post_ready: false, operator_required`, so nothing claims it yet.
 
+## Surface 133 — the contract offered ten lanes that could not take a drop (2026-11-16, operator: "The drop lane can happen at anytime to replace any of these ur normal posts")
+
+The operator said drops are recurring and can replace ANY normal post. That
+made a latent defect urgent: `allowed_lanes()` returned the **eleven** lanes
+this system publishes, and exactly **one** of them — meme — had a claim wired
+into it.
+
+A drop naming any of the other ten validated, entered the ledger, could be
+approved, and was then never published. Nothing errored, nothing logged, the
+lane generated its own post as usual, and the README promised the opposite in
+as many words: *"A drop with post_ready: true that the operator then approves
+can be taken by that lane's scheduled run."* True for one lane in eleven.
+Textbook [[feedback_fold_defer_is_a_handoff_contract]] — a contract naming a
+destination with no consumer.
+
+**Three things shipped.**
+
+1. **`DROP_CONSUMING_LANES`, and a refusal that says what to do.** An
+   unconsumable lane is refused at drop time naming the lane, the lanes that
+   DO work, and the words "ask for it to be wired". Refused rather than
+   accepted because accepting is the worse failure: the operator approves it
+   and believes it is scheduled. The README now advertises the consuming set,
+   and warns against naming a listed lane instead — a meme-lane drop meant for
+   jeepfact publishes to the wrong audience on the wrong day.
+
+2. **jeepfact wired, through a SHARED helper.** `helpers/agent_drop_lane.py`
+   holds the claim/render/select logic and meme now delegates to it. Copying
+   the meme wiring was the obvious move and is the one `/new-flow` explicitly
+   warns against — that approach missed three sites when duckvideo copied meme
+   from memory. The lanes keep their own state-key names as parameters rather
+   than derived, because they genuinely disagree (meme stores its payload
+   under `meme`, jeepfact under `jeepfact` with the caption nested in
+   `post_content` and images as a list of dicts). A guessed key writes where
+   nothing reads.
+
+3. **The throughput card reads the LEDGER.** It had been reading
+   `state/drop_intake.json`, a per-scan manifest rewritten whole on every run
+   — so a scan finding an empty inbox erased the queue from it. Verified live:
+   **manifest 0 proposals, ledger 3 awaiting approval, card green saying "No
+   agent-dropped post is waiting on you."** The card's logic was right and its
+   input was ephemeral.
+
+### Covered
+
+| Use case | Registry matches code | Unconsumable lane | Claim | Render | Publish | Queue visible |
+|---|---|---|---|---|---|---|
+| Lane contract | unit:2 subtests both directions + positive control + comment-is-not-a-call-site | unit:1 (refused, names lane + alternatives + "wired") | — | — | — | — |
+| jeepfact | — | — | unit:2 (payload shape, lane name) | unit:4 (poster placed, one panel, two blockers) | unit:1 (per-lane reel key) | — |
+| Throughput card | — | — | — | — | — | unit:5 (emptied manifest, ledger path, declined, claimed, approved-unclaimed) |
+
+`duck-ops/tests/test_drop_lane_consumers.py` (6 tests), the jeepfact class in
+`duckAgent/tests/test_meme_agent_drop.py` (45 total) and
+`creative_agent/runtime/tests/test_drop_intake_cards.py` (20).
+
+The registry is a hand-maintained claim about code in ANOTHER repo — the same
+shape of thing that just failed — so it is checked by AST against the flows in
+both directions. That scanner **broke on its own refactor**: when the logic
+moved into the shared helper the call shape changed from `claim_for_lane("meme")`
+to `agent_drop_lane.claim(st, "meme")`, and the scan reported that no lane
+claimed anything, including meme. Its positive control is what caught it
+rather than letting both direction checks pass vacuously
+([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
+
+### Open
+
+- **Nine lanes still cannot take a drop**, now visibly rather than silently:
+  `duckvideo` (already video-native, cheapest next), `newduck`, `thursday`,
+  `gtdf`, `reviews_story`, plus `weekly_sale`, `shopify_seo`,
+  `shopify_draft_activation` and `design_brief_queue` — the last four are not
+  social-post lanes at all, and what a dropped mp4 would even mean for a
+  Shopify SEO writeback is undefined.
+- **Approval is still CLI-only.** The card now says a drop is waiting; nothing
+  lets the operator act on it without a shell. They hit this twice in one
+  session ([[feedback_email_to_portal_inversion]]).
+
 ### Open
 
 Also open:
