@@ -142,7 +142,7 @@ Remaining `manual:cron-cadence-race` cells (observer discovery only): the observ
 | **Hardware** | n/a | This stack is Python automation; no glasses/devices |
 | **Performance** | ⚠️  manual:observed | Sidecar cycle ~14min for phase1_observer (Etsy browser ops). No regression budget set. |
 | **Stress** | 🔴 MISSING | No soak test for prolonged sidecar runs or accumulating publish_candidates. |
-| **Security** | ✅ `scripts/secret_scan.py --all` | Tracked-file secret-leak scanner. Zero install (pure stdlib + git). Last clean scan 2026-05-26: 795 files, 0 findings across duck-ops + duckAgent + paint-to-print-3d. Run manually before commits or as part of `/retro`. Upgrade path documented in script docstring (swap to gitleaks if pattern coverage needs expansion). |
+| **Security** | ⚠️ `scripts/secret_scan.py --all` — **currently exits 1** | Tracked-file secret-leak scanner, now with its own tests (`tests/test_secret_scan.py`, Surface 130). Zero install (pure stdlib + git). 2026-11-16: duck-ops clean (314 files), paint-to-print-3d clean (108), **duckAgent 6 findings** — `test/.env.clean|.env.clean2|.env.final` hold live Shopify + OpenAI credentials, tracked since the 2026-02-24 initial commit. Rotation is Tier 3 and deferred by the operator, so `--all` stays non-zero and `/deploy-check` will BLOCK on it until the keys are rotated or the files leave HEAD. Do not read a prior "clean" line as current — this row asserted 0 findings for nine months while the scanner was skipping those files ([[feedback_pin_the_rule_not_the_reading]]). |
 | **Privacy** | ⚠️  manual | Customer message capture is staged-for-approval only; no automated check that ensures no PII leaks to logs. |
 | **Compatibility** | n/a | Single-machine deployment |
 | **Migration** | ✅ workflow_cooldown_sweeper auto-clears legacy stuck states | Today's bulk-dismiss of 46 stuck items is a one-time data migration |
@@ -161,7 +161,7 @@ Remaining `manual:cron-cadence-race` cells (observer discovery only): the observ
 2. ✅ **CLOSED 2026-05-26: Reject-after-schedule** — product decision 1A + `test_reject_after_schedule_is_no_op` pins it.
 3. ✅ **CLOSED 2026-05-26: Concurrent observer + email-reply race** — product decision 2A + race_detected flag on `publish_review_carousel_run`.
 4. **🔴 Stress / soak** — sidecar runs every 6h × multiple weeks. publish_candidates.json grows. Run a synthetic week-of-data soak test once.
-5. ✅ **CLOSED 2026-05-26: Secret-leak automation** — `scripts/secret_scan.py --all`. Zero install, scans tracked files via curated regex patterns. Clean across duck-ops/duckAgent/paint-to-print-3d (795 files). Manual invocation before commits; gitleaks upgrade path documented if patterns need expanding.
+5. ⚠️ **REOPENED 2026-11-13: Secret-leak automation** — `scripts/secret_scan.py --all` shipped 2026-05-26 and was marked closed on a clean scan of 795 files. That scan was clean because `_is_scannable` matched `.env` against `path.suffix`, so three tracked copies of the live environment were never opened; the "closed" mark rested on the bug. Selection fixed and tested 2026-11-13/16 (Surface 130). Still open: the leaked keys are unrotated and in `origin/master`, and the PATTERN list matches only 2 of the ~5 credentials in those files (`ETSY_API_KEY`, `PHOTOROOM_API_KEY`, `SMTP_PASS` have no pattern). A gap is closed when it is *tested*, not when a run comes back green.
 
 ---
 
@@ -7593,6 +7593,28 @@ it existed to catch.
 | Scanner reach | unit:6 subtests (`.env` variants scannable) | unit:1 (finding in `.env.clean`) | — | — | unit:1 (`.zip` not scannable — why this scan exists) | — |
 | Byte stability | unit:1 (binary still skipped) | — | — | — | — | unit:2 (unchanged → not rewritten; changed → rewritten) |
 
+| Scanner itself | unit:10 subtests (text/extensionless scanned) | unit:13 subtests (`.env` + 12 derived names) | unit:2 (untracked, gitignored) | unit:1 (skip message, exit 0) | unit:18 subtests (one fake per pattern) | unit:1 (deleted-but-indexed file) |
+
+`tests/test_secret_scan.py`, 24 tests + 67 subtests — the scanner's first tests
+in any repo (2026-11-16). Weighted toward the SELECTION predicate, because that
+is where the nine-month blind spot lived: a zero-finding scan is a statement
+about which files were opened, and the patterns only matter for files that get
+that far. `test_every_pattern_has_a_fixture` fails if a pattern is added without
+a fake, so the 18 cannot silently become 19-with-one-untested.
+
+Verified by mutation rather than by passing: restoring the pre-fix
+suffix-matching `_is_scannable` turns 13 assertions red (10 derived-name
+subtests plus the end-to-end `test/.env.clean` regression), and a `_redact` that
+returns its input turns all 4 redaction tests red. Both mutants are caught, so
+the suite defends the fix rather than describing it ([[feedback_pin_the_rule_not_the_reading]]).
+
+The fixtures are real token shapes, and they stay invisible to the live `--all`
+scan only because `SKIP_PATH_FRAGMENTS` carries the fragment `test_secret_scan`.
+`test_the_live_scan_skips_this_very_file` pins that, and it was confirmed
+against the staged file: duck-ops scans clean with the 18 fakes tracked.
+Renaming that file would arm 18 false positives and mute the scanner with its
+own noise.
+
 `tests/test_drive_mirror_code_bundles.py`, 13 tests + 6 subtests. Measured:
 duck-ops 310 files / 1.57 MB, duckAgent 792 files (4 excluded) / 11.46 MB,
 paint-to-print-3d 108 files / 4.40 MB — 17.4 MB total against the data's 5.0 GB.
@@ -7607,10 +7629,17 @@ repo does not make Drive re-upload 17 MB nightly.
   files from HEAD does not purge the blobs, and `origin/master` already has
   them. Only rotation closes it: Shopify Admin API token, Etsy API key, OpenAI
   project key. Tier 3, operator's call — not done here.
-- **`secret_scan.py` has no test file in any repo.** The scanner every commit
-  depends on is itself unguarded; this surface pins `_is_scannable` only
-  through `drive_mirror`'s re-export. A planted-credential fixture per pattern
-  is the missing piece.
+- **The scanner's PATTERN list sees only part of this leak.** Closing the
+  selection gap exposed a detection gap underneath it: of the credential-shaped
+  values in those three tracked files, only `SHOPIFY_TOKEN` (`shpat_`) and
+  `OPENAI_API_KEY` (`sk-proj-`) match any pattern. `ETSY_API_KEY` (24 chars),
+  `PHOTOROOM_API_KEY` (56 chars) and `SMTP_PASS` (16 chars) are real
+  credentials that no pattern matches, so the scan reports 6 findings for a
+  leak that is wider than 6. These keys have no distinctive prefix, and a bare
+  length/entropy rule would fire on the ~30 UUID template ids sitting in the
+  same file — so this needs a `KEY|SECRET|TOKEN|PASS=<high-entropy>` rule
+  scoped to env-shaped files, not another prefix. Until then the scan's silence
+  about a credential is not evidence.
 - **The bundles are working-tree content, not a commit.** Both repos run dirty
   for days, so the published code can be ahead of every commit and is not
   guaranteed to be a state that was ever tested as a whole. The README says so;
