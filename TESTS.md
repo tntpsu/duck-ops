@@ -7934,12 +7934,27 @@ rather than letting both direction checks pass vacuously
 
 ### Open
 
-- **Nine lanes still cannot take a drop**, now visibly rather than silently:
-  `duckvideo` (already video-native, cheapest next), `newduck`, `thursday`,
-  `gtdf`, `reviews_story`, plus `weekly_sale`, `shopify_seo`,
-  `shopify_draft_activation` and `design_brief_queue` — the last four are not
-  social-post lanes at all, and what a dropped mp4 would even mean for a
-  Shopify SEO writeback is undefined.
+- ~~Nine lanes still cannot take a drop.~~ **duckvideo wired 2026-11-16**, so
+  three can: meme, jeepfact, duckvideo. It needed least of all — already
+  video-native, and its own `host` step uploads whatever `render` leaves on
+  disk, so the drop is only captioned and nothing downstream changed. That is
+  also why `caption_and_poster` was extracted out of
+  `build_lane_reel_from_video`: duckvideo needs the burn-in WITHOUT the
+  upload, and the truncation refusal is a safety rule that must not exist in
+  two copies.
+
+  duckvideo also publishes differently and was deliberately left that way: its
+  publish is approval-gated by construction, so only the operator's email
+  reply passes `operator_approved=True`. A claimed drop there passes TWO human
+  gates — the ledger approval and the reply — rather than the single gate the
+  auto-publishing lanes apply.
+
+- **Six lanes still cannot**: `newduck`, `thursday`, `gtdf`, `reviews_story`,
+  plus `weekly_sale`, `shopify_seo`, `shopify_draft_activation` and
+  `design_brief_queue`. The last four are not social-post lanes at all, and
+  what a dropped mp4 would even mean for a Shopify SEO writeback is undefined.
+  `newduck` and `thursday` carry products and vote sets rather than a caption
+  plus an asset, so a drop means something genuinely different there.
 - **Approval is still CLI-only.** The card now says a drop is waiting; nothing
   lets the operator act on it without a shell. They hit this twice in one
   session ([[feedback_email_to_portal_inversion]]).

@@ -207,7 +207,7 @@ class DropRecord:
 #: Adding a name here is a CLAIM about duckAgent's code, so
 #: tests/test_drop_lane_consumers.py checks it against the flows themselves
 #: and fails if the two drift apart in either direction.
-DROP_CONSUMING_LANES = frozenset({"meme", "jeepfact"})
+DROP_CONSUMING_LANES = frozenset({"meme", "jeepfact", "duckvideo"})
 
 
 def consuming_lanes() -> frozenset[str]:
