@@ -682,6 +682,21 @@ def _evaluate_job(
                 "reclaim it. Then confirm the job's work actually resumed rather "
                 "than trusting its exit code."
             )
+    elif receipt_status == "timeout":
+        # Its own verdict, not `failed`. A job the wrapper KILLED is a
+        # different problem from one that ran and returned nonzero, and the
+        # fix is different too: the first means something it called is
+        # blocking, the second means its own logic went wrong. Added
+        # 2026-11-17 with the watchdog that can finally produce it -- before
+        # that, the sidecar simply sat in `running` for three days.
+        status = "timeout"
+        severity = "bad"
+        summary = (f"Run exceeded its {_format_duration(timeout_seconds)} "
+                   "timeout and was killed.")
+        recommended_action = (
+            "Find what it was blocking ON rather than rerunning it: the "
+            "process tree at the time, or the job log just before the TIMEOUT "
+            "line. A rerun will block on the same thing.")
     elif receipt_status == "running" and started_at and not finished_at:
         if elapsed_seconds is not None and elapsed_seconds > timeout_seconds:
             status = "hung" if pid_alive else "orphaned"
@@ -895,6 +910,8 @@ def build_scheduler_health(
         "failed_count": sum(1 for item in items if item.get("status") == "failed"),
         "timeout_count": sum(1 for item in items if item.get("status") == "timeout"),
         "hung_count": sum(1 for item in items if item.get("status") == "hung"),
+        "timeout_count": sum(1 for item in items
+                             if item.get("status") == "timeout"),
         "orphaned_count": sum(1 for item in items if item.get("status") == "orphaned"),
         "slow_count": sum(1 for item in items if item.get("status") == "slow"),
         "running_count": sum(1 for item in items if item.get("status") == "running"),

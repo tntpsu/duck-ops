@@ -8158,6 +8158,36 @@ test fails if an entry stops naming a real un-timed call so the list cannot
 rot. `notifier.py` is explicitly barred from the list: it holds the sidecar
 lock.
 
+### The timeout now enforces (2026-11-17)
+
+`run_with_receipt.sh` recorded `timeout_seconds` and never acted on it, which
+is why a job could sit in `running` for three days while its receipt claimed a
+30-minute limit. A timeout nothing acts on is a comment.
+
+It now runs the job in the background with a watchdog. macOS ships no
+`timeout(1)`, hence the hand-rolled one, and it kills the whole **tree**: what
+actually hung both times was a grandchild (`sidecar -> notifier.py -> docker
+exec`), and terminating only the direct child would have left the real blocker
+running and reparented to init.
+
+A killed run records **`timeout`**, not `failed`. That status already existed
+in this module's `ATTENTION_STATUSES` and `BAD_STATUSES` with nothing able to
+produce it — the same shape `skipped_lock_active` had before 2026-11-13 — so
+the watchdog fills it in rather than inventing `timed_out` beside it
+([[feedback_status_fields_one_meaning]]). The two verdicts stay distinct
+because the fixes differ: a killed job means something it CALLED is blocking,
+a failed one means its own logic went wrong, and the advice says to find the
+blocker rather than rerun, since a rerun blocks on the same thing.
+
+Verified against a deliberately hanging job with a hanging grandchild: killed
+at the limit, `status: timeout`, no orphan left behind — and a fast job still
+returns in 0s rather than lingering for the full window, with exit 0, exit 3
+and the exit-75 lock convention all unchanged.
+
+**`run_with_receipt.sh` lives in `duckAgent_runtime/`, which is not git**, so
+this row is the only tracked record that the watchdog exists. A backup of the
+previous version sits beside it as `run_with_receipt.sh.bak-202611170853`.
+
 ### Original entry (2026-11-16, found by asking "what happens if I approve v4?")
 
 Nothing would have happened. The approval would have sat unread.

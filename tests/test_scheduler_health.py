@@ -765,3 +765,67 @@ class ConsecutiveLockSkipTests(unittest.TestCase):
             statuses=["succeeded"], now="2026-11-13T13:00:00-05:00",
         )
         self.assertNotIn("skipped_lock", item["status"])
+
+
+class TimeoutIsItsOwnVerdictTests(unittest.TestCase):
+    """A job the wrapper KILLED is not a job that failed.
+
+    `timeout` sat in this module's KNOWN and BAD status sets with nothing able
+    to produce it — the same shape as `skipped_lock_active` before 2026-11-13.
+    `run_with_receipt.sh` recorded `timeout_seconds` and never enforced it, so
+    the duck-ops sidecar reported `running` for three days (2026-11-13) and
+    again for eight hours (2026-11-17), each time holding its lock and
+    silently killing the operator inbox poller. A timeout nothing acts on is
+    a comment.
+
+    The watchdog added 2026-11-17 is the producer. These pin the verdict, and
+    that it stays distinct from `failed`: the fixes differ, because a killed
+    job means something it CALLED is blocking, while a failed one means its
+    own logic went wrong.
+    """
+
+    def _evaluate(self, receipt: dict) -> dict:
+        now = datetime(2026, 11, 17, 9, 0).astimezone()
+        with TemporaryDirectory() as tmp:
+            return scheduler_health._evaluate_job(
+                {"job_name": "duck_ops_sidecar", "schedule": {},
+                 "declared_at": None},
+                receipt=receipt, resolution=None, events=[], now=now,
+                scheduler_log_path=Path(tmp) / "scheduler.log",
+                history_dir=Path(tmp),
+            )
+
+    def _receipt(self, status: str, **kw) -> dict:
+        base = {
+            "job_name": "duck_ops_sidecar",
+            "status": status,
+            "exit_code": 143,
+            "started_at": "2026-11-17T00:28:00-0500",
+            "finished_at": "2026-11-17T00:58:00-0500",
+            "timeout_seconds": 1800,
+        }
+        base.update(kw)
+        return base
+
+    def test_a_timed_out_run_is_bad_and_says_it_was_killed(self):
+        out = self._evaluate(self._receipt("timeout"))
+        self.assertEqual(out["status"], "timeout")
+        self.assertEqual(out["severity"], "bad")
+        self.assertIn("killed", out["summary"].lower())
+
+    def test_it_is_not_collapsed_into_failed(self):
+        timed = self._evaluate(self._receipt("timeout"))
+        failed = self._evaluate(self._receipt("failed", exit_code=3))
+        self.assertNotEqual(timed["status"], failed["status"])
+
+    def test_the_advice_is_to_find_the_blocker_not_to_rerun(self):
+        """A rerun blocks on the same thing. Both times this happened the
+        blocker was an unresponsive Docker daemon, which a retry cannot fix."""
+        out = self._evaluate(self._receipt("timeout"))
+        action = out["recommended_action"].lower()
+        self.assertIn("blocking", action)
+        self.assertIn("same thing", action)
+
+    def test_timeout_is_already_a_known_bad_status(self):
+        self.assertIn("timeout", scheduler_health.ATTENTION_STATUSES)
+        self.assertIn("timeout", scheduler_health.BAD_STATUSES)
