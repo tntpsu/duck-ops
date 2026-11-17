@@ -8052,6 +8052,77 @@ calling `_status()`, a SECOND read of live state, so the email could disagree
 with the decision it was sent for — three drops in the body, two in the count.
 It now renders from the decision it was handed.
 
+## Surface 136 — the approval email, corrected by the operator reading it (2026-11-16)
+
+Everything here was found by the operator looking at a real email on a real
+phone, not by a test. Four rounds:
+
+**"I can barely read the email."** It was a `<pre>` blob. Now cards with the
+media inline.
+
+**"We shouldn't reinvent the wheel from our other approval emails."** Correct,
+and the house version was better: every other gated lane renders `mailto:`
+buttons that open a pre-filled draft. The first version told the operator to
+TYPE a 44-character stem. The bespoke stylesheet is gone and
+`render_reply_action_buttons` does the work; a test fails if a second
+stylesheet reappears. Switching to the shared helper exposed a fail-silent —
+it returns `""` when no reply-to resolves, so an approval email could have
+shipped with nothing to approve with and no error.
+
+**"I don't see memes. Just photos."** The preview was a bare frame. It now
+burns the caption in exactly as it publishes. Only one of three rendered,
+because two carried a 132-character hook the frame refuses — correct, but it
+looked like a glitch, so a refused caption is now labelled *"caption NOT
+applied"* with the reason on the card.
+
+**"It's not really the full meme or punchline."** That one was a real loss.
+The hook had been trimmed from 132 chars to fit one card, and the trim cut the
+joke. `overlay_hook_line` could always render a SECOND card timed partway
+through; nothing carried one from the drop. `closing_line` + `closing_at` are
+now contract fields wired through all three lanes, and a two-beat clip
+previews **one frame per beat** — a single still shows half a joke, and it is
+the half already visible in the caption.
+
+**"Aren't these videos? Are you just showing a picture?"** Yes. Said plainly
+on every card now, with the path to the clip, rather than letting a still
+imply the video was reviewed.
+
+**"I don't want to send 4 emails."** A corrected re-send leaves its
+predecessors pending, so clearing a queue is routinely several decisions.
+`drop approve <stem> only` approves one and declines the rest **in that lane**
+(never another lane, never a claimed drop), offered as a one-tap *"Approve
+only this (clears N)"* button; and a reply may carry several `drop ` lines,
+each run in order, with quoted reply text ignored and one bad line not
+stopping the others.
+
+A sixth, found by the operator's question rather than the email: a
+`post_ready:false` drop had **no buttons at all**, because the whole block was
+gated on approvability. The one drop that could never be published was the one
+that could not be dismissed, and it would have aged through every digest
+milestone forever. Decline is now always offered.
+
+### Covered
+
+| Use case | Happy | Refused | Supersede | Multi-command | Isolation |
+|---|---|---|---|---|---|
+| Buttons | unit:3 (mailto, both verbs, house teal) | unit:1 (no reply-to is loud) | unit:2 (one-tap offered / absent when solo) | — | — |
+| Previews | unit:3 (finished frame, per-beat, still-is-a-still) | unit:2 (refusal labelled, missing asset) | — | — | — |
+| `only` | unit:1 | unit:1 (nothing else waiting) | unit:2 (other lane untouched, claimed untouched) | — | — |
+| Multi-line | — | unit:1 (bad line does not stop the rest) | — | unit:2 (all run, quoted text ignored) | — |
+| Not-ready | unit:1 (declinable) | unit:1 (no approve) | — | — | unit:1 (every card has a button) |
+| Env | — | — | — | — | unit:2 (no dotenv under test mode) |
+
+`tests/test_drop_operator_and_digest.py` (60 tests). duck-ops 1815 passed.
+
+**The full suite caught what this file could not.** `_load_duckagent_env` ran
+unconditionally so the reply-to would resolve at render time — which in a test
+process pulled the entire production `.env` into `os.environ`. It broke six
+unrelated cadence tests through `DUCK_EMAIL_DIGEST_MODE`, and far worse, it
+populated live SMTP credentials in a suite whose whole purpose is being unable
+to reach anyone ([[feedback_test_runs_reach_the_outside_world]]). It now
+refuses under `DUCK_TEST_MODE` and tests pass `reply_to` explicitly. Six red
+tests in a file I never touched were the only symptom.
+
 ### Open
 
 - ~~Nine lanes still cannot take a drop.~~ **duckvideo wired 2026-11-16**, so

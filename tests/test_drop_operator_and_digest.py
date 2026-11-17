@@ -132,6 +132,108 @@ class ApprovingByReplyTests(unittest.TestCase):
                       drop_operator.handle_drop_text("drop frobnicate x"))
 
 
+class ClearingTheQueueInOneReplyTests(unittest.TestCase):
+    """"I don't want to send 4 emails."
+
+    A corrected re-send leaves its predecessors pending, so clearing a queue
+    routinely means several decisions at once. One tap, or one multi-line
+    reply, rather than one email per drop.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _with(self, entries):
+        return mock.patch.object(drop_intake, "DROP_PROPOSALS_PATH",
+                                 _ledger(self.root, entries))
+
+    def _ledger_now(self):
+        return json.loads((self.root / "proposals.json").read_text())["proposals"]
+
+    def test_approve_only_declines_the_rest_of_that_lane(self):
+        with self._with({"v1": _entry(), "v2": _entry(), "v4": _entry()}):
+            out = drop_operator.handle_drop_text("drop approve v4 only")
+        self.assertIn("Approved v4", out)
+        self.assertIn("Declined 2 superseded", out)
+        led = self._ledger_now()
+        self.assertEqual(led["v4"]["approval"], "approved")
+        self.assertEqual(led["v1"]["approval"], "declined")
+        self.assertEqual(led["v2"]["approval"], "declined")
+
+    def test_only_does_not_touch_another_lane(self):
+        """Clearing Meme Monday must not silently cancel Jeep Fact
+        Wednesday."""
+        with self._with({"m1": _entry(lane="meme"), "m2": _entry(lane="meme"),
+                         "j1": _entry(lane="jeepfact")}):
+            drop_operator.handle_drop_text("drop approve m1 only")
+        led = self._ledger_now()
+        self.assertEqual(led["m2"]["approval"], "declined")
+        self.assertEqual(led["j1"]["approval"], "operator_required")
+
+    def test_only_does_not_touch_an_already_claimed_drop(self):
+        with self._with({"a": _entry(), "done": _entry(claimed_by="meme::r1")}):
+            drop_operator.handle_drop_text("drop approve a only")
+        self.assertEqual(self._ledger_now()["done"]["approval"],
+                         "operator_required")
+
+    def test_only_says_so_when_nothing_else_was_waiting(self):
+        with self._with({"solo": _entry()}):
+            out = drop_operator.handle_drop_text("drop approve solo only")
+        self.assertIn("Nothing else was waiting", out)
+
+    def test_several_commands_in_one_reply_all_run(self):
+        with self._with({"a": _entry(), "b": _entry(), "c": _entry()}):
+            out = drop_operator.handle_drop_text(
+                "drop decline a\ndrop decline b\ndrop approve c")
+        led = self._ledger_now()
+        self.assertEqual(led["a"]["approval"], "declined")
+        self.assertEqual(led["b"]["approval"], "declined")
+        self.assertEqual(led["c"]["approval"], "approved")
+        self.assertIn("> drop decline a", out)
+
+    def test_quoted_reply_text_around_the_commands_is_ignored(self):
+        """An email reply carries the original beneath it."""
+        with self._with({"a": _entry()}):
+            out = drop_operator.handle_drop_text(
+                "Hi,\ndrop approve a\n\nOn Mon someone wrote:\n> old stuff")
+        self.assertIn("Approved a", out)
+
+    def test_one_bad_line_does_not_stop_the_others(self):
+        with self._with({"a": _entry()}):
+            out = drop_operator.handle_drop_text(
+                "drop decline nope\ndrop approve a")
+        self.assertIn("no drop named", out)
+        self.assertIn("Approved a", out)
+        self.assertEqual(self._ledger_now()["a"]["approval"], "approved")
+
+    def test_the_email_offers_the_one_tap_button_when_there_are_siblings(self):
+        import io
+        from contextlib import redirect_stderr
+        state = self.root / "d.json"
+        with self._with({"a": _entry(), "b": _entry()}), \
+             mock.patch.object(drop_operator, "_unanswered_notes", return_value=[]):
+            d = drop_digest.decide(now=NOW, state_path=state)
+        with redirect_stderr(io.StringIO()):
+            _s, _t, html = drop_digest.render_email(
+                d, now=NOW, reply_to="ops@example.com", previews=[])
+        self.assertIn("Approve only this (clears 1)", html)
+        self.assertNotIn("&amp;amp;", html)
+
+    def test_a_solo_drop_gets_no_clear_button(self):
+        import io
+        from contextlib import redirect_stderr
+        state = self.root / "d.json"
+        with self._with({"a": _entry()}), \
+             mock.patch.object(drop_operator, "_unanswered_notes", return_value=[]):
+            d = drop_digest.decide(now=NOW, state_path=state)
+        with redirect_stderr(io.StringIO()):
+            _s, _t, html = drop_digest.render_email(
+                d, now=NOW, reply_to="ops@example.com", previews=[])
+        self.assertNotIn("Approve only this", html)
+
+
 class StatusReadsLikeSomethingYouCanReplyToTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -258,6 +360,289 @@ class TheDigestOnlySpeaksWhenSomethingChangesTests(unittest.TestCase):
         _s, text, _h = drop_digest.render_email(d, now=NOW)
         self.assertIn("drop approve holiday_clip", text)
         self.assertIn("Reply to this email", text)
+
+
+class TheEmailIsReadableOnAPhoneTests(unittest.TestCase):
+    """The first digest went out as a <pre> blob and the operator said they
+    could barely read it, and that it asked them to approve something without
+    showing it. Both are operator-surface failures, which is the recurring
+    one here -- tests passing is not the same as the surface being usable.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.state = self.root / "digest.json"
+
+    def _decide(self, entries, notes=()):
+        path = _ledger(self.root, entries)
+        with mock.patch.object(drop_intake, "DROP_PROPOSALS_PATH", path), \
+             mock.patch.object(drop_operator, "_unanswered_notes",
+                               return_value=list(notes)):
+            return drop_digest.decide(now=NOW, state_path=self.state)
+
+    def _html(self, entries, previews=None, notes=(), reply_to="ops@example.com"):
+        d = self._decide(entries, notes=notes)
+        _s, _t, html = drop_digest.render_email(d, now=NOW, previews=previews,
+                                                reply_to=reply_to)
+        return html
+
+    def test_the_media_is_shown_inline_not_merely_attached(self):
+        """Approving something you cannot see is rubber-stamping it."""
+        html = self._html(
+            {"clip": _entry()},
+            previews=[{"stem": "clip", "is_video": True,
+                       "frames": [{"cid": "drop1a", "path": "/t/p.jpg",
+                                   "label": None}]}])
+        self.assertIn("src='cid:drop1a'", html)
+
+    def test_a_drop_with_no_preview_still_appears_and_says_why(self):
+        html = self._html({"clip": _entry()},
+                          previews=[{"stem": "clip", "frames": [],
+                                     "note": "the file is gone"}])
+        self.assertIn("the file is gone", html)
+        self.assertIn("drop%20approve%20clip", html.replace("+", "%20"))
+
+    def test_no_reply_address_is_loud_rather_than_silently_buttonless(self):
+        """An approval email with nothing to approve with, and no error, is
+        the worst of both ([[feedback_swallowed_errors_lie]])."""
+        import io
+        import sys as _sys
+        from contextlib import redirect_stderr
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "duckAgent"))
+        from helpers import email_reply_action_helper as erah
+
+        err = io.StringIO()
+        with redirect_stderr(err), \
+             mock.patch.object(erah, "approval_reply_to", return_value=""):
+            html = self._html({"clip": _entry()}, reply_to="")
+        self.assertNotIn("mailto:", html)
+        self.assertIn("APPROVAL_REPLY_TO", err.getvalue())
+
+    def test_there_is_no_pre_block(self):
+        """The thing that made it unreadable."""
+        self.assertNotIn("<pre", self._html({"clip": _entry()}))
+
+    def test_it_uses_the_house_approval_buttons_not_its_own(self):
+        """Every other approval email here renders mailto: buttons that open a
+        pre-filled draft. The first version told the operator to TYPE a
+        44-character stem, which is unusable on the phone where it is read --
+        "we shouldn't reinvent the wheel from our other approval emails"."""
+        html = self._html({"clip": _entry()})
+        self.assertIn("mailto:", html)
+        self.assertIn("drop%20approve%20clip", html.replace("+", "%20"))
+        # the house teal, from render_reply_action_buttons
+        self.assertIn("#0f766e", html)
+
+    def test_both_verbs_get_a_button(self):
+        html = self._html({"clip": _entry()})
+        self.assertIn(">Approve<", html)
+        self.assertIn(">Decline<", html)
+
+    def test_it_does_not_carry_a_second_stylesheet(self):
+        """One more look for the operator to learn, for no benefit."""
+        html = self._html({"clip": _entry()})
+        self.assertNotIn("<style>", html)
+        self.assertNotIn("duckdrop", html)
+
+    def test_each_card_shows_the_caption(self):
+        html = self._html({"clip": _entry(caption="Santa duck or doll duck?")})
+        self.assertIn("Santa duck or doll duck?", html)
+
+    def test_it_says_the_preview_is_the_finished_post(self):
+        """The first version showed the raw clip and the operator said "I
+        don't see memes, just photos". The preview now carries the burned-in
+        caption, and the email says so rather than leaving them to wonder."""
+        html = self._html({"clip": _entry()})
+        self.assertIn("caption burned in", html)
+
+    def test_a_not_ready_drop_offers_no_approve_button(self):
+        html = self._html({"draft": _entry(post_ready=False)})
+        self.assertIn("post_ready:false", html)
+        self.assertNotIn("drop%20approve%20draft", html.replace("+", "%20"))
+
+    def test_a_not_ready_drop_can_still_be_DECLINED(self):
+        """It is precisely the drop you want to clear. The first version gated
+        the whole button block on post_ready, so the only drop that could
+        never be published was also the only one that could not be dismissed
+        -- and it would have aged through every digest milestone forever."""
+        html = self._html({"draft": _entry(post_ready=False)})
+        self.assertIn("drop%20decline%20draft", html.replace("+", "%20"))
+        self.assertIn(">Decline<", html)
+
+    def test_every_pending_drop_has_at_least_one_button(self):
+        """No card is a dead end."""
+        import re
+        html = self._html({"a": _entry(), "b": _entry(post_ready=False)})
+        for stem in ("a", "b"):
+            with self.subTest(stem=stem):
+                found = re.findall(
+                    r"drop(?:%20|\+)(approve|decline)(?:%20|\+)([A-Za-z0-9_]+)",
+                    html)
+                self.assertTrue([v for _k, v in found if v == stem],
+                                f"{stem} has no actionable button")
+
+    def test_user_text_is_escaped(self):
+        """Captions come from an outside agent and land in our mail client."""
+        html = self._html({"x": _entry(caption="<script>alert(1)</script>")})
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;", html)
+
+    def test_the_all_clear_is_styled_too_not_a_bare_paragraph(self):
+        self.state.write_text(json.dumps({"stems": ["old"], "note_files": [],
+                                          "milestone": 0}), encoding="utf-8")
+        html = self._html({})
+        self.assertIn("Drop queue is clear", html)
+        self.assertNotIn("<pre", html)
+
+
+class TheSecondBeatSurvivesTests(unittest.TestCase):
+    """The first drop's hook was one 132-character sentence with the joke at
+    the end. It did not fit as a single card, so it was trimmed to fit -- and
+    the trim cost the punchline. The operator spotted it in the email:
+    "it's not really the full meme or punchline".
+
+    `overlay_hook_line` could always render a second card timed to appear
+    partway through; nothing carried one from the drop to it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.state = self.root / "digest.json"
+
+    def test_a_two_beat_drop_previews_one_frame_per_beat(self):
+        """A single still shows half the joke -- and it is the half the
+        operator already read in the caption."""
+        entry = {"stem": "clip", "asset_path": "/t/c.mp4", "media_type": "video",
+                 "on_screen_hook_text": "setup", "closing_line": "payoff",
+                 "closing_at": 5.0, "lane": "meme"}
+        grabbed = []
+
+        def fake_grab(video, dest, at_seconds=0.0):
+            grabbed.append(at_seconds)
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            Path(dest).write_bytes(b"\x89PNG\r\n\x1a\n")
+            return {"status": "ready", "poster_path": str(dest)}
+
+        with mock.patch("pathlib.Path.is_file", return_value=True), \
+             mock.patch.object(drop_digest, "_downscale",
+                               side_effect=lambda s, d: d), \
+             mock.patch.dict(sys.modules):
+            import helpers.image_lane_reel as ilr  # type: ignore
+            import helpers.duck_video_helper as dvh  # type: ignore
+            with mock.patch.object(ilr, "caption_and_poster",
+                                   return_value={"status": "ready",
+                                                 "video_path": "/t/burned.mp4",
+                                                 "clip_seconds": 10.0}), \
+                 mock.patch.object(dvh, "extract_poster_frame",
+                                   side_effect=fake_grab):
+                out = drop_digest.build_previews([entry],
+                                                 out_dir=self.root / "p")
+        self.assertEqual(len(out[0]["frames"]), 2, out[0])
+        self.assertEqual([f["label"] for f in out[0]["frames"]],
+                         ["first beat", "second beat"])
+        self.assertLess(grabbed[0], 5.0, "first frame must precede the payoff")
+        self.assertGreater(grabbed[1], 5.0, "second frame must follow it")
+
+    def test_a_one_beat_drop_still_previews_once(self):
+        entry = {"stem": "clip", "asset_path": "/t/c.mp4", "media_type": "video",
+                 "on_screen_hook_text": "setup", "lane": "meme"}
+        with mock.patch("pathlib.Path.is_file", return_value=True), \
+             mock.patch.object(drop_digest, "_downscale",
+                               side_effect=lambda s, d: d), \
+             mock.patch.dict(sys.modules):
+            import helpers.image_lane_reel as ilr  # type: ignore
+            import helpers.duck_video_helper as dvh  # type: ignore
+            with mock.patch.object(ilr, "caption_and_poster",
+                                   return_value={"status": "ready",
+                                                 "video_path": "/t/b.mp4",
+                                                 "clip_seconds": 10.0}), \
+                 mock.patch.object(dvh, "extract_poster_frame",
+                                   return_value={"status": "ready",
+                                                 "poster_path": "/t/f.png"}):
+                out = drop_digest.build_previews([entry], out_dir=self.root / "p")
+        self.assertEqual(len(out[0]["frames"]), 1)
+
+    def test_the_email_says_a_still_is_a_still(self):
+        """Approving a video off a photo is approving the thing you did not
+        watch, so the email does not let that pass silently."""
+        path = _ledger(self.root, {"clip": _entry()})
+        with mock.patch.object(drop_intake, "DROP_PROPOSALS_PATH", path), \
+             mock.patch.object(drop_operator, "_unanswered_notes", return_value=[]):
+            d = drop_digest.decide(now=NOW, state_path=self.state)
+        _s, _t, html = drop_digest.render_email(
+            d, now=NOW, reply_to="ops@example.com",
+            previews=[{"stem": "clip", "is_video": True,
+                       "frames": [{"cid": "a", "path": "/t/a.jpg", "label": None}]}])
+        self.assertIn("Still frame", html)
+        self.assertIn("DuckDrop/accepted", html)
+
+    def test_a_refused_caption_is_labelled_not_silently_different(self):
+        """"I only saw one with the meme written on it" -- two drops carried a
+        hook too long to fit, fell back to a bare frame, and looked like a
+        glitch rather than a refusal."""
+        path = _ledger(self.root, {"clip": _entry()})
+        with mock.patch.object(drop_intake, "DROP_PROPOSALS_PATH", path), \
+             mock.patch.object(drop_operator, "_unanswered_notes", return_value=[]):
+            d = drop_digest.decide(now=NOW, state_path=self.state)
+        _s, _t, html = drop_digest.render_email(
+            d, now=NOW, reply_to="ops@example.com",
+            previews=[{"stem": "clip", "is_video": True,
+                       "note": "the hook does not fit the frame",
+                       "frames": [{"cid": "a", "path": "/t/a.jpg",
+                                   "label": "caption NOT applied"}]}])
+        self.assertIn("does not fit the frame", html)
+        self.assertIn("caption NOT applied", html)
+
+
+class PreviewsAreBuiltSafelyTests(unittest.TestCase):
+    def test_a_missing_asset_yields_a_note_not_an_exception(self):
+        out = drop_digest.build_previews(
+            [{"stem": "gone", "asset_path": "/nope.mp4", "media_type": "video"}])
+        self.assertEqual(out[0]["frames"], [])
+        self.assertIn("gone", out[0]["note"])
+
+    def test_a_raising_frame_grab_does_not_take_the_email_down(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            clip = Path(tmp) / "c.mp4"
+            clip.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+            with mock.patch.dict(sys.modules):
+                out = drop_digest.build_previews(
+                    [{"stem": "c", "asset_path": str(clip),
+                      "media_type": "video"}], out_dir=Path(tmp) / "out")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["stem"], "c")
+        self.assertIsInstance(out[0]["frames"], list)
+
+    def test_previews_are_downscaled_so_the_email_stays_small(self):
+        self.assertLessEqual(drop_digest.PREVIEW_WIDTH, 600)
+
+
+class TheDigestDoesNotLeakProductionEnvIntoTestsTests(unittest.TestCase):
+    """Found by the full suite, not by this file.
+
+    `_load_duckagent_env` ran unconditionally so that the reply-to address
+    would resolve at render time. In a test process that pulled the whole
+    production .env into os.environ: it flipped DUCK_EMAIL_DIGEST_MODE and
+    broke six unrelated cadence tests, and it populated live SMTP credentials
+    in a suite whose whole point is that it cannot reach anyone
+    ([[feedback_test_runs_reach_the_outside_world]]).
+    """
+
+    def test_it_refuses_to_load_dotenv_under_test_mode(self):
+        import os
+        marker = "DUCK_EMAIL_DIGEST_MODE"
+        os.environ["DUCK_TEST_MODE"] = "1"
+        os.environ.pop(marker, None)
+        drop_digest._load_duckagent_env()
+        self.assertNotIn(marker, os.environ,
+                         "production .env leaked into the test process")
+
+    def test_the_guard_reads_the_same_flag_everything_else_does(self):
+        self.assertEqual(drop_digest._TEST_MODE_ENV, "DUCK_TEST_MODE")
 
 
 class TheDigestStateIsGuardedTests(unittest.TestCase):

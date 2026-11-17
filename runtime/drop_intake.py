@@ -506,9 +506,38 @@ def validate_drop(asset: Path, sidecar: Path, *,
             f"{MAX_HOOK_CHARS} because it has to stay legible burned over a "
             "phone-sized frame")
 
+    # The second beat. `overlay_hook_line` can composite a SECOND card along
+    # the bottom from `closing_at` seconds onward, and that is the right home
+    # for a punchline: the first drop's hook was one sentence with a payoff
+    # ("...turns green (and your holiday dash crew isn't having it)") and at
+    # 132 characters it did not fit the frame as one card. Trimming it to fit
+    # cost the joke. Two beats fit where one does not.
+    closing = meta.get("closing_line", "")
+    if not isinstance(closing, str):
+        raise DropRefused(
+            f'"closing_line" must be a string, not {type(closing).__name__}')
+    closing = "".join(ch for ch in closing if ch >= " ").strip()
+    if len(closing) > MAX_HOOK_CHARS:
+        raise DropRefused(
+            f'"closing_line" is {len(closing)} characters; the limit is '
+            f"{MAX_HOOK_CHARS}")
+    closing_at = meta.get("closing_at", 0.0)
+    if not isinstance(closing_at, (int, float)) or isinstance(closing_at, bool):
+        raise DropRefused(
+            f'"closing_at" must be a number of seconds, not '
+            f"{type(closing_at).__name__}")
+    if closing_at < 0:
+        raise DropRefused('"closing_at" cannot be negative')
+    if closing and not closing_at:
+        raise DropRefused(
+            '"closing_line" needs "closing_at" -- the second card appears '
+            "from that many seconds in, and 0 would stack it on the hook")
+
     return {
         "lane": lane,
         "caption": cleaned.strip(),
+        "closing_line": closing,
+        "closing_at": float(closing_at),
         "media_type": "image" if suffix in _IMAGE_EXTS else "video",
         "source_agent": source_agent,
         "notes": str(meta.get("notes") or "")[:2000],
@@ -844,6 +873,8 @@ The sidecar:
       "source_agent": "who or what made this",
       "post_ready": false,
       "on_screen_hook_text": "optional, up to 120 chars -- see below",
+      "closing_line": "optional second beat, shown from closing_at seconds",
+      "closing_at": 5.0,
       "notes": "optional, for the operator"
     }
 
@@ -912,6 +943,19 @@ drop was 720x1280 against a renderer that assumed 1080, and a third of every
 caption line fell off the right edge of the frame while every status said
 "ready". That is fixed, but it means an unusual aspect ratio is still your
 clip's problem to get right: send something that looks like a phone video.
+
+**A punchline goes in `closing_line`, not in the hook.** A second card can
+appear along the bottom of the frame from `closing_at` seconds in, which is
+where a payoff belongs. The first drop we ever took wrote one 132-character
+sentence with the joke at the end; it did not fit as a single card, and
+trimming it to fit cost the joke. Two beats fit where one does not:
+
+    "on_screen_hook_text": "POV: a stock crossover honks the instant it turns green",
+    "closing_line": "and the holiday dash crew is not having it",
+    "closing_at": 5.0
+
+`closing_at` is required whenever `closing_line` is set -- at 0 the second
+card would stack on top of the first.
 
 **Keep `on_screen_hook_text` to about 80 characters.** 120 is the hard limit
 but what FITS depends on the clip's width -- four lines hold roughly 84

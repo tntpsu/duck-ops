@@ -30,10 +30,12 @@ import drop_intake  # noqa: E402
 
 HELP = (
     "Agent drop commands:\n"
-    "  drops                  what is waiting on you\n"
-    "  drop approve <stem>    let its lane publish it\n"
-    "  drop decline <stem>    never publish it\n"
+    "  drops                       what is waiting on you\n"
+    "  drop approve <stem>         let its lane publish it\n"
+    "  drop approve <stem> only    approve it and decline the rest in that lane\n"
+    "  drop decline <stem>         never publish it\n"
     "  drop answer <file> <text>   reply to an agent's note\n"
+    "\nSeveral lines in one reply are fine; each is run in order.\n"
 )
 
 
@@ -123,6 +125,49 @@ def _resolve_stem(token: str, proposals: dict) -> tuple[str | None, str | None]:
 
 
 def handle_drop_text(text: str) -> str:
+    """Run every `drop ...` line in the reply, not just the first.
+
+    An agent that re-sends a corrected version leaves the earlier ones
+    pending, so clearing a queue routinely means several decisions at once --
+    and the operator's answer to being told to send four separate emails was
+    a flat "I don't want to send 4 emails".
+    """
+    lines = [ln.strip() for ln in str(text or "").splitlines()]
+    commands = [ln for ln in lines if should_delegate_to_drops(ln)]
+    if len(commands) > 1:
+        out = []
+        for line in commands:
+            out.append(f"> {line}")
+            out.append(_handle_one(line))
+        return "\n".join(out)
+    return _handle_one(commands[0] if commands else text)
+
+
+def _decline_siblings(stem: str, proposals: dict) -> list[str]:
+    """Decline every OTHER pending drop in the same lane.
+
+    Superseded versions are the normal case, not an edge one: a corrected
+    re-send leaves its predecessors sitting in the ledger, ageing through
+    every digest milestone until someone clears them by hand.
+    """
+    lane = (proposals.get(stem) or {}).get("lane")
+    declined = []
+    for other, entry in sorted(proposals.items()):
+        if other == stem or not isinstance(entry, dict):
+            continue
+        if entry.get("lane") != lane or entry.get("claimed_by"):
+            continue
+        if str(entry.get("approval") or "") != "operator_required":
+            continue
+        try:
+            drop_intake.set_approval(other, False, by="operator (superseded)")
+            declined.append(other)
+        except drop_intake.DropRefused:
+            continue
+    return declined
+
+
+def _handle_one(text: str) -> str:
     raw = (text or "").strip()
     lowered = raw.lower()
 
@@ -137,7 +182,11 @@ def handle_drop_text(text: str) -> str:
 
     if verb in {"approve", "decline"}:
         proposals = drop_intake._read_ledger(drop_intake.DROP_PROPOSALS_PATH)
-        stem, problem = _resolve_stem(parts[2] if len(parts) > 2 else "", proposals)
+        target = parts[2] if len(parts) > 2 else ""
+        only = False
+        if target.lower().endswith(" only"):
+            target, only = target[: -len(" only")].strip(), True
+        stem, problem = _resolve_stem(target, proposals)
         if problem:
             return problem
         entry = proposals.get(stem) or {}
@@ -153,8 +202,14 @@ def handle_drop_text(text: str) -> str:
             return str(exc)
         if verb == "approve":
             lane = entry.get("lane")
-            return (f"Approved {stem}. The {lane} lane will take it on its next "
-                    "scheduled run.")
+            msg = (f"Approved {stem}. The {lane} lane will take it on its next "
+                   "scheduled run.")
+            if only:
+                others = _decline_siblings(stem, proposals)
+                msg += (f" Declined {len(others)} superseded drop(s) in that "
+                        "lane." if others else
+                        " Nothing else was waiting in that lane.")
+            return msg
         return f"Declined {stem}. No run will ever take it."
 
     if verb == "answer":
