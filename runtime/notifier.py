@@ -2271,9 +2271,19 @@ def _refuse_outbound_under_test_mode(channel: str, descriptor: str) -> None:
     )
 
 
+#: Seconds to wait on the SMTP socket. Python's default is NO timeout, which
+#: means a stalled connection blocks forever: on 2026-11-13 the duck-ops
+#: sidecar wedged here at 18:00 and was still holding its lock three days
+#: later, which killed the seven steps behind it -- including the operator
+#: inbox poller, so every emailed approval went unread. `widget_api` already
+#: passed timeout=10; the lesson simply never reached the other call sites.
+SMTP_TIMEOUT_SECONDS = 30
+
+
 def send_message(settings: dict[str, Any], msg: EmailMessage) -> None:
     _refuse_outbound_under_test_mode("an email", f"subject={msg['Subject']!r}")
-    with smtplib.SMTP(settings["host"], settings["port"]) as server:
+    with smtplib.SMTP(settings["host"], settings["port"],
+                      timeout=SMTP_TIMEOUT_SECONDS) as server:
         if settings.get("use_starttls"):
             server.starttls()
         server.login(settings["user"], settings["password"])

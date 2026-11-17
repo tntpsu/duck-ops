@@ -130,7 +130,7 @@ class TestNotifierEmail:
         sent = []
 
         class _FakeSMTP:
-            def __init__(self, host, port):
+            def __init__(self, host, port, *, timeout=None):
                 sent.append(("connect", host, port))
 
             def __enter__(self):

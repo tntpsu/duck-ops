@@ -8123,7 +8123,59 @@ to reach anyone ([[feedback_test_runs_reach_the_outside_world]]). It now
 refuses under `DUCK_TEST_MODE` and tests pass `reply_to` explicitly. Six red
 tests in a file I never touched were the only symptom.
 
+## Surface 137 — a missing `timeout=` took the operator's inbox offline for three days (2026-11-16, found by asking "what happens if I approve v4?")
+
+Nothing would have happened. The approval would have sat unread.
+
+`operator_inbox_poller` is not a job of its own — it is step 7 of
+`run_duck_ops_sidecar.sh`. That sidecar wedged at **2026-11-13 18:00** inside
+`notifier.send_message` and was still holding its lock **three days and four
+hours later**, pid alive, `updated_at` never advanced past `started_at`. Every
+run since logged `SKIP :: another sidecar run is already in progress`.
+
+The cause is one missing argument:
+
+```python
+with smtplib.SMTP(settings["host"], settings["port"]) as server:
+```
+
+Python's default is NO timeout, so a stalled connection blocks forever.
+
+**Seven steps died behind it**: cooldown_sweep, observer, trend_ranker,
+quality_gate, review_queue, operator_surface_refresh, the review drain — and
+the inbox poller, which is why the emailed-approval path built earlier the
+same day would have silently done nothing. Every component reported healthy
+([[feedback_swallowed_errors_lie]]).
+
+**`widget_api` already passed `timeout=10`.** The lesson had been learned in
+this repo and simply never reached the other call sites — including
+`email_helper.send_email`, which the drop digest itself calls, so the new
+4-hourly drop job could have wedged exactly the same way.
+
+All seven SMTP connections across both repos now carry a timeout, pinned by
+`tests/test_no_untimed_smtp.py` — an **AST** check, because the timeout sits
+on a continuation line where a line-based grep misses it, as mine did while
+verifying the fix ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]). It
+scans both repos: the hung call was in duck-ops, the riskiest remaining one in
+duckAgent. It carries a positive control, since a walker that silently matched
+nothing would pass forever.
+
+Two existing tests failed on the change — fakes standing in for `smtplib.SMTP`
+that no longer matched the real call signature. That is the test suite doing
+its job: a stand-in whose signature has drifted from the thing it stands in
+for is no longer testing it.
+
 ### Open
+
+- **The stale receipt still reads `running`.** `run_with_receipt.sh` writes
+  its END only on normal exit, so a killed job leaves `status: running`
+  forever and `scheduler_health` keeps grading it hung until the next run
+  overwrites it. Self-heals at the next 00:00 fire, but a wrapper that cannot
+  distinguish "running" from "killed three days ago" is how this stayed
+  invisible.
+- **`timeout_seconds: 1800` was recorded and never enforced.** The receipt
+  carried a 30-minute timeout while the job ran for three days. A timeout
+  nothing acts on is a comment.
 
 - ~~Nine lanes still cannot take a drop.~~ **duckvideo wired 2026-11-16**, so
   three can: meme, jeepfact, duckvideo. It needed least of all — already
