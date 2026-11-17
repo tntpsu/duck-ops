@@ -837,7 +837,8 @@ def build_whatsapp_collage(
     for media_url in media_urls[:6]:
         cmd.extend(["--url", media_url])
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True,
+                       timeout=SUBPROCESS_TIMEOUT_SECONDS)
     except Exception:
         return None
     return output_path if output_path.exists() else None
@@ -878,12 +879,14 @@ def stage_whatsapp_media_for_container(settings: dict[str, Any], media_url: str)
         check=True,
         capture_output=True,
         text=True,
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
     )
     subprocess.run(
         [docker_path, "cp", str(source_path), f"{gateway_container}:{container_path}"],
         check=True,
         capture_output=True,
         text=True,
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
     )
     return container_path
 
@@ -2280,6 +2283,21 @@ def _refuse_outbound_under_test_mode(channel: str, descriptor: str) -> None:
 SMTP_TIMEOUT_SECONDS = 30
 
 
+#: Seconds to wait on a shelled-out command. subprocess.run defaults to NO
+#: timeout, so a wedged child blocks forever and takes its parent with it.
+#:
+#: Measured twice: the duck-ops sidecar hung on 2026-11-13 18:00 and again on
+#: 2026-11-17 00:28, both times inside `docker exec ... message send
+#: --channel whatsapp` while the Docker daemon was unresponsive. Eight hours
+#: on the second occasion, three days on the first, each holding the sidecar
+#: lock -- which killed the operator inbox poller, so emailed approvals went
+#: unread while every component reported healthy.
+#:
+#: Generous rather than tight: a real WhatsApp send through the gateway takes
+#: a few seconds, so a minute is far past "slow" and well short of "forever".
+SUBPROCESS_TIMEOUT_SECONDS = 60
+
+
 def send_message(settings: dict[str, Any], msg: EmailMessage) -> None:
     _refuse_outbound_under_test_mode("an email", f"subject={msg['Subject']!r}")
     with smtplib.SMTP(settings["host"], settings["port"],
@@ -2366,7 +2384,8 @@ def send_whatsapp_message(
             cmd.extend(["--message", text_payload])
         if media_url:
             cmd.extend(["--media", stage_whatsapp_media_for_container(settings, media_url)])
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True,
+                       timeout=SUBPROCESS_TIMEOUT_SECONDS)
 
 
 def record_sent_artifact(state: dict[str, Any], artifact: dict[str, Any], subject: str) -> None:

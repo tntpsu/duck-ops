@@ -8123,7 +8123,42 @@ to reach anyone ([[feedback_test_runs_reach_the_outside_world]]). It now
 refuses under `DUCK_TEST_MODE` and tests pass `reply_to` explicitly. Six red
 tests in a file I never touched were the only symptom.
 
-## Surface 137 — a missing `timeout=` took the operator's inbox offline for three days (2026-11-16, found by asking "what happens if I approve v4?")
+## Surface 137 — a missing `timeout=` took the operator's inbox offline, twice (2026-11-16 and 2026-11-17)
+
+**The first diagnosis was wrong, and the fix did not hold.** On 2026-11-16 the
+hung process was `notifier.py`, `send_message` had no SMTP timeout, and that
+was read off the source as the cause. A timeout was added. The sidecar hung
+again at **2026-11-17 00:28**, running the patched code.
+
+The process tree said what the source could not:
+
+    docker exec openclaw-openclaw-gateway-1 ... message send --channel whatsapp
+
+`subprocess.run` also defaults to no timeout, and `select.poll` -- the stack
+both times -- is equally what reading a subprocess pipe looks like. The root
+cause underneath is an unresponsive Docker daemon: `docker ps` itself did not
+return within 120s. ([[feedback_verify_external_behavior_before_root_cause]] —
+a cause read off the source is a hypothesis; the process tree is the evidence.)
+
+The SMTP timeouts stay: they were a real unguarded risk, including in
+`email_helper.send_email`, which the new drop digest calls. They just were not
+this.
+
+**What it cost.** The operator tapped Approve on v4 at 08:40. The reply landed
+correctly formed and sat UNREAD, because `operator_inbox_poller` is step 7 of
+the sidecar and the sidecar was wedged at step 12. Seven steps dead, the lock
+held, every component green.
+
+**The ratchet.** Eighteen un-timed `subprocess` calls exist across both repos.
+A blanket timeout would be wrong for several -- the Drive mirror's rsync moves
+~10 GB, the Etsy Playwright batch runs for minutes -- so a number picked at
+speed would break working jobs to fix a hypothetical one. `UNREVIEWED` in
+`tests/test_no_untimed_smtp.py` lists them, nothing new may join it, and a
+test fails if an entry stops naming a real un-timed call so the list cannot
+rot. `notifier.py` is explicitly barred from the list: it holds the sidecar
+lock.
+
+### Original entry (2026-11-16, found by asking "what happens if I approve v4?")
 
 Nothing would have happened. The approval would have sat unread.
 
