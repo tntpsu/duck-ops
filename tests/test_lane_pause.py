@@ -209,26 +209,35 @@ class NoSixthCopyTests(unittest.TestCase):
     #: degradation fallback for when duck-ops is unreachable, documented at
     #: the call site -- a single comparison, not a second interpretation.
     #: This list only shrinks.
-    ALLOWED = {
-        "lane_pause.py",            # the canonical reader itself
-        "viewer.py",                # _read_lane_pause ImportError fallback
-        "main_agent.py",            # _flow_is_paused_by_operator fallback
-        "workflows_card.py",        # get_flow_pause ImportError fallback
-        "business_operator_desk.py",  # operator_mode_history writer, not a reader
+    #: filename -> the repo whose checkout holds it. The REPO matters: in
+    #: duck-ops CI the duckAgent checkout is behind an optional token, so
+    #: three of these files are simply not on disk. Keying the staleness
+    #: judgement on the filename alone made the first version of this test
+    #: fail there and demand their deletion -- which would have un-exempted
+    #: three real fallbacks on the authority of a scan that never opened the
+    #: files. That is the same mistake the un-timed-SMTP ratchet made the
+    #: same morning ([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]]).
+    ALLOWED_BY_REPO = {
+        "lane_pause.py": "duck-ops",            # the canonical reader itself
+        "business_operator_desk.py": "duck-ops",  # writes operator_mode_history
         # A DIFFERENT "off": an email CADENCE override, not a lane posture
-        # (`effective == "off"` where effective is a send frequency). It
-        # has its own anomaly-bypass semantics and nothing to do with
-        # whether a lane runs. Listed so the distinction is recorded rather
-        # than rediscovered.
-        "email_cadence_gate.py",
+        # (`effective == "off"` where effective is a send frequency). It has
+        # its own anomaly-bypass semantics and nothing to do with whether a
+        # lane runs. Listed so the distinction is recorded, not rediscovered.
+        "email_cadence_gate.py": "duck-ops",
+        "viewer.py": "duckAgent",               # _read_lane_pause fallback
+        "main_agent.py": "duckAgent",           # mail guard fallback
+        "workflows_card.py": "duckAgent",       # get_flow_pause fallback
     }
+    ALLOWED = set(ALLOWED_BY_REPO)
 
-    SEARCH_DIRS = (
-        REPO_ROOT / "runtime",
+    DUCK_OPS_DIRS = (REPO_ROOT / "runtime",)
+    DUCKAGENT_DIRS = (
         REPO_ROOT.parent / "duckAgent" / "src",
         REPO_ROOT.parent / "duckAgent" / "helpers",
         REPO_ROOT.parent / "duckAgent" / "creative_agent" / "runtime" / "src",
     )
+    SEARCH_DIRS = DUCK_OPS_DIRS + DUCKAGENT_DIRS
 
     def _inline_off_comparisons(self, path: Path) -> list[int]:
         """`<something> == "off"` or `"off" == <something>`, by AST -- a grep
@@ -280,20 +289,45 @@ class NoSixthCopyTests(unittest.TestCase):
 
     def test_the_allowlist_only_names_files_that_exist(self):
         """A stale entry silently exempts whatever takes that filename next.
-        Judged only over roots this runner could open -- duckAgent may be
-        absent in duck-ops CI
-        ([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]])."""
-        present = set()
-        opened_roots = 0
-        for root in self.SEARCH_DIRS:
-            if not root.is_dir():
-                continue
-            opened_roots += 1
-            present.update(p.name for p in root.rglob("*.py"))
-        self.assertTrue(opened_roots, "no search root exists")
-        unjudgeable = {"viewer.py", "main_agent.py"} - present
-        stale = self.ALLOWED - present - unjudgeable
-        self.assertEqual(stale, set(), "allowlist entries that name no file")
+
+        An entry is judged ONLY when its own repo's roots were all openable.
+        duck-ops CI reaches duckAgent through an optional token, so there the
+        three duckAgent entries are UNJUDGED, not clean -- and the next test
+        says so out loud, because a green run must not read as "the allowlist
+        is current"."""
+        present: dict[str, set[str]] = {"duck-ops": set(), "duckAgent": set()}
+        readable = {
+            "duck-ops": all(d.is_dir() for d in self.DUCK_OPS_DIRS),
+            "duckAgent": all(d.is_dir() for d in self.DUCKAGENT_DIRS),
+        }
+        for repo, dirs in (("duck-ops", self.DUCK_OPS_DIRS),
+                           ("duckAgent", self.DUCKAGENT_DIRS)):
+            for root in dirs:
+                if root.is_dir():
+                    present[repo].update(p.name for p in root.rglob("*.py"))
+        self.assertTrue(readable["duck-ops"],
+                        "duck-ops' own runtime must always be readable")
+        stale = {
+            name for name, repo in self.ALLOWED_BY_REPO.items()
+            if readable[repo] and name not in present[repo]
+        }
+        self.assertEqual(stale, set(),
+                         "allowlist entries that name no file in their own repo")
+
+    def test_the_allowlist_audit_says_what_it_could_not_judge(self):
+        """Without this, a CI run that never opened duckAgent looks identical
+        to one that checked every entry
+        ([[feedback_a_failed_probe_is_a_fact_about_the_probe]])."""
+        unjudged = sorted(
+            name for name, repo in self.ALLOWED_BY_REPO.items()
+            if not all(d.is_dir() for d in
+                       (self.DUCK_OPS_DIRS if repo == "duck-ops"
+                        else self.DUCKAGENT_DIRS))
+        )
+        if unjudged:
+            print("\n[lane-pause allowlist] not judged on this runner "
+                  "(repo not checked out): " + ", ".join(unjudged))
+        self.assertIsInstance(unjudged, list)
 
 
 if __name__ == "__main__":
