@@ -8907,6 +8907,28 @@ env var alone does not reach `SEARCH_DIRS`.
 fails; re-adding the F821 fails the lint job; reverting the `CODE_REPOS`
 isolation fails 11 under the rehearsal.
 
+### 145c — and one more that borrowed this machine's Drive state
+
+The second CI run came back with a single failure:
+`test_refuses_a_shortcut_target_spelling` asserted
+`len(_guarded_mirror_roots()) >= 2`. With no Drive mount
+`_default_mirror_root()` falls back to the legacy `~/DuckData`, so the two
+named destinations coincide, the union collapses to one entry, and CI
+reported "1 not greater than or equal to 2".
+
+Reading it properly showed the test had never done what it claimed even
+here: the count came from the two DESTINATIONS, not from the two SPELLINGS
+it was named after — `DuckData` is not currently a Drive shortcut on this
+Mac, so `resolve()` returns the same path and the shortcut case went
+unexercised in both environments. The replacement CONSTRUCTS a real symlink
+in a tmp dir and asserts both the link and its target are refused, which
+works on any machine and actually tests the rule. It leans on
+`_guarded_mirror_roots` deriving from the constant at call time — which its
+own docstring already requires, for this reason.
+
+Mutation: dropping the `resolve()` spelling from `_path_spellings` fails
+both subtests. The old assertion survived that mutation untouched.
+
 **Still open.** `media_rendering_helper.font` has no non-macOS candidate, so
 every CI render uses a bitmap fallback and **no CI test can say anything
 about real text layout**. The operator's renders all happen on the Mac, so

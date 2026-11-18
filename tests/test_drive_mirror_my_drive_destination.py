@@ -159,13 +159,52 @@ class TestModeGuardTests(unittest.TestCase):
             )
         )
 
-    def test_refuses_a_shortcut_target_spelling(self):
-        """`My Drive/DuckData` may already exist as a Drive shortcut, so
-        resolve() reports `.shortcut-targets-by-id/...`. Both spellings are
-        guarded or the guard misses whichever one the caller passes."""
-        guarded = self.mod._guarded_mirror_roots()
-        self.assertIn(self.mod._FROZEN_PRODUCTION_MIRROR_ROOT, guarded)
-        self.assertGreaterEqual(len(guarded), 2)
+    def test_the_frozen_root_is_always_guarded(self):
+        """True on any machine, Drive mounted or not."""
+        self.assertIn(self.mod._FROZEN_PRODUCTION_MIRROR_ROOT,
+                      self.mod._guarded_mirror_roots())
+
+    def test_both_spellings_of_a_symlinked_destination_are_refused(self):
+        """`My Drive/DuckData` can already exist as a Drive *shortcut*, which
+        Drive for desktop mounts as a symlink into
+        `.shortcut-targets-by-id/`. `resolve()` then reports the target
+        rather than the guarded directory, so a guard holding one spelling
+        misses the other.
+
+        The condition is CONSTRUCTED here rather than borrowed from this
+        machine. The old test asserted `len(_guarded_mirror_roots()) >= 2`,
+        which is a reading of the local Drive setup: on a runner with no
+        Drive, `_default_mirror_root()` falls back to the legacy
+        `~/DuckData`, so the two named destinations coincide, the union
+        collapses to one entry and duck-ops CI failed with "1 not greater
+        than or equal to 2". Worse, it never exercised the shortcut case
+        even here, because DuckData is not currently a shortcut -- so the
+        count it asserted came from the two DESTINATIONS, not the two
+        spellings it claimed to be about
+        ([[feedback_pin_the_rule_not_the_reading]]).
+
+        A real symlink makes the rule testable anywhere. It relies on
+        `_guarded_mirror_roots` deriving from the constant at CALL time,
+        which its own docstring requires for exactly this reason.
+        """
+        from unittest import mock
+
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "shortcut_target"
+            target.mkdir()
+            link = Path(tmp) / "DuckData"
+            link.symlink_to(target, target_is_directory=True)
+            self.assertNotEqual(link.resolve(), Path(os.path.normpath(str(link))),
+                                "the fixture must actually be a symlink")
+            with mock.patch.object(
+                    self.mod, "_FROZEN_PRODUCTION_MIRROR_ROOT", link):
+                for label, spelling in (("the link", link),
+                                        ("its target", target)):
+                    with self.subTest(spelling=label):
+                        self.assertTrue(
+                            self.mod._refusing_test_mode_prod_write(spelling),
+                            f"{label} is not refused, so the guard misses "
+                            "whichever spelling the caller passes")
 
     def test_allows_an_isolated_tmp_destination(self):
         with TemporaryDirectory() as tmp:
