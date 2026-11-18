@@ -9228,3 +9228,97 @@ the distinction Surface 141 was about. The publish itself is proven by the
 2026-11-13 run; the first scheduled one is 03:20 tomorrow, and the card
 clears then rather than now, because a 5 GB publish to the operator's Drive
 is not something to trigger as a side effect of installing a timer.
+
+---
+
+## Surface 152 — the stuck-draft card could only see one spelling of "stuck" (2026-11-18)
+
+Operator: "U can dismiss the two for 1" (the two Thursday batches) and "Do 3".
+
+The two Thursday drafts were `MJD: [THURSDAY] BATCH REVIEW ... ACTION:choose_final`
+emails from 2026-10-22 and 2026-10-29 — 27 and 20 days old, both with
+`selected_concept_number: null`, both asking the operator to pick one of
+three batch options. Dismissed through `workflow_control.record_workflow_transition`
+(`state=dismissed`, `state_reason=operator_dismissed_slot_passed`), not by
+editing the files. Checked first that no decision-inbox or quality-gate
+entry held the same runs, so there is no zombie left in a second store
+([[feedback_retire_artifacts_in_authoritative_store]]).
+
+### The predicate
+
+`_load_weekly_lane_approval_health` required
+`state == "proposed" AND state_reason == "awaiting_review"`. The second
+half is the fragile one:
+
+| field | vocabulary |
+|---|---|
+| `state` | 8 values, controlled: verified, blocked, skipped_off, observed, dismissed, resolved, proposed, needs_revision |
+| `state_reason` | free-form; **8 spellings in live use** across workflow_control |
+
+**Measured across the seven watched lanes:** the predicate matched ONE
+receipt while two more sat unseen —
+
+- `review_carousel`, `state_reason=approval_reminder_sent`, **176 days**
+- `thursday`, `state=needs_revision`, **178 days**
+
+Both are precisely the silent weekly miss the card exists to catch, and
+both had been invisible for roughly six months. The card now keys on
+`state` alone and ignores `state_reason` entirely for the decision, so a
+reason added next month is caught by default rather than silently excluded
+— an allowlist is only as wide as its spellings, and dropping the fragile
+dimension beats extending it
+([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]],
+[[feedback_status_fields_one_meaning]]).
+
+Scope checked before widening, because the obvious version was too wide:
+**34** non-terminal receipts exist across all lanes (`shopify_activation_pending`
+×11 oldest 208d, `review_email_sent` ×10, `awaiting_operator_approval` ×6,
+`reply_preview_staged` ×3 oldest 220d). Those belong to other cards with
+other cadences — the docstring already draws that line — so the lane filter
+stays. Restricted to weekly lanes the gap was exactly 2.
+
+### And widening it created a false alarm, which the same day's lesson caught
+
+Surfacing the review_carousel draft meant demanding action on a lane the
+operator **paused on 2026-11-13**. That is the same false-alarm shape as
+Surfaces 142d, 149 and 151, so the card now skips paused lanes: a lane that
+is not running has no slot to miss. `_weekly_lane_is_paused` fails OPEN on
+an unreadable config, because a config we cannot read is not evidence of a
+pause.
+
+Lane→config resolution is **by convention** (`<lane>_execution.json`, plus
+one documented `gtdf_winner`→`gtdf` alias) rather than a fourth
+hand-maintained map — `main_agent` and `business_operator_desk` already hold
+two, and a third copy is the drift trap. `test_every_watched_lane_resolves_to_a_real_config`
+fails if a lane is ever added without one.
+
+| | awaiting_review | any other proposed reason | a reason nobody has written yet | needs_revision | terminal states | paused lane | running lane | config unreadable | lane→config |
+|---|---|---|---|---|---|---|---|---|---|
+| counted | ✅ | ✅ `test_any_proposed_reason_counts_not_just_awaiting_review` (5 subtests) | ✅ same subtest list | ✅ `test_needs_revision_counts_too` | ✅ `test_the_terminal_states_are_still_terminal` (6 subtests) | ✅ `test_a_paused_lane_s_stuck_draft_is_not_an_alarm` | ✅ `test_a_RUNNING_lane_s_stuck_draft_still_is` | ✅ `test_an_unreadable_config_does_not_mean_paused` | ✅ `test_every_watched_lane_resolves_to_a_real_config` (7 subtests) |
+| right action named | ✅ `test_a_proposed_draft_is_still_told_to_publish` | | | ✅ `test_needs_revision_is_told_to_regenerate_not_to_publish` | | | | | |
+
+The copy was wrong as well as narrow: a draft the operator sent BACK for
+changes is not waiting for a `publish` reply, it is waiting for a
+regeneration that never came. It now names the state it found and the action
+that matches, and reports the age in days — "sitting 4263.7h" is not a
+number anyone reads.
+
+**A hidden input made visible, again.** Reading the lane configs meant the
+card's verdict no longer depended only on the `openclaw_root` it was handed,
+and `test_all_seven_weekly_lanes_are_watched` began failing the moment gtdf
+and review_carousel were paused in production — for reasons nothing in the
+test mentioned. `lane_config_dir` is now an injectable keyword that the
+existing tests pass explicitly. Same correction as Surface 149's
+`config_path`; second time in one day.
+
+**Mutation-verified.** Restoring the `awaiting_review` requirement fails 8;
+removing the paused-lane skip fails 1.
+
+**Counts:** duck-ops 1912 passed / 1 skipped / 284 subtests; duckAgent 3672
+passed / 1 xfailed / 72 subtests.
+
+**Still open.** The 34 non-terminal receipts in the OTHER lanes are
+unexamined. `reply_preview_staged` at 220 days and
+`shopify_activation_pending` at 208 days are either real stuck work or
+receipts nobody retires, and no card distinguishes those two readings. That
+is a separate surface, not a widening of this one.
