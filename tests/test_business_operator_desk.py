@@ -2635,3 +2635,90 @@ class LanePolicyConfigContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class APausedLaneIsNotALaneAwaitingPromotionTests(unittest.TestCase):
+    """`mode: "off"` had no branch, so a paused lane fell through to the
+    "not ready for promotion yet" copy.
+
+    Operator, 2026-11-18, having paused Jeep Fact Wednesday hours earlier:
+    "I saw something that jeep fact Wednesday that we turned off on an
+    email that said auto approve isn't on any more. Feels like this got
+    messed up when we turned off?"
+
+    Nothing was broken. The surface was saying, of a lane whose launchd job
+    had just been unloaded:
+
+        "Jeep Fact Wednesday policy is not ready for promotion yet;
+         3 more clean gated run(s) are recommended."
+        "Keep replying `publish` on Wednesday while the policy streak
+         builds..."
+
+    Both impossible: no Wednesday run will happen, and nothing has to be
+    earned back -- resuming is one field. review_carousel had been telling
+    the same story since 2026-11-13. Idle is not broken when idle is the
+    instruction ([[feedback_grade_runs_against_runtime_state]]).
+    """
+
+    def _surface(self, raw_config):
+        from business_operator_desk import JEEPFACT_LANE_CONFIG, load_lane_policy_surface
+
+        with patch("business_operator_desk.load_json", return_value=raw_config), \
+             patch("business_operator_desk.list_workflow_states", return_value=[]):
+            return load_lane_policy_surface(JEEPFACT_LANE_CONFIG)
+
+    def test_a_paused_lane_says_it_is_paused(self):
+        s = self._surface({"mode": "off", "paused_on": "2026-11-18",
+                           "paused_because": "reworking the lane"})
+        self.assertTrue(s.get("paused"))
+        self.assertIn("paused by the operator", s["readiness_headline"].lower())
+
+    def test_it_never_asks_for_runs_that_cannot_happen(self):
+        """The exact copy the operator read as 'auto approve isn't on'."""
+        s = self._surface({"mode": "off", "paused_because": "reworking"})
+        blob = f"{s['readiness_headline']} {s['recommended_action']}".lower()
+        self.assertNotIn("not ready for promotion", blob)
+        self.assertNotIn("clean gated run", blob)
+        self.assertNotIn("keep replying", blob)
+
+    def test_it_carries_the_operator_s_own_reason(self):
+        s = self._surface({"mode": "off", "paused_on": "2026-11-13",
+                           "paused_because": "no one looks at the review carousels"})
+        self.assertIn("no one looks at the review carousels",
+                      s["recommended_action"])
+        self.assertIn("2026-11-13", s["recommended_action"])
+
+    def test_it_reads_the_other_pause_shape_too(self):
+        """review_carousel records the reason in operator_mode_history;
+        jeepfact in paused_because. Both are read rather than one being
+        migrated -- rewriting a record of what the operator decided is not
+        a display fix."""
+        s = self._surface({
+            "mode": "off",
+            "operator_mode_history": [
+                {"at": "2026-11-13T05:45:00-05:00", "from": "auto_schedule_instagram",
+                 "to": "off", "reason": "lowest-reach lane on IG"},
+            ],
+        })
+        self.assertIn("lowest-reach lane on IG", s["recommended_action"])
+        self.assertIn("2026-11-13", s["recommended_action"])
+
+    def test_it_says_how_to_resume(self):
+        s = self._surface({"mode": "off", "paused_because": "x",
+                           "mode_before_pause": "auto_schedule_meta"})
+        self.assertIn("auto_schedule_meta", s["recommended_action"])
+
+    def test_an_unpaused_lane_is_untouched(self):
+        """The promotion machinery still works for lanes that are running."""
+        for mode in ("approval_gated", "auto_schedule_meta"):
+            with self.subTest(mode=mode):
+                s = self._surface({"mode": mode})
+                self.assertFalse(s.get("paused"))
+                self.assertNotIn("paused by the operator",
+                                 s["readiness_headline"].lower())
+
+    def test_a_history_free_lane_still_reports_honestly(self):
+        """mode=off must not swallow the 'no history yet' case for a lane
+        that is merely new."""
+        s = self._surface({"mode": "approval_gated"})
+        self.assertFalse(s.get("paused"))

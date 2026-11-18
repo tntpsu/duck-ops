@@ -493,7 +493,40 @@ def load_lane_policy_surface(config: LanePolicyConfig) -> dict[str, Any]:
     promote_ready = bool(mode == "approval_gated" and clean_gated_streak >= threshold)
 
     # Headline + recommended_action — generic copy with lane variables.
-    if mode == config.auto_mode_label:
+    #
+    # The paused branch comes FIRST, and it has to exist. `mode: "off"` is
+    # neither the auto label nor `approval_gated`, so a deliberately paused
+    # lane fell through to the "not ready for promotion yet; N more clean
+    # gated run(s) are recommended" copy, whose recommended action is "keep
+    # replying `publish` on <weekday> while the policy streak builds".
+    #
+    # For a paused lane that is false twice over: no run will happen (the
+    # launchd job is unloaded), and nothing has to be earned back —
+    # resuming is one field. The operator read it as "auto approve isn't on
+    # any more" and asked whether pausing had broken something, which is
+    # exactly what that copy says. review_carousel had been telling the
+    # same story since 2026-11-13.
+    #
+    # Keyed on `mode == "off"` alone, deliberately. This is DISPLAY: a lane
+    # whose mode is off is not running, and saying so is simply true. The
+    # behavioural guard in duckAgent's main_agent requires the stricter
+    # `operator_paused` flag as well, because refusing an operator's email
+    # reply is a real change and `mode` is overloaded across lanes.
+    if mode == "off":
+        readiness_headline = (
+            f"{config.display_name} is paused by the operator, so it is not "
+            f"running and its {config.auto_action_verb} posture is not in question."
+        )
+        note = paused_lane_note(raw_config)
+        resume = str(raw_config.get("to_resume") or "").strip()
+        previous = str(raw_config.get("mode_before_pause") or "").strip()
+        recommended_action = (
+            (note + " " if note else "")
+            + (f"To resume: {resume}" if resume
+               else f"To resume, set `mode` in {config.config_path.name} back to "
+                    f"`{previous or config.auto_mode_label}`.")
+        )
+    elif mode == config.auto_mode_label:
         readiness_headline = f"{config.display_name} {config.auto_action_verb} is already enabled."
         recommended_action = (
             f"Watch the next {config.weekday} run closely and keep the manual "
@@ -538,6 +571,10 @@ def load_lane_policy_surface(config: LanePolicyConfig) -> dict[str, Any]:
         "available": True,
         "path": str(config.config_path),
         "mode": mode,
+        # Readers branch on this rather than re-deriving `mode == "off"` in
+        # each renderer -- the markdown/portal drift trap.
+        "paused": mode == "off",
+        "paused_note": paused_lane_note(raw_config),
         "promotion_threshold": threshold,
         "clean_gated_streak": clean_gated_streak,
         "clean_gated_recent_count": clean_gated_recent_count,
@@ -938,6 +975,30 @@ def build_workflows_card_surface(
             "ready_to_promote": ready_to_promote,
         },
     }
+
+
+def paused_lane_note(config_payload: dict[str, Any]) -> str | None:
+    """Why this lane is off, in the operator's own words, or None.
+
+    Two shapes exist because the two pauses were recorded by different
+    hands: review_carousel carries `operator_mode_history` (2026-11-13,
+    "no one looks at the review carousels"), jeepfact carries
+    `paused_on`/`paused_because` (2026-11-18). Both are read rather than
+    one being migrated, because rewriting a record of what the operator
+    decided is not a display fix.
+    """
+    reason = str(config_payload.get("paused_because") or "").strip()
+    when = str(config_payload.get("paused_on") or "").strip()
+    if not reason:
+        history = config_payload.get("operator_mode_history")
+        if isinstance(history, list) and history:
+            last = history[-1] if isinstance(history[-1], dict) else {}
+            if str(last.get("to") or "").strip() == "off":
+                reason = str(last.get("reason") or "").strip()
+                when = when or str(last.get("at") or "").strip()[:10]
+    if not reason:
+        return None
+    return f"Paused by the operator{f' on {when}' if when else ''}: {reason}"
 
 
 def _is_clean_gated_policy_entry(

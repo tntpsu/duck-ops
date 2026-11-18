@@ -92,6 +92,7 @@ MODEL_PRICING_USD_PER_1M_TOKENS = {
 ESTIMATED_PRICING_MODELS = {
     "gpt-5.5", "gpt-5", "gemini-omni-1.1-flash", "gemini-2.5-flash",
     "gemini-2.5-flash-image",
+    "gpt-image-1.5", "gpt-image-2",
 }
 
 # Image-generation pricing per call. Operators care about images
@@ -100,6 +101,15 @@ ESTIMATED_PRICING_MODELS = {
 # page would underestimate creative-flow spend by an order of magnitude.
 PER_CALL_IMAGE_COST_USD = {
     "gpt-image-1": 0.040,           # ~$0.04 per 1024x1024 standard quality
+    # 30 calls sit in the ledger with no price (newest 2026-09-09), so every
+    # one of them booked as $0.00. Outside the card's 7/30d windows today,
+    # which is the only reason it is not already lying about spend.
+    # !! NOT OpenAI's published rate -- the gpt-image-1 figure as a stand-in,
+    # same convention as gpt-image-2 below. Listed in
+    # ESTIMATED_PRICING_MODELS so the card says the number is a guess
+    # ([[feedback_a_number_needs_its_denominator]]: never render an estimate
+    # as a measurement).
+    "gpt-image-1.5": 0.040,
     "gpt-image-2": 0.040,           # next-gen gpt-image; same flat estimate until OpenAI publishes rates
     "dall-e-3": 0.040,              # ~$0.04 per 1024x1024 standard
     "dall-e-3-hd": 0.080,           # ~$0.08 per 1024x1024 HD

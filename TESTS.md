@@ -9085,3 +9085,146 @@ which is a visual decision about the operator's posts and theirs to make.
 
 **Mutation-verified.** Deleting the non-macOS candidates fails 1; restoring
 the bare `load_default()` fails 1; silencing the warning fails 1.
+
+---
+
+## Surface 149 — "auto approve isn't on any more" (2026-11-18, operator: "I saw something that jeep fact Wednesday that we turned off on an email that said auto approve isn't on any more. Feels like this got messed up when we turned off?")
+
+Nothing was broken. But the operator was right to ask, because the surface
+was telling them something false.
+
+**The email they were looking at predates the pause.** Sent 09:04, four
+hours before it, and it says the opposite: `Mode: auto_schedule_meta`,
+`Decision: auto_schedule_allowed`, "DuckAgent will schedule it
+automatically after this email". No email has been sent since 09:36.
+
+What had changed was the **lane posture surface**, and with `mode: "off"`
+it read:
+
+> "Jeep Fact Wednesday policy is not ready for promotion yet; **3 more
+> clean gated run(s) are recommended**."
+> "**Keep replying `publish` on Wednesday** while the policy streak
+> builds and watch for any blocked decisions."
+
+Both impossible. The launchd job is unloaded, so no Wednesday run will
+happen; and nothing has to be earned back, because resuming is one field.
+`load_lane_policy_surface` branches on `mode == auto_mode_label` then
+`promote_ready` (which itself requires `mode == "approval_gated"`), so a
+paused lane matched neither and fell through to the "still building
+evidence" copy. **review_carousel had been telling the same story since
+2026-11-13**, which is how long this has been live.
+
+Three surfaces, one root cause — a lane the operator switched off being
+graded as a lane that is failing to run:
+
+| surface | said | now says |
+|---|---|---|
+| lane posture (`business_operator_desk`) | "3 more clean gated run(s) are recommended" | "paused by the operator … To resume: …", carrying their own reason |
+| `review_carousel_freshness` card | "Last carousel was 14d ago — verify the Tuesday job is firing" | green, "paused by the operator, so no new carousel is expected" |
+| `scheduler_health` (Surface 142d) | would have graded `missed_run`/bad | `not_scheduled`, warn, non-actionable |
+
+The pause reason is read from the config rather than invented, and from
+**both** shapes that exist: `operator_mode_history` (review_carousel,
+2026-11-13, "no one looks at the review carousels") and
+`paused_on`/`paused_because` (jeepfact, today). Neither is migrated to the
+other, because rewriting a record of what the operator decided is not a
+display fix.
+
+| | paused | mode=off only, other shape | unpaused | red-age + paused | unpaused + stale | config unreadable |
+|---|---|---|---|---|---|---|
+| lane posture | ✅ `test_a_paused_lane_says_it_is_paused`, `test_it_never_asks_for_runs_that_cannot_happen`, `test_it_carries_the_operator_s_own_reason`, `test_it_says_how_to_resume` | ✅ `test_it_reads_the_other_pause_shape_too` | ✅ `test_an_unpaused_lane_is_untouched` (2 subtests) | n/a | n/a | n/a |
+| carousel card | ✅ `test_a_paused_lane_is_green_and_says_why`, `test_it_does_not_ask_for_a_run_that_cannot_happen` | n/a | n/a | ✅ `test_a_pause_outranks_even_a_red_age` | ✅ `test_an_UNPAUSED_stale_lane_is_still_flagged` | ✅ `test_a_missing_config_does_not_mean_paused` |
+
+**Keyed on `mode == "off"` alone, and that is a deliberate split from the
+behavioural guard.** Display: a lane whose mode is off is not running, and
+saying so is simply true. Behaviour: duckAgent's `_flow_is_paused_by_operator`
+still demands the stricter `operator_paused` flag as well, because refusing
+an operator's email reply is a real change and `mode` is overloaded across
+lanes (Surface 142c).
+
+**A design flaw my own fix introduced, caught by three pre-existing tests.**
+The carousel card read duckAgent's config by a path derived from `__file__`,
+so its verdict no longer depended only on the `openclaw_root` it was handed
+— a test given a tmp root still read the operator's real (paused) config and
+came back green for reasons nothing in the test stated. `config_path` is now
+an injectable keyword, and the five pre-existing call sites say explicitly
+that no lane config applies. Hidden input, visible input.
+
+**Mutation-verified.** Disabling the posture branch fails 4; disabling the
+carousel branch fails 3.
+
+---
+
+## Surface 150 — the cost card asked for a price that cannot exist (2026-11-18)
+
+`llm_cost_dashboard` read "7 call(s) used a model missing from the pricing
+table; cost is undercounted." Measured: all seven are gemini **image** calls
+that returned `402 RESOURCE_EXHAUSTED — prepayment credits are depleted`,
+with `model: "unknown"` because the call died before resolving one.
+
+They bought nothing. There was no cost to be missing, and the advice sent
+the reader to the pricing table to fix a **billing outage** —
+`provider_credit_health` was already red about exactly that, which is a
+different card and a different action. Pricing `"unknown"` would have been
+fabricating spend.
+
+A failure is now counted as `failed_calls`, separately, rather than dropped:
+a run of failures is worth seeing, it just is not a pricing gap.
+
+Also found while measuring, and genuinely a pricing gap: **`gpt-image-1.5`,
+30 calls, newest 2026-09-09**, in neither table and therefore booking as
+$0.00 each. It only escapes the card because it falls outside the 7/30d
+windows. Priced in both tables, at the gpt-image-1 rate as a stand-in — and
+added to `ESTIMATED_PRICING_MODELS` so the card says out loud that the
+number is a guess. `gpt-image-2` was in the same undeclared state and is now
+declared too.
+
+| | failed + unpriceable | succeeded + unpriced | gpt-image-1.5 | the two tables | estimate declared |
+|---|---|---|---|---|---|
+| | ✅ `test_a_failed_unpriceable_call_is_not_an_unpriced_call` | ✅ `test_a_SUCCEEDED_unpriced_call_is_still_reported` | ✅ `test_it_is_priced_per_call` | ✅ `test_both_repos_agree_on_the_image_table` | ✅ `test_an_estimated_price_is_declared_an_estimate` |
+
+`test_a_SUCCEEDED_unpriced_call_is_still_reported` is the one that matters
+most: narrowing a detector is the change that most deserves a test proving
+it is still armed.
+
+**Mutation-verified.** Removing the failed-call split fails 1.
+
+---
+
+## Surface 151 — the Drive mirror had no job at all (2026-11-18)
+
+The `drive_mirror_throughput` card read "The last mirror run completed 4.5
+days ago. The job is daily, so two missed nights means the mirror is
+stale." I reported that as a broken producer. It was not.
+
+- Last run **2026-11-13 22:40** — `status: released`, `ok: true`, 19,690
+  files / 5.28 GB, **zero failures**.
+- There was **no installed launchd job for it.** The plist sat unused in
+  `duckAgent_runtime/prepared_plists/`, and the wrapper
+  `run_drive_mirror.sh` existed beside it.
+
+So the card graded a daily cadence that had never been set up, and the
+mirror had only ever run by hand. The fix was installing the job, not
+debugging it — the rule I had in memory and did not apply when I wrote that
+recommendation ([[feedback_verify_the_job_is_firing_first]]: confirm the job
+is firing before debugging its logic).
+
+Installed and bootstrapped: daily 03:20, `RunAtLoad: false` (deliberate —
+every other producer here is a cheap recompute, this one rsyncs ~5 GB, so
+firing it on every login would be a surprise), 2h timeout, wrapped by
+`run_with_receipt.sh` so the scheduler grades it.
+
+Verified rather than assumed:
+
+| check | result |
+|---|---|
+| plist loads | `launchctl list` → `com.philtullai.duckops.drive-mirror`, `runs = 0`, `state = not running` |
+| the wrapper's exact command works | `--dry-run` through the same venv and cwd: exit 0, every tree `ok`, creative slice 2,382 files / 4.56 GB |
+| the scheduler picks it up | roster 50 → **51** jobs; `drive_mirror_nightly` graded `no_history`, "Declared after the last window closed; waiting for the first scheduled run" |
+| no false miss | `declared_at` (plist mtime) suppresses a `missed_run` for the 03:20 window that closed before it existed |
+
+The dry run proves the selection and the environment, **not** the publish —
+the distinction Surface 141 was about. The publish itself is proven by the
+2026-11-13 run; the first scheduled one is 03:20 tomorrow, and the card
+clears then rather than now, because a 5 GB publish to the operator's Drive
+is not something to trigger as a side effect of installing a timer.
