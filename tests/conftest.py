@@ -181,6 +181,27 @@ def _isolate_drop_intake(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_operator_reply_health(monkeypatch, tmp_path):
+    """Keep every test off the real reply-channel state file.
+
+    The OS card grades this file. A fixture reading of "no reply has ever
+    been processed" would turn the drop card red on nothing, and a reading
+    of "processed 0h ago" would turn a real outage green -- which is the
+    worse direction ([[feedback_test_isolation_from_production_state]]).
+    """
+    try:
+        import operator_reply_health
+    except ImportError:
+        yield
+        return
+    monkeypatch.setattr(operator_reply_health, "STATE_PATH",
+                        tmp_path / "operator_reply_health.json")
+    monkeypatch.setattr(operator_reply_health, "RECEIPT_PATH",
+                        tmp_path / "operator_inbox_receipts.jsonl")
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _redirect_llm_call_log(tmp_path, monkeypatch):
     """Redirect llm_call_helpers.LLM_CALL_LOG_PATH to a tmp file so
     no test write reaches the production log. Autouse: applies to

@@ -42,7 +42,9 @@
     "enabled": false
   },
   "whatsapp": {
-    "enabled": true,
+    "enabled": false,
+    "disabled_on": "2026-11-17",
+    "disabled_because": "Operator does not use WhatsApp any more. The inbound bridge last processed a message 2026-06-22; outbound was still pushing review notifications on every notifier run, and that docker exec into the openclaw gateway is what blocked for 8 hours against an unresponsive Docker daemon on 2026-11-17, taking the whole sidecar (including the operator inbox poller) down with it. Turning this off removes the hang's only remaining entry point. The launchd job com.philtullai.duckops.whatsapp-bridge is still loaded and still dead; unloading it is a separate Tier-3 action.",
     "review_operator_push_enabled": true,
     "business_desk_operator_push_enabled": false,
     "target": "+18148124112",

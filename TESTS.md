@@ -8288,3 +8288,231 @@ Also open:
   source guard of its own; only the new ledger does.
 - **The stray `QcYjMhPH3VWz`** (HTML, no extension) sits in the drop root
   untouched. Only `inbox/` is scanned, so it is inert, but nothing reports it.
+
+---
+
+## Surface 138 — the approval was sent, and the poller was looking in the wrong folder (2026-11-17, operator: "Did the approval work? I didn't think we had what's app anymore, what is this canary about")
+
+**I had told the operator their reply was "queued and intact in the inbox."
+It was in Trash.** The reply was real, correctly formed, and sent at 08:40:
+
+    drop approve mid_november_holiday_horror_dash_standoff_v4 only
+
+`operator_inbox_poller` selected the IMAP folder `INBOX` and searched
+`UNSEEN FROM <operator>`. A message in Trash is not in INBOX, so the poller
+truthfully reported `no_new_replies` on every run, including the 12:26 one
+that followed the Docker fix. Four drops stayed `operator_required`, and the
+digest went on re-sending the same four.
+
+The Docker wedge (Surface 137) was real and did break seven sidecar steps,
+but it was **not** why this approval never landed. Two independent faults
+with one symptom, and I attributed the second to the first without checking
+which folder the message was in
+([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]] — a clean scan
+describes the files the guard OPENED; here, the folders).
+
+**My first proposed fix was wrong, and measuring it is what caught it.**
+"Search `[Gmail]/All Mail` instead of INBOX" sounds like it covers
+everything. Gmail's All Mail deliberately **excludes Trash and Spam**.
+Measured against the live mailbox:
+
+| folder | unseen from operator | within 7 days |
+|---|---|---|
+| `INBOX` | 2 | 1 |
+| `"[Gmail]/All Mail"` | 2 | 1 |
+| `"[Gmail]/Trash"` | **174** | **40** |
+
+All Mail would have added nothing. Trash had to be named.
+
+### Widening the search needed three guards, not one
+
+The 174 number is why. Enumerating what a naive widening would have done:
+
+1. **Oldest-first starves the reply that matters.** IMAP returns ascending
+   sequence numbers and the caller slices to `limit=25`; against 174 stale
+   messages, today's answer is never reached. `uids.reverse()` is
+   load-bearing, as is the `SINCE` window.
+2. **A week-old approval would have been executed.** The same Trash sweep
+   turned up an unread `Re: MJD: [THURSDAY] BATCH REVIEW` from 2026-11-12.
+   An approval is a statement about the moment it was written, so a reply
+   older than `MAX_REPLY_AGE_HOURS = 48` is now **reported and left unread**,
+   never dispatched — fail closed, and visible rather than silent.
+3. **Gmail shows one message in several folders under different UIDs.**
+   Without Message-ID dedup an INBOX reply dispatches a second time from All
+   Mail.
+
+A `--dry-run` against the live mailbox before arming it: exactly **one**
+dispatch, the operator's drop approval from Trash at 13.28h. The Thursday
+reply was skipped (it lacks the template marker). Nothing else moved.
+
+| | happy | wrong folder | backlog | stale | duplicate | provider has no such folder | untrusted |
+|---|---|---|---|---|---|---|---|
+| reply reaches the lane | ✅ `test_trash_is_polled` | ✅ `test_every_configured_folder_is_searched`, `test_trash_is_in_the_configured_folders` | ✅ `test_newest_reply_wins_the_limit`, `test_search_window_is_bounded_by_since` | ✅ `test_stale_reply_is_reported_never_dispatched`, `test_undatable_reply_is_treated_as_stale` | ✅ `test_same_message_in_two_folders_dispatches_once` | ✅ `test_missing_folder_is_recorded_not_fatal` | ✅ `test_untrusted_sender_is_refused_even_if_imap_returns_it` |
+| read state is not consumed | ✅ `test_fresh_reply_is_marked_seen_in_its_own_folder` | n/a | n/a | ✅ asserts `stored == []` | n/a | n/a | n/a |
+| dry run writes nothing | ✅ `test_dry_run_leaves_everything_unread` | n/a | n/a | n/a | n/a | n/a | n/a |
+
+**Mutation-verified** (the standard that matters — the pre-existing 17 tests
+all passed against the bug): reverting `POLL_FOLDERS` to `("INBOX",)` fails
+6; using All Mail instead of Trash — my own first answer — fails 5; dropping
+`uids.reverse()` fails 1; disabling the stale guard fails 2.
+
+**The selection predicate had zero tests.** All 17 existing tests covered
+parsing, dispatch, the metadata footer and the trust gate. Nothing called
+`poll_inbox`. The bug lived in the one part of the module no test touched,
+which is the same shape as Surface 130's nine-month `.env.clean` blind spot.
+
+### The loop could not see itself (`runtime/operator_reply_health.py`, new)
+
+Both halves were individually truthful — the digest had sent, the operator
+had replied, the poller reported no new replies — and **nothing read them
+together.** One module does now, and it is deliberately the only
+implementation: the digest renders it into the email and the OS card grades
+it, so a surface cannot disagree with an email about whether an answer
+arrived.
+
+Measured on arrival: **no operator reply had been successfully dispatched
+since 2026-10-26** — 22 days, not one afternoon.
+
+Two things it refuses to do, each found by its own tests:
+
+- **A `--dry-run` receipt is not a delivery.** The dry run records
+  `outcome: "ok"` and dispatches nothing. Counting it made the helper report
+  "your last reply was processed 0h ago" the moment anyone probed the poller
+  — false reassurance from the tool built to prevent it
+  ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
+- **A seven-week-old refusal is not news.** An unbounded refusal list led
+  with a `dispatch_failed` from 2026-09-29 beside a drop that had arrived a
+  minute earlier. `REFUSAL_RECENT_HOURS = 72`.
+
+A missing log yields `polled_ever: False`, never a zero: "we have no
+measurement" and "nothing arrived" are different facts.
+
+| | happy | no log | dry run | refused reply | old refusal | repeats | trash | huge log | corrupt |
+|---|---|---|---|---|---|---|---|---|---|
+| reply-channel reading | ✅ `test_dispatch_is_recorded_with_its_age` | ✅ `test_missing_log_is_not_reported_as_healthy` | ✅ `test_dry_run_receipt_is_not_a_dispatch` | ✅ `test_a_refused_reply_is_surfaced_over_a_quiet_channel` | ✅ `test_an_old_refusal_is_not_news` | ✅ `test_repeated_refusal_of_the_same_command_collapses` | ✅ `test_dispatch_from_trash_is_flagged` | ✅ `test_tail_bound_keeps_the_newest_rows` | ✅ `test_corrupt_lines_do_not_raise`, `test_naive_timestamp_does_not_raise` |
+
+**Three isolation layers, same commit** (new module-level prod-path
+constant, per the house rule): `_isolate_operator_reply_health` in
+`tests/conftest.py` redirects `STATE_PATH` and `RECEIPT_PATH`; `write_state`
+raises `TestModeRefusalError` on the frozen path under `DUCK_TEST_MODE`; and
+`test_no_test_pollution_in_operator_reply_health.py` audits the live file —
+including a test that the fixture redirected *that* suite, so layer 1 is
+asserted live rather than written down. Single-repo by construction, and the
+audit's docstring says why: the module is not on duckAgent's `sys.path` and
+the card reads the file, not the module.
+
+### A re-send now accounts for itself
+
+The 2026-11-17 failure was not only the lost reply — it was that the second
+and third digest looked exactly like the first. On a re-send (`aged_past_*`),
+or whenever a reply arrived and was refused, the email now carries one line
+saying so. Silent on a first send: "nothing from you in 22 days" is true and
+useless beside a drop that arrived a minute ago.
+
+### Found while wiring it: the test-mode guard had silently removed the buttons
+
+`_load_duckagent_env` put duckAgent on `sys.path` **after** its
+`DUCK_TEST_MODE` return. So under test `helpers` was unimportable,
+`_reply_buttons` fell into its own `except` branch, and every approval email
+in the suite rendered with **no buttons** — while the tests asserting the
+buttons exist were the only thing complaining, and I had read their failure
+as pre-existing noise.
+
+Production was never affected (not test mode), which is exactly why it could
+sit there. The guard conflated two things: loading a `.env` reaches the
+outside world, making a module importable reaches nobody. Guard the side
+effect, not the import.
+
+## Surface 139 — WhatsApp outbound: five months dead inbound, still the hang vector (2026-11-17, operator: "I didn't think we had what's app anymore")
+
+The operator was right in one direction and wrong in the other, and the
+difference mattered:
+
+| | state |
+|---|---|
+| inbound (operator replies over WhatsApp) | **dead since 2026-06-22** — `last_processed_at` in `whatsapp_operator_bridge_state.json`, five months, zero messages |
+| outbound (review pushes to the operator) | **live** — sent successfully 2026-11-17 12:27:54, right after the Docker restart |
+
+And that outbound `docker exec` into the openclaw gateway is precisely what
+blocked for eight hours in Surface 137, holding the sidecar lock and taking
+the operator's inbox poller down with it. The 60s subprocess timeout stops it
+wedging again; it does not stop a notifier run spending 60s per cycle on a
+channel nobody reads.
+
+`config/notifier.json` → `whatsapp.enabled: false`, which gates the
+*summary build*, so `send_whatsapp_message` is unreachable rather than
+merely unused. The reason travels with the flag in `disabled_because` — a
+bare `false` is an invitation to flip it back.
+
+| | disabled | reason recorded | send unreachable | not a dead code path |
+|---|---|---|---|---|
+| whatsapp outbound | ✅ `test_the_shipped_config_has_it_disabled` | ✅ `test_the_reason_travels_with_the_flag` | ✅ `test_no_summary_is_built_so_the_send_is_unreachable` | ✅ `test_a_push_would_still_be_built_if_re_enabled` |
+
+That last cell is the one that keeps the others honest: without it, deleting
+the push builder entirely would also make the suite green
+([[feedback_pin_the_rule_not_the_reading]]).
+
+**Still open:** `com.philtullai.duckops.whatsapp-bridge` is still loaded with
+`KeepAlive` and exiting 75, for an inbound channel dead since June. Unloading
+it is Tier 3 and was not in scope.
+
+## Surface 140 — nothing checked that an approved drop was ever TAKEN (2026-11-17, operator: "what is this canary about")
+
+"N approved drop(s) are waiting for their lane's next scheduled run" was
+**green, and stayed green after that run came and went.** An approved drop
+its lane runs past is invisible from every other angle: the lane publishes a
+generated meme, the scheduler reports a healthy run, the receipt exists, and
+the only tell is the wrong post on Instagram. Causes that all look like
+this: `<LANE>_AGENT_DROPS` off, the asset gone from Drive, a render refusal,
+a claim that raised.
+
+Graded against **the lane's own last scheduled start** from
+`scheduler_health.json`, not a guessed grace window: the three consuming
+lanes run weekly on different days, so any single number would be wrong for
+two of them. The verdict is only formed once the window has actually closed
+— which here means once the run has run
+([[feedback_never_grade_an_open_window]]).
+
+Lane → job name is **derived by prefix**, not mapped: `meme` →
+`meme_monday`, `jeepfact` → `jeepfact_wednesday`, `duckvideo` →
+`duckvideo_weekly`, verified unique across all 50 monitored jobs. A
+hand-written map would be a fourth place to forget a lane.
+
+The card also reds on a **refused reply** — an approval the operator sent
+that never reached the lane is the same loss as one the lane declined to
+take. A missed claim outranks it, because that one names a post that already
+went out wrong.
+
+| | happy | lane ran, no claim | waiting for a run | claimed | other lane ran | no scheduler data | no approval stamp | refused reply | both |
+|---|---|---|---|---|---|---|---|---|---|
+| drop throughput card | ✅ existing 20 | ✅ `test_red_when_the_lane_ran_after_approval_without_claiming`, `test_the_reason_names_both_timestamps` | ✅ `test_green_while_waiting_for_a_run_that_has_not_happened` | ✅ `test_a_claimed_drop_never_trips_it` | ✅ `test_another_lanes_run_does_not_indict_this_one` | ✅ `test_missing_scheduler_payload_does_not_fire_or_raise` | ✅ `test_an_approval_with_no_timestamp_does_not_fire` | ✅ `test_red_when_a_reply_arrived_and_was_refused`, `test_a_quiet_channel_is_not_an_alarm`, `test_absent_reply_state_does_not_raise_or_alarm` | ✅ `test_a_missed_claim_outranks_a_refused_reply` |
+| lane name derivation | ✅ `test_lane_prefix_matching_covers_every_consuming_lane` | n/a | n/a | n/a | n/a | n/a | n/a | n/a | ✅ `test_the_newest_start_wins_when_a_lane_has_several_jobs` |
+
+**Mutation-verified:** disabling the detection fails 3; ignoring the lane so
+any run indicts any drop fails 1; dropping the reply-channel red fails 1.
+
+Five of the nine columns above are cases where the canary must **not** fire.
+A canary that cries on a lane waiting for next Monday gets muted, and a muted
+canary is the state we were already in.
+
+**Counts after this surface:** duck-ops 1858 passed / 1 skipped / 268
+subtests; duckAgent 3596 passed / 1 xfailed / 31 subtests. duck-ops secret
+scan clean at 320 tracked files.
+
+### Open after this
+
+- **`com.philtullai.duckops.whatsapp-bridge`** still loaded, still dead
+  (Tier 3 to unload).
+- **The ledger's `status` field is stale.** `approval` flips correctly and is
+  what the claim reads; `status` stayed `awaiting_operator` on all four
+  drops, and declined ones print "awaiting operator (declined)" in `--list`.
+  Display-only, and exactly the two-fields-one-meaning shape
+  `STATUS_CONTRACT.md` exists to prevent.
+- **`MAX_REPLY_AGE_HOURS = 48` has no surface of its own.** A stale-skipped
+  reply reds the drop card only if it concerns a drop; a stale `publish` for
+  newduck is recorded and nothing grades it.
+- **15 of Trash's 40 in-window messages are never examined** (limit 25 per
+  folder). Newest-first makes that the right 25, but the cap is unreported.
+- **The legacy `test/` directory fails collection** (`No module named
+  'shopify_helper'`) — 15 errors, pre-existing, excluded from the canonical
+  scope.

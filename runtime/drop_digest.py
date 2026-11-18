@@ -33,6 +33,7 @@ if str(RUNTIME_DIR) not in sys.path:
 
 import drop_intake  # noqa: E402
 import drop_operator  # noqa: E402
+import operator_reply_health  # noqa: E402
 
 STATE_PATH = REPO_ROOT / "state" / "drop_digest.json"
 _FROZEN_PRODUCTION_STATE_PATH = (REPO_ROOT / "state" / "drop_digest.json").resolve()
@@ -268,17 +269,27 @@ def _load_duckagent_env() -> None:
     ([[feedback_env_in_dotenv]]). Loaded before rendering, not only before
     sending, because the buttons need the reply-to address too.
 
-    REFUSED under DUCK_TEST_MODE, and that refusal is the whole point. The
-    first version loaded unconditionally and so pulled the entire production
-    environment into any test process that rendered an email -- which broke
-    six unrelated cadence tests via DUCK_EMAIL_DIGEST_MODE, and, far worse,
-    populated live SMTP credentials in a suite that is supposed to be unable
-    to reach anyone ([[feedback_test_runs_reach_the_outside_world]]). Tests
-    pass `reply_to` explicitly instead.
+    The CREDENTIAL load is REFUSED under DUCK_TEST_MODE, and that refusal is
+    the whole point. The first version loaded unconditionally and so pulled
+    the entire production environment into any test process that rendered an
+    email -- which broke six unrelated cadence tests via
+    DUCK_EMAIL_DIGEST_MODE, and, far worse, populated live SMTP credentials
+    in a suite that is supposed to be unable to reach anyone
+    ([[feedback_test_runs_reach_the_outside_world]]). Tests pass `reply_to`
+    explicitly instead.
+
+    The sys.path insert is NOT refused, and the distinction cost a day. The
+    first guard returned before it, so under test `helpers` was unimportable
+    and `_reply_buttons` fell into its own except branch and rendered "" --
+    every approval email in the suite silently lost its buttons while the
+    tests that assert the buttons exist were the only thing complaining.
+    Making a module importable reaches nobody; loading a .env does. Guard the
+    side effect, not the import.
     """
+    if str(DUCK_AGENT_ROOT) not in sys.path:
+        sys.path.insert(0, str(DUCK_AGENT_ROOT))
     if str(os.environ.get(_TEST_MODE_ENV) or "").strip() in {"1", "true", "TRUE", "yes"}:
         return
-    sys.path.insert(0, str(DUCK_AGENT_ROOT))
     try:
         from dotenv import load_dotenv  # type: ignore
 
@@ -339,6 +350,25 @@ def _reply_buttons(stem: str, subject: str, run_id: str,
         subject=subject, flow="drops", run_id=run_id, to=recipient,
         actions=actions,
     )
+
+
+def _reply_channel_note(decision: dict) -> str:
+    """One sentence about the reply channel, or "" when it adds nothing.
+
+    Deliberately silent on a FIRST send: "nothing from you in 22 days" is
+    true and useless next to a drop that arrived a minute ago. It speaks on
+    a re-send, when the operator's answer is exactly what is missing, and
+    whenever a reply arrived and was refused -- that one is never noise.
+    """
+    try:
+        health = operator_reply_health.read()
+    except Exception:  # noqa: BLE001 - an email must not die on a receipt log
+        return ""
+    refused = health.get("refused") or []
+    resend = str(decision.get("reason") or "").startswith("aged_past_")
+    if not refused and not resend:
+        return ""
+    return operator_reply_health.describe_for_operator(health)
 
 
 def render_email(decision: dict, now: datetime | None = None,
@@ -446,6 +476,18 @@ def render_email(decision: dict, now: datetime | None = None,
             f"<code>drop answer {_esc(note.get('file'))} &lt;your answer&gt;"
             "</code></div></div>")
 
+    # A RE-SEND has to account for itself. The 2026-11-17 failure was not
+    # that the reply went missing -- it was that the second and third email
+    # looked exactly like the first, so neither side could tell an answer
+    # had been sent and lost ([[feedback_notification_is_not_a_data_pipeline]]).
+    reply_note = _reply_channel_note(decision)
+    if reply_note:
+        parts.append(
+            f"<div style='border:1px solid #f0c9a4;background:#fff8f0;"
+            f"border-radius:10px;padding:12px 14px;margin:4px 0 14px 0;"
+            f"font-size:13px;color:{_TEXT};'>"
+            f"<strong>Heads up</strong> &mdash; {_esc(reply_note)}</div>")
+
     parts.append(f"<p style='color:{_MUTED};font-size:12px;margin-top:18px;'>"
                  f"Oldest item: {decision['oldest_age_days']} day(s). Sent "
                  f"because: {_esc(decision['reason'])}. You only hear from "
@@ -457,6 +499,8 @@ def render_email(decision: dict, now: datetime | None = None,
     text = (f"{text_body}\n\nReply to this email with one of the lines "
             f"above.\n\nOldest item: {decision['oldest_age_days']} day(s). "
             f"Sent because: {decision['reason']}.")
+    if reply_note:
+        text += f"\n\nHeads up -- {reply_note}"
     return subject, text, html
 
 

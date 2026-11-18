@@ -4,11 +4,13 @@ the trust-gate behavior. The IMAP/network calls are exercised
 indirectly via the dispatch unit test that mocks handle_operator_text."""
 from __future__ import annotations
 
+import email.utils
 import json
 import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -223,6 +225,218 @@ class ReceiptTests(unittest.TestCase):
             self.assertEqual(json.loads(lines[0])["uid"], "1")
             self.assertEqual(json.loads(lines[1])["uid"], "2")
 
+class _FakeImap:
+    """Minimal IMAP stand-in shaped like the Gmail behaviour that mattered.
+
+    Per-folder UID lists, ascending as a real server returns them, so a test
+    that expects newest-first has to prove the poller reversed it. `select`
+    on an unknown folder returns NO, which is what a non-Gmail mailbox does
+    for "[Gmail]/Trash".
+    """
+
+    def __init__(self, folders: dict[str, list[tuple[bytes, bytes]]]) -> None:
+        self.folders = folders
+        self.current: str | None = None
+        self.searches: list[tuple[str, str]] = []
+        self.fetched: list[tuple[str, str]] = []
+        self.stored: list[tuple[str, str]] = []
+
+    def select(self, folder, readonly=False):
+        if folder not in self.folders:
+            self.current = None
+            return "NO", [b""]
+        self.current = folder
+        return "OK", [b"1"]
+
+    def search(self, charset, query):
+        self.searches.append((self.current or "", query))
+        uids = b" ".join(uid for uid, _raw in self.folders[self.current])
+        return "OK", [uids]
+
+    def fetch(self, uid, spec):
+        self.fetched.append((self.current or "", uid.decode()))
+        for candidate, raw in self.folders[self.current or ""]:
+            if candidate == uid:
+                return "OK", [(b"1 (BODY[] {%d}" % len(raw), raw)]
+        return "NO", None
+
+    def store(self, uid, flags, value):
+        self.stored.append((self.current or "", uid.decode()))
+        return "OK", [b""]
+
+    def close(self):
+        self.current = None
+
+    def logout(self):
+        return "BYE", [b""]
+
+
+def _reply_bytes(*, subject: str, age_hours: float, command: str,
+                 message_id: str, sender: str = "op@example.com") -> bytes:
+    """A reply shaped like the real mailto replies, dated relative to now."""
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["Subject"] = subject
+    msg["Message-ID"] = message_id
+    sent = datetime.now(timezone.utc) - timedelta(hours=age_hours)
+    msg["Date"] = email.utils.format_datetime(sent)
+    msg.set_content(
+        f"{command}\n\n----\n{poller.APPROVAL_METADATA_MARKER}\n"
+        "FLOW:drops | RUN:2026-11-16 | ACTION:approve\n"
+    )
+    return msg.as_bytes()
+
+
+class FolderSelectionTests(unittest.TestCase):
+    """The predicate, not the parser.
+
+    A reply the poller never OPENS is invisible no matter how well the
+    body parsing works, which is how an approval sat unread in Trash for
+    nine hours on 2026-11-17 while the digest re-sent the same four drops
+    ([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]]).
+    """
+
+    def setUp(self) -> None:
+        self._ctx = [
+            patch.object(poller, "_trusted_operator_email", return_value="op@example.com"),
+            patch.object(poller, "_load_config", return_value={}),
+            patch.object(poller, "load_mailbox_settings", return_value={"enabled": True}),
+            patch.object(poller, "RECEIPT_PATH", Path(tempfile.mkdtemp()) / "r.jsonl"),
+        ]
+        for c in self._ctx:
+            c.start()
+        self.addCleanup(lambda: [c.stop() for c in self._ctx])
+
+    def _run(self, folders, *, dry_run=False, limit=25):
+        fake = _FakeImap(folders)
+        with patch.object(poller, "connect_imap", return_value=(fake, None, None)), \
+             patch.object(poller, "_dispatch_mail_event",
+                          return_value={"ok": True, "response": "done"}) as dispatch:
+            receipts = poller.poll_inbox(dry_run=dry_run, limit=limit)
+        return fake, receipts, dispatch
+
+    def test_trash_is_polled(self) -> None:
+        """The 2026-11-17 regression: the approval was in Trash."""
+        reply = _reply_bytes(subject="Re: drops", age_hours=1.0,
+                             command="drop approve duck_v4 only", message_id="<trash-1>")
+        fake, receipts, dispatch = self._run({
+            "INBOX": [],
+            '"[Gmail]/All Mail"': [],
+            '"[Gmail]/Trash"': [(b"7", reply)],
+        })
+        ok = [r for r in receipts if r["outcome"] == "ok"]
+        self.assertEqual(len(ok), 1, receipts)
+        self.assertEqual(ok[0]["folder"], '"[Gmail]/Trash"')
+        self.assertEqual(ok[0]["command_text"], "drop approve duck_v4 only")
+        dispatch.assert_called_once()
+
+    def test_every_configured_folder_is_searched(self) -> None:
+        fake, _receipts, _d = self._run({f: [] for f in poller.POLL_FOLDERS})
+        self.assertEqual([f for f, _q in fake.searches], list(poller.POLL_FOLDERS))
+
+    def test_trash_is_in_the_configured_folders(self) -> None:
+        """Pins the FOLDER NAME, because All Mail does not cover Trash.
+
+        Gmail's "[Gmail]/All Mail" excludes Trash and Spam: measured
+        2026-11-17, it returned the same 2 unseen messages as INBOX while
+        Trash held 174. Dropping this entry silently restores the bug.
+        """
+        self.assertIn('"[Gmail]/Trash"', poller.POLL_FOLDERS)
+        self.assertIn("INBOX", poller.POLL_FOLDERS)
+
+    def test_missing_folder_is_recorded_not_fatal(self) -> None:
+        reply = _reply_bytes(subject="Re: drops", age_hours=1.0,
+                             command="drop approve duck_v4", message_id="<inbox-1>")
+        _fake, receipts, _d = self._run({"INBOX": [(b"3", reply)]})
+        self.assertEqual([r["outcome"] for r in receipts if r["outcome"] == "ok"], ["ok"])
+        unavailable = {r["folder"] for r in receipts if r["outcome"] == "folder_unavailable"}
+        self.assertEqual(unavailable, {'"[Gmail]/All Mail"', '"[Gmail]/Trash"'})
+
+    def test_newest_reply_wins_the_limit(self) -> None:
+        """Trash held 174 unread operator messages; oldest-first starves today's."""
+        old = _reply_bytes(subject="Re: old", age_hours=10.0,
+                           command="drop approve old_one", message_id="<old>")
+        new = _reply_bytes(subject="Re: new", age_hours=0.5,
+                           command="drop approve new_one", message_id="<new>")
+        _fake, receipts, _d = self._run(
+            {"INBOX": [(b"1", old), (b"2", new)]}, limit=1)
+        ok = [r for r in receipts if r["outcome"] == "ok"]
+        self.assertEqual(len(ok), 1)
+        self.assertEqual(ok[0]["command_text"], "drop approve new_one")
+
+    def test_search_window_is_bounded_by_since(self) -> None:
+        fake, _receipts, _d = self._run({"INBOX": []})
+        query = fake.searches[0][1]
+        self.assertIn("SINCE", query)
+        self.assertIn('FROM "op@example.com"', query)
+        self.assertIn("UNSEEN", query)
+
+    def test_same_message_in_two_folders_dispatches_once(self) -> None:
+        """Gmail shows one message in several folders under different UIDs."""
+        raw = _reply_bytes(subject="Re: drops", age_hours=1.0,
+                           command="drop approve duck_v4", message_id="<shared-1>")
+        _fake, receipts, dispatch = self._run({
+            "INBOX": [(b"11", raw)],
+            '"[Gmail]/All Mail"': [(b"22", raw)],
+            '"[Gmail]/Trash"': [],
+        })
+        self.assertEqual(dispatch.call_count, 1, receipts)
+        dupes = [r for r in receipts if r["outcome"] == "skipped_duplicate_folder_copy"]
+        self.assertEqual(len(dupes), 1)
+        self.assertEqual(dupes[0]["folder"], '"[Gmail]/All Mail"')
+
+    def test_stale_reply_is_reported_never_dispatched(self) -> None:
+        """A five-day-old THURSDAY approval was sitting unread in Trash.
+
+        Widening the search without this guard would have published it.
+        """
+        stale = _reply_bytes(subject="Re: MJD: [THURSDAY] BATCH REVIEW",
+                             age_hours=poller.MAX_REPLY_AGE_HOURS + 1,
+                             command="publish 1188", message_id="<stale-1>")
+        fake, receipts, dispatch = self._run({'"[Gmail]/Trash"': [(b"9", stale)]})
+        dispatch.assert_not_called()
+        skipped = [r for r in receipts if r["outcome"] == "skipped_stale_reply"]
+        self.assertEqual(len(skipped), 1, receipts)
+        self.assertEqual(skipped[0]["command_text"], "publish 1188")
+        self.assertGreater(skipped[0]["age_hours"], poller.MAX_REPLY_AGE_HOURS)
+        self.assertEqual(fake.stored, [], "a stale reply must stay UNREAD")
+
+    def test_undatable_reply_is_treated_as_stale(self) -> None:
+        msg = EmailMessage()
+        msg["From"] = "op@example.com"
+        msg["Subject"] = "Re: drops"
+        msg["Message-ID"] = "<nodate-1>"
+        msg.set_content(
+            f"drop approve duck_v4\n\n----\n{poller.APPROVAL_METADATA_MARKER}\n")
+        _fake, receipts, dispatch = self._run({"INBOX": [(b"4", msg.as_bytes())]})
+        dispatch.assert_not_called()
+        self.assertEqual(
+            [r["outcome"] for r in receipts if r.get("uid") == "4"], ["skipped_stale_reply"])
+
+    def test_fresh_reply_is_marked_seen_in_its_own_folder(self) -> None:
+        reply = _reply_bytes(subject="Re: drops", age_hours=2.0,
+                             command="drop approve duck_v4", message_id="<fresh-1>")
+        fake, _receipts, _d = self._run({'"[Gmail]/Trash"': [(b"5", reply)]})
+        self.assertEqual(fake.stored, [('"[Gmail]/Trash"', "5")])
+
+    def test_dry_run_leaves_everything_unread(self) -> None:
+        reply = _reply_bytes(subject="Re: drops", age_hours=2.0,
+                             command="drop approve duck_v4", message_id="<dry-1>")
+        fake, receipts, dispatch = self._run(
+            {"INBOX": [(b"6", reply)]}, dry_run=True)
+        dispatch.assert_not_called()
+        self.assertEqual(fake.stored, [])
+        self.assertTrue(any(r.get("dry_run") for r in receipts))
+
+    def test_untrusted_sender_is_refused_even_if_imap_returns_it(self) -> None:
+        reply = _reply_bytes(subject="Re: drops", age_hours=1.0,
+                             command="drop approve duck_v4", message_id="<evil-1>",
+                             sender="someone-else@example.com")
+        _fake, receipts, dispatch = self._run({"INBOX": [(b"8", reply)]})
+        dispatch.assert_not_called()
+        self.assertEqual(
+            [r["outcome"] for r in receipts if r.get("uid") == "8"],
+            ["skipped_untrusted_sender"])
 
 if __name__ == "__main__":
     unittest.main()

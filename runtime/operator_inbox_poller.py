@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import email
+import email.utils
 import imaplib
 import json
 import os
@@ -47,7 +48,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
 from email.message import Message
 from pathlib import Path
@@ -69,7 +70,28 @@ from phase1_observer import (  # type: ignore
 DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = DUCK_OPS_ROOT / "config" / "source_observer.json"
 RECEIPT_PATH = DUCK_OPS_ROOT / "state" / "operator_inbox_receipts.jsonl"
-POLL_FOLDER = "INBOX"
+# Folders polled, in order. INBOX is where a reply normally lands, but a
+# reply that was archived or deleted before the poller ran is invisible
+# there. On 2026-11-17 an approval sat in Trash for nine hours while the
+# digest went on re-sending the same four drops; nothing in either
+# direction noticed. Gmail's "[Gmail]/All Mail" deliberately EXCLUDES
+# Trash and Spam -- measured, not assumed: it returned the same 2 unseen
+# messages as INBOX while Trash held 174 -- so Trash has to be named.
+POLL_FOLDERS = ("INBOX", '"[Gmail]/All Mail"', '"[Gmail]/Trash"')
+
+# How far back the IMAP search looks. Unbounded is not an option once
+# Trash is in scope: an oldest-first slice of 174 stale messages never
+# reaches today's reply, so the window AND the newest-first ordering
+# below are both load-bearing.
+POLL_SINCE_DAYS = 7
+
+# A reply older than this is REPORTED, never dispatched. The same Trash
+# sweep also turned up an unread THURSDAY batch approval from five days
+# earlier; widening the search without this guard would have published
+# it on the next run. An approval is a statement about the moment it was
+# written, and acting on a stale one is the failure that cannot be
+# undone -- so this fails closed and leaves the message unread.
+MAX_REPLY_AGE_HOURS = 48
 
 # The unique marker that proves an email originated from a Duck Ops
 # template's mailto button. See
@@ -255,10 +277,202 @@ def _dispatch_mail_event(subject: str, body: str) -> dict[str, Any]:
             pass
 
 
+def _message_age_hours(msg: Message) -> float | None:
+    """Hours since the reply was written, or None if it has no usable Date.
+
+    None is treated as "too old to trust" by the caller rather than "fine":
+    a reply we cannot date is a reply whose staleness we cannot rule out.
+    """
+    raw = msg.get("Date")
+    if not raw:
+        return None
+    try:
+        sent = email.utils.parsedate_to_datetime(str(raw))
+    except (TypeError, ValueError):
+        return None
+    if sent is None:
+        return None
+    if sent.tzinfo is None:
+        sent = sent.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - sent).total_seconds() / 3600.0
+
+
+def _search_newest_first(client: Any, trusted: str) -> tuple[list[bytes], str]:
+    """UIDs of candidate replies in the selected folder, newest first.
+
+    IMAP returns ascending sequence numbers, i.e. oldest first, and the
+    caller slices to a limit -- so without the reverse a backlog of stale
+    messages starves the reply that actually matters.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(days=POLL_SINCE_DAYS)).strftime("%d-%b-%Y")
+    query = f'(UNSEEN FROM "{trusted}" SINCE {since})'
+    status, ids_payload = client.search(None, query)
+    if status != "OK":
+        return [], query
+    uids = (ids_payload[0] or b"").split()
+    uids.reverse()
+    return uids, query
+
+
+def _poll_folder(
+    client: Any,
+    folder: str,
+    *,
+    trusted: str,
+    limit: int,
+    dry_run: bool,
+    seen_message_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Process up to `limit` candidate replies in one folder.
+
+    `seen_message_ids` is shared across folders and carries Message-ID
+    values already handled this run. Gmail surfaces one message in several
+    folders with a different UID in each, so without it an INBOX reply is
+    dispatched a second time from All Mail.
+    """
+    receipts: list[dict[str, Any]] = []
+    status, _ = client.select(folder)
+    if status != "OK":
+        # A missing folder is not a failure -- a non-Gmail mailbox has no
+        # "[Gmail]/Trash" -- but it IS recorded, so a provider that
+        # renames them does not quietly narrow the search back to INBOX.
+        receipts.append({"at": _now_iso(), "outcome": "folder_unavailable", "folder": folder})
+        return receipts
+
+    uids, query = _search_newest_first(client, trusted)
+    if not uids:
+        receipts.append({
+            "at": _now_iso(),
+            "outcome": "no_new_replies",
+            "folder": folder,
+            "trusted_sender": trusted,
+        })
+        return receipts
+
+    for uid in uids[:limit]:
+        uid_str = uid.decode("ascii", errors="replace")
+        try:
+            # BODY.PEEK[] fetches the message without setting the
+            # \Seen flag. Plain RFC822 would auto-mark every fetched
+            # message as read — a dry-run that "didn't write
+            # anything" would still silently consume unread state.
+            fetch_status, fetch_payload = client.fetch(uid, "(BODY.PEEK[])")
+            if fetch_status != "OK" or not fetch_payload:
+                receipts.append(
+                    {"at": _now_iso(), "uid": uid_str, "folder": folder, "outcome": "fetch_failed"}
+                )
+                continue
+            raw = next(
+                (item[1] for item in fetch_payload if isinstance(item, tuple) and len(item) >= 2),
+                None,
+            )
+            if not raw:
+                receipts.append(
+                    {"at": _now_iso(), "uid": uid_str, "folder": folder, "outcome": "fetch_empty"}
+                )
+                continue
+            msg = email.message_from_bytes(raw)
+            from_addr = _parse_address(msg.get("From", ""))
+            # Belt + suspenders: re-verify From even though we
+            # asked IMAP to filter; some servers honor From loosely.
+            if from_addr != trusted:
+                receipts.append({
+                    "at": _now_iso(),
+                    "uid": uid_str,
+                    "folder": folder,
+                    "outcome": "skipped_untrusted_sender",
+                    "from_addr": from_addr,
+                })
+                continue
+            subject = _decode_header_value(msg.get("Subject", "")).strip()
+            body = _extract_plain_text(msg).replace("\r\n", "\n")
+            # Trust signal: the email body MUST contain the marker
+            # the Duck Ops mailto templates emit. This filters out
+            # system notifications (which the operator's own
+            # address sends to itself) and arbitrary replies.
+            if APPROVAL_METADATA_MARKER not in body:
+                receipts.append({
+                    "at": _now_iso(),
+                    "uid": uid_str,
+                    "folder": folder,
+                    "outcome": "skipped_missing_approval_marker",
+                    "subject": subject,
+                })
+                continue
+
+            message_id = str(msg.get("Message-ID", "")).strip()
+            if message_id and message_id in seen_message_ids:
+                receipts.append({
+                    "at": _now_iso(),
+                    "uid": uid_str,
+                    "folder": folder,
+                    "outcome": "skipped_duplicate_folder_copy",
+                    "subject": subject,
+                    "message_id": message_id,
+                })
+                continue
+
+            age_hours = _message_age_hours(msg)
+            if age_hours is None or age_hours > MAX_REPLY_AGE_HOURS:
+                # Left UNREAD on purpose: an undispatched approval the
+                # operator can still see beats one silently acted on a
+                # week late. The drop-claim canary reads this outcome.
+                receipts.append({
+                    "at": _now_iso(),
+                    "uid": uid_str,
+                    "folder": folder,
+                    "outcome": "skipped_stale_reply",
+                    "subject": subject,
+                    "age_hours": round(age_hours, 2) if age_hours is not None else None,
+                    "max_age_hours": MAX_REPLY_AGE_HOURS,
+                    "command_text": _strip_quoted_reply(_strip_metadata_footer(body)),
+                })
+                continue
+
+            # Visible command text (above the metadata footer) for
+            # the receipt log; the actual dispatch passes the full
+            # body so handle_mail_event can parse FLOW/RUN/ACTION.
+            command_text = _strip_quoted_reply(_strip_metadata_footer(body))
+            dispatch = (
+                _dispatch_mail_event(subject, body)
+                if not dry_run
+                else {"ok": True, "response": "(dry-run)"}
+            )
+            receipt = {
+                "at": _now_iso(),
+                "uid": uid_str,
+                "folder": folder,
+                "from_addr": from_addr,
+                "subject": subject,
+                "command_text": command_text,
+                "age_hours": round(age_hours, 2),
+                "dry_run": dry_run,
+                "outcome": "ok" if dispatch.get("ok") else "dispatch_failed",
+                "dispatch": dispatch,
+            }
+            receipts.append(receipt)
+            # Only mark Seen on successful real dispatch. Dry runs
+            # and failures leave the email unread so the operator
+            # can intervene.
+            if dispatch.get("ok") and not dry_run:
+                client.store(uid, "+FLAGS", "\\Seen")
+                if message_id:
+                    seen_message_ids.add(message_id)
+        except Exception as exc:
+            receipts.append({
+                "at": _now_iso(),
+                "uid": uid_str,
+                "folder": folder,
+                "outcome": "process_exception",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    return receipts
+
+
 def poll_inbox(*, dry_run: bool = False, limit: int = 25) -> list[dict[str, Any]]:
-    """Connect to the operator's inbox, process up to `limit` unread
-    operator replies, and return a list of receipt dicts (one per
-    message touched). Each receipt is also appended to the receipt log."""
+    """Connect to the operator's mailbox, process up to `limit` unread
+    operator replies PER FOLDER, and return a list of receipt dicts (one
+    per message touched). Each receipt is also appended to the receipt log."""
     config = _load_config()
     settings = load_mailbox_settings(config)
     if not settings.get("enabled"):
@@ -290,118 +504,19 @@ def poll_inbox(*, dry_run: bool = False, limit: int = 25) -> list[dict[str, Any]
         return [receipt]
 
     receipts: list[dict[str, Any]] = []
+    seen_message_ids: set[str] = set()
     try:
-        status, _ = client.select(POLL_FOLDER)
-        if status != "OK":
-            receipt = {"at": _now_iso(), "outcome": "select_failed", "folder": POLL_FOLDER}
-            _append_receipt(receipt)
-            return [receipt]
-        # Strict search: UNSEEN AND FROM the trusted operator email.
-        # The body-marker check on each fetched message is the true
-        # trust signal; the SUBJECT prefix filter was wrong here
-        # because Gmail's SEARCH SUBJECT doesn't reliably match
-        # encoded-word subjects across providers.
-        search_query = f'(UNSEEN FROM "{trusted}")'
-        status, ids_payload = client.search(None, search_query)
-        if status != "OK":
-            receipt = {"at": _now_iso(), "outcome": "search_failed", "query": search_query}
-            _append_receipt(receipt)
-            return [receipt]
-        uids = (ids_payload[0] or b"").split()[:limit]
-        if not uids:
-            receipt = {
-                "at": _now_iso(),
-                "outcome": "no_new_replies",
-                "trusted_sender": trusted,
-            }
-            _append_receipt(receipt)
-            return [receipt]
-
-        for uid in uids:
-            uid_str = uid.decode("ascii", errors="replace")
+        for folder in POLL_FOLDERS:
+            receipts.extend(_poll_folder(
+                client, folder,
+                trusted=trusted, limit=limit, dry_run=dry_run,
+                seen_message_ids=seen_message_ids,
+            ))
             try:
-                # BODY.PEEK[] fetches the message without setting the
-                # \Seen flag. Plain RFC822 would auto-mark every fetched
-                # message as read — a dry-run that "didn't write
-                # anything" would still silently consume unread state.
-                fetch_status, fetch_payload = client.fetch(uid, "(BODY.PEEK[])")
-                if fetch_status != "OK" or not fetch_payload:
-                    receipts.append(
-                        {"at": _now_iso(), "uid": uid_str, "outcome": "fetch_failed"}
-                    )
-                    continue
-                raw = next(
-                    (item[1] for item in fetch_payload if isinstance(item, tuple) and len(item) >= 2),
-                    None,
-                )
-                if not raw:
-                    receipts.append(
-                        {"at": _now_iso(), "uid": uid_str, "outcome": "fetch_empty"}
-                    )
-                    continue
-                msg = email.message_from_bytes(raw)
-                from_addr = _parse_address(msg.get("From", ""))
-                # Belt + suspenders: re-verify From even though we
-                # asked IMAP to filter; some servers honor From loosely.
-                if from_addr != trusted:
-                    receipts.append({
-                        "at": _now_iso(),
-                        "uid": uid_str,
-                        "outcome": "skipped_untrusted_sender",
-                        "from_addr": from_addr,
-                    })
-                    continue
-                subject = _decode_header_value(msg.get("Subject", "")).strip()
-                body = _extract_plain_text(msg).replace("\r\n", "\n")
-                # Trust signal: the email body MUST contain the marker
-                # the Duck Ops mailto templates emit. This filters out
-                # system notifications (which the operator's own
-                # address sends to itself) and arbitrary replies.
-                if APPROVAL_METADATA_MARKER not in body:
-                    receipts.append({
-                        "at": _now_iso(),
-                        "uid": uid_str,
-                        "outcome": "skipped_missing_approval_marker",
-                        "subject": subject,
-                    })
-                    continue
-                # Visible command text (above the metadata footer) for
-                # the receipt log; the actual dispatch passes the full
-                # body so handle_mail_event can parse FLOW/RUN/ACTION.
-                command_text = _strip_quoted_reply(_strip_metadata_footer(body))
-                dispatch = (
-                    _dispatch_mail_event(subject, body)
-                    if not dry_run
-                    else {"ok": True, "response": "(dry-run)"}
-                )
-                receipt = {
-                    "at": _now_iso(),
-                    "uid": uid_str,
-                    "from_addr": from_addr,
-                    "subject": subject,
-                    "command_text": command_text,
-                    "dry_run": dry_run,
-                    "outcome": "ok" if dispatch.get("ok") else "dispatch_failed",
-                    "dispatch": dispatch,
-                }
-                receipts.append(receipt)
-                # Only mark Seen on successful real dispatch. Dry runs
-                # and failures leave the email unread so the operator
-                # can intervene.
-                if dispatch.get("ok") and not dry_run:
-                    client.store(uid, "+FLAGS", "\\Seen")
-            except Exception as exc:
-                receipts.append({
-                    "at": _now_iso(),
-                    "uid": uid_str,
-                    "outcome": "process_exception",
-                    "error": f"{type(exc).__name__}: {exc}",
-                })
+                client.close()
+            except Exception:
+                pass
     finally:
-        try:
-            client.close()
-        except Exception:
-            pass
         try:
             client.logout()
         except Exception:
@@ -409,8 +524,17 @@ def poll_inbox(*, dry_run: bool = False, limit: int = 25) -> list[dict[str, Any]
 
     for r in receipts:
         _append_receipt(r)
-    return receipts
+    # Publish the reading the OS card grades. Never fatal: a poll that
+    # delivered an approval must not be reported as a failure because a
+    # state file could not be written.
+    try:
+        import operator_reply_health  # local import: optional consumer
 
+        operator_reply_health.write_state()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[inbox-poller] WARNING reply-health state not written: {exc}",
+              file=sys.stderr)
+    return receipts
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Poll the operator inbox for Duck Ops command replies.")
