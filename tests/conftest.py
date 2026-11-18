@@ -146,6 +146,20 @@ def _redirect_drive_mirror_paths(tmp_path, monkeypatch):
         drive_mirror, "WHOLE_TREES", (("fixture", tmp_path / "fixture_source"),)
     )
     monkeypatch.setattr(drive_mirror, "CREATIVE_SOURCE", tmp_path / "fixture_runs")
+    # CODE_REPOS is the constant this docstring warned about, missed for the
+    # third time. It holds absolute paths to the REAL duck-ops, duckAgent and
+    # paint-to-print-3d checkouts, and `stage_code_bundles` shells out to
+    # `git ls-files` in each -- so every "clean run" test was zipping the
+    # operator's actual working trees, and a repo that is not checked out
+    # records `source_missing`, which lands in `manifest["failures"]` and
+    # makes `ok` False. That is why eleven drive-mirror tests failed in
+    # duck-ops CI (which checks out duck-ops alone) while passing here.
+    #
+    # () rather than a temp git repo: `git init` per test across ~1900 tests
+    # is not worth it, and the bundling behaviour itself is covered by
+    # tests/test_drive_mirror_code_bundles.py, which patches this constant to
+    # its own fixture repos and therefore still wins over this default.
+    monkeypatch.setattr(drive_mirror, "CODE_REPOS", ())
     yield
 
 

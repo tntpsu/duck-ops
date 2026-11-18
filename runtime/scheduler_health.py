@@ -35,6 +35,7 @@ JOB_TIMEOUT_SECONDS = {
     "weekly_sunday": 5400,
 }
 ATTENTION_STATUSES = {
+    "not_scheduled",
     "missed_run",
     "failed",
     "timeout",
@@ -65,6 +66,13 @@ BAD_STATUSES = {
 #: interval changes ([[feedback_pin_the_rule_not_the_reading]]).
 SKIPPED_LOCK_STUCK_THRESHOLD = 3
 WARN_STATUSES = {
+    # A job nothing will run again belongs in the ROLLUP, not only on its own
+    # line. The 2026-11-09 incident this card was widened for was "35 jobs all
+    # healthy on a machine holding 50 loaded duck agents" -- the lesson being
+    # that a blind spot has to be visible. An intentional pause reads yellow
+    # and clears itself when the plist returns; an ACCIDENTAL unload would
+    # otherwise leave the card green about a job that is gone.
+    "not_scheduled",
     "dependency_blocked_recent",
     "fixed_pending_next_run",
     "slow",
@@ -74,7 +82,11 @@ WARN_STATUSES = {
     "no_history",
     "unknown",
 }
-NON_ACTIONABLE_ATTENTION_STATUSES = {"dependency_blocked_recent"}
+#: Worth SEEING on the card, but not an action item. A deliberately
+#: unloaded job is the common reading of `not_scheduled`, and the card
+#: cannot tell that from an accidental unload -- so it shows the line
+#: and declines to demand work.
+NON_ACTIONABLE_ATTENTION_STATUSES = {"dependency_blocked_recent", "not_scheduled"}
 LOG_EVENT_RE = re.compile(
     r"^\[(?P<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?: [A-Z]{2,4})?\]\s+"
     r"(?P<event>START|END|TIMEOUT|BUDGET|SKIP|INTERRUPTED)\s+"
@@ -611,8 +623,11 @@ def _evaluate_job(
     job_name = str(job.get("job_name") or "").strip()
     timeout_seconds = _safe_int((receipt or {}).get("timeout_seconds"), _safe_int(job.get("timeout_seconds"), DEFAULT_TIMEOUT_SECONDS))
     grace_seconds = _safe_int(job.get("grace_seconds"), DEFAULT_GRACE_SECONDS)
-    expected_at = _schedule_datetime(job.get("schedule") or {}, now=now, future=False)
-    next_expected_at = _schedule_datetime(job.get("schedule") or {}, now=now, future=True)
+    # No `or {}`: that coercion is what turned "schedule unknown" back into
+    # midnight-daily. `_normalize_schedule(None)` is [], so a job with no
+    # declared window has no expected_at and cannot be graded `missed_run`.
+    expected_at = _schedule_datetime(job.get("schedule"), now=now, future=False)
+    next_expected_at = _schedule_datetime(job.get("schedule"), now=now, future=True)
     start_event = _latest_event(events, job_name, "START")
     end_event = _latest_event(events, job_name, "END")
     timeout_event = _latest_event(events, job_name, "TIMEOUT")
@@ -766,6 +781,26 @@ def _evaluate_job(
         )
         recommended_action = "Let the next scheduled window run or smoke-test the wrapper manually."
 
+    # Nothing is loaded to run this job again. Placed AFTER the chain so a
+    # genuine failure, timeout or in-flight run still gets its own verdict --
+    # but ahead of the healthy default, because a retired job whose last run
+    # succeeded would otherwise report "Last scheduled run finished
+    # successfully" forever, which is true of the past and useless about the
+    # present. `warn`, never `bad`: nothing failed, and an intentional
+    # unload is the common case. It clears itself when the plist comes back.
+    if status in {"healthy", "no_history"} and not job.get("plist_path"):
+        status = "not_scheduled"
+        severity = "warn"
+        summary = (
+            "Receipts exist for this job but no launchd plist declares it, so "
+            "nothing will run it again."
+        )
+        recommended_action = (
+            "Expected if the job was paused or retired on purpose. If not, the "
+            "plist is missing from ~/Library/LaunchAgents -- restore it and "
+            "bootstrap it back."
+        )
+
     # 2026-09-07: a missed_run verdict is only true until the job's NEXT
     # window (plus grace) has passed. The sidecar grades at 06:xx against
     # yesterday's 07:xx window, and the cached verdict used to stay red all
@@ -866,7 +901,17 @@ def build_scheduler_health(
             {
                 "job_name": str(job_name),
                 "label": str(job_name),
-                "schedule": {},
+                # None, NOT {}. `_normalize_schedule({})` resolves a bare dict
+                # to midnight-daily, so this placeholder -- which means "we
+                # found receipts and have no idea when this is supposed to
+                # run" -- silently handed every receipt-only job a daily
+                # cadence it never declared. The first one to exist was
+                # jeepfact_wednesday on 2026-11-18, minutes after the operator
+                # asked for that job to be cancelled: it would have graded
+                # `missed_run`/bad at 00:30 the next morning and reddened the
+                # card on a pause they had asked for. `_normalize_schedule`
+                # returns [] for None, so there is no window to miss.
+                "schedule": None,
                 "timeout_seconds": JOB_TIMEOUT_SECONDS.get(str(job_name), DEFAULT_TIMEOUT_SECONDS),
                 "grace_seconds": DEFAULT_GRACE_SECONDS,
             },

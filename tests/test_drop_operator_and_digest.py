@@ -21,6 +21,7 @@ RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
+import _siblings  # noqa: E402
 import drop_intake  # noqa: E402
 import drop_digest  # noqa: E402
 import drop_operator  # noqa: E402
@@ -209,6 +210,7 @@ class ClearingTheQueueInOneReplyTests(unittest.TestCase):
         self.assertEqual(self._ledger_now()["a"]["approval"], "approved")
 
     def test_the_email_offers_the_one_tap_button_when_there_are_siblings(self):
+        _siblings.skip_without_reply_buttons(self)
         import io
         from contextlib import redirect_stderr
         state = self.root / "d.json"
@@ -398,6 +400,7 @@ class TheEmailIsReadableOnAPhoneTests(unittest.TestCase):
         self.assertIn("src='cid:drop1a'", html)
 
     def test_a_drop_with_no_preview_still_appears_and_says_why(self):
+        _siblings.skip_without_reply_buttons(self)
         html = self._html({"clip": _entry()},
                           previews=[{"stem": "clip", "frames": [],
                                      "note": "the file is gone"}])
@@ -407,6 +410,7 @@ class TheEmailIsReadableOnAPhoneTests(unittest.TestCase):
     def test_no_reply_address_is_loud_rather_than_silently_buttonless(self):
         """An approval email with nothing to approve with, and no error, is
         the worst of both ([[feedback_swallowed_errors_lie]])."""
+        _siblings.skip_without_reply_buttons(self)
         import io
         import sys as _sys
         from contextlib import redirect_stderr
@@ -429,6 +433,7 @@ class TheEmailIsReadableOnAPhoneTests(unittest.TestCase):
         pre-filled draft. The first version told the operator to TYPE a
         44-character stem, which is unusable on the phone where it is read --
         "we shouldn't reinvent the wheel from our other approval emails"."""
+        _siblings.skip_without_reply_buttons(self)
         html = self._html({"clip": _entry()})
         self.assertIn("mailto:", html)
         self.assertIn("drop%20approve%20clip", html.replace("+", "%20"))
@@ -436,6 +441,7 @@ class TheEmailIsReadableOnAPhoneTests(unittest.TestCase):
         self.assertIn("#0f766e", html)
 
     def test_both_verbs_get_a_button(self):
+        _siblings.skip_without_reply_buttons(self)
         html = self._html({"clip": _entry()})
         self.assertIn(">Approve<", html)
         self.assertIn(">Decline<", html)
@@ -467,12 +473,14 @@ class TheEmailIsReadableOnAPhoneTests(unittest.TestCase):
         the whole button block on post_ready, so the only drop that could
         never be published was also the only one that could not be dismissed
         -- and it would have aged through every digest milestone forever."""
+        _siblings.skip_without_reply_buttons(self)
         html = self._html({"draft": _entry(post_ready=False)})
         self.assertIn("drop%20decline%20draft", html.replace("+", "%20"))
         self.assertIn(">Decline<", html)
 
     def test_every_pending_drop_has_at_least_one_button(self):
         """No card is a dead end."""
+        _siblings.skip_without_reply_buttons(self)
         import re
         html = self._html({"a": _entry(), "b": _entry(post_ready=False)})
         for stem in ("a", "b"):
@@ -516,6 +524,7 @@ class TheSecondBeatSurvivesTests(unittest.TestCase):
     def test_a_two_beat_drop_previews_one_frame_per_beat(self):
         """A single still shows half the joke -- and it is the half the
         operator already read in the caption."""
+        _siblings.skip_without_preview_helpers(self)
         entry = {"stem": "clip", "asset_path": "/t/c.mp4", "media_type": "video",
                  "on_screen_hook_text": "setup", "closing_line": "payoff",
                  "closing_at": 5.0, "lane": "meme"}
@@ -548,6 +557,7 @@ class TheSecondBeatSurvivesTests(unittest.TestCase):
         self.assertGreater(grabbed[1], 5.0, "second frame must follow it")
 
     def test_a_one_beat_drop_still_previews_once(self):
+        _siblings.skip_without_preview_helpers(self)
         entry = {"stem": "clip", "asset_path": "/t/c.mp4", "media_type": "video",
                  "on_screen_hook_text": "setup", "lane": "meme"}
         with mock.patch("pathlib.Path.is_file", return_value=True), \

@@ -829,3 +829,117 @@ class TimeoutIsItsOwnVerdictTests(unittest.TestCase):
     def test_timeout_is_already_a_known_bad_status(self):
         self.assertIn("timeout", scheduler_health.ATTENTION_STATUSES)
         self.assertIn("timeout", scheduler_health.BAD_STATUSES)
+
+
+class AnUnloadedJobIsNotAMissedRunTests(unittest.TestCase):
+    """A job found only in receipts has no DECLARED window to miss.
+
+    Found 2026-11-18, minutes after the operator asked for
+    `jeepfact_wednesday` to be cancelled. Unloading it and moving the plist
+    out of ~/Library/LaunchAgents dropped it from the plist roster -- but
+    the roster is ALSO seeded from the receipt directory, and that path
+    handed such jobs `"schedule": {}`. `_normalize_schedule({})` returns
+    `[{}]`, which `_schedule_entry_datetime` resolves to midnight with no
+    weekday, i.e. DAILY. So the card invented a cadence the job had never
+    declared and would have graded it `missed_run`/bad at 00:30 the next
+    morning -- reddening the scheduler card over a pause the operator had
+    asked for, with a recommended action ("check launchd load state") that
+    described the intended state of the world.
+
+    It is the mirror of the rule this module already states for
+    `_discover_unmonitored_jobs`: inventing a verdict for a job you cannot
+    see is a confident wrong answer. There it was about jobs with no
+    receipt; here it is jobs with no plist.
+    """
+
+    def _payload(self, now: str, *, exit_code: int = 0):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            launch_agents.mkdir()          # deliberately EMPTY -- no plist
+            receipt_dir = root / "receipts"
+            receipt_dir.mkdir()
+            (receipt_dir / "jeepfact_wednesday.json").write_text(json.dumps({
+                "job_name": "jeepfact_wednesday",
+                "run_id": "jeepfact_wednesday_20261118_090004_1",
+                "status": "succeeded" if exit_code == 0 else "failed",
+                "exit_code": exit_code,
+                "started_at": "2026-11-18T09:00:04-05:00",
+                "finished_at": "2026-11-18T09:04:26-05:00",
+                "timeout_seconds": 1800,
+            }), encoding="utf-8")
+            return scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat(now),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=root / "missing.log",
+                receipt_dir=receipt_dir,
+                resolution_dir=root / "resolutions",
+                history_dir=root / "history",
+                write_outputs=False,
+            )
+
+    def test_no_window_is_invented_for_it(self):
+        item = self._payload("2026-11-18T10:35:00-05:00")["items"][0]
+        self.assertEqual(item["job_name"], "jeepfact_wednesday")
+        self.assertIsNone(item["expected_at"])
+        self.assertIsNone(item["next_expected_at"])
+
+    def test_it_is_never_graded_missed_run(self):
+        """The regression. The day AFTER the last run, past any grace."""
+        for now in ("2026-11-19T00:30:00-05:00",
+                    "2026-11-19T09:00:00-05:00",
+                    "2026-11-25T09:00:00-05:00"):
+            with self.subTest(now=now):
+                payload = self._payload(now)
+                item = payload["items"][0]
+                self.assertNotEqual(item["status"], "missed_run")
+                self.assertEqual(item["severity"], "warn")
+                self.assertEqual(payload["status"], "warn")
+
+    def test_it_says_nothing_will_run_it_rather_than_healthy(self):
+        """The other way to be wrong: a retired job reading green forever.
+
+        "Last scheduled run finished successfully" is true of the past and
+        useless about the present.
+        """
+        item = self._payload("2026-11-18T10:35:00-05:00")["items"][0]
+        self.assertEqual(item["status"], "not_scheduled")
+        self.assertIn("nothing will run it", item["summary"])
+        self.assertIn("paused or retired", item["recommended_action"])
+
+    def test_it_is_visible_but_not_an_action_item(self):
+        """An intentional unload is the common reading, and the card cannot
+        tell it from an accidental one -- so it shows the line and declines
+        to demand work."""
+        item = self._payload("2026-11-18T10:35:00-05:00")["items"][0]
+        self.assertFalse(item["attention_needed"])
+        self.assertNotIn("not_scheduled", scheduler_health.BAD_STATUSES)
+
+    def test_a_real_failure_still_outranks_it(self):
+        """Placed after the verdict chain, so a job that failed on its last
+        run keeps that verdict rather than being excused by being unloaded."""
+        item = self._payload("2026-11-18T10:35:00-05:00", exit_code=1)["items"][0]
+        self.assertEqual(item["status"], "failed")
+        self.assertEqual(item["severity"], "bad")
+
+    def test_a_loaded_job_is_unaffected(self):
+        """The fix must not stop grading jobs that ARE scheduled."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"
+            launch_agents.mkdir()
+            _write_plist(
+                launch_agents / "com.philtullai.duckagent.reviews.daily.plist",
+                label="com.philtullai.duckagent.reviews.daily",
+                job_name="reviews_daily",
+                schedule={"Hour": 9, "Minute": 0},
+            )
+            payload = scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat("2026-04-23T11:00:00-04:00"),
+                launch_agents_dir=launch_agents,
+                scheduler_log_path=root / "missing.log",
+                receipt_dir=root / "receipts",
+                write_outputs=False,
+            )
+        self.assertEqual(payload["items"][0]["status"], "missed_run")
+        self.assertIsNotNone(payload["items"][0]["expected_at"])

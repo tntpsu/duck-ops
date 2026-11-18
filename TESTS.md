@@ -8816,3 +8816,101 @@ person to reach for `mode` as "is this lane live?" will be as wrong as I was.
 A `lane_posture` field with one meaning per value is the real fix
 ([[feedback_status_fields_one_meaning]]); this surface only stopped the
 immediate bleeding.
+
+---
+
+## Surface 145 — CI had been red in BOTH repos, and I had only looked at one (2026-11-18, operator: "It looks like CI keeps failing. I thought u were supposed to continue to make sure that stays clean")
+
+I reported duckAgent's red CI this morning, committed the ffmpeg fix, pushed
+it — and never ran `gh run list` again. The rule in memory is exactly that
+([[feedback_red_ci_is_no_ci]]: run it as part of committing), and I had the
+rule and skipped the step. duck-ops CI I had not looked at at all; it had
+been failing every run since 2026-11-16.
+
+The ffmpeg fix did work: duckAgent went 9 failures → 1. What follows is
+everything still red.
+
+### 145a — duck-ops: 22 failures, one root cause
+
+duck-ops CI checks out duck-ops **alone**. The workflow has claimed since
+2026-11-09 that "the handful of cross-repo assertions skip BY NAME rather
+than failing, so the summary says what this runner could not check instead
+of implying it did". True of the handful that existed then; three later
+features added hard sibling dependencies without the guard.
+
+| cluster | why it failed in CI | fix |
+|---|---|---|
+| 11 × `test_drive_mirror*` | `CODE_REPOS` holds absolute paths to the real duck-ops / duckAgent / paint-to-print-3d checkouts, and `stage_code_bundles` shells out to `git ls-files` in each. An absent repo records `source_missing`, which lands in `manifest["failures"]` and makes `ok` False | added `CODE_REPOS` to the autouse `_redirect_drive_mirror_paths` fixture |
+| 9 × `test_drop_operator_and_digest` | `drop_digest._reply_buttons` imports `helpers.email_reply_action_helper` from duckAgent and returns `""` when it cannot, so every assertion about an approval button failed | `tests/_siblings.py` → `skip_without_reply_buttons` / `skip_without_preview_helpers`, named per test |
+| 1 × `test_no_untimed_smtp` ratchet | two of four `SEARCH_DIRS` are in duckAgent, so every ratchet entry naming a duckAgent file read as "no longer an un-timed call" | judge staleness only over files the run actually OPENED |
+| F821 (separate job) | `LANE_DROP_SPECS: dict[str, dict[str, Any]]` never imported `Any` | `from typing import Any` |
+
+**The drive-mirror fix is isolation, not a skip**, and it is the better
+outcome: those eleven tests were zipping the operator's real working trees
+through `git ls-files` on every clean-run pass. The fixture's own docstring
+had predicted this — "Every production path the module names belongs here,
+and the list is only complete until someone adds a constant" — and
+`CODE_REPOS` is the third constant to be added without being added there.
+
+**The ratchet one is the more dangerous shape.** The test did not merely
+fail; it instructed the reader to DELETE three entries
+(`listing_video_helper.py:172`, `pictostl_helper.py:242`,
+`pictostl_helper.py:117`) that still name real un-timed subprocess calls —
+on the authority of a scan that never opened those files. Acting on it
+would have un-exempted three live hazards in a file whose whole purpose is
+that an un-timed call wedged the sidecar twice. A clean result is only as
+wide as the selection behind it
+([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]]), and the fixed
+version also guards the vacuous pass (`assertTrue(scanned_dirs)`) so a run
+that opened nothing cannot agree with itself.
+
+The F821 was invisible to every test by construction: `from __future__
+import annotations` makes the annotation a lazy string, so it never
+evaluates and only ruff ever looks. Real latent bug —
+`get_type_hints()` on `drop_intake` raises.
+
+### 145b — duckAgent: a test that asserted a font metric
+
+`test_a_hook_that_cannot_fit_is_reported_not_silently_cut` asked whether one
+specific hook overflows a 720×480 card at `max_lines=4`. That is a question
+about **font metrics**, and `media_rendering_helper.font` only looks at macOS
+system paths, falling back to `ImageFont.load_default()` — a ~11px bitmap
+face that ignores the requested size — everywhere else. Measured both ways:
+
+| font | `max_lines=4` overflow |
+|---|---|
+| this Mac (Arial Black 72px) | `"green (and your holiday dash crew isn't having it)"` |
+| PIL fallback (what CI gets) | `None` |
+
+So it passed here and failed there, which is a timed flake with extra steps.
+Rewritten to pin the RULE — "text that does not fit is recorded, never
+silently cut" — at `max_lines=1`, which no font can fit, and to exercise
+**both faces** so it can never again pass on one and fail on the other.
+
+Two mistakes of my own in that rewrite, both caught before pushing: the
+first patched `helpers.media_rendering_helper.font`, which is a silent
+no-op because `duck_video_helper` does `from ... import font` and holds its
+own reference — the test would have checked the local font twice while
+claiming to cover both. And a `test_the_overflow_record_is_reset_between_cards`
+was added because `last_overflow` is state on a function object, so a stale
+value makes the next caller refuse a hook that fits.
+
+### Rehearsing CI instead of learning from it
+
+`DUCK_OPS_NO_SIBLINGS=1 pytest tests -q` reproduces the duck-ops runner on
+this Mac. Measured: 1890 passed / 10 skipped with it, 1899 passed / 1
+skipped without. The ratchet and font cases were each verified directly
+against a genuinely absent sibling and a forced fallback font, because the
+env var alone does not reach `SEARCH_DIRS`.
+
+**Mutation-verified.** A stale ratchet entry in a file the run CAN see still
+fails; re-adding the F821 fails the lint job; reverting the `CODE_REPOS`
+isolation fails 11 under the rehearsal.
+
+**Still open.** `media_rendering_helper.font` has no non-macOS candidate, so
+every CI render uses a bitmap fallback and **no CI test can say anything
+about real text layout**. The operator's renders all happen on the Mac, so
+this is a coverage limit rather than a live defect — but it means the
+`[[feedback_visual_output_needs_eyes]]` family of tests is weaker in CI than
+it reads. Bundling a font would fix it and is a deliberate decision, not a
+test change.

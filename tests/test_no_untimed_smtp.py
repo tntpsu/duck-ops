@@ -125,11 +125,24 @@ class EveryBlockingCallIsTimedTests(unittest.TestCase):
 
     def test_the_ratchet_only_covers_calls_that_still_exist(self):
         """A stale entry silently exempts whatever moves onto that line
-        number. The list shrinks as sites are fixed; it must not rot."""
+        number. The list shrinks as sites are fixed; it must not rot.
+
+        Judged only over files this runner could actually OPEN. Two of the
+        four SEARCH_DIRS live in duckAgent, which duck-ops CI does not check
+        out, so there every entry naming a duckAgent file read as "no longer
+        an un-timed call" and the test demanded their deletion -- deleting
+        them would have un-exempted three real un-timed calls that are still
+        there, on the authority of a scan that never opened the files. A
+        clean result is only as wide as the selection behind it
+        ([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]]).
+        """
         live = set()
+        scanned_files = set()
+        scanned_dirs = []
         for root in SEARCH_DIRS:
             if not root.is_dir():
                 continue
+            scanned_dirs.append(root)
             for path in sorted(root.rglob("*.py")):
                 if "test" in path.name:
                     continue
@@ -137,14 +150,35 @@ class EveryBlockingCallIsTimedTests(unittest.TestCase):
                     tree = ast.parse(path.read_text(encoding="utf-8"))
                 except (OSError, SyntaxError):
                     continue
+                scanned_files.add(path.name)
                 for node in ast.walk(tree):
                     if (isinstance(node, ast.Call) and _is_subprocess_call(node)
                             and not any(k.arg == "timeout" for k in node.keywords)):
                         live.add(f"{path.name}:{node.lineno}")
-        stale = UNREVIEWED - live
+        # Guard against the vacuous pass: a run that opened nothing would
+        # report every entry as un-judgeable and agree with itself.
+        self.assertTrue(scanned_dirs, f"none of {SEARCH_DIRS} exists")
+        stale = {entry for entry in (UNREVIEWED - live)
+                 if entry.split(":")[0] in scanned_files}
         self.assertEqual(stale, set(),
                          "these ratchet entries no longer name an un-timed "
                          "call; delete them so the list keeps shrinking")
+
+    def test_the_ratchet_audit_says_what_it_could_not_judge(self):
+        """Entries whose file this runner never opened are UNJUDGED, not
+        clean -- and the distinction has to be visible, or the next person
+        reads a green CI run as "the ratchet is current"."""
+        unopened = {entry for entry in UNREVIEWED
+                    if not any((root / entry.split(":")[0]).exists()
+                               or any(p.name == entry.split(":")[0]
+                                      for p in root.rglob("*.py"))
+                               for root in SEARCH_DIRS if root.is_dir())}
+        if unopened:
+            print("\n[ratchet] not judged on this runner (file not present): "
+                  + ", ".join(sorted(unopened)))
+        # Nothing to assert about the operator's Mac, where all four dirs
+        # exist; this exists so a CI run states its own blind spot.
+        self.assertIsInstance(unopened, set)
 
     def test_notifier_is_held_to_the_strict_rule(self):
         """It holds the sidecar lock, so a hang there takes seven other steps
