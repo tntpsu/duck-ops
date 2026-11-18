@@ -9531,3 +9531,117 @@ item an emergency and train the operator to ignore the card.
 `customer_reply` threads at 220 days — if those are real customer messages
 they are long past any useful reply, and the right action may be a bulk
 retire rather than a reply. Not decided here; the card names them.
+
+## Surface 156 — four of the five "220-day customers" were not customers waiting (2026-11-18, operator: "Fix 1")
+
+The new Receipt Follow-Through card named five `customer_reply` receipts as
+its oldest and shortest-window items, 220 days against a 3-day window.
+Reading them one by one against the LIVE producer rather than the receipt
+changed four of the five verdicts.
+
+The `etsy_conversation_browser_sync` producer regenerates daily (18:27 on
+2026-11-18, 265 threads) and tracked **every one** of the same five
+threads. The receipts were April/May snapshots, frozen since.
+
+| receipt | thread | live `linked_customer_short_id` | live verdict | call |
+|---|---|---|---|---|
+| C301 | `::r` | **C392** | `reply_needed=False`, `open_loop_owner=customer` | retired — reply WAS sent, waiting on the buyer for 13 names/numbers |
+| C394 | `::meredith` | **C426** | 6 msgs, newer artifact `mail::134571` | retired — superseded snapshot |
+| C395 | `::logan` | **C396** | newer artifact `mail::133428` | retired — superseded snapshot |
+| C381 | `::devon-piper` | C381 | `reply_drafted`, thread dead at April | retired — **a real missed $45 sale**, drafted 04-11, never sent |
+| C376 | `::peter` | C376 | **`reply_needed=True`, `open_loop_owner=seller`**, 12 msgs, newer `mail::147080` | **KEPT** — the one live open loop |
+
+Each retirement carries its own `state_reason`
+(`operator_resolved_waiting_on_customer`,
+`superseded_by_newer_case_id`, `operator_retired_expired_opportunity`), not
+one blanket "stale" — the distinction is the whole output of the
+investigation and a shared reason would have destroyed it
+([[feedback_retire_artifacts_in_authoritative_store]]).
+
+### The structural fix, so the next three need no one to be looking
+
+Three of five were pinned to a case id the live producer had re-keyed. An
+age window cannot tell a frozen snapshot from open work, so `SUPERSEDED`
+is now a kind of its own: a receipt whose entity the live producer tracks
+under a DIFFERENT identity is reported as superseded, never graded as
+overdue. `SUPERSESSION_KEYS` declares the per-lane entity field, so only
+lanes that have one are checked.
+
+| Use case | Covered |
+|---|---|
+| A re-keyed thread is superseded, not overdue | `test_receipt_lifecycle.py::SupersededReceiptsTests` |
+| The SAME identity is still graded | mutation partner — this is C376/peter's shape |
+| No live index → grades normally (fail OPEN) | 1 test |
+| Thread absent from the index → grades normally | 1 test |
+| No thread key / no entity_id → grades normally | 2 tests |
+| Only lanes in `SUPERSESSION_KEYS` are checked | 1 test |
+| A superseded receipt never reaches the overdue list | 1 test |
+| **The three real re-keys would all have been caught** | 3 subtests, the measured cases |
+| The card's loader actually BUILDS the index | `test_receipt_followthrough_card.py::SupersededReceiptsReachTheCardTests` |
+| Missing / malformed / partial sync file grades normally | 3 tests |
+
+**Mutation-verified** (3 of 3, in both halves): superseding whenever the
+index knows the thread (2 red + 1 red), never superseding (5 red + 1 red),
+loader passing an empty index (1 red — the test that proves the two halves
+are actually connected).
+
+Overdue count: 48 → 44.
+
+**Open:** `customer_reply::C376` (peter) is a live open loop — a Grave
+Digger custom duck with a drafted $45 reply and a message
+(`mail::147080`) that arrived after the April browser capture and was
+never processed. Operator action, not an automated one: customer replies
+are human-gated.
+
+## Surface 157 — the competitor email was never dead; the receipt was (2026-11-18, operator: "I thought I got 3 every week")
+
+**A correction.** Surface 155 reported
+`competitor/weekly_operator_email_deferred` at 167 days as a dead
+handoff — "a deferral naming a destination whose consumer stopped" — and
+offered it as a live find. That was WRONG, and the operator said so.
+
+The mailbox, read AS DELIVERED (`from:me to:me`), settles it:
+
+| `Competitor Analysis Report` | delivered |
+|---|---|
+| 2026-11-15 | ✓ three days before this was written |
+| 2026-11-08, 11-01, 10-18 | ✓ |
+| 2026-09-13, 09-06 | ✓ |
+
+And `scheduler_health` already watches the producer:
+`competitor_weekly` last started **2026-11-15T06:30:05**, healthy — the
+email landed at 06:31.
+
+The two are different paths. The deferral receipt is written by
+`profit_intel.py`'s cadence gate; the report is sent by
+`duckAgent/flows/competitor/competitor_reports.py`, which has no deferral
+step. The receipts stop at 167 days because that is when the competitor
+report stopped going through the gate — a path ABANDONED in favour of a
+direct weekly send. Reclassified `PARKED`, with the mailbox dates as the
+basis.
+
+### What this says about the method
+
+A receipt said the handoff was dead. The delivered mail said it was alive.
+**The mail wins, every time** — which is exactly what
+[[feedback_fold_defer_is_a_handoff_contract]] already says ("audit lanes by
+reading the emails AS DELIVERED (from:me to:me)") and what this surface
+skipped before reporting a finding.
+
+It also cost a test. `test_a_dead_per_run_log_reports_exactly_one_item`
+was written against the competitor pair *because* its newest was 167 days
+old, so it defended the false alarm. Rewritten against constructed ages on
+the profit pair — the RULE, not today's reading
+([[feedback_pin_the_rule_not_the_reading]]) — plus a new
+`test_a_retired_path_is_parked_not_reported_as_a_dead_handoff` pinning the
+correction.
+
+Overdue count: 44 → 43.
+
+**Open:** the mailbox shows no competitor report for 2026-09-20, -09-27,
+-10-04, -10-11 or -10-25 — five missed Sundays in that stretch, with the
+last three weeks consistent. `competitor_weekly` is a 06:30 Sunday
+`StartCalendarInterval` job and there is no catch-up, so sleep-skip is the
+likely cause ([[feedback_verify_the_job_is_firing_first]]). Not chased
+here; scheduler_health would have shown `missed_run` at the time and the
+job is healthy now.

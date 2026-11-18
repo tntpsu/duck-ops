@@ -177,17 +177,38 @@ class PerRunPairsCollapseToTheirNewestTests(unittest.TestCase):
         self.assertEqual(rl.overdue_items(verdicts), [])
 
     def test_a_dead_per_run_log_reports_exactly_one_item(self):
-        """competitor's newest deferral is 167 days old, so the handoff is
-        dead -- and it is ONE finding, not seven
-        ([[feedback_fold_defer_is_a_handoff_contract]])."""
+        """A per-run log whose NEWEST entry is past the window is one finding,
+        not one per entry ([[feedback_fold_defer_is_a_handoff_contract]]).
+
+        Written against the profit pair with constructed ages, deliberately.
+        The first version used the competitor deferral because its newest was
+        167 days old -- and that reading was WRONG: the competitor report
+        sends directly now and arrived three days before this was written, so
+        those receipts are a retired path and are classified PARKED. A test
+        pinned to that reading defended a false alarm
+        ([[feedback_pin_the_rule_not_the_reading]])."""
+        verdicts = [
+            _classify(_receipt("profit", "observed",
+                               "weekly_operator_email_deferred", days_old=age))
+            for age in (40, 120, 180)
+        ]
+        overdue = rl.overdue_items(verdicts)
+        self.assertEqual(len(overdue), 1)
+        self.assertAlmostEqual(overdue[0].age_days, 40, places=0)
+
+    def test_a_retired_path_is_parked_not_reported_as_a_dead_handoff(self):
+        """The correction itself, as a regression. The competitor deferral
+        receipts stop at 167 days because the report moved to a direct weekly
+        send, not because a handoff died -- verified by reading the delivered
+        mail, which is the only thing that settles it."""
         verdicts = [
             _classify(_receipt("competitor", "observed",
                                "weekly_operator_email_deferred", days_old=age))
             for age in (167, 175, 183)
         ]
-        overdue = rl.overdue_items(verdicts)
-        self.assertEqual(len(overdue), 1)
-        self.assertAlmostEqual(overdue[0].age_days, 167, places=0)
+        for v in verdicts:
+            self.assertEqual(v.kind, rl.PARKED)
+        self.assertEqual(rl.overdue_items(verdicts), [])
 
     def test_per_entity_receipts_are_each_counted(self):
         """14 stuck newduck drafts are 14 distinct listings. Collapsing these
@@ -222,6 +243,107 @@ class PerRunPairsCollapseToTheirNewestTests(unittest.TestCase):
             _classify(_receipt("x", "observed", "y", days_old=400)),
         ]
         self.assertEqual(rl.overdue_items(verdicts), [])
+
+
+class SupersededReceiptsTests(unittest.TestCase):
+    """A frozen snapshot of an entity a live producer has re-keyed.
+
+    Found by working the five oldest customer_reply receipts on 2026-11-18.
+    All five were April/May snapshots and the daily
+    `etsy_conversation_browser_sync` tracked every one of the same threads --
+    three under a DIFFERENT `linked_customer_short_id` because the thread had
+    been re-keyed to a newer case. An age window cannot tell that from open
+    work, which is why four of five looked like 220-day-old unanswered
+    customers when only one was.
+    """
+
+    THREAD = "etsy-thread::meredith"
+
+    def _receipt(self, entity_id, *, days_old=220.0):
+        r = _receipt("customer_reply", "observed", "needs_thread_review",
+                     days_old=days_old)
+        r["entity_id"] = entity_id
+        r["metadata"] = {"conversation_thread_key": self.THREAD}
+        return r
+
+    def test_a_rekeyed_thread_is_superseded_not_overdue(self):
+        v = _classify(self._receipt("C394"),
+                      live_identity={self.THREAD: "C426"})
+        self.assertEqual(v.kind, rl.SUPERSEDED)
+        self.assertFalse(v.overdue)
+        self.assertEqual(v.superseded_by, "C426")
+
+    def test_the_SAME_identity_is_still_graded(self):
+        """The mutation partner. A supersession check that fired whenever the
+        live producer knew the thread would retire every open loop, including
+        the one real one this investigation kept (C376 / peter, which the
+        sync reports as reply_needed with open_loop_owner=seller)."""
+        v = _classify(self._receipt("C394"),
+                      live_identity={self.THREAD: "C394"})
+        self.assertEqual(v.kind, rl.PENDING)
+        self.assertTrue(v.overdue)
+
+    def test_no_live_index_grades_normally(self):
+        """Fail OPEN. A missing or unreadable sync file is not evidence that
+        anything was superseded, and treating it as such would silently
+        retire every customer_reply receipt at once."""
+        v = _classify(self._receipt("C394"))
+        self.assertEqual(v.kind, rl.PENDING)
+        self.assertTrue(v.overdue)
+
+    def test_a_thread_absent_from_the_live_index_grades_normally(self):
+        v = _classify(self._receipt("C394"),
+                      live_identity={"etsy-thread::someone-else": "C999"})
+        self.assertEqual(v.kind, rl.PENDING)
+
+    def test_a_receipt_with_no_thread_key_grades_normally(self):
+        r = _receipt("customer_reply", "observed", "needs_thread_review",
+                     days_old=220)
+        r["entity_id"] = "C394"
+        v = _classify(r, live_identity={self.THREAD: "C426"})
+        self.assertEqual(v.kind, rl.PENDING)
+
+    def test_a_receipt_with_no_entity_id_grades_normally(self):
+        """Without our own identity there is nothing to compare, so claiming
+        supersession would be a guess."""
+        r = self._receipt("C394")
+        r["entity_id"] = ""
+        v = _classify(r, live_identity={self.THREAD: "C426"})
+        self.assertEqual(v.kind, rl.PENDING)
+
+    def test_only_lanes_with_a_declared_entity_key_are_checked(self):
+        """The index is keyed on a lane-specific metadata field. A lane with
+        no entry in SUPERSESSION_KEYS must not accidentally match on some
+        other lane's thread key."""
+        r = _receipt("newduck", "observed", "draft_ready", days_old=213)
+        r["entity_id"] = "ND1"
+        r["metadata"] = {"conversation_thread_key": self.THREAD}
+        v = _classify(r, live_identity={self.THREAD: "C426"})
+        self.assertEqual(v.kind, rl.PENDING)
+        self.assertIn("customer_reply", rl.SUPERSESSION_KEYS)
+        self.assertNotIn("newduck", rl.SUPERSESSION_KEYS)
+
+    def test_a_superseded_receipt_never_reaches_the_overdue_list(self):
+        verdicts = [_classify(self._receipt("C394"),
+                              live_identity={self.THREAD: "C426"})]
+        self.assertEqual(rl.overdue_items(verdicts), [])
+
+    def test_the_three_real_rekeys_would_all_have_been_caught(self):
+        """The measured cases, as a regression. These three were retired by
+        hand on 2026-11-18 after reading five receipts; the point of the
+        check is that the next three need no one to be looking."""
+        for thread, old_id, new_id in (
+                ("etsy-thread::r", "C301", "C392"),
+                ("etsy-thread::meredith", "C394", "C426"),
+                ("etsy-thread::logan", "C395", "C396")):
+            with self.subTest(thread=thread):
+                r = _receipt("customer_reply", "observed", "thread_observed",
+                             days_old=220)
+                r["entity_id"] = old_id
+                r["metadata"] = {"conversation_thread_key": thread}
+                v = _classify(r, live_identity={thread: new_id})
+                self.assertEqual(v.kind, rl.SUPERSEDED)
+                self.assertEqual(v.superseded_by, new_id)
 
 
 class JunkInputTests(unittest.TestCase):

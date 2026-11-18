@@ -64,6 +64,22 @@ BLOCKED = "blocked"
 #: UNCLASSIFIED: no POLICY entry. A question, not a verdict.
 UNCLASSIFIED = "unclassified"
 
+#: SUPERSEDED: a live producer is tracking this same entity under a NEWER
+#: identity, so the receipt is a frozen snapshot rather than open work.
+#:
+#: Found 2026-11-18 while working the five oldest customer_reply receipts.
+#: All five were April/May snapshots; the `etsy_conversation_browser_sync`
+#: producer regenerates DAILY and tracked every one of the same threads,
+#: three of them under a different `linked_customer_short_id` (C301->C392,
+#: C394->C426, C395->C396) because the thread had been re-keyed to a newer
+#: case. Two stores, one of them frozen -- the shape
+#: [[feedback_retire_artifacts_in_authoritative_store]] is about, and the
+#: reason an age window alone cannot tell stuck work from dead bookkeeping.
+#:
+#: Detecting it beats relying on someone reading five receipts by hand: the
+#: next three will go stale the same way and nobody will be looking.
+SUPERSEDED = "superseded"
+
 #: How many receipts of one (lane, state_reason) pair are real at once.
 #:
 #: PER_ENTITY -- each receipt is its own stuck thing: 14 `newduck/draft_ready`
@@ -126,9 +142,31 @@ POLICY: dict[tuple[str, str], Policy] = {
     ("profit", "weekly_operator_email_deferred"): _pending(
         21, "folded into the Monday business digest; weekly cadence x3",
         cardinality=PER_RUN),
-    ("competitor", "weekly_operator_email_deferred"): _pending(
-        21, "folded into the Monday business digest; weekly cadence x3",
-        cardinality=PER_RUN),
+    # PARKED, after reading the mailbox AS DELIVERED rather than trusting the
+    # receipts ([[feedback_fold_defer_is_a_handoff_contract]]).
+    #
+    # These 7 receipts were first classified PENDING, which made the card
+    # report "competitor's weekly email stopped 167 days ago" as a dead
+    # handoff. That was WRONG. The operator said so -- "I thought I got 3
+    # every week" -- and the mailbox agrees: `Competitor Analysis Report`
+    # arrived 2026-11-15, 11-08, 11-01, 10-18, 09-13 and 09-06, from:me
+    # to:me, most recently three days before this was written.
+    #
+    # The two are different paths. The deferral receipt is written by
+    # profit_intel.py's cadence gate; the report is sent by
+    # duckAgent/flows/competitor/competitor_reports.py, which has no
+    # deferral step. So these receipts are the last traces of a path
+    # ABANDONED in favour of a direct weekly send, not evidence of a
+    # handoff that died -- the newest is 167d because that is when the
+    # competitor report stopped going through the gate.
+    #
+    # The lesson is about the method, not the entry: a receipt said the
+    # handoff was dead and the delivered mail said it was alive. The mail
+    # wins, every time.
+    ("competitor", "weekly_operator_email_deferred"): _parked(
+        "retired path: the report now sends directly (verified in the "
+        "mailbox 2026-11-15, -08, -01); profit_intel's gate no longer "
+        "carries it"),
 
     # --- production lanes: a prepared draft waiting on a human ------------
     ("newduck", "draft_ready"): _pending(
@@ -179,6 +217,8 @@ class ReceiptVerdict:
     cardinality: str
     workflow_id: str
     path: str
+    #: Set when kind is SUPERSEDED: what is tracking this entity now.
+    superseded_by: str | None = None
 
 
 def _age_days(updated_at: Any, *, now: datetime | None = None) -> float | None:
@@ -195,11 +235,20 @@ def _age_days(updated_at: Any, *, now: datetime | None = None) -> float | None:
     return (reference - when).total_seconds() / 86400.0
 
 
+#: Per-lane: which receipt metadata field names the entity, and which live
+#: identity field to compare against. A receipt is SUPERSEDED when the live
+#: producer tracks the same entity key under a different identity.
+SUPERSESSION_KEYS: dict[str, str] = {
+    "customer_reply": "conversation_thread_key",
+}
+
+
 def classify_receipt(
     receipt: Any,
     *,
     now: datetime | None = None,
     paused_lanes: frozenset[str] | set[str] | None = None,
+    live_identity: dict[str, str] | None = None,
     path: str = "",
 ) -> ReceiptVerdict | None:
     """One receipt's verdict, or None when the state is universally terminal.
@@ -221,7 +270,30 @@ def classify_receipt(
     policy = POLICY.get((lane, reason))
     paused = lane in (paused_lanes or frozenset())
 
+    # Supersession is checked BEFORE the window, because an age window cannot
+    # tell a frozen snapshot from open work -- that is exactly how five
+    # customer_reply receipts read as 220-day-old unanswered customers when
+    # four of them were already handled or re-keyed.
+    superseded_by = None
+    entity_key = SUPERSESSION_KEYS.get(lane)
+    if entity_key and live_identity:
+        metadata = receipt.get("metadata")
+        thread = str((metadata or {}).get(entity_key) or "").strip() \
+            if isinstance(metadata, dict) else ""
+        current = live_identity.get(thread) if thread else None
+        mine = str(receipt.get("entity_id") or "").strip()
+        if current and mine and current != mine:
+            superseded_by = current
+
     cardinality = PER_ENTITY
+    if superseded_by:
+        return ReceiptVerdict(
+            lane=lane, state=state, state_reason=reason, age_days=age,
+            kind=SUPERSEDED, overdue=False, window_days=None, paused=paused,
+            cardinality=PER_ENTITY,
+            workflow_id=str(receipt.get("workflow_id") or ""), path=path,
+            superseded_by=superseded_by,
+        )
     if state == BLOCKED:
         kind, window, overdue = BLOCKED, None, False
     elif policy is None:
