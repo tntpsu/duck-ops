@@ -59,15 +59,63 @@ jobs:
     # stamp in its own SCHEDULER_TZ and passes under any TZ.
     env:
       TZ: America/New_York
+      # Mapped into `env` because the `secrets` context is not available in a
+      # step-level `if`. Empty when the secret is unset, which is the signal
+      # the sibling checkout below keys on.
+      DUCKAGENT_RO_TOKEN: ${{ secrets.DUCKAGENT_RO_TOKEN }}
     steps:
+      # Everything is checked out under `repos/` so the SIBLING layout the
+      # code expects exists here too. `drop_digest.DUCK_AGENT_ROOT`,
+      # `drive_mirror.DUCKAGENT_ROOT` and `tests/_siblings.py` all resolve
+      # `REPO_ROOT.parent / "<name>"` from `__file__`, and actions/checkout
+      # refuses a path outside the workspace -- so the parent has to be a
+      # directory inside it rather than the workspace root.
       - uses: actions/checkout@v4
+        with:
+          path: repos/duck-ops
+      # duckAgent is PRIVATE and duck-ops is PUBLIC, so the default
+      # GITHUB_TOKEN cannot read it. Without this the suite still passes:
+      # ten cross-repo assertions skip BY NAME via tests/_siblings.py, and
+      # the run says what it could not check instead of implying it did.
+      # With it, those ten run for real -- `email_reply_action_helper` is
+      # pure stdlib, and the un-timed-call ratchet only needs the files to
+      # EXIST so it can ast-parse them, which is the gap that mattered: with
+      # duckAgent absent it reported three live un-timed calls as fixed.
+      #
+      # To enable: create a fine-grained PAT with Contents:Read on
+      # tntpsu/duckAgent only, and add it as the repository secret
+      # DUCKAGENT_RO_TOKEN. Note what that means in a PUBLIC repo -- a token
+      # readable by any workflow run here. `on: push` only runs for commits
+      # from someone with write access, and GitHub withholds secrets from
+      # fork pull requests, so the exposure is to this repo's own
+      # collaborators; read-only and single-repo scope is the point.
+      - name: Check out duckAgent (skipped without a token)
+        if: env.DUCKAGENT_RO_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          repository: tntpsu/duckAgent
+          token: ${{ env.DUCKAGENT_RO_TOKEN }}
+          path: repos/duckAgent
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install test dependencies
+        working-directory: repos/duck-ops
         run: pip install -r requirements-test.txt
-      # duckAgent is not checked out here. The handful of cross-repo
-      # assertions skip BY NAME rather than failing, so the summary says what
-      # this runner could not check instead of implying it did.
+      - name: Say which siblings this run can see
+        working-directory: repos/duck-ops
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "tests")
+          import _siblings
+          for name in ("duckAgent", "paint-to-print-3d"):
+              print(f"{name}: {_siblings.sibling_repo(name) or 'NOT CHECKED OUT'}")
+          print("reply buttons importable:",
+                _siblings.duckagent_reply_helper_importable())
+          print("preview helpers importable:",
+                _siblings.duckagent_preview_helpers_importable())
+          PY
       - name: Run the suite
+        working-directory: repos/duck-ops
         run: pytest tests -q

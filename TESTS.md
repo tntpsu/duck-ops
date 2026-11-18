@@ -8936,3 +8936,152 @@ this is a coverage limit rather than a live defect — but it means the
 `[[feedback_visual_output_needs_eyes]]` family of tests is weaker in CI than
 it reads. Bundling a font would fix it and is a deliberate decision, not a
 test change.
+
+---
+
+## Surface 146 — a job that had done nothing since June (2026-11-18)
+
+`duck_ops_order_refresh` was the one `bad` job on the scheduler card. The
+card said "the last 28 scheduled runs all declined to start because a lock
+was present". The truth was worse by a factor of 28.
+
+**Measured, from the job's own log rather than the card:** the last run to
+write an END line finished **2026-06-25 06:19**. The next one started
+10:21 and never finished — so its `trap cleanup EXIT` never fired (EXIT does
+not run on SIGKILL), and the empty lock directory it left behind declined
+**779 firings over five months**. Six times a day, exit 75, nobody looking.
+
+Three separate faults, and the card's own advice was one of them.
+
+### 146a — the lock could not self-heal
+
+`run_duck_ops_order_refresh.sh` held a bare `mkdir` mutex: no pid file, no
+staleness check. An orphaned lock is therefore permanent.
+
+`run_duck_ops_sidecar.sh` was given exactly this fix on 2026-11-13 after
+twelve days of the same thing, and `run_review_carousel_tuesday.sh` has had
+it for months. **Three wrappers were left behind** — order_refresh,
+etsy_browser_schedule and whatsapp_bridge — which is the incomplete-fix
+shape ([[feedback_incomplete_fix_enumerate_all_branches]]): a fix covering
+one branch of a multi-branch mechanism is presumed incomplete until every
+sibling is enumerated.
+
+The house pattern is now ported to the two live ones. These files are in
+`openclaw_runtime/`, which is not a git repository, so they carry no test —
+the verification is the run below.
+
+**Verified end to end** by kickstarting the real launchd job, not by reading
+the script:
+
+```
+[2026-11-18 11:29:16 EST] STALE duck_ops_order_refresh :: reclaiming a lock
+  held by an unrecorded pid that is no longer running (lock created Jun 25 10:21:20 2026)
+[2026-11-18 11:29:39 EST] END   duck_ops_order_refresh :: exit=0
+```
+
+and then the work itself, because exit 0 is not proof: both
+`etsy_open_orders_snapshot.json` and `shopify_open_orders_snapshot.json`
+rewritten at 11:29:39, each `status: live`, `error: null`,
+`timed_out: false`, and a fresh packing summary. The lock directory is
+released.
+
+### 146b — the count was a lower bound presented as a total
+
+`_consecutive_lock_skips` walks the job's history file, which began
+2026-11-12. So the streak could not exceed ~70 whatever the truth was, and
+"28" read as four days where the reality was five months — the difference
+between a glitch and a dead job ([[feedback_a_number_needs_its_denominator]]).
+
+| | streak ends at a real run | streak eats the whole history | only `running` rows | unreadable history |
+|---|---|---|---|---|
+| wording | ✅ `test_a_streak_with_a_real_run_behind_it_is_reported_exactly` ("the last 4", no hedge) | ✅ `test_a_streak_that_eats_the_history_is_reported_as_a_LOWER_BOUND` ("at least 5" + where to look) | ✅ `test_running_rows_alone_are_not_an_exhausted_streak` | ✅ `test_the_exhaustion_probe_never_raises` |
+
+### 146c — and the advice told the reader to wait for a fix that could not come
+
+The old `recommended_action` said the lock "should carry a pid" and that "if
+not, the lock is orphaned and the next run will reclaim it". **Both halves
+were false for exactly the wrappers that needed them.** A reader following
+it would have checked for a pid that was never written, concluded the next
+run would recover, and waited — which is what five months of this looked
+like. Pinned by
+`test_the_advice_no_longer_promises_a_pid_or_a_self_heal`.
+
+**Mutation-verified.** Reporting the bounded streak as exact fails 1.
+
+---
+
+## Surface 147 — duck-ops CI can now see its siblings (2026-11-18)
+
+Surface 145 made ten cross-repo assertions skip by name rather than fail.
+Skipping is honest; running them is better.
+
+`actions/checkout` refuses a path outside the workspace, so everything is
+checked out under `repos/` and duck-ops lands at `repos/duck-ops`. That is
+what makes `REPO_ROOT.parent / "<name>"` resolve — the layout the code
+already expects. Verified before pushing, by running the suite from exactly
+that shape:
+
+| layout | result |
+|---|---|
+| `repos/duck-ops`, parent empty | 1854 passed, 34 skipped, **0 failed** |
+| `repos/duck-ops` + `repos/duckAgent` | 1891 passed, 10 skipped, **0 failed** |
+
+So the sibling buys **37 tests that actually run**, and every one of the ten
+remaining skips is a pollution audit skipping because a fresh checkout has
+no production state — nothing cross-repo is skipped any more.
+
+**duckAgent is PRIVATE and duck-ops is PUBLIC**, so this needs a token the
+default `GITHUB_TOKEN` does not have. The step is conditional on
+`secrets.DUCKAGENT_RO_TOKEN` (mapped through `env`, because the `secrets`
+context is not available in a step-level `if`), so the suite behaves exactly
+as it does today until one is added. A `Say which siblings this run can see`
+step prints the answer either way, so a green run can never again imply
+coverage it did not have.
+
+The gap that actually mattered is the un-timed-call ratchet: with duckAgent
+absent it reported three live un-timed subprocess calls as fixed. It only
+needs the files to EXIST so it can ast-parse them, and
+`email_reply_action_helper` is pure stdlib — so the token costs no extra
+dependencies.
+
+---
+
+## Surface 148 — every CI render used the wrong face (2026-11-18)
+
+`media_rendering_helper.font()` listed only macOS paths, so on any other
+machine it fell through to `ImageFont.load_default()` — **called bare**,
+which pins the face at size 10. A caption asking for 72px rendered at 10px.
+
+Four production callers render published media through this function
+(`social_template_renderer`, `duck_video_helper`, `meme_helper`,
+`flows/newduck/steps`), so this is not merely a weak test: on a machine
+without the macOS fonts it would ship a post with 10px text and **report
+success**. The fallback was silent too, which is the worst shape a fallback
+can have ([[feedback_plausible_fallbacks_mask_failure]]).
+
+**A correction to my own Surface 145 entry**, which called the fallback "a
+~11px BITMAP face". Measured on Pillow 12.1.1: `load_default()` returns a
+*scalable* face (Aileron), not a bitmap one. The consequence I described was
+right and the mechanism I named was wrong — and it matters, because "is it a
+FreeTypeFont?" therefore cannot detect the fallback. These tests read the
+module's own flag instead of inferring from pixels.
+
+| | our face found | no face found | size honoured | ordering | non-mac path present |
+|---|---|---|---|---|---|
+| | ✅ `test_font_uses_one_of_our_own_faces` | ✅ `test_the_fallback_is_loud` (names what it tried) | ✅ `test_the_chosen_face_honours_the_requested_size`, ✅ `test_even_the_fallback_render_is_the_requested_size` | ✅ `test_production_keeps_its_own_face_first` | ✅ `test_there_is_a_face_for_a_machine_that_is_not_this_one` |
+
+**Production rendering is deliberately unchanged.** The macOS faces stay
+FIRST and `Arial Black` is still the bold face every published post has used;
+the DejaVu/Liberation entries were APPENDED. `test_production_keeps_its_own_face_first`
+fails if anything is ever inserted ahead of them, because that would restyle
+the operator's media as a side effect of a CI fix.
+
+What this does **not** buy: CI metrics are now deterministic, not
+*transferable*. CI measures DejaVu, production measures Arial Black, so a
+test about whether specific text FITS still has to be font-independent — as
+`test_a_hook_that_cannot_fit_is_reported_not_silently_cut` now is. Making
+them transferable would mean shipping one bundled face in production too,
+which is a visual decision about the operator's posts and theirs to make.
+
+**Mutation-verified.** Deleting the non-macOS candidates fails 1; restoring
+the bare `load_default()` fails 1; silencing the warning fails 1.

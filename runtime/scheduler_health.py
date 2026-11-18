@@ -250,6 +250,50 @@ def _consecutive_lock_skips(
     return streak
 
 
+def _lock_skip_streak_exhausts_history(
+    job_name: str,
+    *,
+    history_dir: Path = HISTORY_DIR,
+) -> bool:
+    """True when EVERY terminal row in the history is a lock skip.
+
+    The streak above is bounded by the history file, so it is a lower bound
+    whenever the file runs out before the streak does -- and reporting a
+    lower bound as if it were exact is how a five-month outage looked like
+    four days.
+
+    Measured 2026-11-18 on `duck_ops_order_refresh`: the card said "the last
+    28 scheduled runs", because the history began 2026-11-12. The job's own
+    log held 779 skips, and the lock it was deferring to had been created
+    2026-06-25 10:21 by a run that never wrote an END line. "28" is not
+    wrong, but read as a total it says four days and the truth was five
+    months, which is the difference between a glitch and a dead job
+    ([[feedback_a_number_needs_its_denominator]]).
+    """
+    path = history_dir / f"{job_name}.jsonl"
+    try:
+        if not path.is_file():
+            return False
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except Exception:
+        return False
+    saw_terminal = False
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").strip()
+        if status == "running" or not status:
+            continue
+        saw_terminal = True
+        if not status.startswith("skipped_lock"):
+            return False
+    return saw_terminal
+
+
 def _load_receipts(receipt_dir: Path = RECEIPT_DIR) -> dict[str, dict[str, Any]]:
     receipts: dict[str, dict[str, Any]] = {}
     if not receipt_dir.exists():
@@ -685,17 +729,39 @@ def _evaluate_job(
         if skips >= SKIPPED_LOCK_STUCK_THRESHOLD:
             status = "skipped_lock_stuck"
             severity = "bad"
+            # "at least" when the streak ate the whole history: the count is a
+            # lower bound there, and stating it flat turned five months into
+            # four days.
+            bounded = _lock_skip_streak_exhausts_history(
+                job_name, history_dir=history_dir)
+            how_many = f"at least {skips}" if bounded else f"the last {skips}"
             summary = (
-                f"The last {skips} scheduled runs all declined to start because a "
-                f"lock was present, so this job has done no work since before them. "
-                f"A lock held across that many firings is usually owned by a process "
-                f"that is already gone."
+                f"{how_many.capitalize()} scheduled runs all declined to start "
+                f"because a lock was present, so this job has done no work since "
+                f"before them. A lock held across that many firings is usually "
+                f"owned by a process that is already gone."
             )
+            if bounded:
+                summary += (
+                    " Every run in the recorded history declined, so the real"
+                    " streak starts earlier than this count can see — check the"
+                    " job's own log and the lock directory's creation time for"
+                    " how long it has actually been down."
+                )
+            # The old wording promised two things that were not true of every
+            # wrapper: that the lock carries a pid, and that the next run
+            # reclaims it when the owner is gone. Three wrappers held a bare
+            # `mkdir` lock with neither, which is exactly why this job sat
+            # dead -- so the advice sent the reader to wait for a recovery
+            # that was never going to happen.
             recommended_action = (
-                "Check whether the lock holder is alive (the lock directory should "
-                "carry a pid); if not, the lock is orphaned and the next run will "
-                "reclaim it. Then confirm the job's work actually resumed rather "
-                "than trusting its exit code."
+                "Find the lock directory named in the job's wrapper and check "
+                "whether it holds a live pid. An EMPTY lock, or one whose pid is "
+                "gone, is orphaned: delete the directory, then confirm the job's "
+                "work actually resumed rather than trusting its exit code. If the "
+                "wrapper has no pid file at all it cannot self-heal -- port the "
+                "staleness check from run_duck_ops_sidecar.sh or it will wedge "
+                "again on the next hard kill."
             )
     elif receipt_status == "timeout":
         # Its own verdict, not `failed`. A job the wrapper KILLED is a

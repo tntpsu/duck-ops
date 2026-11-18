@@ -766,6 +766,74 @@ class ConsecutiveLockSkipTests(unittest.TestCase):
         )
         self.assertNotIn("skipped_lock", item["status"])
 
+    def test_a_streak_that_eats_the_history_is_reported_as_a_LOWER_BOUND(self):
+        """Measured 2026-11-18 on duck_ops_order_refresh: the card said "the
+        last 28 scheduled runs" because the history began 2026-11-12. The
+        job's own log held 779 skips and the lock it deferred to was created
+        2026-06-25 by a run that never wrote an END line. 28 is not wrong,
+        but read as a total it says four days where the truth was five
+        months -- the difference between a glitch and a dead job."""
+        item = self._payload(
+            statuses=["skipped_lock_active"] * 5,
+            now="2026-11-13T13:00:00-05:00",
+        )
+        self.assertIn("at least 5", item["summary"].lower())
+        self.assertIn("starts earlier than this count can see",
+                      item["summary"])
+
+    def test_a_streak_with_a_real_run_behind_it_is_reported_exactly(self):
+        """The count IS the whole streak here, so hedging it would be the
+        opposite error."""
+        item = self._payload(
+            statuses=["succeeded"] + ["skipped_lock_active"] * 4,
+            now="2026-11-13T13:00:00-05:00",
+        )
+        self.assertIn("the last 4", item["summary"].lower())
+        self.assertNotIn("at least", item["summary"].lower())
+
+    def test_the_advice_no_longer_promises_a_pid_or_a_self_heal(self):
+        """The old wording said the lock "should carry a pid" and that "the
+        next run will reclaim it". Three wrappers held a bare `mkdir` lock
+        with neither, which is why duck_ops_order_refresh sat dead for five
+        months -- so the advice sent the reader to wait for a recovery that
+        was never going to happen."""
+        action = self._payload(
+            statuses=["skipped_lock_active"] * 3,
+            now="2026-11-13T13:00:00-05:00",
+        )["recommended_action"]
+        self.assertIn("EMPTY lock", action)
+        self.assertIn("delete the directory", action)
+        self.assertIn("cannot self-heal", action)
+        self.assertNotIn("the next run will reclaim it", action)
+
+    def test_the_exhaustion_probe_never_raises(self):
+        """An unreadable history must not manufacture a verdict
+        ([[feedback_receipts_never_load_bearing]])."""
+        with TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "nope"
+            self.assertFalse(
+                scheduler_health._lock_skip_streak_exhausts_history(
+                    "whatever", history_dir=missing))
+            empty = Path(tmp) / "hist"
+            empty.mkdir()
+            (empty / "job.jsonl").write_text("not json\n{\n", encoding="utf-8")
+            self.assertFalse(
+                scheduler_health._lock_skip_streak_exhausts_history(
+                    "job", history_dir=empty))
+
+    def test_running_rows_alone_are_not_an_exhausted_streak(self):
+        """A history of nothing but in-flight rows has no terminal evidence,
+        so it must not read as "every run declined"."""
+        with TemporaryDirectory() as tmp:
+            hist = Path(tmp) / "hist"
+            hist.mkdir()
+            (hist / "job.jsonl").write_text(
+                "\n".join(json.dumps({"status": "running"}) for _ in range(3)),
+                encoding="utf-8")
+            self.assertFalse(
+                scheduler_health._lock_skip_streak_exhausts_history(
+                    "job", history_dir=hist))
+
 
 class TimeoutIsItsOwnVerdictTests(unittest.TestCase):
     """A job the wrapper KILLED is not a job that failed.
