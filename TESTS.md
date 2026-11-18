@@ -8516,3 +8516,104 @@ scan clean at 320 tracked files.
 - **The legacy `test/` directory fails collection** (`No module named
   'shopify_helper'`) — 15 errors, pre-existing, excluded from the canonical
   scope.
+
+## Surface 141 — the reply reached the inbox, and two more layers dropped it (2026-11-17, found by running the fixed poller for real instead of stopping at the dry run)
+
+Fixing the folder (Surface 138) made the reply arrive. Arriving was not
+enough. Two further faults sat behind it, and **both were found only by
+running the real path and checking the ledger afterwards** — the dry run was
+green, the dispatch exited 0, and neither said anything was wrong.
+
+### 141a — `FLOW:drops` had no branch in `handle_mail_event`
+
+`operator_inbox_poller` dispatches every approval reply to
+`main_agent.handle_mail_event`. There was no `drops` branch. `drops` is not
+in `DUCK_OPS_DECISION_GATEWAY_FLOWS` either, so the reply fell through every
+per-flow fast path and reached the **LLM mail classifier**. The duck-ops
+operator surface was reachable from `review_loop.py handle --text` and from
+nowhere an email could get to — the digest's buttons named a destination with
+no consumer there ([[feedback_fold_defer_is_a_handoff_contract]]).
+
+Ordering is load-bearing and asserted. The drop grammar is duck-ops' own
+(`drop approve <stem> only`), not an ACTION verb — but `infer_reply_action`
+sees the word "approve" inside it and sets `action=approve`, so the branch
+has to run before the gateway and before every fast path or the reply gets
+handed to whichever branch matched that action next.
+
+Routed through duck-ops rather than reimplemented, for the same reason the
+claim is: `only` also declines the siblings, prefixes resolve uniquely or are
+refused, and a not-ready drop cannot be approved. The loader **fails closed**
+here, opposite to `load_claim_for_lane` which fails open — a missing sibling
+repo must not take Monday's post down, but it must also not let an approval be
+marked Seen and discarded.
+
+### 141b — a mail separator ate the command, and exit 0 reported success
+
+The reply that actually arrived read:
+
+    drop approve mid_november_holiday_horror_dash_standoff_v4 only ----
+
+Gmail rendered the digest's mailto body with the `----` separator on the
+**same line** as the command. `_strip_metadata_footer` looked for `\n----\n`
+and `\nDuckAgent approval metadata:`, matched neither, and passed the line
+through intact. The target then no longer ended in `" only"`, so the stem
+resolved to `'..._v4 only ----'`, which matched nothing:
+
+    no drop named 'mid_november_holiday_horror_dash_standoff_v4 only ----'
+
+**The subprocess exited 0 and the poller marked the email Seen.** The
+operator's decision was consumed and discarded in one step. Had it not
+already been applied by hand, it would have been unrecoverable from the
+mailbox — a strictly worse outcome than the unread message we started the
+day with ([[feedback_swallowed_errors_lie]], and the house rule that a 200 is
+never proof).
+
+Three fixes, because each covers a different layer:
+
+1. `_strip_trailing_separator` in the command parser, **token-wise not
+   character-wise** — stems end in `_v4` and a `rstrip` would eat the suffix.
+2. `_SEPARATOR_TAIL` in `_strip_metadata_footer`, so the receipt log shows
+   what the operator meant rather than the furniture.
+3. `apply_drop_text` returns `{response, applied, commands}`, and the email
+   branch **raises when `applied` is 0** so the message stays unread. Reading
+   that off the response prose would mean grepping our own copy for its
+   wording ([[feedback_pin_the_rule_not_the_reading]]).
+
+| | happy | same-line separator | separator variants | version suffix | one dash | unknown stem | ambiguous | not ready | status/help | mixed | old callers |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| command parsing | ✅ existing 60 | ✅ `test_a_trailing_separator_does_not_break_only` | ✅ `test_separator_variants_all_resolve` (6 subtests) | ✅ `test_a_stem_ending_in_a_version_suffix_survives` | ✅ `test_a_single_dash_is_not_treated_as_a_separator` | n/a | n/a | n/a | n/a | n/a | n/a |
+| `applied` is honest | n/a | n/a | n/a | n/a | n/a | ✅ `test_an_unknown_stem_applies_nothing` | ✅ `test_an_ambiguous_prefix_applies_nothing` | ✅ `test_a_not_ready_drop_applies_nothing` | ✅ `test_the_status_listing_applies_nothing`, `test_an_unknown_verb_applies_nothing` | ✅ `test_a_mixed_reply_counts_only_what_changed` | ✅ `test_handle_drop_text_still_returns_a_string` |
+| receipt text | ✅ `test_a_command_with_no_furniture_is_untouched`, `test_a_numeric_command_is_untouched` | ✅ `test_a_same_line_separator_is_trimmed` | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | ✅ `test_the_own_line_separator_still_works` |
+| email dispatch | ✅ `test_a_drop_reply_reaches_duck_ops`, `test_a_decline_routes_the_same_way` | n/a | n/a | n/a | n/a | ✅ `test_a_reply_that_applied_nothing_raises` | n/a | n/a | n/a | ✅ `test_a_partially_applied_multi_command_reply_is_accepted` | ✅ `test_another_flow_is_untouched` |
+| ordering + isolation | ✅ `test_it_runs_before_the_decision_gateway`, `test_it_never_reaches_the_llm_classifier`, `test_the_quoted_original_is_not_executed`, `test_a_missing_duck_ops_checkout_raises` | | | | | | | | | | |
+
+`test_the_quoted_original_is_not_executed` is the one that would hurt most if
+it went: `apply_drop_text` runs **every** `drop ` line it is given, and every
+button label in the quoted digest is itself a drop command — so passing the
+full body would execute the whole template, approving and declining stems the
+operator never chose.
+
+**Mutation-verified.** Removing the separator tolerance fails 8; a char-wise
+strip fails the single-dash test; always reporting `applied: 1` fails 5;
+removing the `drops` branch fails 6 (including the LLM-classifier test, which
+confirms that was the pre-fix destination); passing the full body fails 1;
+swallowing the missing-loader error fails 1.
+
+**End-to-end, through the real subprocess**, with the body exactly as it
+arrived: receipt text `drop approve mid_november_holiday_horror_dash_standoff_v4 only`,
+returncode 0, handler reports `Approved ... The meme lane will take it on its
+next scheduled run`, ledger reads v4 `approved` and the other three
+`declined`. That is the first time this chain has run from an email to the
+ledger.
+
+**Counts after this surface:** duck-ops 1875 passed / 1 skipped / 274
+subtests; duckAgent 3605 passed / 1 xfailed / 31 subtests.
+
+**What this says about the earlier verification.** Surface 138's dry run
+proved the message would be *found*. It could not prove the command would be
+*applied*, because `--dry-run` skips the dispatch entirely — and I reported
+the dry run as if it settled the question. The lesson is the one already in
+memory and not yet applied here: the dry run is a probe of the selection, and
+a probe's success is a fact about the probe
+([[feedback_a_failed_probe_is_a_fact_about_the_probe]],
+[[feedback_real_generation_test_beats_mocks]]).

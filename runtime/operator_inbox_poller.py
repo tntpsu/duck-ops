@@ -178,6 +178,10 @@ def _strip_quoted_reply(body: str) -> str:
     return body[:earliest].strip()
 
 
+#: A run of separator characters at the very end of the operator's text.
+_SEPARATOR_TAIL = re.compile(r"\s+[-=_*~.]{2,}\s*$")
+
+
 def _strip_metadata_footer(body: str) -> str:
     """Trim the 'DuckAgent approval metadata:' footer so the receipt
     log's command_text field shows only the operator-visible command."""
@@ -186,8 +190,14 @@ def _strip_metadata_footer(body: str) -> str:
     for marker in ("\n----\n", "\nDuckAgent approval metadata:"):
         idx = body.find(marker)
         if idx >= 0:
-            return body[:idx].strip()
-    return body.strip()
+            body = body[:idx]
+            break
+    # Gmail rendered the digest's mailto body with the separator on the SAME
+    # line as the command, so neither marker above matched and the receipt
+    # log read `drop approve <stem> only ----`. The command handler now
+    # tolerates that, but the receipt is what a human reads when asking
+    # "what did they actually send", so it should not show furniture.
+    return _SEPARATOR_TAIL.sub("", body).strip()
 
 
 def _extract_command_text(message: Message) -> str:

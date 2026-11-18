@@ -102,6 +102,30 @@ def _unanswered_notes() -> list[dict]:
     return [n for n in notes if isinstance(n, dict) and not n.get("answered_at")]
 
 
+#: Tokens made only of these are mail-template furniture, never part of a
+#: stem. Gmail rendered the digest's reply body with the `----` separator on
+#: the SAME line as the command, so the real 2026-11-17 approval arrived as
+#: `drop approve <stem> only ----` -- and the whole command was refused
+#: because the target no longer ended in " only". Exit 0, nothing applied.
+_SEPARATOR_CHARS = set("-=_*~.")
+
+
+def _strip_trailing_separator(target: str) -> str:
+    """Drop trailing separator tokens from a command's target.
+
+    Token-wise, never character-wise: stems end in things like `_v4`, and a
+    char-wise strip would eat a legitimate suffix.
+    """
+    tokens = (target or "").split()
+    while tokens:
+        last = tokens[-1]
+        if len(last) >= 2 and set(last) <= _SEPARATOR_CHARS:
+            tokens.pop()
+            continue
+        break
+    return " ".join(tokens)
+
+
 def _resolve_stem(token: str, proposals: dict) -> tuple[str | None, str | None]:
     """Exact match, else a unique prefix.
 
@@ -132,15 +156,35 @@ def handle_drop_text(text: str) -> str:
     and the operator's answer to being told to send four separate emails was
     a flat "I don't want to send 4 emails".
     """
+    return apply_drop_text(text)["response"]
+
+
+def apply_drop_text(text: str) -> dict:
+    """`handle_drop_text` plus whether anything was actually applied.
+
+    The email path needs the count, not the prose. `operator_inbox_poller`
+    marks a reply Seen on a successful dispatch, and on 2026-11-17 a
+    dispatch that refused every command returned exit 0 -- so the
+    operator's approval was consumed and discarded in one step. Deciding
+    that from the response TEXT would mean grepping our own copy for its
+    wording ([[feedback_pin_the_rule_not_the_reading]]); this is the
+    structured answer instead.
+    """
     lines = [ln.strip() for ln in str(text or "").splitlines()]
     commands = [ln for ln in lines if should_delegate_to_drops(ln)]
     if len(commands) > 1:
-        out = []
+        out: list[str] = []
+        applied = 0
         for line in commands:
+            message, changed = _handle_one(line)
             out.append(f"> {line}")
-            out.append(_handle_one(line))
-        return "\n".join(out)
-    return _handle_one(commands[0] if commands else text)
+            out.append(message)
+            applied += 1 if changed else 0
+        return {"response": "\n".join(out), "applied": applied,
+                "commands": len(commands)}
+    message, changed = _handle_one(commands[0] if commands else text)
+    return {"response": message, "applied": 1 if changed else 0,
+            "commands": len(commands)}
 
 
 def _decline_siblings(stem: str, proposals: dict) -> list[str]:
@@ -167,39 +211,48 @@ def _decline_siblings(stem: str, proposals: dict) -> list[str]:
     return declined
 
 
-def _handle_one(text: str) -> str:
+def _handle_one(text: str) -> tuple[str, bool]:
+    """The message for the operator, and whether anything actually CHANGED.
+
+    The boolean exists because exit 0 is not proof. On 2026-11-17 the real
+    approval reply dispatched successfully, returned "no drop named '<stem>
+    only ----'", and the poller marked the email Seen -- consuming the
+    operator's decision while applying none of it. A caller that can mark a
+    message read needs to know the difference between "ran" and "did
+    something" ([[feedback_swallowed_errors_lie]]).
+    """
     raw = (text or "").strip()
     lowered = raw.lower()
 
     if lowered in {"drop", "drops", "drop status", "drops status"}:
-        return _status()
+        return _status(), False
 
     parts = raw.split(None, 2)
     verb = parts[1].lower() if len(parts) > 1 else ""
 
     if verb in {"help", ""}:
-        return HELP
+        return HELP, False
 
     if verb in {"approve", "decline"}:
         proposals = drop_intake._read_ledger(drop_intake.DROP_PROPOSALS_PATH)
-        target = parts[2] if len(parts) > 2 else ""
+        target = _strip_trailing_separator(parts[2] if len(parts) > 2 else "")
         only = False
         if target.lower().endswith(" only"):
             target, only = target[: -len(" only")].strip(), True
         stem, problem = _resolve_stem(target, proposals)
         if problem:
-            return problem
+            return problem, False
         entry = proposals.get(stem) or {}
         if verb == "approve" and not entry.get("post_ready"):
             # Approving something the AGENT never declared finished would make
             # the operator's half of a two-key gate carry both halves.
             return (f"{stem} has post_ready:false — the agent has not declared "
                     "it finished, so approving it would not let any run take "
-                    "it. Ask the agent to re-send it as ready.")
+                    "it. Ask the agent to re-send it as ready."), False
         try:
             drop_intake.set_approval(stem, verb == "approve", by="operator")
         except drop_intake.DropRefused as exc:
-            return str(exc)
+            return str(exc), False
         if verb == "approve":
             lane = entry.get("lane")
             msg = (f"Approved {stem}. The {lane} lane will take it on its next "
@@ -209,19 +262,19 @@ def _handle_one(text: str) -> str:
                 msg += (f" Declined {len(others)} superseded drop(s) in that "
                         "lane." if others else
                         " Nothing else was waiting in that lane.")
-            return msg
-        return f"Declined {stem}. No run will ever take it."
+            return msg, True
+        return f"Declined {stem}. No run will ever take it.", True
 
     if verb == "answer":
         rest = parts[2] if len(parts) > 2 else ""
         bits = rest.split(None, 1)
         if len(bits) < 2:
-            return "usage: drop answer <file> <your answer>"
+            return "usage: drop answer <file> <your answer>", False
         try:
             note = drop_intake.answer_feedback(bits[0], bits[1])
         except drop_intake.DropRefused as exc:
-            return str(exc)
+            return str(exc), False
         return (f"Answered {note.get('file')}. The reply is in "
-                f"{drop_intake.ANSWERS_DIR}/ where the agent will see it.")
+                f"{drop_intake.ANSWERS_DIR}/ where the agent will see it."), True
 
-    return HELP
+    return HELP, False

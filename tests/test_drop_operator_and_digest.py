@@ -653,6 +653,131 @@ class TheDigestStateIsGuardedTests(unittest.TestCase):
             drop_digest._write_state({},
                                      path=drop_digest._FROZEN_PRODUCTION_STATE_PATH)
 
+class AMailSeparatorMustNotEatTheCommandTests(unittest.TestCase):
+    """The 2026-11-17 approval, exactly as it arrived.
+
+    Gmail rendered the digest's mailto body with the `----` separator on the
+    SAME line as the command, so the reply read:
+
+        drop approve mid_november_holiday_horror_dash_standoff_v4 only ----
+
+    The target no longer ended in " only", the stem did not resolve, and the
+    whole command was refused -- while the subprocess that ran it exited 0
+    and the poller marked the email read.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.path = None
+
+    def _with(self, entries):
+        self.path = _ledger(self.root, entries)
+        return mock.patch.object(drop_intake, "DROP_PROPOSALS_PATH", self.path)
+
+    def _three(self):
+        return {s: _entry() for s in ("alpha_v1", "alpha_v2", "alpha_v3")}
+
+    def _led(self):
+        return json.loads(self.path.read_text())["proposals"]
+
+    def test_a_trailing_separator_does_not_break_only(self):
+        with self._with(self._three()):
+            out = drop_operator.apply_drop_text("drop approve alpha_v3 only ----")
+        self.assertEqual(out["applied"], 1, out["response"])
+        self.assertEqual(self._led()["alpha_v3"]["approval"], "approved")
+        self.assertEqual(self._led()["alpha_v1"]["approval"], "declined")
+
+    def test_separator_variants_all_resolve(self):
+        for sep in ("----", "====", "-----------", "***", "___", "..."):
+            with self.subTest(sep=sep), self._with(self._three()):
+                out = drop_operator.apply_drop_text(
+                    f"drop approve alpha_v3 only {sep}")
+                self.assertEqual(out["applied"], 1, f"{sep}: {out['response']}")
+
+    def test_a_stem_ending_in_a_version_suffix_survives(self):
+        """Token-wise, not character-wise: `_v3` must not be eaten."""
+        with self._with(self._three()):
+            out = drop_operator.apply_drop_text("drop approve alpha_v3 ----")
+        self.assertEqual(out["applied"], 1, out["response"])
+        self.assertEqual(self._led()["alpha_v3"]["approval"], "approved")
+
+    def test_a_single_dash_is_not_treated_as_a_separator(self):
+        """One character could plausibly belong to a stem."""
+        self.assertEqual(drop_operator._strip_trailing_separator("a_v3 -"),
+                         "a_v3 -")
+        self.assertEqual(drop_operator._strip_trailing_separator("a_v3 --"),
+                         "a_v3")
+
+
+class ARefusalIsNotASuccessTests(unittest.TestCase):
+    """`applied` is the field the email path gates on.
+
+    Reading it off the response PROSE would mean grepping our own copy for
+    its wording, which breaks the moment the copy improves
+    ([[feedback_pin_the_rule_not_the_reading]]).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _with(self, entries):
+        return mock.patch.object(drop_intake, "DROP_PROPOSALS_PATH",
+                                 _ledger(self.root, entries))
+
+    def test_an_unknown_stem_applies_nothing(self):
+        with self._with({"alpha_v1": _entry()}):
+            self.assertEqual(
+                drop_operator.apply_drop_text("drop approve nope")["applied"], 0)
+
+    def test_an_ambiguous_prefix_applies_nothing(self):
+        with self._with({"alpha_v1": _entry(), "alpha_v2": _entry()}):
+            out = drop_operator.apply_drop_text("drop approve alpha")
+        self.assertEqual(out["applied"], 0)
+        self.assertIn("matches 2 drops", out["response"])
+
+    def test_a_not_ready_drop_applies_nothing(self):
+        with self._with({"alpha_v1": _entry(post_ready=False)}):
+            out = drop_operator.apply_drop_text("drop approve alpha_v1")
+        self.assertEqual(out["applied"], 0)
+        self.assertIn("post_ready:false", out["response"])
+
+    def test_the_status_listing_applies_nothing(self):
+        with self._with({"alpha_v1": _entry()}):
+            self.assertEqual(drop_operator.apply_drop_text("drops")["applied"], 0)
+
+    def test_an_unknown_verb_applies_nothing(self):
+        with self._with({}):
+            self.assertEqual(
+                drop_operator.apply_drop_text("drop frobnicate x")["applied"], 0)
+
+    def test_an_approval_applies_one(self):
+        with self._with({"alpha_v1": _entry()}):
+            self.assertEqual(
+                drop_operator.apply_drop_text("drop approve alpha_v1")["applied"], 1)
+
+    def test_a_decline_applies_one(self):
+        with self._with({"alpha_v1": _entry()}):
+            self.assertEqual(
+                drop_operator.apply_drop_text("drop decline alpha_v1")["applied"], 1)
+
+    def test_a_mixed_reply_counts_only_what_changed(self):
+        with self._with({"alpha_v1": _entry()}):
+            out = drop_operator.apply_drop_text(
+                "drop approve alpha_v1\ndrop approve ghost")
+        self.assertEqual(out["commands"], 2)
+        self.assertEqual(out["applied"], 1)
+
+    def test_handle_drop_text_still_returns_a_string(self):
+        """review_loop and the desk paths call the old name."""
+        with self._with({"alpha_v1": _entry()}):
+            out = drop_operator.handle_drop_text("drop approve alpha_v1")
+        self.assertIsInstance(out, str)
+        self.assertIn("Approved alpha_v1", out)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

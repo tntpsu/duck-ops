@@ -196,6 +196,38 @@ class MetadataFooterTests(unittest.TestCase):
         self.assertEqual(poller._strip_metadata_footer(body), "just text")
 
 
+class MetadataFooterSeparatorTests(unittest.TestCase):
+    """The receipt log is what a human reads to ask "what did they send?".
+
+    Gmail put the digest's `----` separator on the SAME line as the command,
+    so neither of the two markers matched and the logged command text read
+    `drop approve <stem> only ----`.
+    """
+
+    def test_a_same_line_separator_is_trimmed(self) -> None:
+        self.assertEqual(
+            poller._strip_metadata_footer(
+                "drop approve alpha_v4 only ----\n"
+                f"{poller.APPROVAL_METADATA_MARKER} FLOW:drops"),
+            "drop approve alpha_v4 only")
+
+    def test_the_own_line_separator_still_works(self) -> None:
+        self.assertEqual(
+            poller._strip_metadata_footer(
+                "drop approve alpha_v4 only\n\n----\n"
+                f"{poller.APPROVAL_METADATA_MARKER} FLOW:drops"),
+            "drop approve alpha_v4 only")
+
+    def test_a_command_with_no_furniture_is_untouched(self) -> None:
+        self.assertEqual(
+            poller._strip_metadata_footer("drop approve alpha_v4 only"),
+            "drop approve alpha_v4 only")
+
+    def test_a_numeric_command_is_untouched(self) -> None:
+        self.assertEqual(poller._strip_metadata_footer("publish 240"),
+                         "publish 240")
+
+
 class TrustGateTests(unittest.TestCase):
     def test_explicit_override_wins(self) -> None:
         with patch.dict(os.environ, {"POLLER_OPERATOR_EMAIL": "Alice@Example.COM"}):
