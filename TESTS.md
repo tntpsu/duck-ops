@@ -8617,3 +8617,202 @@ memory and not yet applied here: the dry run is a probe of the selection, and
 a probe's success is a fact about the probe
 ([[feedback_a_failed_probe_is_a_fact_about_the_probe]],
 [[feedback_real_generation_test_beats_mocks]]).
+
+---
+
+## Surface 142 — cancelling Jeep Fact Wednesday, and the pause that did not hold (2026-11-18, operator: "cancel the jeep fact job and today's scheduled post. I need to rework it")
+
+Today's 09:00 run had already finished: Facebook post
+`554937081033679_122277411596757684` scheduled for 18:00, an Instagram
+carousel queued locally as `jeepfact-2026-11-18-instagram-55594b` for the
+same slot, and the review email sent at 09:04.
+
+### 142a — the cancellation itself
+
+Done through `flows/meme/replace.py`, which is the canonical cancel path, not
+through hand-rolled Graph calls: list the page's scheduled posts, match on the
+run's own post id, delete, then quarantine the IG queue entry. The order
+matters — `GraphScheduledPosts.list()` first means a post that is **not** on
+the scheduled list (already live, already deleted) refuses the cancel instead
+of guessing. Measured before acting: the page held exactly **one** scheduled
+post, so the delete could not touch another lane.
+
+`jeepfact_posts.json` is marked `cancelled`, not deleted. Receipts are the
+record of what was *attempted*; deleting one makes the duck-ops performance
+collector chase a post id that no longer exists forever and count it as
+`fetch_failed`, which is the documented reason `mark_superseded_receipts_cancelled`
+exists.
+
+| | the post is scheduled | not on the scheduled list | FB refuses the delete | IG entry pending | IG already sent | receipt | collector |
+|---|---|---|---|---|---|---|---|
+| verified live | ✅ 1 scheduled post found, deleted, re-listed → 0 | ✅ refuses (inherited from `replace.py`) | ✅ refuses (inherited) | ✅ quarantined, `list_pending_entries()` → `[]` | ✅ left alone | ✅ `cancelled` + reason, not removed | ✅ no live post id left to fetch |
+
+### 142b — `mode: "off"` did not stop the email path
+
+The pause switch (`_off_mode_guard`) is the first statement of `run_all`,
+`run_only` and `run_from` — which is everything the **scheduler** can reach,
+and nothing the **mail** path does. `handle_mail_event` calls
+`step_jeepfact_publish` / `step_jeepfact_prepare` directly, never through a
+runner. So the review email already sitting in the inbox was one click from
+re-creating exactly what had just been cancelled.
+
+The policy evaluator does not close it either, and assuming it does is the
+easy mistake: `evaluate_jeepfact_execution_policy` tests `operator_approved`
+**before** it looks at `mode`, so an approve reply returns
+`manual_publish_allowed` for a lane that is off. That ordering is pinned by
+`test_the_policy_evaluator_does_NOT_close_this`, whose failure message says
+to check the guard is still wired before deleting anything.
+
+### 142c — and the first fix was four lanes too wide
+
+Keying the new mail-path refusal on `mode == "off"` looked obviously right and
+was wrong on first contact. `blog`, `gtdf`, `jeepfact` **and**
+`review_carousel` were all already `off`; review_carousel is off because "no
+one looks at the review carousels" (operator, 2026-11-13) — a decision about
+reach, not a stop-work order. Its portal Reject button still emits a
+`needs_changes` email, and resetting a run is bookkeeping rather than a post.
+Three **existing** tests (`test_main_agent_carousel_dispatch.py`) failed and
+are what caught it.
+
+So the pause is now its own explicit flag and the two must agree:
+`mode: "off"` stops the scheduler, `operator_paused: true` additionally stops
+every path. `_flow_is_paused_by_operator` fails **open** on an unreadable
+config — unlike the write guards — because a config we cannot read is not
+evidence of a pause, and treating it as one would deadlock every lane on a
+typo.
+
+| | paused lane | mode=off only | unpaused | both signals | unreadable config | drops |
+|---|---|---|---|---|---|---|
+| predicate | ✅ `test_the_pause_is_declared_explicitly` | ✅ `test_mode_off_alone_is_not_a_pause` (3 subtests: review_carousel, blog, gtdf) | ✅ `test_an_unpaused_lane_is_untouched` | ✅ `test_both_signals_are_required` (4 subtests) | ✅ `test_an_unreadable_config_is_not_a_pause` | ✅ `test_drops_replies_are_unaffected` |
+| approve reply | ✅ `test_a_paused_lane_does_not_publish_on_an_approve_reply` | ✅ carousel dispatch ×3 still green | n/a | n/a | n/a | n/a |
+| revise reply | ✅ `test_a_paused_lane_does_not_regenerate_on_a_revise_reply` (credits + Shopify uploads) | n/a | n/a | n/a | n/a | n/a |
+| ordering | ✅ `test_it_runs_before_the_decision_gateway` (a paused lane must not even RECORD an approval) | n/a | n/a | n/a | n/a | n/a |
+| `dispatch_publish` | ✅ `test_a_paused_lane_refuses_a_direct_publish_call` | n/a | ✅ `test_an_unpaused_lane_still_publishes` | n/a | n/a | n/a |
+| notice | ✅ `test_a_paused_lane_refuses_and_records_a_receipt` | n/a | n/a | n/a | n/a | n/a |
+| notice fails | ✅ `test_the_refusal_holds_when_the_notice_cannot_be_sent` | n/a | n/a | n/a | n/a | n/a |
+
+The reply gets **one** notice back. Silence would be the worse failure here —
+the operator took a deliberate action and is entitled to know it did nothing
+([[feedback_swallowed_errors_lie]]) — and it can only fire on a lane that is
+explicitly paused.
+
+### 142d — the job
+
+`launchctl bootout` plus moving the plist to
+`~/Library/LaunchAgents/disabled/`. The move is the part that matters:
+`scheduler_health._load_scheduled_jobs` globs
+`~/Library/LaunchAgents/com.philtullai.duck*.plist` **non-recursively**, so a
+booted-out-but-present plist would be graded `missed_run` every Wednesday on a
+pause the operator asked for, while a moved one simply leaves the roster.
+`test_jeepfact_lane_is_paused.py` asserts no live plist, a restorable copy in
+`disabled/`, and that the copy is still a Wednesday-09:00 job so resuming is a
+move rather than a rewrite. It also asserts the readiness requirements were
+**not** quietly relaxed during the pause.
+
+**Delete `test_jeepfact_lane_is_paused.py` when the lane resumes.** It asserts
+an intended state of the world, not a rule, so it is supposed to fail the
+moment someone turns the lane back on — that failure is the reminder to remove
+it. The mechanism lives in `test_paused_lane_reply_guard.py`, which stays
+correct either way.
+
+**Mutation-verified.** Removing either guard call site fails 4; dropping
+`operator_paused` from the config fails 1.
+
+---
+
+## Surface 143 — the drop ledger had two fields meaning one thing (2026-11-18)
+
+Closes the open item recorded in Surface 141. `scan_inbox` stamped
+`status: "awaiting_operator"` beside `approval: "operator_required"`,
+`record_proposals` carried it into the durable ledger, and nothing ever
+updated it again. On 2026-11-18 all four live entries still read
+`status: awaiting_operator` while `approval` said three were declined and one
+approved — the two-fields-one-meaning trap `STATUS_CONTRACT.md` exists to
+forbid ([[feedback_status_fields_one_meaning]]). Removing it was only cheap
+because nothing had come to depend on it yet.
+
+Three faults, found by following the one the operator could see:
+
+1. **the stale duplicate** — removed at the writer, and the four live records
+   migrated through `_write_ledger` rather than by editing the JSON.
+2. **`--list` printed "awaiting operator (declined)"** — wrong twice: nothing
+   is awaited, and the operator already answered. It had its own copy of the
+   claim rules; it now derives from `_drop_state`, the same function the
+   agent-facing status file uses.
+3. **`_drop_state` tested `approval` before `post_ready`** — so an approved
+   drop whose sidecar said `post_ready: false` answered "approved and waiting
+   for its lane's next run", while `claimable_for_lane` requires post_ready
+   and would never take it. The status file is the **only** feedback channel
+   the producing agent has, so the agent was the one party left with the wrong
+   answer; the CLI already warns the *operator* about this combination at
+   approval time.
+
+| | scanned | after a decision | declined | approved+ready | approved+not ready | claimed | no asset | `--list` output |
+|---|---|---|---|---|---|---|---|---|
+| one decision field | ✅ `test_a_scanned_proposal_has_no_second_decision_field` | ✅ `test_a_decision_leaves_exactly_one_field_to_read` | n/a | n/a | n/a | n/a | n/a | n/a |
+| writer, not reader | ✅ `test_the_scan_manifest_does_not_carry_it_from_the_writer` | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| `_drop_state` | n/a | n/a | ✅ `test_a_declined_drop_is_not_described_as_awaiting_anyone`, `test_a_declined_not_ready_drop_still_reads_declined` | ✅ `test_the_ready_approved_path_is_unchanged` | ✅ `test_post_ready_outranks_approval` | ✅ `test_a_claim_still_outranks_everything` | ✅ `test_an_approved_drop_with_no_asset_is_not_claimable` | n/a |
+| agrees with reality | n/a | n/a | n/a | ✅ `test_it_agrees_with_what_can_actually_be_claimed` (2 subtests, derived from `claimable_for_lane`) | ✅ same | n/a | n/a | n/a |
+| operator-facing copy | n/a | n/a | ✅ `test_a_declined_drop_is_never_called_awaiting` | n/a | n/a | n/a | n/a | ✅ `test_each_drop_is_named_with_a_state_and_a_reason`, `test_the_undecided_drop_is_the_only_one_awaiting_anyone` |
+
+**The first version of the status test was decoration**, and the mutation run
+is what said so. It called `record_proposals` with a hand-built proposal dict
+— which never had a `status` key to begin with — so re-introducing the field
+in `scan_inbox` passed the entire suite. A test for a *removed* field has to
+run the code that used to add it
+([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]]: a clean result
+describes which code the test actually opened). Rewritten to drive
+`scan_inbox` end-to-end with a real asset and sidecar.
+
+Likewise `--list` is now covered at the **CLI**, not only through
+`_drop_state`: the helper was correct the whole time while the renderer above
+it printed the wrong string, so a helper-only test would have stayed green
+through the bug.
+
+**Mutation-verified.** Re-adding `status` fails 2 (zero before the rewrite);
+reverting the `_drop_state` order fails 2; giving `--list` its own copy of the
+rules back fails 2.
+
+---
+
+## Surface 144 — the pollution audit flagged a real cost row (2026-11-18)
+
+`test_no_test_pollution_in_llm_call_log.py` went red on one row, and the row
+was genuine: a duckvideo call at 09:30 today that failed with Gemini 402
+(prepayment credits depleted). Its `artifact_id` is
+`call::duckvideo::unknown` — and that exact string was sitting in the audit's
+`_FIXTURE_ARTIFACT_IDS`, where it should never have been. `unknown` is
+**production's own fallback**, from
+`duckAgent/helpers/duck_video_motion_helper.py:425`
+(`str(concept.get('id') or 'unknown')`): a real run that fails before it
+resolves a concept writes precisely that.
+
+A marker has to be a value production *cannot* emit; this one never was. The
+comment above the set described them as "single-letter fixture concept ids",
+which `unknown` plainly is not — the list and its own documentation
+disagreed, and nobody read them against each other.
+
+The failure mode was quiet and would have ended with the audit deleted: the
+file's instructions say "find the polluting test — do not widen the marker
+list to excuse it", so the next reader would have hunted a test that does not
+exist, then reached for the one remaining option the docstring pleads against.
+Checked before concluding: across 9,124 rows that marker matched **one** row,
+today's, and no historical fixture row ever used it.
+
+| | real failed row | genuine fixture model | genuine fixture id | marker vs production | whole ledger |
+|---|---|---|---|---|---|
+| audit | ✅ `test_a_real_failed_duckvideo_row_is_not_flagged` (the exact 2026-11-18 row) | ✅ `test_a_genuine_fixture_row_is_still_caught` | ✅ same | ✅ `test_no_marker_is_a_value_production_emits` (1 subtest, list kept as data beside the assertion) | ✅ `test_no_fixture_rows_in_the_production_llm_call_log` → clean |
+
+Narrowing a guard is the move that most deserves a test proving it is still
+armed, so `test_a_genuine_fixture_row_is_still_caught` ships beside it.
+
+**Counts after Surfaces 142–144:** duck-ops 1892 passed / 1 skipped / 277
+subtests; duckAgent 3625 passed / 1 xfailed / 50 subtests.
+
+**Still open.** `mode: "off"` remains overloaded across lanes — blog, gtdf and
+review_carousel each mean something slightly different by it, and only
+jeepfact now carries `operator_paused`. Nothing grades that, and the next
+person to reach for `mode` as "is this lane live?" will be as wrong as I was.
+A `lane_posture` field with one meaning per value is the real fix
+([[feedback_status_fields_one_meaning]]); this surface only stopped the
+immediate bleeding.

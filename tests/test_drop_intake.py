@@ -91,7 +91,11 @@ class AcceptanceTests(_DropRoot):
         self.drop("good.png")
         proposal = self.scan()["proposals"][0]
         self.assertEqual(proposal["approval"], "operator_required")
-        self.assertEqual(proposal["status"], "awaiting_operator")
+        # `approval` is the only field carrying the decision. There used to be
+        # a `status: "awaiting_operator"` here too, which the durable ledger
+        # inherited and never updated -- see
+        # test_drop_proposal_ledger.OneFieldCarriesTheDecisionTests.
+        self.assertNotIn("status", proposal)
 
     def test_an_accepted_file_moves_out_of_the_inbox(self) -> None:
         self.drop("good.png")

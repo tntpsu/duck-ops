@@ -228,3 +228,253 @@ class TheDropRootLivesInMyDriveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OneFieldCarriesTheDecisionTests(unittest.TestCase):
+    """The ledger had TWO fields meaning the same thing, and one went stale.
+
+    `scan_inbox` stamped `status: "awaiting_operator"` beside
+    `approval: "operator_required"`, `record_proposals` carried it into the
+    durable ledger, and nothing ever updated it again. So on 2026-11-18 all
+    four live entries read `status: awaiting_operator` while `approval` said
+    three were declined and one approved -- a reader that reached for the
+    obvious-looking field would have been told the operator had not answered
+    yet. Exactly the shape `STATUS_CONTRACT.md` exists to forbid
+    ([[feedback_status_fields_one_meaning]]).
+
+    Removing it was only cheap because nothing had come to depend on it yet.
+    These tests keep it that way.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.ledger = self.base / "drop_proposals.json"
+        self.asset = self.base / "clip.mp4"
+        self.asset.write_bytes(b"x" * 10)
+
+    def _entries(self, *props):
+        drop_intake.record_proposals({"proposals": list(props)},
+                                     ledger_path=self.ledger)
+        return json.loads(self.ledger.read_text())["proposals"]
+
+    def _scanned(self):
+        """Through `scan_inbox`, because that is where the field was WRITTEN.
+
+        The first version of this test called `record_proposals` with a
+        hand-built proposal dict, which never had a `status` key to begin
+        with -- so re-introducing the field in `scan_inbox` passed the whole
+        suite. A test for a removed field has to run the code that used to
+        add it ([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]]).
+        """
+        import os
+        import time
+        root = self.base / "DuckDrop"
+        drop_intake.init_drop_root(root)
+        asset = root / drop_intake.INBOX_DIR / "clip.mp4"
+        asset.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64)
+        side = asset.with_suffix(asset.suffix + ".json")
+        side.write_text(json.dumps({"caption": "a caption", "lane": "meme",
+                                    "source_agent": "gemini",
+                                    "post_ready": True}), encoding="utf-8")
+        old = time.time() - 300
+        for f in (asset, side):
+            os.utime(f, (old, old))
+        manifest = drop_intake.scan_inbox(root)
+        drop_intake.record_proposals(manifest, ledger_path=self.ledger)
+        return manifest, json.loads(self.ledger.read_text())["proposals"]
+
+    def test_a_scanned_proposal_has_no_second_decision_field(self):
+        manifest, entries = self._scanned()
+        self.assertEqual(len(entries), 1, manifest)
+        entry = next(iter(entries.values()))
+        self.assertNotIn("status", entry)
+        self.assertEqual(entry["approval"], "operator_required")
+
+    def test_the_scan_manifest_does_not_carry_it_from_the_writer(self):
+        """Fixed at the writer, not patched at the reader."""
+        manifest, _ = self._scanned()
+        for prop in manifest["proposals"]:
+            self.assertNotIn("status", prop)
+
+    def test_a_decision_leaves_exactly_one_field_to_read(self):
+        """The regression in one assertion: decide, then re-read everything."""
+        self._entries(_proposal("a", asset=self.asset))
+        drop_intake.set_approval("a", False, ledger_path=self.ledger)
+        entry = json.loads(self.ledger.read_text())["proposals"]["a"]
+        self.assertEqual(entry["approval"], "declined")
+        decision_fields = [k for k in entry
+                           if k in {"status", "state", "decision", "review_status"}]
+        self.assertEqual(
+            decision_fields, [],
+            f"{decision_fields} duplicates `approval` and will go stale the "
+            "same way `status` did")
+
+
+
+class TheListCommandAgreesWithTheLedgerTests(unittest.TestCase):
+    """`--list` printed "awaiting operator (declined)".
+
+    Wrong twice: nothing is awaited, and the operator already answered. It
+    had its own copy of the claim rules; it now derives from `_drop_state`,
+    the same function the agent-facing status file uses.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.asset = Path(self.tmp.name) / "clip.mp4"
+        self.asset.write_bytes(b"x" * 10)
+
+    def _entry(self, **kw):
+        base = _proposal("a", asset=self.asset)
+        base.update({"approval": "operator_required", "claimed_by": None})
+        base.update(kw)
+        return base
+
+    def test_a_declined_drop_is_not_described_as_awaiting_anyone(self):
+        state, detail = drop_intake._drop_state(self._entry(approval="declined"))
+        self.assertEqual(state, "declined")
+        self.assertNotIn("awaiting", f"{state} {detail}".lower())
+
+    def test_an_approved_ready_drop_reads_as_claimable(self):
+        state, _ = drop_intake._drop_state(self._entry(approval="approved"))
+        self.assertEqual(state, "approved")
+
+    def test_an_approved_drop_with_no_asset_is_not_claimable(self):
+        """`claimable_for_lane` requires the file; the list must agree."""
+        self.asset.unlink()
+        entry = self._entry(approval="approved")
+        state, _ = drop_intake._drop_state(entry)
+        self.assertEqual(state, "approved")  # the ledger's own view
+        self.assertEqual(
+            drop_intake.claimable_for_lane("meme",
+                                           ledger_path=Path(self.tmp.name) / "none.json"),
+            [], "a missing ledger must not make anything claimable")
+
+
+class AnApprovedNotReadyDropIsNotOnItsWayTests(unittest.TestCase):
+    """`_drop_state` tested `approval` before `post_ready`.
+
+    So an approved drop whose sidecar said `post_ready: false` answered
+    "approved and waiting for its lane's next run" -- while
+    `claimable_for_lane` requires post_ready and would never take it. The
+    status file is the ONLY feedback channel the producing agent has, so it
+    was the one party left with the wrong answer; the CLI already warns the
+    OPERATOR about this combination at approval time.
+    """
+
+    def _entry(self, **kw):
+        base = {"lane": "meme", "approval": "operator_required",
+                "claimed_by": None, "post_ready": True,
+                "received_at": "2026-11-16T06:00:00-05:00"}
+        base.update(kw)
+        return base
+
+    def test_post_ready_outranks_approval(self):
+        state, detail = drop_intake._drop_state(
+            self._entry(approval="approved", post_ready=False))
+        self.assertEqual(state, "not_ready")
+        self.assertIn("changed nothing", detail)
+
+    def test_a_claim_still_outranks_everything(self):
+        state, _ = drop_intake._drop_state(
+            self._entry(approval="approved", post_ready=False,
+                        claimed_by="meme::r1"))
+        self.assertEqual(state, "published")
+
+    def test_a_declined_not_ready_drop_still_reads_declined(self):
+        """Declined is the operator's answer; readiness is beside the point."""
+        state, _ = drop_intake._drop_state(
+            self._entry(approval="declined", post_ready=False))
+        self.assertEqual(state, "declined")
+
+    def test_the_ready_approved_path_is_unchanged(self):
+        state, detail = drop_intake._drop_state(self._entry(approval="approved"))
+        self.assertEqual(state, "approved")
+        self.assertIn("next run", detail)
+
+    def test_it_agrees_with_what_can_actually_be_claimed(self):
+        """The rule, not the reading: whatever `_drop_state` calls on-its-way
+        must be something `claimable_for_lane` would really hand over."""
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            asset = base / "clip.mp4"
+            asset.write_bytes(b"x" * 10)
+            ledger = base / "l.json"
+            drop_intake.record_proposals(
+                {"proposals": [_proposal("ready", asset=asset),
+                               _proposal("unready", asset=asset, post_ready=False)]},
+                ledger_path=ledger)
+            for stem in ("ready", "unready"):
+                drop_intake.set_approval(stem, True, ledger_path=ledger)
+            entries = json.loads(ledger.read_text())["proposals"]
+            claimable = {d["stem"] for d in
+                         drop_intake.claimable_for_lane("meme", ledger_path=ledger)}
+            for stem, entry in entries.items():
+                with self.subTest(stem=stem):
+                    state, _ = drop_intake._drop_state(entry)
+                    self.assertEqual(
+                        state == "approved", stem in claimable,
+                        f"{stem}: _drop_state says {state!r} but claimable="
+                        f"{stem in claimable}")
+
+
+class TheListOutputItselfTests(unittest.TestCase):
+    """Covering the operator-facing string, not just the helper under it.
+
+    `_drop_state` was correct while `--list` kept its own copy of the rules
+    and printed "awaiting operator (declined)". A test on the helper alone
+    would have stayed green through that, so this one drives the CLI.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.ledger = self.base / "drop_proposals.json"
+        self.asset = self.base / "clip.mp4"
+        self.asset.write_bytes(b"x" * 10)
+        drop_intake.record_proposals(
+            {"proposals": [_proposal("yes", asset=self.asset),
+                           _proposal("no", asset=self.asset),
+                           _proposal("untouched", asset=self.asset)]},
+            ledger_path=self.ledger)
+        drop_intake.set_approval("yes", True, ledger_path=self.ledger)
+        drop_intake.set_approval("no", False, ledger_path=self.ledger)
+
+    def _list_output(self) -> str:
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = drop_intake.main(["--list", "--ledger-path", str(self.ledger)])
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def test_a_declined_drop_is_never_called_awaiting(self):
+        for line in self._list_output().splitlines():
+            if "awaiting" in line.lower():
+                with self.subTest(line=line.strip()):
+                    self.assertNotIn(
+                        "declin", line.lower(),
+                        "the pre-fix bug: 'awaiting operator (declined)'")
+
+    def test_each_drop_is_named_with_a_state_and_a_reason(self):
+        out = self._list_output()
+        self.assertIn("declined:", out)
+        self.assertIn("CLAIMABLE:", out)
+        self.assertIn("waiting_for_a_human:", out)
+
+    def test_the_undecided_drop_is_the_only_one_awaiting_anyone(self):
+        """Each drop prints as a stem line followed by its state line."""
+        lines = [ln for ln in self._list_output().splitlines() if ln.strip()]
+        states = {lines[i].strip(): lines[i + 1].split("->", 1)[1].strip()
+                  for i in range(0, len(lines) - 1, 2)}
+        self.assertEqual(
+            {stem for stem, state in states.items()
+             if state.startswith("waiting_for_a_human")},
+            {"untouched"})
+        self.assertTrue(states["yes"].startswith("CLAIMABLE"))
+        self.assertTrue(states["no"].startswith("declined"))

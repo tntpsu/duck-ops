@@ -646,8 +646,14 @@ def scan_inbox(drop_root: Path | None = None, *,
             "stem": record.stem,
             "received_at": record.received_at,
             # Explicit, so no later reader can mistake this for approved work.
+            # ONE field carries the decision. There used to be a `status:
+            # "awaiting_operator"` beside it, written here and never updated
+            # again, so every declined or approved drop in the ledger still
+            # read "awaiting_operator" forever -- the two-fields-one-meaning
+            # trap `STATUS_CONTRACT.md` exists to prevent. Nothing had come
+            # to depend on it yet, which is the only reason removing it was
+            # cheap; a week later it would have had a reader.
             "approval": "operator_required",
-            "status": "awaiting_operator",
         })
 
     manifest["accepted_count"] = len(manifest["accepted"])
@@ -1076,12 +1082,20 @@ def _drop_state(entry: dict) -> tuple[str, str]:
     approval = str(entry.get("approval") or "")
     if approval == "declined":
         return ("declined", "the operator declined it; it will never be posted")
+    # Ahead of the approved branch on purpose. `claimable_for_lane` requires
+    # post_ready, so an approved drop whose sidecar says post_ready:false can
+    # never be taken by anything -- and the old order answered "approved and
+    # waiting for its lane's next run", telling the producing agent its post
+    # was on the way. This file is the ONLY channel that agent has. The CLI
+    # already warns the operator about this exact combination at approval
+    # time; the agent was the one left with the wrong answer.
+    if not entry.get("post_ready"):
+        detail = "accepted, but the sidecar said post_ready:false, so no run will take it"
+        if approval == "approved":
+            detail += " -- the operator approved it anyway, which changed nothing"
+        return ("not_ready", detail)
     if approval == "approved":
         return ("approved", "approved and waiting for its lane's next run")
-    if not entry.get("post_ready"):
-        return ("not_ready",
-                "accepted, but the sidecar said post_ready:false, so no run "
-                "will take it")
     return ("waiting_for_a_human", "accepted and waiting on the operator")
 
 
@@ -1285,18 +1299,20 @@ def main(argv: list[str] | None = None) -> int:
         if not proposals:
             print("[drop-intake] no proposals")
             return 0
+        # Derived by `_drop_state`, the same function the agent-facing status
+        # file uses, rather than a second copy of the rules. The old copy here
+        # printed "awaiting operator (declined)" for every declined drop --
+        # wrong twice over: nothing is awaited, and the operator already
+        # answered.
         for stem, e in sorted(proposals.items()):
-            if e.get("claimed_by"):
-                why = f"used by {e['claimed_by']}"
-            elif e.get("approval") != "approved":
-                why = f"awaiting operator ({e.get('approval')})"
-            elif not e.get("post_ready"):
-                why = "sidecar says post_ready=false"
-            elif not Path(str(e.get("asset_path") or "")).is_file():
-                why = "asset file is gone"
-            else:
-                why = "CLAIMABLE"
-            print(f"  {stem}\n      lane={e.get('lane')} from={e.get('source_agent')} -> {why}")
+            state, detail = _drop_state(e)
+            if state == "approved":
+                if not Path(str(e.get("asset_path") or "")).is_file():
+                    state, detail = ("asset_missing", "approved, but the asset file is gone")
+                else:
+                    state, detail = ("CLAIMABLE", detail)
+            print(f"  {stem}\n      lane={e.get('lane')} from={e.get('source_agent')}"
+                  f" -> {state}: {detail}")
         return 0
 
     drop_root = Path(args.drop_root) if args.drop_root else DROP_ROOT

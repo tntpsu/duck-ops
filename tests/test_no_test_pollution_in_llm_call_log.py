@@ -50,9 +50,20 @@ _FIXTURE_MODELS = {
 #: Synthetic artifact ids built from single-letter fixture concept ids. The
 #: duckvideo instrumentation stamps `call::duckvideo::<concept_id>`, and real
 #: concept ids are slugs like `snowy_dashboard_santa_grab_v1`.
+#:
+#: `call::duckvideo::unknown` was in this set and should never have been:
+#: `unknown` is PRODUCTION's own fallback, from
+#: `duckAgent/helpers/duck_video_motion_helper.py:425`
+#: (`str(concept.get('id') or 'unknown')`). A real run that fails before it
+#: resolves a concept writes exactly that, which is what happened on
+#: 2026-11-18 at 09:30 when Gemini answered 402 (prepayment credits
+#: depleted). The audit then reported a genuine, wanted cost row as test
+#: pollution -- and this file's own instructions say to fix the polluting
+#: test, so the next reader would have hunted a test that does not exist.
+#: A marker has to be a value production CANNOT emit; this one never was
+#: ([[feedback_pin_the_rule_not_the_reading]]).
 _FIXTURE_ARTIFACT_IDS = {
     "call::duckvideo::c",
-    "call::duckvideo::unknown",
     "call::unknown:x",
 }
 
@@ -65,6 +76,44 @@ def _pollution_reason(row: dict) -> str | None:
     if artifact_id in _FIXTURE_ARTIFACT_IDS:
         return f"fixture artifact_id {artifact_id!r}"
     return None
+
+
+class TestTheMarkersCannotMatchProductionTests(unittest.TestCase):
+    """A marker that production can emit turns this audit into a false alarm.
+
+    Guarding the guard, because the failure mode is quiet: the audit goes
+    red, the instructions above send the reader looking for a polluting
+    test, there is none, and the usual way out is deleting the audit --
+    which this file's docstring already pleads against.
+    """
+
+    #: What production actually writes when a duckvideo run fails before it
+    #: has a concept id. Kept as data next to the assertion so the two
+    #: cannot drift.
+    PRODUCTION_FALLBACK_IDS = ("call::duckvideo::unknown",)
+
+    def test_no_marker_is_a_value_production_emits(self):
+        for artifact_id in self.PRODUCTION_FALLBACK_IDS:
+            with self.subTest(artifact_id=artifact_id):
+                self.assertNotIn(artifact_id, _FIXTURE_ARTIFACT_IDS)
+
+    def test_a_real_failed_duckvideo_row_is_not_flagged(self):
+        """The exact 2026-11-18 row, as the ledger holds it."""
+        row = {
+            "provider": "gemini", "model": "gemini-omni-1.1-flash",
+            "kind": "video", "status": "failed",
+            "error": "motion_exception: APIStatusError: Error code: 402",
+            "artifact_id": "call::duckvideo::unknown",
+            "at": "2026-11-18T09:30:18.471022-05:00",
+        }
+        self.assertIsNone(_pollution_reason(row))
+
+    def test_a_genuine_fixture_row_is_still_caught(self):
+        """Narrowing the list must not have disarmed the audit."""
+        self.assertIsNotNone(
+            _pollution_reason({"model": "model-a", "artifact_id": ""}))
+        self.assertIsNotNone(
+            _pollution_reason({"artifact_id": "call::duckvideo::c"}))
 
 
 class TestTheProductionLedgerHoldsNoFixtures(unittest.TestCase):
