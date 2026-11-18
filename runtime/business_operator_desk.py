@@ -17,6 +17,7 @@ from typing import Any, Callable
 from dependency_health import DEPENDENCY_HEALTH_MD_PATH, build_dependency_health
 from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
 from inventory_truth import INVENTORY_TRUTH_MD_PATH, build_inventory_truth
+from lane_pause import read_lane_pause
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
 from operator_interface_contracts import build_interface_contract_summary
 from product_concept_queue import PRODUCT_CONCEPT_QUEUE_MD_PATH, build_product_concept_queue
@@ -512,7 +513,7 @@ def load_lane_policy_surface(config: LanePolicyConfig) -> dict[str, Any]:
     # behavioural guard in duckAgent's main_agent requires the stricter
     # `operator_paused` flag as well, because refusing an operator's email
     # reply is a real change and `mode` is overloaded across lanes.
-    if mode == "off":
+    if read_lane_pause(raw_config).display_paused:
         readiness_headline = (
             f"{config.display_name} is paused by the operator, so it is not "
             f"running and its {config.auto_action_verb} posture is not in question."
@@ -980,25 +981,16 @@ def build_workflows_card_surface(
 def paused_lane_note(config_payload: dict[str, Any]) -> str | None:
     """Why this lane is off, in the operator's own words, or None.
 
-    Two shapes exist because the two pauses were recorded by different
-    hands: review_carousel carries `operator_mode_history` (2026-11-13,
-    "no one looks at the review carousels"), jeepfact carries
-    `paused_on`/`paused_because` (2026-11-18). Both are read rather than
-    one being migrated, because rewriting a record of what the operator
-    decided is not a display fix.
+    Delegates to `lane_pause.pause_note`, which is the one place that knows
+    the two record shapes (review_carousel's `operator_mode_history`,
+    jeepfact's `paused_on`/`paused_because`). This function had the first
+    copy of that logic and the review-carousel OS card grew a second one
+    the same day; the canonical reader now has the only one.
+
+    The name is kept because it has tests and callers, and renaming it
+    would be churn on top of a fix.
     """
-    reason = str(config_payload.get("paused_because") or "").strip()
-    when = str(config_payload.get("paused_on") or "").strip()
-    if not reason:
-        history = config_payload.get("operator_mode_history")
-        if isinstance(history, list) and history:
-            last = history[-1] if isinstance(history[-1], dict) else {}
-            if str(last.get("to") or "").strip() == "off":
-                reason = str(last.get("reason") or "").strip()
-                when = when or str(last.get("at") or "").strip()[:10]
-    if not reason:
-        return None
-    return f"Paused by the operator{f' on {when}' if when else ''}: {reason}"
+    return read_lane_pause(config_payload).note
 
 
 def _is_clean_gated_policy_entry(

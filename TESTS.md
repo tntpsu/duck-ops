@@ -9322,3 +9322,212 @@ unexamined. `reply_preview_staged` at 220 days and
 `shopify_activation_pending` at 208 days are either real stuck work or
 receipts nobody retires, and no card distinguishes those two readings. That
 is a separate surface, not a widening of this one.
+
+## Surface 153 — one reader for "is this lane intentionally off?" (2026-11-18, operator: "1 go")
+
+Six places answered that question, in six different ways, and a seventh
+never asked. Five were written **on this same day**, each because the
+previous one was not reachable from where the next card lived. The
+predicate was never the hard part; the LOCATION was.
+
+| # | site | predicate | note derivation |
+|---|---|---|---|
+| 1 | `main_agent._flow_is_paused_by_operator` | `operator_paused` AND `mode == "off"` | — |
+| 2 | `business_operator_desk` lane posture | inline `mode == "off"` | own copy, 2 record shapes |
+| 3 | `viewer._load_review_carousel_health` | inline `mode == "off"` | SECOND copy, same shapes, read slightly differently |
+| 4 | `viewer._weekly_lane_is_paused` | inline `mode == "off"` | none |
+| 5 | `runner.py:46` | `get_flow_execution_mode(...) == "off"` | none |
+| 6 | `viewer._load_content_publish_health` | **never asked** | — |
+
+Site 5 was found by the new AST guard, not by reading the code — it had
+been in production since 2026-11-13 and was not in the list of four the
+session started from ([[feedback_incomplete_fix_enumerate_all_branches]]).
+
+### The dates site 6 was going to fire on
+
+`content_publish_cadence` reds any lane silent >17d. Computed from each
+lane's last real publish, not guessed:
+
+- **2026-11-29** — gtdf (mode `off`)
+- **2026-12-05** — jeepfact (mode `off`, `operator_paused: true`)
+
+Both deliberate pauses. Both now excluded from the age ladder rather than
+graded by it, and the lane is NAMED with the operator's own reason so a
+pause nobody meant to leave on is still visible ([[feedback_no_silent_caps]]).
+
+### The display/behaviour split is kept, deliberately
+
+Collapsing the six readers to one boolean is the tempting simplification
+and it is wrong. `lane_pause.read_lane_pause` returns two verdicts from one
+read:
+
+- `display_paused` (`mode == "off"`) — enough to SAY a lane is not running.
+- `operator_paused` (the explicit flag AND off) — enough to REFUSE an
+  operator's action.
+
+`mode` is overloaded: blog, gtdf and review_carousel were all `off` on
+2026-11-18 for unrelated reasons, and review_carousel is off as a REACH
+decision while its portal Reject button must keep working. A mail-path
+refusal first keyed on `mode` alone broke that button for three lanes
+nobody had asked about, and three pre-existing tests caught it.
+
+| Use case | Covered |
+|---|---|
+| Two verdicts stay distinct | `test_lane_pause.py::TheTwoVerdictsAreDistinctTests` (5) |
+| `operator_paused ⇒ display_paused` for every input | cross-product subtests over 6 modes × 5 flag values |
+| `off_peak` / `handoff` / `offline` are not `off` | `test_a_mode_that_merely_contains_off_is_not_off` |
+| Unreadable config fails OPEN (3 of 4 callers chose this) | `UnreadableConfigFailsOpenTests` (4) |
+| Both operator record shapes read | `NoteDerivationTests` (8) |
+| Only the LAST history entry, only if it turned the lane off | `test_only_the_LAST_history_entry_counts_...` |
+| No reason anywhere → `None`, not a filler sentence | 8 subtests |
+| Live configs are self-consistent (rule, not value) | `TheRealConfigsStillGradeAsTheyDidTests` |
+| **No seventh copy appears** | `NoSixthCopyTests` — AST scan of 4 source roots |
+| The AST scan can see a continuation-line comparison | positive control |
+| The allowlist names no dead file | anti-rot |
+| duckAgent's two bridges reach the shared reader | `test_lane_pause_bridge.py` (9) |
+| Each bridge degrades to a bare mode check without duck-ops | `sys.modules["lane_pause"] = None` + positive control |
+| `content_publish_cadence` skips a paused lane | `test_listing_content_watchdogs.py` (+10) |
+| …and is still RED when the lane is NOT paused | mutation partner |
+| …and a paused lane does not mask a different stale lane | `test_a_paused_lane_does_not_mask_...` |
+| `manual` is not a pause; a missing config is not a pause | 2 tests |
+
+**Mutation-verified** (4 of 4 caught): removing the paused skip (4 red),
+skipping every lane unconditionally (7 red), `display_paused = False` in
+the shared reader (6 red), dropping the note (2 red).
+
+The AST guard allowlists `email_cadence_gate.py:445`, which is a DIFFERENT
+"off": an email cadence override with its own anomaly-bypass semantics,
+nothing to do with whether a lane runs. Recorded so the distinction is not
+rediscovered.
+
+**Open:** `mode: "off"` is still overloaded in the CONFIG FILES — only
+jeepfact carries `operator_paused`. The shared reader makes that
+survivable rather than fixed; a lane that needs behavioural refusal must
+still add the flag by hand.
+
+## Surface 154 — the decision inbox read the live duck-ops, not the one it was handed (2026-11-18)
+
+Found by dismissing the 178-day thursday draft from Surface 152.
+
+`_run_dismissed_in_workflow_control` re-derived `parents[5]/duck-ops`
+instead of using the `openclaw_root` the inbox was already given. So **21
+decision-inbox tests** handed a tmp root for `review_queue.json` were still
+reading the operator's live `state/workflow_control`, and each was one
+matching lane+run_id away from silently losing its fixture row.
+
+One fired: dismissing `thursday::2026-05-21` for real broke
+`test_decision_inbox_thursday_shows_vote_package_and_schedule_copy`,
+whose fixture used that same run_id. The test had been passing for months
+on an accident of production state
+([[feedback_test_isolation_from_production_state]]).
+
+STATE now follows the caller; CODE (`duck_flows`) still resolves from the
+checkout. In production they are the same directory, so nothing changed
+there — the input simply stopped being invisible. Same fix shape as
+`config_path` and `lane_config_dir` earlier the same day; this is the
+fourth time.
+
+| Use case | Covered |
+|---|---|
+| A dismissal in the GIVEN root is seen | `test_decision_inbox_reads_its_own_root.py` |
+| An empty given root reports no dismissal | the assertion that pins it |
+| It does not consult the live checkout (that run_id IS dismissed there) | named explicitly, skips if absent |
+| Lane AND run_id must both match | 1 test |
+| End-to-end: a pending item survives | `InboxEndToEndTests` |
+| End-to-end: still hidden once dismissed in that root | mutation partner for the 2026-07-03 store-sync behaviour |
+
+**Mutation-verified** (2 of 2): reverting to the sibling-resolved root
+(1 red), removing the workflow_control check entirely (2 red).
+
+## Surface 155 — Receipt Follow-Through: stuck work vs receipts nobody retires (2026-11-18, operator: "3 fix it")
+
+Nothing graded non-terminal `workflow_control` receipts, because the
+obvious count is useless in **both** directions. Measured on the live
+store:
+
+| count | what it is |
+|---|---|
+| 475 | naive "non-terminal" — the number a simple scan gives |
+| 150 | **parked**: observation records doing their job (143 competitor snapshots, newest 0d) |
+| 101 | **blocked**: already owned by `build_workflow_followthrough_items(include_all_blocked=True)` |
+| 224 | pending |
+| **48** | **overdue** against a declared window |
+| 0 | unclassified |
+
+An earlier hand estimate of "34" was wrong the other way. Neither number
+told the operator anything, so neither got acted on
+([[feedback_a_number_needs_its_denominator]]).
+
+### Why the policy is DATA, not a rule
+
+`observed` is TERMINAL for an observation lane (a snapshot was taken) and
+NON-TERMINAL for a production lane (a draft is waiting on a human). One
+state, two meanings, and the receipt does not say which
+([[feedback_status_fields_one_meaning]]). So
+`receipt_lifecycle.POLICY` declares it per `(lane, state_reason)` — 28
+entries, each with a stated `basis`.
+
+**An undeclared pair is UNCLASSIFIED and turns the card yellow**, rather
+than being guessed either way. Every allowlist that bit this stack in
+November bit it by failing silently on the value nobody had thought of.
+
+### Two mistakes made while writing it
+
+1. **`blocked` fell into "unclassified"** and made that bucket 101 items
+   of noise — which is how a signal meaning "I do not know" gets ignored.
+   It now has its own kind and is handed off, not graded twice.
+2. **Every receipt was graded individually**, so 127 healthy daily
+   `profit/weekly_operator_email_deferred` records read as 127 overdue
+   items and buried the 48 real ones. Policy entries now declare
+   `PER_RUN` (one recurring event; grade only the newest — if that one is
+   fresh the handoff is alive) vs `PER_ENTITY` (14 newduck drafts are 14
+   distinct stuck listings; collapsing would hide 13).
+
+That second distinction found a real one: **`competitor/weekly_operator_email_deferred`
+newest is 167 days old** while profit's is 0 — a deferral naming a
+destination whose consumer stopped ([[feedback_fold_defer_is_a_handoff_contract]]),
+reported as ONE finding rather than seven.
+
+### What the card says today
+
+RED, 48 receipts in 15 groups, oldest first:
+`customer_reply/thread_observed ×2 (220d, window 3d)`,
+`customer_reply/needs_thread_review ×2 (220d)`,
+`review_execution/reply_preview_staged ×2 (220d, window 7d)`,
+`thursday/batch_ready ×3 (216d)`, `newduck/draft_ready ×14 (213d)`,
+`newduck/shopify_activation_pending ×11 (208d)`,
+`review_execution/submit_confirmed ×1 (94d, window 2d)`.
+
+| Use case | Covered |
+|---|---|
+| Universally terminal states dropped (7 subtests) | `test_receipt_lifecycle.py::TerminalStatesAreNotGradedTests` |
+| `skipped_off` is terminal — the operator caused it | 1 test |
+| `blocked` is neither dropped nor windowed | 2 tests incl. the regression |
+| Same state, different lane, different kind | `test_the_SAME_state_means_different_things_...` |
+| Exactly at the window is not yet overdue | 1 test |
+| No timestamp → not overdue | 2 tests |
+| Undeclared pair is neither parked nor pending | 2 tests |
+| Every policy entry declares a basis / positive window | 3 subtest loops over all 28 |
+| A paused lane's receipt is never overdue | 1 test |
+| …and IS overdue when the lane runs | mutation partner |
+| Live per-run log reports nothing (profit) | 1 test |
+| Dead per-run log reports exactly ONE item (competitor) | 1 test |
+| Per-entity receipts each counted (14 ≠ 1) | 1 test |
+| Both cardinalities actually used in POLICY | anti-decoration guard |
+| **No live receipt falls into an undeclared pair** | `TheLiveStoreIsFullyDeclaredTests`, 50-receipt floor |
+| Card loader: parked / overdue / fresh / red at 4× window | `test_receipt_followthrough_card.py` (16) |
+| `gtdf_winner` paused by the `gtdf` config (the one alias) | 1 test |
+| Undeclared pair outranks overdue in the copy | 1 test |
+| `.json.bak.*` snapshots ignored | 1 test |
+| Malformed receipt / missing dir never raise | 2 tests |
+| Registration, incl. the empty-payload yellow fallback | `ReceiptFollowthroughRegistrationTests` (6) |
+| Undeclared pair asks for a POLICY entry, not for work | 1 test |
+
+RED needs **4× the declared window**, not merely past it: a declared
+window is a nudge at 1×, and reding at 1× would make every slightly-late
+item an emergency and train the operator to ignore the card.
+
+**Open:** the 48 are now visible but not worked. The two oldest groups are
+`customer_reply` threads at 220 days — if those are real customer messages
+they are long past any useful reply, and the right action may be a bulk
+retire rather than a reply. Not decided here; the card names them.
