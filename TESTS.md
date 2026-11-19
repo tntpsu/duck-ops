@@ -9645,3 +9645,41 @@ last three weeks consistent. `competitor_weekly` is a 06:30 Sunday
 likely cause ([[feedback_verify_the_job_is_firing_first]]). Not chased
 here; scheduler_health would have shown `missed_run` at the time and the
 job is healthy now.
+
+## Surface 158 — the consumer was pushed before the provider (2026-11-18)
+
+duckAgent CI turned 21 tests red with
+`classify_receipt() got an unexpected keyword argument 'live_identity'`.
+
+Not a logic bug — an ORDERING one. duckAgent's workflow checks out
+`tntpsu/duck-ops` at its **default branch at run time**, so the two repos
+are only in step if the provider lands first. Surface 156's duckAgent
+commit (the caller) was pushed before its duck-ops commit (the new
+signature), and the CI run started in the gap. Both suites had been green
+locally, where the sibling is the working tree.
+
+**Pushing order is now part of the change, not an accident:** duck-ops
+first whenever duckAgent starts calling something new in it.
+
+But a card whose contract is "never raises" should not depend on a sibling
+checkout being in step at all. The loader now feature-detects
+`live_identity` with `inspect.signature`, says so on a loud channel, and
+grades without the index rather than exploding — an environment fault gets
+its own channel instead of a plausible-looking result
+([[feedback_plausible_fallbacks_mask_failure]]). A per-receipt failure
+skips that receipt, not the scan.
+
+**Rehearsed, not assumed:** the previous duck-ops `receipt_lifecycle.py`
+was extracted from `b9025b6` into a tmp `DUCK_OPS_ROOT` and the card run
+against it. It printed the warning and returned 44 overdue instead of 43 —
+the superseded receipt reading as overdue, which is the honest degradation.
+
+| Use case | Covered |
+|---|---|
+| An older duck-ops does not raise | `test_receipt_followthrough_card.py::CrossRepoSkewTests` |
+| …and still grades the receipt (44, not "nothing is stuck") | 1 test |
+| The CURRENT provider is actually used when present | mutation partner — a loader always taking the degraded path passes the two above |
+| One unclassifiable receipt does not lose the others | 1 test |
+
+**Open:** nothing enforces the push order. The guard makes a skew
+survivable and visible; it does not make the two repos atomic.
