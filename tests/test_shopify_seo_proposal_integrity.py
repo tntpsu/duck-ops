@@ -498,3 +498,39 @@ class TheGeneratorIsGuardedAndWiredToTheRegistry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheApprovalCopyMatchesWhatApplyWouldDo(unittest.TestCase):
+    """The email promised "all 23 items" for a batch that would write 16.
+    Operator-facing copy is an assertion and nothing fails when it stops being
+    true -- so the number in it is the one the applier uses."""
+
+    def test_it_names_the_applyable_count_when_some_are_withheld(self) -> None:
+        copy = S._approval_action(
+            "issue_category_batch", 23, issue_category="weak_title", applyable_count=16
+        )
+        self.assertIn("16 of the 23", copy)
+        self.assertIn("other 7", copy)
+        self.assertNotIn("all 23", copy)
+
+    def test_it_still_says_all_when_every_item_is_real_work(self) -> None:
+        copy = S._approval_action(
+            "issue_category_batch", 23, issue_category="weak_title", applyable_count=23
+        )
+        self.assertIn("all 23 items", copy)
+
+    def test_the_built_payload_copy_agrees_with_its_own_count(self) -> None:
+        resources = TheCategoryBatchActuallyAsksTheModel._weak_product()
+        payload = TheCategoryBatchActuallyAsksTheModel()._build(resources, category="weak_title")
+        applyable = payload["applyable_item_count"]
+        count = payload["item_count"]
+        copy = payload["approval_action"]
+        if applyable == 0:
+            # Surface 82e owns this case: a batch with nothing to apply is not
+            # a review and says so instead of asking for a reply.
+            self.assertIn("nothing", copy.lower())
+            self.assertEqual(payload["status"], "not_reviewable")
+        elif applyable != count:
+            self.assertIn(f"{applyable} of the {count}", copy)
+        else:
+            self.assertIn(f"all {count} items", copy)

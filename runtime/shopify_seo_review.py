@@ -1097,9 +1097,34 @@ def _review_subject_label(review_type: str, issue_category: str | None = None) -
     return "Top 10 SEO fixes"
 
 
-def _approval_action(review_type: str, item_count: int, *, issue_category: str | None = None, auto_send_next_category: bool = False) -> str:
+def _approval_action(
+    review_type: str,
+    item_count: int,
+    *,
+    issue_category: str | None = None,
+    auto_send_next_category: bool = False,
+    applyable_count: int | None = None,
+) -> str:
+    """What `apply` would actually do.
+
+    This used to promise "all {item_count} items" while the apply path writes
+    only the fields that survived the Surface 60/61/165 guards -- the
+    2026-11-04 batch said 23 and would have written 16. Operator-facing copy is
+    an assertion, and nothing fails when it stops being true
+    ([[feedback_pin_the_rule_not_the_reading]]), so the number here is the one
+    the applier uses.
+    """
     if review_type == "issue_category_batch":
-        action = f"Reply apply to update all {item_count} items in the {_category_label(issue_category).lower()} batch."
+        label = _category_label(issue_category).lower()
+        if applyable_count is not None and applyable_count != item_count:
+            withheld = item_count - applyable_count
+            action = (
+                f"Reply apply to update {applyable_count} of the {item_count} items in the "
+                f"{label} batch. The other {withheld} are listed for context only -- their "
+                "proposal was not a real change, so nothing would be written for them."
+            )
+        else:
+            action = f"Reply apply to update all {item_count} items in the {label} batch."
         if auto_send_next_category:
             action += " If this applies cleanly, DuckAgent will email the next remaining SEO category automatically."
         return action
@@ -1243,6 +1268,7 @@ def build_shopify_seo_review(
             len(items),
             issue_category=issue_category,
             auto_send_next_category=auto_send_next_category,
+            applyable_count=applyable,
         ),
         "items": items,
         "applyable_item_count": applyable,
