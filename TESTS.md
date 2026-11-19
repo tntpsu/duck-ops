@@ -10036,3 +10036,114 @@ Declared **PARKED with no window**, and the reasoning is the part worth keeping:
 | The basis names its real owner | `test_the_declared_basis_names_the_surface_that_does_grade_it` |
 | No window, deliberately | `test_a_window_here_would_be_coverage_that_could_never_fire` |
 | The ready half is terminal | `test_the_ready_state_is_dropped_entirely` |
+
+## Surface 165 — the SEO batch the operator refused, and the four reasons it was refusable (2026-11-19, operator: "I wasn't impressed by the last run and thus why I didn't approve")
+
+The operator declined `shopify_seo_weak_title_20261104_073503` (emailed 11-09, 23
+items) and said so ten days later. The card had reported the batch as
+`awaiting_review` the whole time; nobody had read the batch. Reading it found
+**four independent defects**, each of which alone justified the refusal.
+
+**1. Nothing was asking the model.** `_generate_proposals` had exactly ONE call
+site — the `top_actions` review type, which the daily kickoff never uses. Both
+`issue_category_batch` and `missing_only_bulk` set `proposals = []`, so **every
+category batch the operator has ever reviewed was built from
+`_default_title_for_resource`**. The answer to "this SEO title is too generic"
+was a template, and 11 of the 23 proposals carried the identical suffix
+`| MyJeepDuck Dashboard Decor Duck Gift`. Two shipped surfaces were wired to a
+code path that does not run in production: Surface 40's GSC demand enrichment
+and Surface 60's in-prompt differentiation rule. A surface that is *measured*
+(`scripts/eval_shopify_seo.py` scores `_generate_proposals`) but not *reached* is
+the sharpest form of [[feedback_instrumented_for_one_question_only]].
+
+**2. Titles had no trailing-separator guard; descriptions had two.** The model
+returns `"... (That Aren't Just Candy) | MyJeepDuck Blog"` (79 chars);
+`_trim_to_range` cuts at the word boundary under 70 and leaves `"... Just Candy) |"`.
+`_finalize_sentence` rstrips separators and `_description_needs_fallback` rejects
+a trailing one — the title path had **neither**, so 4 of 23 titles were offered
+for publication ending in a bare pipe, invisible to every gate including the
+Surface 61 scorer. Same file, same run, one side guarded. Writing the parity test
+then found the description list was itself incomplete (`-`, `&`, `at` passed it);
+both now share `_strip_dangling_tail` / `_has_dangling_tail`.
+
+**3. The no-op guard was gated to the wrong category.** Surface 60's echo check
+ran only when the item carried `duplicate_seo_title` / `near_duplicate_seo_title`
+or collided with an in-batch sibling. The weak_title codes
+(`seo_title_matches_raw_title`, `weak_generic_seo_title`) match neither, so
+`echoes_current` was computed correctly and **never consulted** — 7 of 23
+proposals were byte-identical to the live value with `apply_seo_title: True`.
+`collides_sibling` can only be true when `siblings` is non-empty, so the gate had
+*only* ever suppressed the echo branch.
+
+**4. The count and the applier disagreed.** `_item_is_applyable` re-derived the
+no-op, so the payload honestly said `applyable_item_count: 16` — but it never
+persisted the decision, and `_field_flags` in duckAgent reads `apply_seo_title`
+off the item. Replying `apply` would have written **all 23**, including 7
+unchanged values and the 4 broken titles. The old email is still in the inbox and
+still applyable, so the fix is in both repos: duck-ops persists the withholding,
+and the applier re-derives it rather than trusting a flag another repo wrote.
+
+**Third recurrence in one family.** 2026-07-13 (Surface 60) fixed "don't
+auto-apply a non-fix" for duplicates; 2026-09-07 (Surface 82e) fixed "don't ask
+for approval of nothing"; neither generalised to the other eight categories.
+[[feedback_incomplete_fix_enumerate_all_branches]] — enumerate every sibling
+branch, and [[feedback_llm_detection_vs_generation]] — the detection must reach
+the generation prompt, which here it could not, because the generator was unreachable.
+
+**Found by the dry run, not by review:** with the generator wired in, the first
+real call returned **empty** — `OpenAI JSON parse failed ... raw=`. `seo_meta`
+resolves to a reasoning model, which bills its thinking against
+`max_completion_tokens`, and one call carrying 23 resources spent the ceiling
+before emitting content. The fail-soft path turned that into 23 template titles —
+i.e. the exact batch the operator rejected, reproduced from a *different* cause.
+Fixed by chunking (≤8 resources per request, near-duplicate siblings kept in one
+chunk so the differentiation instruction stays satisfiable) and a per-call
+ceiling with reasoning headroom. This is why the template fallback is now
+counted and reported: it is a *plausible* answer to "this copy is too generic",
+so it is the one fallback that must never be silent
+([[feedback_plausible_fallbacks_mask_failure]]).
+
+**Isolation regression caught in the same pass:** wiring the generator into the
+category batch made `test_shopify_seo_no_op_batch.py` — which patches the state
+paths but not the generator — bill real tokens on every run (the SEO suites went
+73.7s → 0.22s once guarded). `_generate_proposals` now refuses under
+`DUCK_TEST_MODE` and takes an injectable client, so a prompt test cannot reach
+the network by construction ([[feedback_test_runs_reach_the_outside_world]]).
+
+| Use case | Happy | Defect reproduced | Positive control | Fail-closed |
+|---|---|---|---|---|
+| Dangling tail in a title | `test_a_clean_title_is_left_alone` | `test_a_truncated_real_title_never_ends_on_a_separator` (the 4 real strings), `test_a_truncated_title_never_ends_on_a_connective_word` | `test_stripping_is_idempotent`, `test_a_tail_of_nothing_but_separators_does_not_return_a_partial_word` | `test_surface_61_scores_a_dangling_tail_and_fails_closed_on_it` |
+| Title/description guard parity | n/a | `test_the_title_fallback_rejects_a_tail_exactly_as_the_description_one_does` (6 tails × both fields) | — | — |
+| Echo in a non-duplicate category | `test_a_genuine_change_is_still_applied` | `test_an_echo_is_withheld_for_a_category_that_is_not_about_duplicates` (both weak_title codes) | `test_an_echo_differing_only_in_case_and_ampersand_is_still_an_echo` | `test_the_sibling_collision_branch_still_fires` (Surface 60 unregressed) |
+| Echo in a description | `test_a_changed_description_is_still_applied` | `test_a_description_equal_to_the_live_one_is_withheld` | — | — |
+| Count vs applier | — | `test_every_item_the_flags_allow_is_an_item_the_count_counted` | — | `duckAgent/tests/test_shopify_seo_review_helper.py::test_field_flags_refuses_a_no_op_written_by_an_older_run` (+ `..._still_allows_a_real_change`, `..._whitespace_only_differences`) |
+| Generator reachability | `test_a_category_batch_calls_the_generator` | `test_the_template_can_never_answer_the_weak_title_category` | `test_template_fallbacks_are_counted_over_writable_fields_only` | `test_a_refusal_degrades_to_the_template_and_says_so` |
+| Prompt carries the finding | — | `test_the_prompt_forbids_echoing_the_current_value_in_every_category` | — | — |
+| Request sizing | — | `test_a_large_batch_is_chunked_and_no_resource_is_dropped` (69 resources, no drops/dupes) | `test_one_failing_chunk_does_not_cost_the_whole_batch` (8 llm / 8 template) | — |
+| Model routing | `test_the_generator_names_a_registry_role_not_a_model_literal` | — | — | `test_no_model_literal_survives_anywhere_in_this_module` (AST), `test_the_seo_meta_role_exists_and_is_priced` |
+| Test isolation | `test_an_injected_client_is_allowed_so_a_test_can_read_the_prompt` | — | — | `test_the_generator_refuses_to_reach_the_api_under_test_mode` |
+
+**By dimension:** unit + deterministic guards (no LLM in the suite); AST guard for
+the model literal; one real gated dry-run against the live audit in a temp state
+dir (never production, never emailed). **STATUS: SHIPPED 2026-11-19** —
+`runtime/shopify_seo_review.py`, `duckAgent/helpers/shopify_seo_review_helper.py`,
+`duckAgent/config/models.json` (`seo_meta`, models_version 5),
+`tests/test_shopify_seo_proposal_integrity.py` (27 tests / 17 subtests).
+
+**Open after this surface:**
+- `missing_only_bulk` still sets `proposals = []` and is template-only. Left that
+  way deliberately — an ABSENT field has no weak copy to improve on — but it is
+  now the only review type with no model in the loop, and that is a choice
+  nothing tests.
+- `scripts/eval_shopify_seo.py` scores `_generate_proposals` and has never
+  scored the path that reaches the operator. The gated eval should be re-run now
+  that the category batch actually uses the generator, and its promotion gate has
+  never been exercised against a reasoning model.
+- Nothing caps SEO proposal spend. A category batch is unbounded (`limit=0`), so
+  `weak_description` is 9 chunks per build, and the kickoff can rebuild daily.
+- `openai_helper` has **no** `DUCK_TEST_MODE` refusal of its own; the guard added
+  here is per-caller. The duck-ops SEO suites were billing real tokens before
+  today and nothing failed. Every other LLM caller reachable from a test has the
+  same exposure — the AST-enumeration approach from
+  [[feedback_test_runs_reach_the_outside_world]] applied to SMTP is the shape of
+  the fix, and it has not been applied to OpenAI.

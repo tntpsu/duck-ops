@@ -157,11 +157,10 @@ def test_generator_prompt_includes_demand_when_present(tmp_path, monkeypatch):
         return {"items": [{"id": "1", "seo_title": "Jeep Wrangler Duck Dashboard Buddy Gift",
                            "seo_description": "x" * 155, "rationale": "ok"}]}
 
-    monkeypatch.setattr(ssr, "_ensure_duckagent_imports", lambda: (fake_openai_json, None))
     ctx = _ctx(tmp_path)
     resources = [{"id": "1", "kind": "product", "title": "Jeep Wrangler Duck",
                   "resource_url": "/p/1", "seo_title": "", "seo_description": "", "issues": []}]
-    ssr._generate_proposals(resources, demand_context=ctx)
+    ssr._generate_proposals(resources, demand_context=ctx, openai_json=fake_openai_json)
     assert "STORE_TOP_SEARCH_TERMS" in captured["user"]
     assert "jeep wrangler duck" in captured["user"]  # the real query was injected
     assert "high_intent_searches" in captured["user"]
@@ -176,11 +175,10 @@ def test_generator_prompt_unchanged_when_demand_empty(tmp_path, monkeypatch):
         captured["user"] = user
         return {"items": [{"id": "1", "seo_title": "A" * 50, "seo_description": "x" * 155, "rationale": "ok"}]}
 
-    monkeypatch.setattr(ssr, "_ensure_duckagent_imports", lambda: (fake_openai_json, None))
     empty = sdc.load_seo_demand_context(gsc_path=tmp_path / "none.json",
                                         listing_path=tmp_path / "none2.json")
     resources = [{"id": "1", "kind": "product", "title": "Plain Duck",
                   "resource_url": "/p/1", "seo_title": "", "seo_description": "", "issues": []}]
-    ssr._generate_proposals(resources, demand_context=empty)
+    ssr._generate_proposals(resources, demand_context=empty, openai_json=fake_openai_json)
     assert "STORE_TOP_SEARCH_TERMS" not in captured["user"]
     assert "high_intent_searches" not in captured["user"]

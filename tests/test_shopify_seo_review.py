@@ -451,8 +451,9 @@ class Surface60NearDuplicateTitleTests(unittest.TestCase):
         def fake_openai_json(system, user, **kwargs):
             captured["user"] = user
             return {"items": []}
-        with patch.object(shopify_seo_review, "_ensure_duckagent_imports", return_value=(fake_openai_json, None)):
-            shopify_seo_review._generate_proposals(self._two_near_dup_pages()["top_actions"])
+        shopify_seo_review._generate_proposals(
+            self._two_near_dup_pages()["top_actions"], openai_json=fake_openai_json
+        )
         self.assertIn("CRITICAL DIFFERENTIATION", captured["user"])
         self.assertIn("gid://shopify/Page/1", captured["user"])
 

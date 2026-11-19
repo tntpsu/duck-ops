@@ -191,10 +191,42 @@ def _supersede_open_category_reviews(
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+# A title is truncated at a word boundary, and the word before that boundary is
+# often a separator or a conjunction the model used to attach the brand suffix
+# ("... Just Candy) | MyJeepDuck Blog" -> "... Just Candy) |"). The DESCRIPTION
+# path has been protected against this twice over since it was written --
+# `_finalize_sentence` rstrips the separators and `_description_needs_fallback`
+# rejects a trailing one -- while the TITLE path had neither, so 4 of the 23
+# titles in the 2026-11-04 weak_title batch were sent to the operator ending in
+# a bare pipe. Both paths now share one definition of a dangling tail.
+_DANGLING_TAIL_CHARS = " \t,;:-|&/+\u2013\u2014\u00b7"
+_TRAILING_STOPWORDS = {
+    "and", "or", "the", "for", "with", "from", "at", "in", "on", "to", "of", "by", "a", "an",
+}
+
+
+def _strip_dangling_tail(text: str) -> str:
+    """Remove trailing separators and dangling connective words left behind by a
+    word-boundary truncation. Idempotent; never returns a partial word."""
+    value = _normalize_text(text).rstrip(_DANGLING_TAIL_CHARS)
+    while value:
+        words = value.split()
+        if len(words) < 2 or words[-1].lower() not in _TRAILING_STOPWORDS:
+            break
+        value = " ".join(words[:-1]).rstrip(_DANGLING_TAIL_CHARS)
+    return value
+
+
+def _has_dangling_tail(text: str) -> bool:
+    value = _normalize_text(text)
+    return bool(value) and _strip_dangling_tail(value) != value
+
+
 def _trim_to_range(text: str, *, min_len: int, max_len: int, extras: list[str]) -> str:
     value = _normalize_text(text)
     if len(value) > max_len:
         value = value[: max_len + 1].rsplit(" ", 1)[0].strip() or value[:max_len].strip()
+        value = _strip_dangling_tail(value)
     for extra in extras:
         if len(value) >= min_len:
             break
@@ -208,15 +240,15 @@ def _trim_to_range(text: str, *, min_len: int, max_len: int, extras: list[str]) 
             padding = padding[: room + 1].rsplit(" ", 1)[0].strip() or padding[:room].strip()
             if padding:
                 value = _normalize_text(f"{value} {padding}")
-    return value
+    return _strip_dangling_tail(value)
 
 
 def _finalize_sentence(text: str, *, max_len: int) -> str:
-    value = _normalize_text(text).rstrip(" ,;:-|")
+    value = _normalize_text(text).rstrip(_DANGLING_TAIL_CHARS)
     if len(value) > max_len:
         value = value[: max_len + 1].rsplit(" ", 1)[0].strip() or value[:max_len].strip()
-        value = value.rstrip(" ,;:-|")
-    trailing_stopwords = {"and", "or", "the", "for", "with", "from"}
+        value = value.rstrip(_DANGLING_TAIL_CHARS)
+    trailing_stopwords = _TRAILING_STOPWORDS
     while value:
         bare = value.rstrip(".!?").rstrip(" ,;:-|")
         if not bare:
@@ -446,12 +478,28 @@ def _default_description_for_resource(resource: dict[str, Any]) -> str:
 
 def _title_needs_fallback(value: str) -> bool:
     text = _normalize_text(value).lower()
-    return (not text) or ("collectible flock favorite" in text) or len(text) < 45 or len(text) > 70
+    return (
+        (not text)
+        or ("collectible flock favorite" in text)
+        or len(text) < 45
+        or len(text) > 70
+        # Parity with _description_needs_fallback: a title left ending in a
+        # separator or a connective word is not a title.
+        or _has_dangling_tail(text)
+    )
 
 
 def _description_needs_fallback(value: str) -> bool:
     text = _normalize_text(value).lower()
-    return (not text) or len(text) < 150 or len(text) > 160 or text.endswith(("and", "or", "the", "for", "with", "from", "|"))
+    return (
+        (not text)
+        or len(text) < 150
+        or len(text) > 160
+        # One shared definition of a dangling tail for both fields. This used to
+        # be a shorter inline tuple that missed "-", "&" and the connective
+        # "at"/"in"/"to" family.
+        or _has_dangling_tail(text)
+    )
 
 
 def _issue_codes(resource: dict[str, Any]) -> set[str]:
@@ -496,6 +544,8 @@ def _seo_title_quality(title: str, *, subject: str = "", min_len: int = 45, max_
         issues.append("multi_separator")
     if "collectible flock favorite" in low:
         issues.append("placeholder")
+    if _has_dangling_tail(text):
+        issues.append("dangling_tail")
     return issues
 
 
@@ -503,7 +553,10 @@ def _seo_title_quality(title: str, *, subject: str = "", min_len: int = 45, max_
 # rather than silently shipping/falling-back. Excludes the heuristic
 # `subject_missing` (kept eval-only, advisory) to avoid noisy false-positives on
 # legitimately reworded titles; keeps the clear-cut, high-precision failures.
-_LIVE_QUALITY_ISSUE_CODES = {"too_short", "too_long", "placeholder", "duck_stuffing", "brand_repeat", "multi_separator"}
+_LIVE_QUALITY_ISSUE_CODES = {
+    "too_short", "too_long", "placeholder", "duck_stuffing", "brand_repeat",
+    "multi_separator", "dangling_tail",
+}
 
 
 def _flag_low_quality_titles(items: list[dict[str, Any]]) -> None:
@@ -569,11 +622,35 @@ def _flag_title_differentiation(items: list[dict[str, Any]]) -> None:
         collides_sibling = bool(prop_key) and any(
             _dup_title_key(s.get("proposed_seo_title")) == prop_key for s in siblings
         )
-        if (codes & _DUP_TITLE_ISSUE_CODES or siblings) and (echoes_current or collides_sibling):
+        # An echo is never a fix, whatever category produced it. This used to be
+        # gated behind `codes & _DUP_TITLE_ISSUE_CODES or siblings`, so a
+        # proposal identical to the live title sailed through for every category
+        # EXCEPT the duplicate ones -- 7 of the 23 items in the 2026-11-04
+        # weak_title batch (`seo_title_matches_raw_title` / `weak_generic_seo_title`)
+        # were sent to the operator as fixes with `apply_seo_title: True`.
+        # (`collides_sibling` can only be true when `siblings` is non-empty, so
+        # dropping the gate changes nothing for the collision branch.)
+        if echoes_current or collides_sibling:
             item["title_needs_differentiation"] = True
             item["apply_seo_title"] = False  # fail closed: never auto-apply a non-fix
         if siblings and item.get("kind") == "page":
             item["consolidation_candidate"] = True
+
+
+def _withhold_no_op_descriptions(items: list[dict[str, Any]]) -> None:
+    """The title path has had an echo guard since Surface 60; the description
+    path never did. `_item_is_applyable` re-derived the right answer for the
+    COUNT, but the applier reads `apply_seo_description` off the item, so a
+    description identical to the live one would still be written. Persist the
+    decision on the item instead of re-deriving it in one reader."""
+    for item in items:
+        if not item.get("apply_seo_description", True):
+            continue
+        if _normalize_text(item.get("proposed_seo_description")) == _normalize_text(
+            item.get("current_seo_description")
+        ):
+            item["description_is_no_op"] = True
+            item["apply_seo_description"] = False  # fail closed: never write an unchanged value
 
 
 def _item_is_applyable(item: dict[str, Any]) -> bool:
@@ -590,6 +667,21 @@ def _item_is_applyable(item: dict[str, Any]) -> bool:
     if apply_description and _normalize_text(item.get("proposed_seo_description")) == _normalize_text(item.get("current_seo_description")):
         apply_description = False
     return apply_title or apply_description
+
+
+def _template_fallback_counts(items: list[dict[str, Any]]) -> dict[str, int]:
+    """Counted over the fields that would actually be WRITTEN -- a template
+    title on an item whose title is withheld is not a fallback that matters."""
+    counts = {"title": 0, "description": 0, "applyable_items": 0}
+    for item in items:
+        if not isinstance(item, dict) or not _item_is_applyable(item):
+            continue
+        counts["applyable_items"] += 1
+        if item.get("apply_seo_title") and item.get("title_source") == "template":
+            counts["title"] += 1
+        if item.get("apply_seo_description") and item.get("description_source") == "template":
+            counts["description"] += 1
+    return counts
 
 
 def _applyable_item_count(items: list[dict[str, Any]]) -> int:
@@ -720,8 +812,101 @@ def _next_issue_category(after_category: str | None, audit_payload: dict[str, An
     return None
 
 
-def _generate_proposals(resources: list[dict[str, Any]], *, demand_context: Any = None) -> list[dict[str, Any]]:
-    openai_json, _ = _ensure_duckagent_imports()
+class SeoProposalGenerationRefused(RuntimeError):
+    """Raised INSTEAD of calling the model, so no test can reach the API.
+
+    `pytest` has mailed the operator and billed real tokens before
+    ([[feedback_test_runs_reach_the_outside_world]]); a flag only helps if the
+    sender itself reads it, so this is checked in the generator rather than left
+    to each test to patch. Wiring the generator into the category batch on
+    2026-11-19 made `test_shopify_seo_no_op_batch.py` -- which patches the state
+    paths but not the generator -- start billing gpt tokens on every run.
+    """
+
+
+def _llm_generation_blocked() -> str | None:
+    """Why we must not call the model right now, or None."""
+    if os.environ.get("DUCK_TEST_MODE") == "1":
+        return "DUCK_TEST_MODE=1"
+    return None
+
+
+# One request per <=8 resources. Sized so the reasoning a model spends on a
+# call cannot crowd out the answer, and so a single failure costs one chunk.
+_PROPOSAL_CHUNK_SIZE = 8
+_PROPOSAL_TOKENS_BASE = 2000
+_PROPOSAL_TOKENS_PER_RESOURCE = 500
+
+
+def _chunk_prompt_resources(
+    prompt_resources: list[dict[str, Any]],
+    dup_groups: dict[str, list[str]],
+) -> list[list[dict[str, Any]]]:
+    """Split into request-sized chunks, keeping near-duplicate SIBLINGS in the
+    same chunk. Splitting a duplicate group across two calls would make the
+    differentiation instruction unsatisfiable -- neither call can see the title
+    it has to differ from."""
+    group_of: dict[str, str] = {}
+    for key, ids in dup_groups.items():
+        for rid in ids:
+            group_of[str(rid)] = key
+    # Siblings first, in group order, so chunking keeps them adjacent.
+    ordered = sorted(
+        prompt_resources,
+        key=lambda entry: (group_of.get(str(entry.get("id") or "")) or "~", str(entry.get("id") or "")),
+    )
+    chunks: list[list[dict[str, Any]]] = []
+    for entry in ordered:
+        if chunks and len(chunks[-1]) < _PROPOSAL_CHUNK_SIZE:
+            chunks[-1].append(entry)
+        else:
+            chunks.append([entry])
+    return chunks
+
+
+def _generate_proposals_fail_soft(
+    resources: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Generate proposals, degrading to the deterministic template on failure --
+    but say so out loud and return the reason so the payload can carry it. The
+    template is a plausible-looking answer, so a swallowed error here reads
+    downstream exactly like a successful run."""
+    if not resources:
+        return [], None
+    try:
+        return _generate_proposals(resources), None
+    except SeoProposalGenerationRefused as exc:
+        # Expected under test; still recorded, because a production run that
+        # somehow refused would otherwise be indistinguishable from a good one.
+        return [], f"refused: {exc}"
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        print(
+            f"[shopify-seo] WARNING proposal generation failed for {len(resources)} "
+            f"resource(s); falling back to the deterministic template for ALL of "
+            f"them -- {reason}",
+            file=sys.stderr,
+        )
+        return [], reason
+
+
+def _generate_proposals(
+    resources: list[dict[str, Any]],
+    *,
+    demand_context: Any = None,
+    openai_json: Any = None,
+) -> list[dict[str, Any]]:
+    """Ask the model for replacement SEO metadata.
+
+    `openai_json` is injectable so a test can exercise the PROMPT without any
+    possibility of a real call; when it is not injected we are about to reach
+    the network, which is where the test-mode refusal belongs.
+    """
+    if openai_json is None:
+        blocked = _llm_generation_blocked()
+        if blocked:
+            raise SeoProposalGenerationRefused(blocked)
+        openai_json, _ = _ensure_duckagent_imports()
     # Surface 40: enrich the prompt with REAL first-party demand (GSC queries +
     # GA4 verdict). Fail-soft — if the reader or state is unavailable, context is
     # empty and the prompt is identical to the pre-Surface-40 behavior.
@@ -797,52 +982,107 @@ def _generate_proposals(resources: list[dict[str, Any]], *, demand_context: Any 
             "current_seo_title — never echo the current title. Groups (id (current title)):\n  "
             + "\n  ".join(group_lines) + "\n"
         )
-    user = (
+    user_prefix = (
         "Create proposed replacement SEO for each Shopify resource below.\n"
         "Rules:\n"
         "- Return one item per input id.\n"
         "- seo_title must be 45-70 characters.\n"
         "- seo_description must be 150-160 characters.\n"
+        "- NEVER echo current_seo_title or current_seo_description back. Every "
+        "resource below is listed BECAUSE its current value is weak; returning it "
+        "unchanged is not an answer. If you cannot improve one, still rewrite it.\n"
+        "- Do not end a title or description on a separator (| - , &) or on a "
+        "connective word (and, or, the, for, with, at). Write it short enough to "
+        "fit the range without being cut.\n"
         "- Do not invent pricing, shipping promises, or trademark claims.\n"
         "- Keep titles/descriptions plain text only.\n"
         "- rationale should be 4-18 words.\n"
         + dedup_rule
         + demand_rules
-        + f"\nRESOURCES_JSON:\n{json.dumps(prompt_resources, ensure_ascii=False)}\n"
-        + demand_block
-        + '\nReturn JSON as {"items":[{"id":"...","seo_title":"...","seo_description":"...","rationale":"..."}]}.'
     )
-    response = openai_json(system, user, max_tokens=2200, temperature=0.3, model="gpt-4o-mini")
-    items = response.get("items") if isinstance(response.get("items"), list) else []
+    user_suffix = (
+        '\nReturn JSON as {"items":[{"id":"...","seo_title":"...","seo_description":"...","rationale":"..."}]}.'
+    )
+
+    by_id: dict[str, dict[str, Any]] = {}
+    chunks = _chunk_prompt_resources(prompt_resources, dup_groups)
+    failures: list[str] = []
+    for chunk in chunks:
+        user = (
+            user_prefix
+            + f"\nRESOURCES_JSON:\n{json.dumps(chunk, ensure_ascii=False)}\n"
+            + demand_block
+            + user_suffix
+        )
+        # Generous per-call ceiling: the reasoning tokens are billed here too, so
+        # a limit sized for the visible answer alone comes back empty at
+        # finish_reason=length (observed 2026-11-19 with 23 resources in one call).
+        max_tokens = _PROPOSAL_TOKENS_BASE + _PROPOSAL_TOKENS_PER_RESOURCE * len(chunk)
+        try:
+            response = openai_json(system, user, max_tokens=max_tokens, temperature=0.3, role="seo_meta")
+        except Exception as exc:
+            # One bad chunk must not cost the whole batch; the rest still get
+            # real proposals and the loss is reported rather than absorbed.
+            failures.append(f"{len(chunk)} resource(s): {type(exc).__name__}: {exc}")
+            continue
+        items = response.get("items") if isinstance(response.get("items"), list) else []
+        for item in items:
+            if isinstance(item, dict) and item.get("id"):
+                by_id[str(item["id"])] = item
+    if failures:
+        print(
+            f"[shopify-seo] WARNING {len(failures)} of {len(chunks)} proposal chunk(s) failed; "
+            f"those resources fall back to the deterministic template -- "
+            + " | ".join(failures),
+            file=sys.stderr,
+        )
     proposals: list[dict[str, Any]] = []
-    by_id = {str(item.get("id") or ""): item for item in items if isinstance(item, dict)}
     for resource in resources:
         rid = str(resource.get("id") or "")
         proposal = by_id.get(rid) or {}
-        seo_title = _trim_to_range(
-            proposal.get("seo_title") or resource.get("title") or "",
-            min_len=45,
-            max_len=70,
-            extras=["MyJeepDuck", "gift ideas"],
-        )
-        seo_description = _trim_to_range(
-            proposal.get("seo_description") or f"Shop {resource.get('title') or 'this MyJeepDuck favorite'} at MyJeepDuck.",
-            min_len=150,
-            max_len=160,
-            extras=[
-                "Explore collectible ducks, custom gifts, and quick-ship favorites from MyJeepDuck.",
-                "Built for ducking fans, gift shoppers, and standout dashboard displays.",
-            ],
-        )
+        # A resource the model did not answer for goes straight to the
+        # deterministic per-kind template. It used to pad the RAW title with
+        # filler ("... collectible duck gift idea"), which passes the length
+        # gate, so a chunk the model never answered produced junk that was
+        # neither a proposal nor a template.
+        if proposal.get("seo_title"):
+            seo_title = _trim_to_range(
+                str(proposal["seo_title"]),
+                min_len=45,
+                max_len=70,
+                extras=["MyJeepDuck", "gift ideas"],
+            )
+            title_source = "llm"
+        else:
+            seo_title = _default_title_for_resource(resource)
+            title_source = "template"
+        if proposal.get("seo_description"):
+            seo_description = _trim_to_range(
+                str(proposal["seo_description"]),
+                min_len=150,
+                max_len=160,
+                extras=[
+                    "Explore collectible ducks, custom gifts, and quick-ship favorites from MyJeepDuck.",
+                    "Built for ducking fans, gift shoppers, and standout dashboard displays.",
+                ],
+            )
+            description_source = "llm"
+        else:
+            seo_description = _default_description_for_resource(resource)
+            description_source = "template"
         if _title_needs_fallback(seo_title):
             seo_title = _default_title_for_resource(resource)
+            title_source = "template"
         if _description_needs_fallback(seo_description):
             seo_description = _default_description_for_resource(resource)
+            description_source = "template"
         proposals.append(
             {
                 "id": rid,
                 "seo_title": seo_title,
                 "seo_description": seo_description,
+                "title_source": title_source,
+                "description_source": description_source,
                 "rationale": _normalize_text(proposal.get("rationale") or "Improves clarity, missing metadata coverage, and click appeal."),
             }
         )
@@ -899,7 +1139,10 @@ def build_shopify_seo_review(
     if not isinstance(audit_payload, dict) or not audit_payload:
         audit_payload = build_shopify_seo_audit()
 
+    proposal_error: str | None = None
     if review_type == "missing_only_bulk":
+        # A genuinely ABSENT field has no weak copy to improve on, so the
+        # deterministic template is an honest answer here.
         selected = _select_missing_only_candidates(audit_payload, limit=limit if limit > 0 else None)
         proposals: list[dict[str, Any]] = []
     elif review_type == "issue_category_batch":
@@ -908,7 +1151,7 @@ def build_shopify_seo_review(
             issue_category=str(issue_category or ""),
             limit=limit if limit > 0 else None,
         )
-        proposals = []
+        proposals, proposal_error = _generate_proposals_fail_soft(selected)
     else:
         selected = _select_review_candidates(audit_payload, limit=limit)
         proposals = _generate_proposals(selected)
@@ -948,10 +1191,14 @@ def build_shopify_seo_review(
             if apply_seo_description
             else resource.get("seo_description") or ""
         )
+        title_source = str(proposal.get("title_source") or ("template" if not proposal else "llm"))
+        description_source = str(proposal.get("description_source") or ("template" if not proposal else "llm"))
         if apply_seo_title and _title_needs_fallback(proposed_title):
             proposed_title = _default_title_for_resource(resource)
+            title_source = "template"
         if apply_seo_description and _description_needs_fallback(proposed_description):
             proposed_description = _default_description_for_resource(resource)
+            description_source = "template"
         items.append(
             {
                 "id": str(resource.get("id") or ""),
@@ -966,11 +1213,14 @@ def build_shopify_seo_review(
                 "rationale": _normalize_text(proposal.get("rationale") or _default_rationale_for_resource(resource)),
                 "apply_seo_title": apply_seo_title,
                 "apply_seo_description": apply_seo_description,
+                "title_source": title_source,
+                "description_source": description_source,
             }
         )
 
     _flag_title_differentiation(items)  # Surface 60: fail closed on undifferentiated near-dup titles
     _flag_low_quality_titles(items)     # Surface 61: fail closed on low-quality proposed titles
+    _withhold_no_op_descriptions(items)  # Surface 165: a description equal to the live one is not a fix
     applyable = _applyable_item_count(items)
 
     preview_limit = 15 if review_type == "missing_only_bulk" and len(items) > 15 else 0
@@ -996,6 +1246,13 @@ def build_shopify_seo_review(
         ),
         "items": items,
         "applyable_item_count": applyable,
+        # How many of the fields we would actually WRITE came from the
+        # deterministic template rather than the model. The template is a
+        # plausible answer to "this copy is too generic" and is therefore the
+        # one fallback that must never be silent: before 2026-11-19 every
+        # category batch was 100% template and nothing said so.
+        "template_fallback_counts": _template_fallback_counts(items),
+        "proposal_generation_error": proposal_error,
         # Surface 82e: asking the operator to approve a batch in which every
         # field was withheld parks the whole lane on a reply that could only
         # ever be a lie. `near_duplicate_title` does this by construction --

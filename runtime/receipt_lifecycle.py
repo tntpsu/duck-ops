@@ -181,6 +181,15 @@ POLICY: dict[tuple[str, str], Policy] = {
     ("weekly", "draft_article_ready"): _pending(30, "same shape as blog"),
     ("thursday", "batch_ready"): _pending(14, "weekly Thursday lane; cadence x2"),
     ("thursday", "candidate_pool_ready"): _pending(14, "weekly Thursday lane"),
+    # Appeared in the live store 2026-11-19T09:21 (today's This-or-That email)
+    # and was caught by test_no_live_receipt_falls_into_an_undeclared_pair.
+    # PENDING on the same 14d as its sibling states: the post slot is same-day,
+    # but grading at one day would fire every week the operator simply has not
+    # answered yet, and this lane has FIVE receipts already dismissed with
+    # `slot_passed` -- an unanswered choice going stale is the real failure, so
+    # it needs a window, just not a hair trigger.
+    ("thursday", "awaiting_review"): _pending(
+        14, "operator A/B choice on one Thursday post; weekly cadence x2"),
     ("gtdf", "batch_ready"): _pending(14, "weekly lane; cadence x2"),
 
     # Appeared in the live store 2026-11-19T00:23 and was caught by
