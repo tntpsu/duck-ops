@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import seo_rules_config as _seo_rules_config
 from email_cadence_gate import log_cadence_decision, should_send_email
 from shopify_seo_audit import build_shopify_seo_audit
 
@@ -553,10 +554,11 @@ def _seo_title_quality(title: str, *, subject: str = "", min_len: int = 45, max_
 # rather than silently shipping/falling-back. Excludes the heuristic
 # `subject_missing` (kept eval-only, advisory) to avoid noisy false-positives on
 # legitimately reworded titles; keeps the clear-cut, high-precision failures.
-_LIVE_QUALITY_ISSUE_CODES = {
-    "too_short", "too_long", "placeholder", "duck_stuffing", "brand_repeat",
-    "multi_separator", "dangling_tail",
-}
+# Derived from config/seo_rules.json, not written here. This set and the eval
+# script's idea of which codes are fatal used to be maintained separately, and
+# they disagreed about `subject_missing`: the eval gated on a code production
+# ships happily, so its gate could never pass and never had.
+_LIVE_QUALITY_ISSUE_CODES = set(_seo_rules_config.blocking_title_quality_codes())
 
 
 def _flag_low_quality_titles(items: list[dict[str, Any]]) -> None:
@@ -783,7 +785,24 @@ def _select_issue_category_candidates(
     *,
     issue_category: str,
     limit: int | None = None,
+    ledger: dict[str, Any] | None = None,
+    consult_ledger: bool = True,
+    resweep: bool = False,
 ) -> list[dict[str, Any]]:
+    """Resources in one issue category that still need work.
+
+    The audit codes say what is WRONG. The ledger says what this lane has
+    already written, under which rules, and whether that copy is still live --
+    and until 2026-11-19 nothing in this path consulted it, so the lane
+    re-proposed the same categories every time the round-robin cursor wrapped,
+    about every nine days. 176 writeback receipts recorded exactly what had
+    been applied and none of them were ever read here.
+
+    A resource the lane already rewrote under the CURRENT rules, whose value is
+    still live, and which the auditor still flags, is withheld: regenerating it
+    with the same rules and the same generator would produce the same copy. It
+    is surfaced as a rules problem instead (`issue_persists`).
+    """
     spec = _category_spec(issue_category)
     if not spec:
         return []
@@ -796,10 +815,69 @@ def _select_issue_category_candidates(
         codes = _issue_codes(resource)
         if codes & issue_codes:
             selected.append(dict(resource))
+
+    if consult_ledger:
+        selected = _withhold_ledger_current(selected, ledger=ledger, resweep=resweep)
+
     selected.sort(key=_priority_sort_key)
     if limit is None or limit <= 0:
         return selected
     return selected[:limit]
+
+
+def _withhold_ledger_current(
+    resources: list[dict[str, Any]],
+    *,
+    ledger: dict[str, Any] | None = None,
+    resweep: bool = False,
+) -> list[dict[str, Any]]:
+    """Drop resources the ledger says are already done, annotate the rest.
+
+    Fails OPEN: if the ledger cannot be read, every candidate is kept and the
+    reason is stamped on each one. Failing closed would silently empty the
+    queue, and an empty queue looks exactly like a healthy one
+    ([[feedback_swallowed_errors_lie]]).
+    """
+    try:
+        import seo_copy_ledger as _ledger_mod
+    except Exception as exc:  # pragma: no cover - import guard
+        for resource in resources:
+            resource["ledger_unavailable"] = f"{type(exc).__name__}: {exc}"
+        return resources
+
+    try:
+        book = ledger if ledger is not None else _ledger_mod.load_ledger()
+    except Exception as exc:
+        for resource in resources:
+            resource["ledger_unavailable"] = f"{type(exc).__name__}: {exc}"
+        return resources
+
+    if book.get("load_error"):
+        for resource in resources:
+            resource["ledger_unavailable"] = "ledger file unreadable"
+        return resources
+
+    rows = book.get("rows") or {}
+    kept: list[dict[str, Any]] = []
+    for resource in resources:
+        resource_id = resource.get("resource_id") or resource.get("id")
+        if not resource_id:
+            kept.append(resource)
+            continue
+        verdict = _ledger_mod.classify_resource(
+            rows.get(_ledger_mod.row_key("shopify", resource_id)),
+            live_values={
+                "seo_title": resource.get("seo_title"),
+                "seo_description": resource.get("seo_description"),
+            },
+            issue_codes=sorted(_issue_codes(resource)),
+            resweep=resweep,
+        )
+        resource["ledger_trigger"] = verdict.get("trigger") or ""
+        resource["ledger_reason"] = verdict.get("reason") or ""
+        if verdict.get("needs_work"):
+            kept.append(resource)
+    return kept
 
 
 def _next_issue_category(after_category: str | None, audit_payload: dict[str, Any]) -> str | None:

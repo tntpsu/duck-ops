@@ -290,6 +290,28 @@ def _redirect_llm_call_log(tmp_path, monkeypatch):
         tmp_receipts.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(_wc, "WORKFLOW_RECEIPT_STATE_DIR", tmp_receipts)
 
+    # 2026-11-19: seo_copy_ledger.SEO_COPY_LEDGER_PATH is a new module-level
+    # production-state path, so it ships with all three isolation layers in the
+    # same commit (CLAUDE.md "Cross-repo state writes"): this fixture, the
+    # DUCK_TEST_MODE frozen-path refusal in save_ledger, and the post-suite
+    # pollution audit in test_no_test_pollution_in_seo_copy_ledger.py. The
+    # ledger decides which resources the SEO lane proposes, so a test row
+    # landing in production would silently suppress real work -- an empty queue
+    # looks exactly like a healthy one.
+    try:
+        import seo_copy_ledger as _ledger
+    except ImportError:
+        pass
+    else:
+        tmp_ledger_dir = tmp_path / "seo_copy_ledger"
+        tmp_ledger_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(
+            _ledger, "SEO_COPY_LEDGER_PATH", tmp_ledger_dir / "seo_copy_ledger.json"
+        )
+        monkeypatch.setattr(
+            _ledger, "SEO_WRITEBACK_RECEIPTS_DIR", tmp_ledger_dir / "receipts"
+        )
+
     # 2026-06-08: review_reply_executor.EXECUTION_QUEUE_STATE_PATH
     # was NOT isolated, so any test calling queue_review_reply or
     # save_queue_state wrote to the production execution queue.

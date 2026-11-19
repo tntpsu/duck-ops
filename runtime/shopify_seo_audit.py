@@ -11,9 +11,25 @@ from typing import Any
 
 
 DUCK_OPS_ROOT = Path(__file__).resolve().parents[1]
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 DUCK_AGENT_ROOT = DUCK_OPS_ROOT.parent / "duckAgent"
 DUCK_AGENT_VENV_PY = DUCK_AGENT_ROOT / ".venv" / "bin" / "python3"
 STATE_PATH = DUCK_OPS_ROOT / "state" / "shopify_seo_audit.json"
+
+# Length bands and issue severities come from the shared versioned config, not
+# from literals here. This module used to carry 35/70 for titles and 70/165 for
+# descriptions while the generator in shopify_seo_review.py aimed at 45/70 and
+# 150/160, and the newduck builder in duckAgent aimed at 70-80 -- a window
+# where 9 of 11 possible lengths were rejects of THIS file.
+from seo_rules_config import (  # noqa: E402
+    accept_band,
+    issue_severity,
+    seo_rules_version,
+)
+
+TITLE_ACCEPT_MIN, TITLE_ACCEPT_MAX = accept_band("seo_title")
+DESCRIPTION_ACCEPT_MIN, DESCRIPTION_ACCEPT_MAX = accept_band("seo_description")
 OUTPUT_MD_PATH = DUCK_OPS_ROOT / "output" / "operator" / "shopify_seo_audit.md"
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -341,16 +357,16 @@ def _issues_for_resource(kind: str, node: dict[str, Any]) -> list[dict[str, Any]
     issues: list[dict[str, Any]] = []
 
     if not has_explicit_title:
-        issues.append({"code": "missing_seo_title", "severity": "high", "message": "Missing SEO title."})
-    elif len(seo_title) < 35:
-        issues.append({"code": "short_seo_title", "severity": "medium", "message": f"SEO title is short ({len(seo_title)} chars)."})
-    elif len(seo_title) > 70:
-        issues.append({"code": "long_seo_title", "severity": "medium", "message": f"SEO title is long ({len(seo_title)} chars)."})
+        issues.append({"code": "missing_seo_title", "severity": issue_severity("missing_seo_title"), "message": "Missing SEO title."})
+    elif len(seo_title) < TITLE_ACCEPT_MIN:
+        issues.append({"code": "short_seo_title", "severity": issue_severity("short_seo_title"), "message": f"SEO title is short ({len(seo_title)} chars, accept {TITLE_ACCEPT_MIN}-{TITLE_ACCEPT_MAX})."})
+    elif len(seo_title) > TITLE_ACCEPT_MAX:
+        issues.append({"code": "long_seo_title", "severity": issue_severity("long_seo_title"), "message": f"SEO title is long ({len(seo_title)} chars, accept {TITLE_ACCEPT_MIN}-{TITLE_ACCEPT_MAX})."})
     elif _title_matches_raw_title(seo_title, raw_title):
         issues.append(
             {
                 "code": "seo_title_matches_raw_title",
-                "severity": "medium",
+                "severity": issue_severity("seo_title_matches_raw_title"),
                 "message": "SEO title is too close to the raw resource title.",
             }
         )
@@ -358,27 +374,27 @@ def _issues_for_resource(kind: str, node: dict[str, Any]) -> list[dict[str, Any]
         issues.append(
             {
                 "code": "weak_generic_seo_title",
-                "severity": "medium",
+                "severity": issue_severity("weak_generic_seo_title"),
                 "message": "SEO title is too generic and does not add enough search intent.",
             }
         )
 
     if not has_explicit_description:
-        issues.append({"code": "missing_seo_description", "severity": "high", "message": "Missing SEO description."})
-    elif len(seo_description) < 70:
+        issues.append({"code": "missing_seo_description", "severity": issue_severity("missing_seo_description"), "message": "Missing SEO description."})
+    elif len(seo_description) < DESCRIPTION_ACCEPT_MIN:
         issues.append(
             {
                 "code": "short_seo_description",
-                "severity": "medium",
-                "message": f"SEO description is short ({len(seo_description)} chars).",
+                "severity": issue_severity("short_seo_description"),
+                "message": f"SEO description is short ({len(seo_description)} chars, accept {DESCRIPTION_ACCEPT_MIN}-{DESCRIPTION_ACCEPT_MAX}).",
             }
         )
-    elif len(seo_description) > 165:
+    elif len(seo_description) > DESCRIPTION_ACCEPT_MAX:
         issues.append(
             {
                 "code": "long_seo_description",
-                "severity": "medium",
-                "message": f"SEO description is long ({len(seo_description)} chars).",
+                "severity": issue_severity("long_seo_description"),
+                "message": f"SEO description is long ({len(seo_description)} chars, accept {DESCRIPTION_ACCEPT_MIN}-{DESCRIPTION_ACCEPT_MAX}).",
             }
         )
     else:
@@ -386,7 +402,7 @@ def _issues_for_resource(kind: str, node: dict[str, Any]) -> list[dict[str, Any]
             issues.append(
                 {
                     "code": "low_value_seo_copy",
-                    "severity": "medium",
+                    "severity": issue_severity("low_value_seo_copy"),
                     "message": "SEO description reads like generic site copy instead of a strong resource-specific summary.",
                 }
             )
@@ -394,7 +410,7 @@ def _issues_for_resource(kind: str, node: dict[str, Any]) -> list[dict[str, Any]
             issues.append(
                 {
                     "code": "weak_generic_seo_description",
-                    "severity": "medium",
+                    "severity": issue_severity("weak_generic_seo_description"),
                     "message": "SEO description is too generic and does not describe this resource specifically enough.",
                 }
             )
@@ -425,7 +441,7 @@ def _decorate_duplicates(resources: list[dict[str, Any]]) -> None:
         resource["issues"].append(
             {
                 "code": "duplicate_seo_title",
-                "severity": "medium",
+                "severity": issue_severity("duplicate_seo_title"),
                 "message": f"SEO title duplicates {len(duplicates)} other resource(s).",
                 "duplicates": duplicates,
             }
@@ -445,7 +461,7 @@ def _decorate_duplicates(resources: list[dict[str, Any]]) -> None:
         resource["issues"].append(
             {
                 "code": "near_duplicate_seo_title",
-                "severity": "medium",
+                "severity": issue_severity("near_duplicate_seo_title"),
                 "message": f"SEO title is near-duplicate of {len(near_duplicates)} other resource(s).",
                 "duplicates": near_duplicates,
             }

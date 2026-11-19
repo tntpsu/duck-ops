@@ -10151,3 +10151,129 @@ dir (never production, never emailed). **STATUS: SHIPPED 2026-11-19** —
   same exposure — the AST-enumeration approach from
   [[feedback_test_runs_reach_the_outside_world]] applied to SMTP is the shape of
   the fix, and it has not been applied to OpenAI.
+
+## Surface 166 — three rule sets for two fields, and the lane that had no memory (2026-11-19, operator: "Go on all three" + "the new duck flow should utilize our rules so we get things right in the first place")
+
+Two defects, one cause: nothing in the SEO stack had a single definition of
+either **what good copy is** or **what has already been written**.
+
+**1. The same two fields carried three different bands.**
+
+| Where | Shopify SEO title | Shopify SEO description |
+|---|---|---|
+| `duckAgent/helpers/seo_rules.py` (newduck writes) | 70–80 | 150–160 |
+| `runtime/shopify_seo_review.py` (the generator) | 45–70 | 150–160 |
+| `runtime/shopify_seo_audit.py` (the auditor grades) | 35–70 accept | 70–165 accept |
+
+The newduck builder aimed at a window where **9 of its 11 possible title
+lengths were rejects of the auditor two repos over**, so new listings were born
+needing repair. The fingerprint was in the live store the whole time and nobody
+read it as one: **20 product titles sit at exactly 70 characters**, pinned
+against a ceiling their own producer was trying to exceed. No test anywhere
+compared the two numbers, because no test could — they were literals in
+different repos.
+
+**2. Selection had no per-resource memory at all.** `_select_issue_category_candidates`
+filtered purely on today's audit codes, and a round-robin cursor walked nine
+categories one batch per day, wrapping about every nine days and re-proposing
+the same categories. **176 writeback receipts** recorded exactly what had been
+applied and verified; not one was ever read in the selection path.
+
+**The fix:** `duckAgent/config/seo_rules.json` (`seo_rules_version`) as the one
+definition, read by all four surfaces, plus `state/seo_copy_ledger.json` as a
+**derived index over the receipts** — not a second record, so the two cannot
+disagree about what was applied.
+
+The load-bearing invariant is **`accept ⊇ generate`** per field. `generate` is
+what a producer aims for; `accept` is what the auditor tolerates. Collapsing
+them into one number is what makes a lane re-flag its own output — the risk the
+Surface 60 note recorded as "be careful" is now a structural guarantee with a
+test. `accept` values were set to the live auditor behaviour, so adopting the
+config changed nothing: **0 band-code differences across all 355 live resources,
+and every recorded severity identical.**
+
+| | Happy | Bands disagree across repos | No ledger row | Row under old rules | Row under current rules | Operator edited in admin | Config missing/corrupt |
+|---|---|---|---|---|---|---|---|
+| `generate ⊆ accept`, every platform × field | `unit:21 subtests` | `test_every_field_in_every_platform` | — | — | — | — | — |
+| newduck band vs auditor accept (cross-repo) | `test_the_newduck_title_band_cannot_produce_an_auditor_reject` | same | — | — | — | — | `skip_without_siblings` |
+| Auditor reads the config | `test_the_bands_it_enforces_come_from_the_config` | `test_no_length_literal_survives_in_the_issue_function` (AST) | — | — | — | — | `test_a_missing_file_raises` |
+| Issue-code vocabulary declared | `test_every_issue_code_the_auditor_emits_is_declared` | `test_every_declared_code_is_actually_emitted` | — | — | — | — | — |
+| Generator quality vocabulary | `test_the_live_withhold_set_is_the_configs_blocking_set` | `test_the_advisory_code_is_not_in_the_withhold_set` | — | — | — | — | — |
+| Work is gated by the AUDITOR, not the ledger | `test_a_flagged_resource_with_no_row_is_work` | — | `test_a_clean_resource_with_no_row_is_not_work` | `test_a_clean_resource_with_a_stale_row_is_not_work_by_default` | — | — | — |
+| Rework suppressed | — | — | — | `test_a_resource_written_under_older_rules_is_work_again` | `test_a_resource_written_under_current_rules_and_still_flagged_is_withheld` | — | — |
+| Hash keeps the ledger honest | `test_whitespace_only_change_is_not_drift` | `test_a_one_word_change_is_drift` | — | — | — | `test_an_admin_edit_re_enters_the_queue` | — |
+| Drift the auditor accepts | — | — | — | — | — | `test_drift_the_auditor_is_content_with_is_an_observation_not_work` | — |
+| Deliberate re-sweep is opt-in | `test_resweep_pulls_in_clean_resources_below_the_current_version` | — | — | — | `test_resweep_does_not_pull_in_resources_already_at_the_current_version` | — | — |
+| Backfill from receipts | `test_a_verified_receipt_becomes_a_row` | `test_the_row_hashes_the_OBSERVED_value_not_the_proposed_one` | — | `test_a_receipt_with_no_version_reads_as_pre_config` | `test_a_receipt_carrying_a_version_keeps_it` | — | `test_an_unverified_receipt_does_not` |
+| Selector consults the ledger | `test_a_resource_written_under_current_rules_leaves_the_queue` | `test_the_withheld_reason_is_recorded_on_the_resource` | — | — | — | — | `test_it_fails_OPEN_when_the_ledger_cannot_be_read` |
+| Ledger isolation (3 layers) | `conftest` autouse, BOTH repos | `test_the_source_guard_refuses_a_production_write_under_test_mode` | — | — | — | — | `test_no_row_carries_a_test_marker` |
+| Etsy title reaches the floor | `test_without_keywords_the_config_fillers_reach_the_floor` | `test_two_listings_do_not_get_the_same_filler_tail` | — | — | — | — | `test_it_warns_when_even_the_fillers_cannot_fill_the_window` |
+
+**By dimension:** unit + AST guards + cross-repo contract tests, no LLM in the
+suite; one replay of the auditor's issue function over the 355-resource live
+snapshot to prove behaviour was preserved; one end-to-end classification of the
+same snapshot against the receipt-backfilled ledger.
+**STATUS: SHIPPED 2026-11-19** — `duckAgent/config/seo_rules.json`,
+`duckAgent/helpers/seo_rules.py`, `duckAgent/helpers/shopify_seo_writeback_helper.py`,
+`runtime/seo_rules_config.py`, `runtime/seo_copy_ledger.py`,
+`runtime/shopify_seo_audit.py`, `runtime/shopify_seo_review.py`,
+`tests/test_seo_rules_config.py` (17 tests / 21 subtests),
+`tests/test_seo_copy_ledger.py` (21 tests),
+`tests/test_no_test_pollution_in_seo_copy_ledger.py` (4 tests).
+
+**Measured on the live catalogue (355 resources, 176 receipts):**
+- Backfill: 175 of 176 receipts used (1 unverified, correctly skipped) → 156 rows.
+- Steady state: **90 resources need work, 265 cost nothing.** Those 90 are exactly
+  the resources the auditor flags — the ledger adds no work, it only removes
+  rework.
+- A deliberate `seo_rules_version` bump adds 68 (`resweep`), bounded and opt-in.
+- 22 resources drifted outside the lane while the auditor stays content →
+  reported as an observation for a hash refresh, never as silent work.
+- Etsy titles under a jeep-heavy keyword list went from **67–76 chars to 121–139**
+  against the operator's 120–140 policy.
+
+**A mistake this surface pins.** The first ledger implementation made "no ledger
+row" a trigger in its own right. Run against the live snapshot it classified
+**all 355 resources as needing work** — a catalogue-wide re-propose, the exact
+outcome the receipt backfill exists to prevent. The auditor decides whether
+there is anything to FIX; the ledger only decides whether we have already TRIED.
+Absence of a row is not a defect in the copy.
+`test_a_clean_resource_with_no_row_is_not_work` is that lesson.
+
+**A deliberate reversal, recorded because it overrides a documented decision.**
+`test_without_keywords_the_template_is_unchanged` asserted that "no keyword
+material is not a reason to invent filler." That held while the only way to
+come up short was an empty keyword list — but the banned-title-terms filter
+removes `jeep` and `rubber`, which is what this shop's keyword lists are
+richest in, so a FULL list could still be filtered down to a 67-character
+title. The fillers **rotate per listing** (keyed on the title, so a re-run does
+not churn published copy) because a fixed order would give the whole shop one
+tail — the identical-boilerplate-suffix defect that made the Surface 165
+weak_title batch worthless. Emptying `title_filler_phrases` in the config
+restores the old behaviour with no code change.
+
+**Open after this surface:**
+- **The round-robin cursor still exists.** The ledger now decides *whether* a
+  resource needs work, but `_next_issue_category` still decides *which category
+  goes today*, so `weak_title`'s 23 items still wait behind a nine-category
+  walk. Retiring the cursor in favour of batching straight from the ledger is
+  the remaining piece of the design and is NOT done.
+- **No OS card reads the ledger.** `rules_version_resweep` sitting at 68 forever
+  would mean a bump was started and abandoned, and nothing would say so. This
+  lane needs the two-card bracket (input: is the ledger fresh and the config
+  readable? output: are resweep rows actually draining?).
+- **Nothing rebuilds the ledger on a cadence.** `seo_copy_ledger.py --rebuild` is
+  manual. Until it runs after each apply, rows go stale and resources the lane
+  just fixed can be re-proposed — the very thing this surface closed.
+- `issue_persists` is computed and surfaced but has **no consumer**: a resource
+  the lane rewrote under current rules that the auditor still flags is withheld
+  and nothing reports the count. That is the signal that the rules or the
+  generator need changing, and it is currently invisible.
+- The auditor's `accept` bands are still the old wide ones. Tightening
+  `seo_title` to 45–70 would newly flag 14 resources and `seo_description` to
+  150–160 would flag 73 (measured). Both are deliberate operator decisions with
+  a measured cost, which is exactly what the config is for — but neither has
+  been made.
+- Etsy has **no auditor at all**, so `accept` equals `generate` there and nothing
+  grades Etsy copy after it ships. The filler rotation, the banned-term policy
+  and the 120–140 floor are enforced only at write time.
