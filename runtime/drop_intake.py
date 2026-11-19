@@ -164,10 +164,113 @@ def _refuse_test_mode_prod_write(path: Path) -> None:
             f"{which}."
         )
 
+#: The standalone lane. Every other lane answers "which weekly slot is this
+#: for?"; this one answers "when do you want it out?" and belongs to no slot.
+#: A drop naming it is rendered and scheduled by the express runner on the
+#: ten-minute `social_publish_due` cadence, within minutes of the operator's
+#: approval, instead of waiting for a weekly launchd job.
+EXPRESS_LANE = "express"
+
+#: `publish_at` value meaning "as soon as you can after I approve it".
+PUBLISH_AT_ASAP = "asap"
+#: Spellings of it we accept, because an agent writing "now" means asap and
+#: refusing it teaches nothing. The STORED value is always PUBLISH_AT_ASAP.
+_ASAP_WORDS = frozenset({"asap", "now", "immediately", "immediate"})
+
+#: A scheduled time must be at least this far out. Two independent floors
+#: land on the same number: Meta refuses a Facebook `scheduled_publish_time`
+#: under 10 minutes ahead, and our own IG queue is drained by a sidecar that
+#: fires every 10 minutes, so a nearer time could not be honoured by either
+#: platform. Anything under this should be sent as `asap` instead, which takes
+#: a different publish path entirely (immediate, not scheduled).
+MIN_PUBLISH_LEAD_SECONDS = 600
+#: And no further out than this. OURS, not a platform limit -- Facebook allows
+#: months. A post scheduled further ahead than we can remember approving sits
+#: in an untrusted channel with nobody able to recall what it says, and the
+#: ledger row that authorises it is a row nobody will read again.
+MAX_PUBLISH_LEAD_DAYS = 60
+
+#: The zone a wall-clock `publish_at` is read in. Same env var and same
+#: default as `scheduler_health.SCHEDULER_TZ`, and a test pins that the two
+#: agree -- "18:00" from an agent means 18:00 where the shop is, and resolving
+#: it in a different zone than every other schedule in this system would put
+#: a post out hours early twice a year.
+#:
+#: A naive stamp is localised by ATTACHING this zone, never by adding today's
+#: offset: ZoneInfo recomputes the offset from the resulting wall time, so a
+#: time on the far side of a DST change is still the hour the agent asked for
+#: ([[feedback_schedule_math_needs_a_zone_not_an_offset]]).
+def _publish_tz_name() -> str:
+    return os.environ.get("DUCK_SCHEDULER_TZ") or "America/New_York"
+
+
+def _publish_tz():
+    from zoneinfo import ZoneInfo
+    return ZoneInfo(_publish_tz_name())
+
+
+def resolve_publish_at(raw: Any, *, now: datetime | None = None) -> tuple[str, datetime | None]:
+    """Normalise a sidecar `publish_at` into ("asap", None) or ("at", dt).
+
+    Raises DropRefused with a message written for the agent that sent it.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        raise DropRefused(
+            f'"publish_at" is required on an "{EXPRESS_LANE}" drop: either '
+            f'"{PUBLISH_AT_ASAP}" or an ISO-8601 time like '
+            '"2026-11-22T18:00". An express post has no weekly slot to fall '
+            "back on, so without it there is no answer to when it goes out.")
+    text = raw.strip()
+    if text.lower() in _ASAP_WORDS:
+        return PUBLISH_AT_ASAP, None
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise DropRefused(
+            f'"publish_at": {text!r} is not "{PUBLISH_AT_ASAP}" and does not '
+            "parse as an ISO-8601 time. Use e.g. \"2026-11-22T18:00\" "
+            f"(read in {_publish_tz_name()}) or \"2026-11-22T18:00-05:00\"."
+        ) from None
+    if parsed.tzinfo is None:
+        # Wall clock in the shop's zone, with the offset computed for THAT
+        # date rather than today's.
+        parsed = parsed.replace(tzinfo=_publish_tz())
+
+    now = now or datetime.now().astimezone()
+    lead = (parsed - now).total_seconds()
+    if lead < 0:
+        raise DropRefused(
+            f'"publish_at": {parsed.isoformat()} is already in the past '
+            f"(it is now {now.isoformat()}). Send a future time, or "
+            f'"{PUBLISH_AT_ASAP}" to go out as soon as it is approved.')
+    if lead < MIN_PUBLISH_LEAD_SECONDS:
+        raise DropRefused(
+            f'"publish_at": {parsed.isoformat()} is only '
+            f"{lead / 60:.0f} minute(s) away. Neither platform can honour "
+            f"that -- Facebook refuses a scheduled time under "
+            f"{MIN_PUBLISH_LEAD_SECONDS // 60} minutes and our Instagram "
+            f"queue is drained every {MIN_PUBLISH_LEAD_SECONDS // 60} "
+            f'minutes. Use "{PUBLISH_AT_ASAP}" for something this soon; it '
+            "publishes immediately instead of scheduling.")
+    if lead > MAX_PUBLISH_LEAD_DAYS * 86400:
+        raise DropRefused(
+            f'"publish_at": {parsed.isoformat()} is {lead / 86400:.0f} days '
+            f"out; the limit is {MAX_PUBLISH_LEAD_DAYS}. That is our rule, "
+            "not the platform's: nobody will remember approving a post that "
+            "far ahead.")
+    return "at", parsed
+
+
 #: Lanes a drop may name, from the flow registry rather than a second list
 #: that drifts. Resolved lazily so importing this module never needs them.
 _FALLBACK_LANES = frozenset({
     "meme", "jeepfact", "thursday", "duckvideo", "gtdf", "reviews_story",
+    # Not a flow. `express` has no flows/express/steps.py and never will: it
+    # is a standalone post with no generation step, no review email of its
+    # own and no weekly slot, so it cannot come from the flow registry and
+    # has to be named here.
+    EXPRESS_LANE,
 })
 
 #: Extension -> the magic bytes a real file of that type starts with. The
@@ -237,7 +340,7 @@ class DropRecord:
 #: Adding a name here is a CLAIM about duckAgent's code, so
 #: tests/test_drop_lane_consumers.py checks it against the flows themselves
 #: and fails if the two drift apart in either direction.
-DROP_CONSUMING_LANES = frozenset({"meme", "jeepfact", "duckvideo"})
+DROP_CONSUMING_LANES = frozenset({"meme", "jeepfact", "duckvideo", EXPRESS_LANE})
 
 
 #: What each consuming lane actually wants, written for the agent that has to
@@ -257,6 +360,7 @@ LANE_DROP_SPECS: dict[str, dict[str, Any]] = {
         "publishes": ("the operator's approval is the LAST human step; the "
                       "Monday run schedules it to Facebook and Instagram "
                       "with no further review"),
+        "consumer": "flows/meme/steps.py",
     },
     "jeepfact": {
         "what": "Jeep Fact Wednesday — normally a 5-slide deck; a drop is one panel or clip.",
@@ -264,6 +368,7 @@ LANE_DROP_SPECS: dict[str, dict[str, Any]] = {
         "media_types": ("image", "video"),
         "publishes": ("the operator's approval is the LAST human step; the "
                       "Wednesday run schedules it with no further review"),
+        "consumer": "flows/jeepfact/steps.py",
     },
     "duckvideo": {
         "what": "The weekly duck reel.",
@@ -272,6 +377,18 @@ LANE_DROP_SPECS: dict[str, dict[str, Any]] = {
         "publishes": ("approval is NOT enough — the operator must also reply "
                       "to the review email before anything is posted, so a "
                       "drop here passes two human gates"),
+        "consumer": "flows/duckvideo/steps.py",
+    },
+    EXPRESS_LANE: {
+        "what": ("A standalone post. Belongs to no weekly slot and replaces "
+                 "nothing -- Meme Monday still runs as usual."),
+        "day": "whenever you ask: set \"publish_at\"",
+        "media_types": ("image", "video"),
+        "publishes": ("the operator's approval is the LAST human step. Within "
+                      "about ten minutes of it the post is rendered and then "
+                      "either published immediately (publish_at: asap) or "
+                      "scheduled for the time you asked for"),
+        "consumer": "helpers/express_drop_publisher.py",
     },
 }
 
@@ -534,8 +651,27 @@ def validate_drop(asset: Path, sidecar: Path, *,
             '"closing_line" needs "closing_at" -- the second card appears '
             "from that many seconds in, and 0 would stack it on the hook")
 
+    # WHEN it goes out. Only the express lane has this question to answer --
+    # every other lane's time comes from its own weekly window, so a
+    # `publish_at` there would be silently ignored, which is the exact shape
+    # of lie this contract keeps having to fix. Refused instead, naming the
+    # lane that does honour it.
+    publish_at_raw = meta.get("publish_at")
+    if lane == EXPRESS_LANE:
+        kind, when = resolve_publish_at(publish_at_raw)
+        publish_at = PUBLISH_AT_ASAP if kind == PUBLISH_AT_ASAP else when.isoformat()
+    else:
+        if publish_at_raw is not None:
+            raise DropRefused(
+                f'"publish_at" has no meaning on the "{lane}" lane -- that '
+                f"lane publishes on its own weekly day, so the time would be "
+                f'ignored. Use "lane": "{EXPRESS_LANE}" for a post that goes '
+                "out at a time you choose, or drop the field.")
+        publish_at = ""
+
     return {
         "lane": lane,
+        "publish_at": publish_at,
         "caption": cleaned.strip(),
         "closing_line": closing,
         "closing_at": float(closing_at),
@@ -796,8 +932,16 @@ def answer_feedback(file_name: str, answer: str, *,
 
 
 def set_approval(stem: str, approved: bool, *, by: str = "operator",
+                 publish_now: bool = False,
                  ledger_path: Path | None = None) -> dict:
-    """Record the operator's decision on one proposal."""
+    """Record the operator's decision on one proposal.
+
+    `publish_now` rewrites `publish_at` to `asap` in the same write. It is the
+    operator's override for a drop whose requested time has passed: the agent
+    cannot set it (nothing in the drop folder reaches this function), and
+    without it a missed window would cost a full round trip through Drive for
+    a post that is otherwise fine and still wanted.
+    """
     path = Path(ledger_path) if ledger_path is not None else DROP_PROPOSALS_PATH
     proposals = _read_ledger(path)
     entry = proposals.get(stem)
@@ -811,8 +955,47 @@ def set_approval(stem: str, approved: bool, *, by: str = "operator",
     entry["approval"] = "approved" if approved else "declined"
     entry["approved_at"] = datetime.now().astimezone().isoformat()
     entry["approved_by"] = by
+    if publish_now and approved:
+        if entry.get("lane") != EXPRESS_LANE:
+            raise DropRefused(
+                f"{stem} is on the \"{entry.get('lane')}\" lane, which "
+                f"publishes on its own weekly day. Only an "
+                f"\"{EXPRESS_LANE}\" drop can be released immediately.")
+        entry["publish_at"] = PUBLISH_AT_ASAP
+        entry["publish_at_overridden_by"] = by
     _write_ledger(path, proposals)
     return entry
+
+
+def publish_window(entry: dict, *, now: datetime | None = None) -> tuple[str, datetime | None]:
+    """Where one ledger entry sits relative to its requested publish time.
+
+    One function, read by the claim filter, the agent's status file and the
+    operator's approve message, so none of the three can disagree about
+    whether a post is still sendable.
+
+    Returns one of:
+      ("none", None)       no requested time -- a weekly lane
+      ("asap", None)       go as soon as it is approved
+      ("scheduled", dt)    the time is still ahead
+      ("missed", dt)       the time has passed
+      ("unreadable", None) a stored value that no longer parses
+    """
+    raw = str(entry.get("publish_at") or "").strip()
+    if not raw:
+        return "none", None
+    if raw.lower() in _ASAP_WORDS:
+        return PUBLISH_AT_ASAP, None
+    try:
+        when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        # Stored by an older writer, or edited by hand. Reported, never
+        # treated as "fine" and never treated as "go now".
+        return "unreadable", None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=_publish_tz())
+    now = now or datetime.now().astimezone()
+    return ("scheduled", when) if when > now else ("missed", when)
 
 
 def claimable_for_lane(lane: str, ledger_path: Path | None = None) -> list[dict]:
@@ -833,6 +1016,15 @@ def claimable_for_lane(lane: str, ledger_path: Path | None = None) -> list[dict]
         if entry.get("claimed_by"):
             continue
         if not Path(str(entry.get("asset_path") or "")).is_file():
+            continue
+        # The fourth condition, and the only one that can go from true to
+        # false while nothing changes: a requested time passes. Publishing a
+        # dated post after its moment is worse than not publishing it -- a
+        # Black Friday joke on the following Tuesday -- so this fails CLOSED
+        # and `_drop_state` reports `missed_window` to the agent while
+        # `drop approve <stem> now` is the operator's one-word override.
+        state, _when = publish_window(entry)
+        if state in {"missed", "unreadable"}:
             continue
         out.append({**entry, "stem": stem})
     # FIFO, so a backlog drains in the order it arrived instead of the newest
@@ -876,7 +1068,8 @@ The sidecar:
 
     {
       "caption": "the post text, up to 2200 characters",
-      "lane": "meme",
+      "lane": "express",
+      "publish_at": "asap",
       "source_agent": "who or what made this",
       "post_ready": false,
       "on_screen_hook_text": "optional, up to 120 chars -- see below",
@@ -918,6 +1111,67 @@ A drop with `post_ready: true` that the operator then approves can be taken by
 that lane's scheduled run INSTEAD of the post it would have generated itself.
 That is the whole point of the field, which is why it is a deliberate claim
 rather than a default.
+
+## Sending a post that is not tied to a weekly slot
+
+Most lanes here answer "which weekly slot is this for?" — a meme drop waits
+for Monday, a jeepfact drop for Wednesday. If what you have is just a post,
+use the `express` lane instead and say when you want it out:
+
+    "lane": "express",
+    "publish_at": "asap"
+
+    "lane": "express",
+    "publish_at": "2026-11-22T18:00"
+
+`publish_at` is REQUIRED on an express drop and REFUSED on every other lane.
+Required here because an express post has no weekly slot to fall back on, so
+without it there is no answer to when it goes out. Refused elsewhere because
+those lanes publish on their own day and the field would be silently ignored,
+which is the single failure mode this whole contract is written to avoid.
+
+**`"asap"`** means "as soon as the operator approves it". The runner fires
+every ten minutes, so that is the real resolution: expect the post within
+about ten minutes of approval, not instantly. `"now"` and `"immediately"` are
+accepted as the same thing.
+
+**A time** is ISO-8601. Written without an offset — `"2026-11-22T18:00"` — it
+is read as wall-clock time in the shop's own zone (America/New_York), with the
+offset computed for THAT DATE, so a time on the far side of a daylight-saving
+change is still the hour you asked for. Write the offset explicitly
+(`"2026-11-22T18:00-05:00"`) if you would rather be exact. Either way
+`status.json` echoes back the time we resolved it to — check it, because an
+agent that meant UTC finds out there rather than from a post five hours early.
+
+Two bounds on a time, and the first one is not ours:
+
+  * **at least 10 minutes out.** Facebook refuses a scheduled time nearer than
+    that, and our Instagram queue is drained every 10 minutes, so neither
+    platform could honour it. Something sooner should be `"asap"`, which takes
+    a different path entirely — published immediately rather than scheduled.
+  * **at most 60 days out.** That one IS ours. Nobody will remember approving
+    a post further ahead than that, and the approval is what authorises it.
+
+**The operator still approves it.** `publish_at` says WHEN, never WHETHER. An
+express drop sits in the ledger exactly like any other until a human approves
+it, and nothing you can write into this folder changes that.
+
+**A time that passes before approval holds the post.** If you ask for Saturday
+18:00 and the operator does not get to it until Sunday, nothing is published:
+`status.json` shows `missed_window` and the operator is told the same thing,
+with a one-word reply that releases it immediately if they still want it. It
+fails that way on purpose — a dated post sent after its moment is worse than
+one that never went out. If a post is time-critical, say so in `notes`.
+
+**What an express post actually becomes.** An image publishes as a Facebook
+photo and an Instagram feed image. A video publishes as an Instagram reel and
+a Facebook PHOTO OF ITS POSTER FRAME — the same thing the meme lane already
+does with a dropped clip, said here so you do not discover it from the feed.
+There is no Facebook video path.
+
+An express post replaces nothing. Meme Monday still runs as usual; this is an
+extra post, not a substitute for a scheduled one.
+
 
 `lane` must be one of the lanes that can actually TAKE a drop. That is a
 smaller set than the lanes this system publishes, and the difference matters:
@@ -1024,18 +1278,31 @@ misunderstanding every week.
 scan and says what happened to every file you have sent:
 
     waiting_for_a_human   accepted, the operator has not decided yet
-    approved              approved, waiting for its lane's next run
+    approved              approved, waiting for its lane's run (or, on
+                          express, for the next ten-minute pass)
+    scheduled             taken and handed to the platforms, holding until
+                          the publish_at you asked for
     published             a run took it; it is on the lane
     declined              the operator said no; it will never be posted
     not_ready             accepted, but post_ready was false, so no run
                           will ever take it
+    missed_window         express only: approved, but the publish_at you
+                          asked for has passed, so nothing will send it.
+                          The operator can release it immediately; if they
+                          do not, send a new version with a future time
 
 If a file you sent is not listed at all, it was refused before it became a
 proposal: look in `rejected/` for a `.reason.txt` with the same name. Those
 reasons are written for you, not for us -- they say what to change.
 
+Each drop also echoes `publish_at` as we resolved it, which is the field to
+check when a time did not land where you expected.
+
 A run of `declined`, or a pile of `not_ready`, is the signal to ask rather
-than to send more of the same.
+than to send more of the same. So is a `missed_window`: it means the gap
+between your sending and the operator approving was longer than the lead time
+you left, so leave more of it or send `asap` and let the approval set the
+time.
 
 **`feedback/`** — write a `.json`, `.md` or `.txt` file here to ask a
 question, say a rule is ambiguous, report that something did not work, or
@@ -1061,7 +1328,9 @@ a `.reason.txt` saying why -- read that rather than guessing.
 Accepted is NOT published. Every drop becomes a proposal the operator
 approves by hand, the same as every other post in this system. Approval is a
 human action taken here, not something a sidecar can grant itself: a drop that
-is `post_ready` but unapproved sits in the ledger untouched forever.
+is `post_ready` but unapproved sits in the ledger untouched forever. That is
+as true of an express drop as of any other -- `publish_at` chooses the time,
+never the permission.
 
 Types: .png .jpg .jpeg (max 25 MB), .mp4 .mov (max 300 MB). The contents
 must actually be that type; the extension alone is not enough.
@@ -1079,6 +1348,10 @@ def _drop_state(entry: dict) -> tuple[str, str]:
     tells it only that we have fields.
     """
     if entry.get("claimed_by"):
+        state, when = publish_window(entry)
+        if state == "scheduled" and when is not None:
+            return ("scheduled",
+                    f"taken and scheduled to publish at {when.isoformat()}")
         return ("published", "a scheduled run took it; it is on the lane")
     approval = str(entry.get("approval") or "")
     if approval == "declined":
@@ -1096,6 +1369,29 @@ def _drop_state(entry: dict) -> tuple[str, str]:
             detail += " -- the operator approved it anyway, which changed nothing"
         return ("not_ready", detail)
     if approval == "approved":
+        # Ahead of the plain "approved" answer: an express drop whose time has
+        # passed is approved, post_ready and still never going out, and
+        # "waiting for its lane's next run" would be a flat lie -- the runner
+        # fires every ten minutes and skips it every time.
+        window, when = publish_window(entry)
+        if window == "missed" and when is not None:
+            return ("missed_window",
+                    f"approved, but the requested publish_at "
+                    f"({when.isoformat()}) has passed, so nothing will send "
+                    "it. The operator can release it immediately, or send a "
+                    "new version with a future time.")
+        if window == "unreadable":
+            return ("missed_window",
+                    "approved, but the stored publish_at no longer parses, so "
+                    "nothing will send it. Re-send with a valid publish_at.")
+        if window == "scheduled" and when is not None:
+            return ("approved",
+                    f"approved and waiting to be scheduled for "
+                    f"{when.isoformat()}")
+        if window == PUBLISH_AT_ASAP:
+            return ("approved",
+                    "approved and waiting on the express runner, which fires "
+                    "every ten minutes")
         return ("approved", "approved and waiting for its lane's next run")
     return ("waiting_for_a_human", "accepted and waiting on the operator")
 
@@ -1124,13 +1420,20 @@ def write_status_file(drop_root: Path, proposals: dict,
             "received_at": entry.get("received_at"),
             "claimed_by": entry.get("claimed_by"),
             "claimed_at": entry.get("claimed_at"),
+            # Echoed back so the agent can see what we READ its publish_at
+            # as, not just what it wrote: a naive "2026-11-22T18:00" is
+            # resolved in the shop's zone, and an agent that meant UTC finds
+            # out here rather than from a post five hours early.
+            "publish_at": entry.get("publish_at") or None,
+            "publish_at_overridden_by": entry.get("publish_at_overridden_by"),
         }
     payload = {
         "generated_at": now.isoformat(),
         "doc": ("What happened to each file you dropped. Rewritten every scan. "
-                "`state` is one of: waiting_for_a_human, approved, published, "
-                "declined, not_ready. If something you sent is not listed at "
-                "all it was refused before it became a proposal -- look in "
+                "`state` is one of: waiting_for_a_human, approved, scheduled, "
+                "published, declined, not_ready, missed_window. If something "
+                "you sent is not listed at all it was refused before it "
+                "became a proposal -- look in "
                 f"{REJECTED_DIR}/ for a .reason.txt with the same name."),
         "lanes_open_for_drops": sorted(consuming_lanes()),
         "drops": drops,
@@ -1218,11 +1521,34 @@ def init_drop_root(drop_root: Path | None = None) -> Path:
     # The lane list is rendered from the registry rather than typed into the
     # template: a lane added upstream would otherwise be refused here while
     # the contract an agent reads still said it was invalid.
-    lanes = lane_spec_block()
-    (drop_root / "README.md").write_text(
-        MIRROR_DROP_README.replace("{lanes}", lanes), encoding="utf-8"
-    )
+    write_contract_readme(drop_root)
     return drop_root
+
+
+def write_contract_readme(drop_root: Path) -> Path:
+    """Publish the contract where the agent reads it. Idempotent.
+
+    Called on every scan, not only on `--init`. Until 2026-11-19 it was
+    init-only, so the README in Drive was whatever the contract looked like
+    the last time someone ran that flag by hand -- and a rule added to the
+    validator reached the agent only as an unexplained refusal. A contract
+    that drifts from the code enforcing it is the one failure this whole lane
+    is built around ([[feedback_fold_defer_is_a_handoff_contract]]), and the
+    lane list is already rendered from the live registry for exactly that
+    reason, which init-only writing quietly undid.
+    """
+    lanes = lane_spec_block()
+    path = Path(drop_root) / "README.md"
+    text = MIRROR_DROP_README.replace("{lanes}", lanes)
+    # Rewritten only on a real change: this folder is synced, and touching an
+    # unchanged file six times a day would upload it six times a day.
+    try:
+        if path.read_text(encoding="utf-8") == text:
+            return path
+    except OSError:
+        pass
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def _write_json_atomic(path: Path, payload: dict) -> None:
@@ -1326,6 +1652,15 @@ def main(argv: list[str] | None = None) -> int:
     proposals = record_proposals(manifest, ledger_path=ledger_path)
     state_path = Path(args.state_path) if args.state_path else DROP_INTAKE_STATE_PATH
     _write_json_atomic(state_path, manifest)
+
+    # Keep the contract the agent reads in step with the code enforcing it.
+    # Loud, never fatal: a scan that refused to run because a README could
+    # not be written would stop accepting posts over a documentation file.
+    try:
+        write_contract_readme(drop_root)
+    except OSError as exc:
+        print(f"[drop-intake] WARNING contract README not refreshed: {exc}",
+              file=sys.stderr)
 
     notes = collect_feedback(drop_root)
     if notes:

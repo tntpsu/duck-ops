@@ -10508,3 +10508,137 @@ against a roster that holds a DIFFERENT red SEO-named job.
   costs nothing per item and a model-generated one costs a chunk per eight, so
   one cap is a compromise; per-category caps are a config shape away but nothing
   yet says the single number is wrong.
+
+## Surface 169 — the express drop: a post that belongs to no weekly slot (2026-11-19, operator: "an option to just send a post and once we approve it can get scheduled right away or at a time the other agent sends it")
+
+Every drop lane until now answered "which weekly slot is this for?". A `meme`
+drop waits for Monday 09:00, `jeepfact` for Wednesday, `duckvideo` for Friday —
+and the lane's publish step derives the publish time from its own weekly
+window, so an approved drop waited for its day twice over. An agent with
+simply a post had nowhere to put it.
+
+The `express` lane answers "when do you want it out?" instead.
+
+| | before | after |
+|---|---|---|
+| where the time comes from | the lane's weekly window | the sidecar's `publish_at` |
+| how long after approval | up to 6 days | ~10 minutes, or the requested time |
+| what runs it | a weekly launchd job | the existing 10-minute `social_publish_due` sidecar |
+| what it costs the weekly lane | the drop replaces that week's post | nothing — Meme Monday still runs |
+
+**No new launchd job, and no new publish machinery.** `social_publish_due`
+already fires every ten minutes to publish things whose time has come, and
+Meta already holds a Facebook `scheduled_publish_time` server-side while our
+own IG queue holds Instagram (because Meta's IG API accepts a scheduled time
+and then ignores it — verified 2026-06-03). Express is a consumer of both.
+Ordering inside the sidecar is deliberate: the express pass runs **after** the
+queue drain, because rendering a dropped clip runs ffmpeg and uploads to
+Shopify Files, and a slow render must never delay a post whose time has
+already arrived.
+
+Three properties carry the surface:
+
+1. **`publish_at` says WHEN, never WHETHER.** The operator approves every
+   express post exactly as before, and nothing writable from the drop folder
+   reaches `set_approval`. A time is not permission
+   ([[feedback_auto_manual_queue_contract]]).
+2. **A time that passes before approval HOLDS the post.** It fails closed:
+   `claimable_for_lane` stops offering it, the agent's `status.json` says
+   `missed_window`, and the operator is told in the same reply that approved
+   it — with `drop approve <stem> now` as a one-word release. A dated post
+   sent after its moment (a Black Friday joke on the Tuesday) is worse than
+   one that never went out, and the operator chose this over publishing it
+   late.
+3. **`publish_at` is REFUSED on a weekly lane, not ignored.** That lane
+   publishes on its own day, so the field would be silently dropped — the
+   agent believing a time was honoured while the post goes out Monday is
+   precisely the failure this contract exists to prevent
+   ([[feedback_fold_defer_is_a_handoff_contract]]).
+
+**Two bounds on a requested time, and only one is ours.** At least 10 minutes
+out, because Meta refuses a nearer Facebook schedule and our IG queue drains
+every 10 — neither platform *could* honour it, so anything sooner must be
+`asap`, which takes the immediate branch instead. At most 60 days, which is
+ours: nobody will remember approving a post further ahead than that, and the
+approval is what authorises it. A naive `"2026-11-22T18:00"` is read as wall
+clock in the shop's own zone with the offset computed for **that date**, not
+today's, and a test pins that the zone matches `scheduler_health.SCHEDULER_TZ`
+([[feedback_schedule_math_needs_a_zone_not_an_offset]]). 60 days is wide enough
+to straddle a DST change, so this is not theory.
+
+**The README the agent reads is now republished on every scan.** It was written
+only by `--init`, so the live copy was whatever the contract looked like the
+last time someone ran that flag by hand (2026-11-16), and a rule added to the
+validator reached the agent only as an unexplained refusal. The lane list was
+already rendered from the live registry to prevent exactly that drift, which
+init-only writing quietly undid. Rewritten only on a real change, because the
+folder is synced and an untouched file would otherwise upload six times a day.
+
+| | Happy | Missing | Too soon / past | Too far | Malformed | Wrong lane | Window passed |
+|---|---|---|---|---|---|---|---|
+| Time accepted | `test_an_asap_image_drop_is_accepted`, `test_an_asap_video_drop_is_accepted`, `test_a_future_time_is_accepted_and_stored_with_an_offset`, `test_now_and_immediately_are_stored_as_asap` | `test_a_missing_publish_at_is_refused` | `test_a_past_time_is_refused_at_the_door`, `test_a_time_under_the_platform_floor_is_refused` | `test_a_time_beyond_our_own_ceiling_is_refused` | `test_an_unparseable_time_is_refused_with_an_example`, `test_a_non_string_time_is_refused_rather_than_coerced` | `test_publish_at_on_a_meme_drop_is_refused`, `test_a_meme_drop_without_the_field_is_still_fine` | — |
+| Zone, not offset | `test_a_naive_time_is_read_as_wall_clock_in_the_shop_zone`, `test_the_publish_zone_matches_every_other_schedule_in_the_system` | — | — | `test_the_ceiling_is_wide_enough_to_cross_a_dst_change` | — | — | `test_a_summer_time_and_a_winter_time_get_different_offsets` |
+| Time ≠ permission | `test_an_approved_asap_drop_is_claimable_exactly_once` | `test_an_unapproved_express_drop_is_not_claimable`, `test_a_not_ready_express_drop_is_not_claimable_even_when_approved` | — | — | — | `test_an_express_claim_never_takes_another_lanes_drop`, `test_it_claims_express_and_only_express` | `test_only_the_operator_can_release_it` |
+| Passed window holds | `test_a_future_window_is_reported_as_waiting_for_its_time` | — | `test_a_passed_window_is_not_claimable`, `test_the_agent_is_told_missed_window_and_not_approved` | — | `test_an_unreadable_stored_time_holds_too` | `test_a_weekly_lane_cannot_be_released_immediately` | `test_the_operator_can_release_it_immediately` |
+| One window reader | `test_every_reader_goes_through_publish_window`, `test_a_weekly_lane_has_no_window`, `test_the_window_comes_from_duck_ops_not_a_second_parser` | — | — | — | — | — | — |
+| Operator is told | `test_approving_an_asap_drop_names_the_ten_minute_cadence`, `test_approving_a_scheduled_drop_names_the_time`, `test_the_waiting_list_shows_when_each_express_drop_would_go` | — | `test_approving_a_missed_window_says_nothing_will_send_it` | — | — | `test_now_on_a_decline_is_refused_rather_than_ignored` | `test_the_now_flag_releases_it_in_one_reply`, `test_now_and_only_compose_in_either_order`, `test_a_stem_ending_in_now_is_not_eaten` |
+| Publish: asap | `test_facebook_is_published_not_scheduled`, `test_it_reports_published_now`, `test_both_platforms_are_attempted`, `test_the_target_time_is_seconds_away_not_the_literal_now` | — | — | — | — | — | — |
+| Publish: scheduled | `test_facebook_gets_the_requested_time`, `test_instagram_gets_the_same_time_as_facebook`, `test_it_reports_scheduled` | — | — | — | — | — | — |
+| Video → reel | `test_instagram_gets_the_reel`, `test_facebook_gets_the_poster_frame_not_the_video`, `test_the_receipt_records_it_as_a_reel_on_instagram`, `test_the_instagram_receipt_points_at_the_video` | — | — | — | — | — | — |
+| Failure publishes nothing | — | `test_no_public_url_stops_before_any_platform_call`, `test_a_panel_the_render_never_wrote_stops_it_too` | `test_a_render_refusal_stops_before_any_platform_call` | — | `test_one_platform_failing_is_partial_not_success`, `test_both_platforms_failing_is_failed` | — | — |
+| Claim is the gate | `test_nothing_claimable_publishes_nothing`, `test_a_pass_is_bounded_so_it_cannot_hold_the_sidecar` | `test_no_duck_ops_checkout_is_not_a_crash` | `test_a_raising_claim_is_loud_but_not_fatal` | — | — | `test_the_kill_switch_stops_the_whole_path`, `test_the_kill_switch_defaults_to_on` | — |
+| Nothing escapes in tests | `test_a_refusal_is_not_counted_as_a_live_platform` | — | `test_a_facebook_publish_is_refused`, `test_an_immediate_instagram_publish_is_refused` | — | — | — | — |
+| Sidecar wiring | `test_the_express_pass_is_after_the_queue_drain`, `test_the_express_pass_is_wrapped`, `test_a_dry_run_publishes_nothing`, `test_the_heartbeat_can_tell_a_failure_from_an_empty_queue` | — | — | — | — | — | — |
+| Contract republished | `test_writing_it_is_idempotent`, `test_an_unchanged_readme_is_not_rewritten` | `test_a_scan_restores_a_deleted_readme` | `test_a_scan_rewrites_a_stale_readme` | — | `test_a_scan_still_accepts_posts_when_the_readme_cannot_be_written` | — | — |
+| Agent contract | `test_it_documents_the_express_lane_and_publish_at`, `test_it_states_both_bounds_and_whose_they_are`, `test_it_says_approval_is_still_required`, `test_it_says_a_passed_window_holds_the_post`, `test_it_says_what_a_video_express_post_becomes`, `test_it_names_the_zone_a_naive_time_is_read_in`, `test_it_says_an_express_post_replaces_nothing`, `test_the_lane_block_is_rendered_from_the_live_registry` | — | — | — | — | — | — |
+| Consumer contract | `test_every_lane_declares_where_its_consumer_lives`, `test_the_declared_consumer_scan_finds_a_non_flow_consumer`, `test_a_module_constant_resolves_but_a_computed_name_does_not` | `test_every_consuming_lane_has_a_canary_prefix` | `test_an_express_drop_unclaimed_after_a_sidecar_pass_is_caught` | — | — | — | — |
+
+**By dimension:** unit + patched-seam tests. No LLM, no network, no Meta call —
+every Meta write in this repo already routes through
+`meta_token_manager.make_request`, which refuses under `DUCK_TEST_MODE`, and
+`NothingEscapesUnderTestMode` is a positive control on that guard for this NEW
+sender rather than an assumption that it covers it
+([[feedback_test_runs_reach_the_outside_world]]). The agent-facing README is
+asserted by content, not by eyeball.
+**STATUS: SHIPPED 2026-11-19** — `runtime/drop_intake.py`,
+`runtime/drop_operator.py`, `duckAgent/helpers/express_drop_publisher.py` (new),
+`duckAgent/helpers/drop_claim_loader.py`, `duckAgent/scripts/social_publish_due.py`,
+`duckAgent/.../viewer.py`, `tests/test_express_drop.py` (52 tests),
+`tests/test_drop_lane_consumers.py` (+3), and
+`duckAgent/tests/test_express_drop_publisher.py` (31 tests),
+`duckAgent/creative_agent/runtime/tests/test_drop_intake_cards.py` (+3).
+
+**Two guards that fired while building this, both doing their job:**
+
+- **`test_every_listed_lane_actually_claims` refused `express` the moment it
+  was added to `DROP_CONSUMING_LANES`** — correctly: nothing claimed it yet, so
+  a drop naming it would have been accepted, approved and never published,
+  which is the Surface 133 bug exactly. It scans `flows/*/steps.py`, and
+  express has no flow and never will. Each spec now declares the duckAgent file
+  that claims it (`consumer`) and the test checks THAT, which is strictly
+  stronger for these lanes than the directory convention: a consumer that moves
+  file has to update its own spec.
+- **The AST scan then reported express as unconsumed anyway**, because the
+  publisher passes a module constant (`claim_for_lane(EXPRESS_LANE, ...)`) and
+  the scan counted only string literals. Resolving module-level constants was
+  the right fix rather than spelling the lane name twice in the consumer — a
+  rename would leave the literal at the claim site behind and the lane would
+  claim something else. A computed name is still *not* resolved: a scan that
+  guesses is worse than one that admits it cannot see.
+
+**Open after this surface:**
+- **No OS card distinguishes an express failure from an idle express lane.**
+  The heartbeat carries `express_published` and `express_error`, and the claim
+  canary catches approved-but-unclaimed, but nothing grades a pass that renders
+  and then fails at both platforms every ten minutes. Today that reads as a
+  claimed drop that never appears, visible only in the sidecar log.
+- **`MAX_PER_PASS` is 3 and nothing reports a backlog.** Four approved express
+  drops publish over two passes, which is right, but ten would take four and
+  no surface says so.
+- **A failed express publish leaves the drop claimed.** That is deliberate —
+  re-publishing something that may already be public is the worse failure —
+  but it means a render bug consumes approved posts one per pass with no
+  retry path short of a re-send from the agent.
+- **Facebook gets a still for a video express post**, matching the meme lane.
+  Documented in the agent README rather than fixed; a Facebook video path
+  would be the only one of its kind in the system.

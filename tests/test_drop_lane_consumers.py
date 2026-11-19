@@ -48,12 +48,44 @@ from conftest import DUCKAGENT_ROOT, requires_duckagent  # noqa: E402
 _CLAIM_CALLS = {"claim", "claim_for_lane", "_claim_agent_drop"}
 
 
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Module-level `NAME = "literal"` bindings.
+
+    A claim call may pass a module constant rather than a literal --
+    `claim_for_lane(EXPRESS_LANE, ...)` -- and a scan that counted only
+    literals reported that lane as unconsumed while its consumer sat right
+    there. Resolving the constant is strictly safer than the alternative,
+    which is spelling the lane name twice in the consumer: a rename would then
+    leave the literal at the claim site behind and the lane would claim
+    something else entirely.
+
+    Module level only, and only from a plain string literal. Anything computed
+    is not resolved, because a scan that guesses is worse than one that admits
+    it cannot see.
+    """
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not (isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                out[target.id] = node.value.value
+    return out
+
+
 def _lane_names_claimed_in(path: Path) -> set[str]:
-    """Lane-name string literals passed to a claim call in this file."""
+    """Lane names passed to a claim call in this file.
+
+    A string literal, or a module-level constant bound to one.
+    """
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):  # pragma: no cover - unreadable flow
         return set()
+    constants = _module_string_constants(tree)
     found: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -69,13 +101,22 @@ def _lane_names_claimed_in(path: Path) -> set[str]:
                 and isinstance(fn.value, ast.Name)
                 and fn.value.id == "agent_drop_lane"):
             continue
+        def _as_lane(node_value: ast.expr) -> str | None:
+            if isinstance(node_value, ast.Constant) and isinstance(node_value.value, str):
+                return node_value.value
+            if isinstance(node_value, ast.Name):
+                return constants.get(node_value.id)
+            return None
+
         for arg in node.args:
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                found.add(arg.value)
+            name = _as_lane(arg)
+            if name:
+                found.add(name)
         for kw in node.keywords:
-            if (kw.arg == "lane" and isinstance(kw.value, ast.Constant)
-                    and isinstance(kw.value.value, str)):
-                found.add(kw.value.value)
+            if kw.arg == "lane":
+                name = _as_lane(kw.value)
+                if name:
+                    found.add(name)
     return found
 
 
@@ -94,18 +135,83 @@ def _lanes_that_claim() -> set[str]:
     return claiming
 
 
+def _declared_consumer(lane: str) -> str:
+    return str((drop_intake.LANE_DROP_SPECS.get(lane) or {}).get("consumer") or "")
+
+
+def _lanes_claimed_by_declared_consumers() -> set[str]:
+    """Lanes claimed by the duckAgent file their own spec NAMES.
+
+    Needed because a consumer is not always a flow. `express` has no
+    flows/express/steps.py and never will: it is a standalone post with no
+    generation step and no weekly slot, so it rides the ten-minute
+    social_publish_due sidecar instead. Scanning only flows/*/steps.py would
+    report it as unconsumed -- which is the *right* answer for a lane with no
+    consumer and the wrong one for a lane whose consumer lives elsewhere.
+
+    So the spec declares WHERE, and this checks the claim is actually there.
+    That is strictly stronger than the directory convention it replaces for
+    these lanes: a consumer that moves file has to update its own spec.
+    """
+    claiming: set[str] = set()
+    for lane in sorted(drop_intake.DROP_CONSUMING_LANES):
+        declared = _declared_consumer(lane)
+        if not declared:
+            continue
+        path = DUCKAGENT_ROOT / declared
+        if not path.is_file():
+            continue
+        if lane in _lane_names_claimed_in(path):
+            claiming.add(lane)
+    return claiming
+
+
 @requires_duckagent
 class TheRegistryMatchesTheFlowsTests(unittest.TestCase):
 
     def test_every_listed_lane_actually_claims(self):
-        claiming = _lanes_that_claim()
+        claiming = _lanes_that_claim() | _lanes_claimed_by_declared_consumers()
         for lane in sorted(drop_intake.DROP_CONSUMING_LANES):
             with self.subTest(lane=lane):
                 self.assertIn(
                     lane, claiming,
-                    f"DROP_CONSUMING_LANES offers {lane!r}, but no "
-                    f"flows/{lane}/steps.py calls a claim. A drop naming it "
-                    "would be accepted, approved, and never published.")
+                    f"DROP_CONSUMING_LANES offers {lane!r}, but neither "
+                    f"flows/{lane}/steps.py nor its declared consumer "
+                    f"({_declared_consumer(lane) or 'none declared'}) calls a "
+                    "claim. A drop naming it would be accepted, approved, and "
+                    "never published.")
+
+    def test_every_lane_declares_where_its_consumer_lives(self):
+        """A spec with no `consumer` cannot be checked at all.
+
+        The scan above would pass vacuously for such a lane -- it would find
+        no claim and fall back to the flows convention, which is exactly how
+        a non-flow consumer slips through unverified.
+        """
+        for lane in sorted(drop_intake.DROP_CONSUMING_LANES):
+            with self.subTest(lane=lane):
+                declared = _declared_consumer(lane)
+                self.assertTrue(
+                    declared,
+                    f"LANE_DROP_SPECS[{lane!r}] has no 'consumer' naming the "
+                    "duckAgent file that claims it")
+                self.assertTrue(
+                    (DUCKAGENT_ROOT / declared).is_file(),
+                    f"{lane!r} declares consumer {declared!r}, which does not "
+                    "exist in duckAgent")
+
+    def test_the_declared_consumer_scan_finds_a_non_flow_consumer(self):
+        """Positive control for the half of the scan the flows walk cannot do.
+
+        Without it, a scan that silently matched nothing would let
+        `test_every_listed_lane_actually_claims` pass on the flows half alone
+        and the express wiring could rot unnoticed -- the same vacuous-pass
+        trap `test_the_scan_finds_the_lane_we_know_is_wired` exists for.
+        """
+        self.assertIn(drop_intake.EXPRESS_LANE,
+                      _lanes_claimed_by_declared_consumers())
+        self.assertNotIn(drop_intake.EXPRESS_LANE, _lanes_that_claim(),
+                         "express has grown a flow; collapse the two scans")
 
     def test_every_claiming_lane_is_listed(self):
         for lane in sorted(_lanes_that_claim()):
@@ -131,6 +237,19 @@ class TheRegistryMatchesTheFlowsTests(unittest.TestCase):
                 "other.claim('newduck')\n",  # a `claim` that is not ours
                 encoding="utf-8")
             self.assertEqual(_lane_names_claimed_in(fake), set())
+
+    def test_a_module_constant_resolves_but_a_computed_name_does_not(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "consumer.py"
+            fake.write_text(
+                'LANE = "express"\n'
+                'COMPUTED = "exp" + "ress2"\n'
+                "claim_for_lane(LANE, claimed_by='x')\n"
+                "claim_for_lane(COMPUTED, claimed_by='x')\n"
+                "claim_for_lane(unknown_name, claimed_by='x')\n",
+                encoding="utf-8")
+            self.assertEqual(_lane_names_claimed_in(fake), {"express"})
 
 
 class TheContractRefusesAnUnconsumableLaneTests(unittest.TestCase):

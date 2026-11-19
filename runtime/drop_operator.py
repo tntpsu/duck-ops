@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 RUNTIME_DIR = Path(__file__).resolve().parent
 if str(RUNTIME_DIR) not in sys.path:
@@ -33,10 +34,28 @@ HELP = (
     "  drops                       what is waiting on you\n"
     "  drop approve <stem>         let its lane publish it\n"
     "  drop approve <stem> only    approve it and decline the rest in that lane\n"
+    "  drop approve <stem> now     express drops only: send it immediately,\n"
+    "                              ignoring the time the agent asked for\n"
     "  drop decline <stem>         never publish it\n"
     "  drop answer <file> <text>   reply to an agent's note\n"
-    "\nSeveral lines in one reply are fine; each is run in order.\n"
+    "\n'only' and 'now' can be combined in either order.\n"
+    "Several lines in one reply are fine; each is run in order.\n"
 )
+
+#: Suffix words that modify an approval rather than naming the drop. Stripped
+#: as TOKENS from the end, in any order, for the same reason the separator
+#: strip is token-wise: stems end in things like `_v4` and `_now_2`, and a
+#: character-wise or anywhere-in-the-string match would eat a real suffix.
+_APPROVE_FLAGS = {"only", "now"}
+
+
+def _split_approve_flags(target: str) -> tuple[str, set[str]]:
+    """("<stem>", {"only", "now"}) from "<stem> now only"."""
+    tokens = (target or "").split()
+    flags: set[str] = set()
+    while len(tokens) > 1 and tokens[-1].lower() in _APPROVE_FLAGS:
+        flags.add(tokens.pop().lower())
+    return " ".join(tokens), flags
 
 
 def should_delegate_to_drops(text: str) -> bool:
@@ -75,6 +94,18 @@ def format_waiting(pending: list, notes: list) -> str:
             ready = "" if entry.get("post_ready") else "  [post_ready:false — no run will take it]"
             lines.append(f"  {stem}")
             lines.append(f"      lane={entry.get('lane')} from={entry.get('source_agent')}{ready}")
+            # An express drop's WHEN is the operator's decision too, not just
+            # its whether: approving one whose time has passed does nothing,
+            # and that has to be visible before the reply is typed.
+            window, when = drop_intake.publish_window(entry)
+            if window == drop_intake.PUBLISH_AT_ASAP:
+                lines.append("      when: immediately on approval")
+            elif window == "scheduled" and when is not None:
+                lines.append(f"      when: {when.isoformat()}")
+            elif window in {"missed", "unreadable"}:
+                lines.append(
+                    "      when: REQUESTED TIME HAS PASSED — approving alone "
+                    f"sends nothing; use 'drop approve {stem} now'")
             caption = str(entry.get("caption") or "").strip().replace("\n", " ")
             if caption:
                 lines.append(f"      \"{caption[:110]}\"")
@@ -211,6 +242,39 @@ def _decline_siblings(stem: str, proposals: dict) -> list[str]:
     return declined
 
 
+def _what_happens_next(stem: str, lane: Any, *, publish_now: bool) -> str:
+    """What the operator should expect, re-read from the ledger AFTER writing.
+
+    Read back rather than predicted: `publish_now` rewrites `publish_at` in
+    the same write, and a message composed from what we INTENDED would say
+    "going out now" for a write that was refused. The ledger is the thing the
+    runner will read, so it is the thing this sentence should describe.
+    """
+    entry = (drop_intake._read_ledger(drop_intake.DROP_PROPOSALS_PATH)
+             .get(stem) or {})
+    if str(lane or "") != drop_intake.EXPRESS_LANE:
+        return f"The {lane} lane will take it on its next scheduled run."
+    window, when = drop_intake.publish_window(entry)
+    if window == drop_intake.PUBLISH_AT_ASAP:
+        prefix = "Released immediately — " if publish_now else ""
+        return (f"{prefix}the express runner fires every ten minutes, so it "
+                "will be rendered and posted within about that.")
+    if window == "scheduled" and when is not None:
+        return (f"It will be rendered within about ten minutes and scheduled "
+                f"to publish at {when.isoformat()}.")
+    if window in {"missed", "unreadable"}:
+        # Approval is recorded but nothing will send it. Said here rather than
+        # left to the agent's status file, because the operator has a one-word
+        # fix and is reading this sentence right now.
+        detail = (f"the time it asked for ({when.isoformat()}) has already "
+                  "passed" if when is not None
+                  else "its stored publish_at no longer parses")
+        return (f"NOTHING WILL SEND IT: {detail}, so the express runner will "
+                f"skip it every time. Reply `drop approve {stem} now` to send "
+                "it immediately instead, or decline it and ask for a re-send.")
+    return "The express runner will pick it up within about ten minutes."
+
+
 def _handle_one(text: str) -> tuple[str, bool]:
     """The message for the operator, and whether anything actually CHANGED.
 
@@ -236,9 +300,9 @@ def _handle_one(text: str) -> tuple[str, bool]:
     if verb in {"approve", "decline"}:
         proposals = drop_intake._read_ledger(drop_intake.DROP_PROPOSALS_PATH)
         target = _strip_trailing_separator(parts[2] if len(parts) > 2 else "")
-        only = False
-        if target.lower().endswith(" only"):
-            target, only = target[: -len(" only")].strip(), True
+        target, flags = _split_approve_flags(target)
+        only = "only" in flags
+        publish_now = "now" in flags
         stem, problem = _resolve_stem(target, proposals)
         if problem:
             return problem, False
@@ -249,14 +313,17 @@ def _handle_one(text: str) -> tuple[str, bool]:
             return (f"{stem} has post_ready:false — the agent has not declared "
                     "it finished, so approving it would not let any run take "
                     "it. Ask the agent to re-send it as ready."), False
+        if publish_now and verb == "decline":
+            return "'now' only applies to an approval.", False
         try:
-            drop_intake.set_approval(stem, verb == "approve", by="operator")
+            drop_intake.set_approval(stem, verb == "approve", by="operator",
+                                     publish_now=publish_now)
         except drop_intake.DropRefused as exc:
             return str(exc), False
         if verb == "approve":
             lane = entry.get("lane")
-            msg = (f"Approved {stem}. The {lane} lane will take it on its next "
-                   "scheduled run.")
+            msg = f"Approved {stem}. " + _what_happens_next(
+                stem, lane, publish_now=publish_now)
             if only:
                 others = _decline_siblings(stem, proposals)
                 msg += (f" Declined {len(others)} superseded drop(s) in that "
