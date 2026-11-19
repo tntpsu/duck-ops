@@ -6,6 +6,7 @@ were self-generated mail mis-matched on the content term "custom duck"."""
 from __future__ import annotations
 
 import sys
+import unittest
 from pathlib import Path
 
 RUNTIME = Path(__file__).resolve().parents[1] / "runtime"
@@ -63,3 +64,92 @@ def test_marketing_and_shipping_still_excluded():
     # Pre-existing exclusions must still hold (no regression).
     assert cic._looks_like_custom_design_request("You made a sale!", "custom duck", "etsy@etsy.com") is False
     assert cic._looks_like_custom_design_request("Newsletter", "custom duck unsubscribe", "news@x.com") is False
+
+
+class _Lane:
+    """Minimal stand-in for an etsy_message_lane posture, so these tests state
+    the posture they describe instead of inheriting the operator's current one."""
+
+    def __init__(self, off: bool):
+        self.off = off
+        self.reads_enabled = not off
+        self.replies_enabled = not off
+        self.note = "Grok bot answers these." if off else None
+        self.resume_hint = None
+        self.known = True
+
+
+def _queue(message_lane):
+    """One conversation needing a reply, plus one refund and one brief, so the
+    suppression can be shown to take ONLY the reply."""
+    cases = [
+        {
+            "artifact_id": "customer_case::mail::1",
+            "channel": "etsy_conversation",
+            "recommended_action": "reply_with_context",
+            "customer_summary": "where is my duck",
+            "priority": "medium",
+        },
+        {
+            "artifact_id": "customer_case::mail::2",
+            "channel": "etsy_conversation",
+            "recommended_action": "refund_review",
+            "customer_summary": "arrived broken",
+            "priority": "high",
+        },
+    ]
+    return cic.build_customer_interaction_queue(cases, [], [], message_lane=message_lane)
+
+
+class EtsyMessageRepliesLeaveTheQueueWhenTheLaneIsOff(unittest.TestCase):
+    """2026-11-19: 363 of 459 operator-facing queue items were
+    `reply_with_context` -- a wall of apparently neglected customers that
+    nobody on this side can work, because the operator's Grok bot answers Etsy
+    messages now. Suppressed and counted, never silently dropped."""
+
+    def test_with_the_lane_on_nothing_is_suppressed(self):
+        q = _queue(_Lane(off=False))
+        actions = {str(i.get("recommended_action")) for i in q["items"]}
+        self.assertIn("reply_with_context", actions)
+        self.assertEqual(q["counts"]["etsy_message_replies_suppressed"], 0)
+        self.assertIs(q["counts"]["etsy_message_lane_off"], False)
+        self.assertIsNone(q["etsy_message_lane_note"])
+
+    def test_with_the_lane_off_only_the_reply_items_go(self):
+        q = _queue(_Lane(off=True))
+        actions = [str(i.get("recommended_action")) for i in q["items"]]
+        self.assertNotIn("reply_with_context", actions)
+        self.assertIn("refund_review", actions,
+                      "refunds are order-driven and are still ours")
+        self.assertEqual(q["counts"]["etsy_message_replies_suppressed"], 1)
+        self.assertIs(q["counts"]["etsy_message_lane_off"], True)
+
+    def test_the_suppressed_count_is_never_silent(self):
+        q = _queue(_Lane(off=True))
+        self.assertEqual(
+            q["counts"]["operator_queue_items"] + q["counts"]["etsy_message_replies_suppressed"],
+            len(_queue(_Lane(off=False))["items"]),
+            "every item is either shown or counted as suppressed")
+        self.assertIn("Grok bot answers these", q["etsy_message_lane_note"])
+
+    def test_the_markdown_surface_names_the_suppression_and_the_reason(self):
+        md = cic.render_customer_interaction_queue_markdown(_queue(_Lane(off=True)))
+        self.assertIn("Etsy message replies suppressed", md)
+        self.assertIn("Grok bot answers these", md)
+
+    def test_the_markdown_surface_stays_quiet_when_nothing_is_suppressed(self):
+        md = cic.render_customer_interaction_queue_markdown(_queue(_Lane(off=False)))
+        self.assertNotIn("suppressed", md)
+
+    def test_a_posture_object_it_does_not_understand_suppresses_nothing(self):
+        # Cross-repo / older-provider shape: no `off` attribute. Fail toward
+        # SHOWING the work, never toward hiding it.
+        class Odd:
+            pass
+
+        q = cic.build_customer_interaction_queue(
+            [{"artifact_id": "customer_case::mail::1", "channel": "etsy_conversation",
+              "recommended_action": "reply_with_context", "customer_summary": "x",
+              "priority": "medium"}], [], [], message_lane=Odd())
+        self.assertEqual(q["counts"]["etsy_message_replies_suppressed"], 0)
+        self.assertEqual(len(q["items"]), 1)

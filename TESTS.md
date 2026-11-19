@@ -9951,3 +9951,88 @@ from 17 entries to 16**, which is the only direction it is allowed to move.
 every customer surface is reading a snapshot that will keep ageing. Nothing
 grades its age — the surfaces now SAY it is frozen, but no card would notice if
 the operator turned reads back on and the producer then failed.
+
+## Surface 163 — the third store, and 363 queue items nobody could work (2026-11-19)
+
+Retiring C376 in the capture and the receipt was not enough. The rebuild at
+00:23 left **two live queue items** for peter:
+
+```
+ops_queue::conversation::etsy-thread::peter   recommended_action: reply_with_context
+ops_queue::custom_design::mail::147080        recommended_action: clarify_brief
+```
+
+`customer_interaction_queue.json` is built from the **mail-derived customer
+cases**, not from the browser captures — a third store with its own idea of
+what is outstanding. Two stores closed, one still saying "reply to this".
+
+Measuring it before changing anything turned a one-thread problem into the
+headline:
+
+| recommended_action | count |
+|---|---|
+| **reply_with_context** | **363** |
+| refund_or_replacement_review | 53 |
+| clarify_brief | 18 |
+| refund_review | 10 |
+| escalate | 9 |
+| replacement_review | 3 |
+| check_inventory_and_queue_print | 3 |
+| **total operator-facing** | **459** |
+
+**79% of the customer queue was "reply to an Etsy message"** — work that is now
+the Grok bot's and that nobody on this side will ever do. That is the surface
+the operator meant by "doesn't look like something is broken".
+
+Suppressed while the lane is off, and **counted**, reusing the builder's
+existing `hidden_counts` precedent rather than inventing a mechanism:
+`etsy_message_replies_suppressed`, `etsy_message_lane_off`, and
+`etsy_message_lane_note`, with a line in the rendered markdown. Nothing is
+deleted.
+
+**The line is drawn at the action class the operator switched off.** Refunds,
+replacements, escalations, briefs and print work are order-driven and stay —
+`clarify_brief` included, because suppressing 18 items the operator may still
+want is a worse error than leaving them.
+
+| Use case | Lane on | Lane off | Unknown posture |
+|---|---|---|---|
+| Reply items | `test_with_the_lane_on_nothing_is_suppressed` | `test_with_the_lane_off_only_the_reply_items_go` | `test_a_posture_object_it_does_not_understand_suppresses_nothing` |
+| Other actions | kept (same tests assert `refund_review` survives) | kept | kept |
+| Nothing vanishes | `test_the_suppressed_count_is_never_silent` — shown + suppressed == total | same | — |
+| Markdown | `test_the_markdown_surface_stays_quiet_when_nothing_is_suppressed` | `test_the_markdown_surface_names_the_suppression_and_the_reason` | — |
+
+An unrecognised posture object suppresses **nothing**: fail toward showing the
+work. `operator_surface_phrase` now reads every field through `getattr` for the
+same reason — it runs inside four operator renderers, and raising inside a
+renderer takes a whole surface down to annotate one line of it.
+
+## Surface 164 — a pair the midnight run invented, and why it got no window (2026-11-19)
+
+`test_no_live_receipt_falls_into_an_undeclared_pair` went red on a pair that did
+not exist when the session started: **`quality_gate/observed/awaiting_operator_resolution`**,
+written at 00:23:34 by the sidecar's `quality_gate` step. Caught by the guard,
+not by anyone reading code — which is the entire point of it.
+
+`quality-gate.json` is **one recurring log**: 948 receipts, a 12-entry history,
+`updated_at` advancing every ~6h, flipping between `verified/gating_ready` and
+this state as `pending_count` moves off zero.
+
+Declared **PARKED with no window**, and the reasoning is the part worth keeping:
+
+- A window here could **never fire**. The producer rewrites the receipt every
+  run, so its age cannot exceed any threshold. A window would read as coverage
+  while being incapable of alerting — worse than no policy, which at least
+  shows up as `unclassified`.
+- The work itself is **already owned**. The 6 pending artifacts behind this
+  state are graded by `decision_gateway_sync` (`pending_count: 6`,
+  `stale_pending_with_proof_count: 0`), which can tell a fresh pending item
+  from a stalled one. Checked before parking: parking a backlog nobody else
+  grades is precisely the failure this module exists to prevent.
+
+| Use case | Covered |
+|---|---|
+| Parked at any age | `test_it_is_parked_and_therefore_never_overdue` (0.01d, 30d, 400d) |
+| The basis names its real owner | `test_the_declared_basis_names_the_surface_that_does_grade_it` |
+| No window, deliberately | `test_a_window_here_would_be_coverage_that_could_never_fire` |
+| The ready half is terminal | `test_the_ready_state_is_dropped_entirely` |

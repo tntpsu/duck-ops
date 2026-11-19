@@ -13,6 +13,8 @@ from datetime import datetime
 import re
 from typing import Any
 
+from etsy_message_lane import load_message_lane, operator_surface_phrase
+
 
 PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 LANE_ORDER = {"customer_issue": 0, "custom_design": 1, "print_queue": 2}
@@ -703,7 +705,13 @@ def build_customer_interaction_queue(
     customer_cases: list[dict[str, Any]],
     custom_design_cases: list[dict[str, Any]],
     print_queue_candidates: list[dict[str, Any]],
+    *,
+    message_lane: Any | None = None,
 ) -> dict[str, Any]:
+    """`message_lane` is injected by tests only; production reads the config.
+    A default-None parameter rather than a module read inside the loop, so a
+    test can state the posture it is describing instead of inheriting the
+    operator's current one."""
     items: list[dict[str, Any]] = []
     grouped_customer_cases: dict[str, list[dict[str, Any]]] = {}
     hidden_counts = {
@@ -810,6 +818,24 @@ def build_customer_interaction_queue(
         )
     )
 
+    # The operator switched Etsy MESSAGE replies off on 2026-11-18 -- their own
+    # Grok bot answers them -- so "reply to this Etsy message" is no longer work
+    # on this side. Left in the queue it was 363 of 459 operator-facing entries:
+    # a wall that looks like a mountain of neglected customers and that nobody
+    # here can work. Suppressed and COUNTED, never silently dropped
+    # ([[feedback_no_silent_caps]]). Everything else stays: refunds,
+    # replacements, escalations, briefs and print work are order-driven and are
+    # still ours.
+    lane = load_message_lane() if message_lane is None else message_lane
+    suppressed_reply_items = 0
+    if getattr(lane, "off", False):
+        kept = [
+            item for item in items
+            if str(item.get("recommended_action") or "") != "reply_with_context"
+        ]
+        suppressed_reply_items = len(items) - len(kept)
+        items = kept
+
     return {
         "generated_at": datetime.now().astimezone().isoformat(),
         "counts": {
@@ -817,8 +843,11 @@ def build_customer_interaction_queue(
             "custom_design_cases_total": len(custom_design_cases),
             "print_queue_candidates_total": len(print_queue_candidates),
             "operator_queue_items": len(items),
+            "etsy_message_replies_suppressed": suppressed_reply_items,
+            "etsy_message_lane_off": bool(getattr(lane, "off", False)),
             **hidden_counts,
         },
+        "etsy_message_lane_note": operator_surface_phrase(lane),
         "items": items,
     }
 
@@ -830,6 +859,13 @@ def render_customer_interaction_queue_markdown(queue_payload: dict[str, Any]) ->
         f"- Generated at: `{queue_payload.get('generated_at')}`",
         f"- Operator-facing items: `{queue_payload.get('counts', {}).get('operator_queue_items', 0)}`",
         f"- Hidden low-signal customer cases: `{queue_payload.get('counts', {}).get('customer_cases_hidden', 0)}`",
+        *(
+            [f"- Etsy message replies suppressed: "
+             f"`{queue_payload.get('counts', {}).get('etsy_message_replies_suppressed', 0)}`"
+             f" — {queue_payload.get('etsy_message_lane_note') or 'lane off'}"]
+            if queue_payload.get("counts", {}).get("etsy_message_replies_suppressed")
+            else []
+        ),
         f"- Custom design cases: `{queue_payload.get('counts', {}).get('custom_design_cases_total', 0)}`",
         f"- Print queue candidates: `{queue_payload.get('counts', {}).get('print_queue_candidates_total', 0)}`",
         "",

@@ -183,6 +183,26 @@ POLICY: dict[tuple[str, str], Policy] = {
     ("thursday", "candidate_pool_ready"): _pending(14, "weekly Thursday lane"),
     ("gtdf", "batch_ready"): _pending(14, "weekly lane; cadence x2"),
 
+    # Appeared in the live store 2026-11-19T00:23 and was caught by
+    # test_no_live_receipt_falls_into_an_undeclared_pair, not by anyone reading
+    # the code -- which is what that guard is for.
+    #
+    # PARKED, and deliberately NOT _pending: `quality-gate.json` is one
+    # recurring log that quality_gate_pilot rewrites on every sidecar run (948
+    # receipts, 12-entry history, updated_at advancing every ~6h), flipping
+    # between verified/gating_ready and this state as `pending_count` moves off
+    # zero. Its age therefore CANNOT exceed any window, so declaring a window
+    # here would be coverage that can never fire -- worse than none, because it
+    # reads as graded.
+    #
+    # The work itself is owned: the 6 pending artifacts behind this state are
+    # graded by the decision_gateway_sync card (pending_count 6,
+    # stale_pending_with_proof_count 0 at the time of writing), which is the
+    # surface that can actually tell a fresh pending item from a stalled one.
+    ("quality_gate", "awaiting_operator_resolution"): _parked(
+        "the pending-review backlog is graded by decision_gateway_sync; this "
+        "receipt is a per-run log whose age is meaningless"),
+
     # --- approval / execution waits ---------------------------------------
     ("review_execution", "reply_preview_staged"): _pending(
         7, "a drafted review reply; the drain paces 2/session x 3 windows/day"),

@@ -499,3 +499,36 @@ class LanesSwitchedOffSomewhereOtherThanAFlowSpec(unittest.TestCase):
         self.assertNotEqual(
             rl.overdue_items([hot]), [],
             "positive control: ungated, this receipt IS overdue")
+
+
+class ThePerRunQualityGateLogTests(unittest.TestCase):
+    """Declared 2026-11-19 after the live-store guard caught a brand-new pair
+    the midnight sidecar had created. Parked on purpose, not pending."""
+
+    def _receipt(self, days_old=0.01):
+        return _receipt("quality_gate", "observed", "awaiting_operator_resolution",
+                        days_old=days_old, workflow_id="quality_gate")
+
+    def test_it_is_parked_and_therefore_never_overdue(self):
+        for days in (0.01, 30, 400):
+            with self.subTest(days=days):
+                v = _classify(self._receipt(days))
+                self.assertEqual(v.kind, rl.PARKED)
+                self.assertEqual(rl.overdue_items([v]), [])
+
+    def test_the_declared_basis_names_the_surface_that_does_grade_it(self):
+        policy = rl.POLICY[("quality_gate", "awaiting_operator_resolution")]
+        self.assertIn("decision_gateway_sync", policy.basis)
+
+    def test_a_window_here_would_be_coverage_that_could_never_fire(self):
+        # The producer rewrites this receipt every sidecar run, so its age can
+        # never exceed a window. Pinning that the policy declares NO window
+        # keeps the next person from adding one that looks like coverage.
+        policy = rl.POLICY[("quality_gate", "awaiting_operator_resolution")]
+        self.assertIsNone(policy.window_days)
+
+    def test_the_ready_state_is_dropped_entirely(self):
+        # The same log flips to verified/gating_ready when pending_count hits
+        # zero, and `verified` is universally terminal.
+        self.assertIsNone(_classify(
+            _receipt("quality_gate", "verified", "gating_ready", workflow_id="quality_gate")))

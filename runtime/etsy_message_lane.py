@@ -152,20 +152,21 @@ def operator_surface_phrase(posture: MessageLanePosture) -> str | None:
     operator asked for the difference to be visible: "Update cards so it
     doesn't look like something is broken."
     """
-    if not posture.off:
+    if not getattr(posture, "off", False):
         return None
     what = []
-    if not posture.replies_enabled:
+    if not getattr(posture, "replies_enabled", True):
         what.append("replies")
-    if not posture.reads_enabled:
+    if not getattr(posture, "reads_enabled", True):
         what.append("inbox reads")
     detail = " and ".join(what) or "this lane"
     phrase = f"Etsy message {detail} are off by operator decision"
-    if posture.note:
+    note = getattr(posture, "note", None)
+    if note:
         # First sentence only. The config holds the full reasoning; a surface
         # line that runs to four sentences stops being read at all
         # ([[feedback_no_silent_caps]] -- derive the copy from what fits).
-        headline = posture.note.split(". ")[0].rstrip(".")
+        headline = str(note).split(". ")[0].rstrip(".")
         phrase += f" — {headline}"
     if not phrase.endswith("."):
         phrase += "."
