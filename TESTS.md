@@ -9683,3 +9683,47 @@ the superseded receipt reading as overdue, which is the honest degradation.
 
 **Open:** nothing enforces the push order. The guard makes a skew
 survivable and visible; it does not make the two repos atomic.
+
+## Surface 159 — a fixture with a fuse on it (2026-11-19)
+
+`tests/test_jeepfact_new_duck_slots.py::TestEndToEndSelection` went red on a
+commit that touched nothing near it, having passed ninety minutes earlier in
+the same session.
+
+`select_jeepfact_products` takes no `now` — it reads the real clock
+internally. The fixture built its products from the module's frozen
+`NOW = 2026-10-07`, so `brand-new-duck-2` was stamped **2026-10-04 forever**.
+Measured at the moment of failure:
+
+| fixture duck | created_at | age | inside the 45d window |
+|---|---|---|---|
+| brand-new-duck-0 | 2026-10-06 | 44d | yes |
+| brand-new-duck-1 | 2026-10-05 | 45d | yes |
+| brand-new-duck-2 | 2026-10-04 | **46d** | **no** |
+
+So `assert len(fresh) >= 2` saw 1. The test was correct and the fixture had
+expired — a timed flake whose fuse was lit on 2026-10-07 and burned for 43
+days ([[feedback_pin_the_rule_not_the_reading]]).
+
+The file's own docstrings already cite that memory **twice**, for two
+earlier versions of the same mistake in the same class (`== 2` on an 11.5%
+lottery; a docstring claiming determinism of a `random.random()` scorer).
+Third time in one file.
+
+Fixed by building the end-to-end fixture relative to the REAL clock, so a
+brand-new duck is brand new whenever it runs. `TestRecentSelection` keeps
+the frozen `NOW` because it passes `now=NOW` explicitly — the difference
+between the two classes is now stated in the docstring.
+
+| Use case | Covered |
+|---|---|
+| The fixture ducks are inside the REAL window | `test_the_fixture_ducks_are_inside_the_real_window` — the fuse-check |
+| It reads the window from production, not a literal | uses `jf._jeepfact_new_duck_days()` |
+
+**Mutation-verified:** drifting the fixture back to the frozen `NOW` makes
+the fuse-check fail FIRST, with the handle, the age and the window in the
+message — so the next person reads "the fixture expired", not "new ducks
+are not being picked".
+
+Not caused by the day's work, but it blocked both pushes, so it was fixed
+rather than noted.
