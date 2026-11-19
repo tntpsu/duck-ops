@@ -39,6 +39,13 @@ REVIEW_REPLY_EXECUTION_AUTH_PATH = STATE_DIR / "review_reply_execution_auth.json
 REVIEW_REPLY_DISCOVERY_SESSIONS_PATH = STATE_DIR / "review_reply_discovery_sessions.json"
 CURRENT_CARD_PATH = OUTPUT_DIR / "current_customer_action.md"
 QUEUE_CARD_PATH = OUTPUT_DIR / "customer_queue.md"
+from etsy_message_lane import (
+    load_message_lane,
+    operator_surface_phrase,
+    refusal_message,
+    replies_allowed,
+)
+
 SAFE_ETSY_MESSAGES_URL = "https://www.etsy.com/messages"
 SAFE_ETSY_INBOX_URL = "https://www.etsy.com/messages?ref=hdr_user_menu-messages"
 BAD_ETSY_MESSAGES_URLS = {
@@ -1724,13 +1731,46 @@ def _record_browser_capture(packet: dict[str, Any], note: str) -> None:
     _record_customer_workflow_capture(packet, row)
 
 
+#: phase1_observer takes 17-21 minutes on the current data set (measured
+#: 2026-11-18: 21m10s inside the 18:00 sidecar run), so the ceiling sits well
+#: above that rather than at a round number that would kill working refreshes.
+#: With NO ceiling an operator command could hang on the observer forever --
+#: the same class as the two sidecar wedges the timeout ratchet was built for
+#: (tests/test_no_untimed_smtp.py).
+_OBSERVER_RERUN_TIMEOUT_SECONDS = 2400
+
+
 def _rerun_observer() -> None:
-    subprocess.run([sys.executable, str(ROOT / "runtime" / "phase1_observer.py")], cwd=str(ROOT), check=False)
+    """Rebuild the derived customer surfaces after a capture.
+
+    Swallows failure on purpose -- the command's own write has already landed
+    and this is a refresh -- but never silently: the timeout gets its own loud
+    line, because a refresh that stopped happening is exactly the kind of thing
+    that goes unnoticed for weeks ([[feedback_swallowed_errors_lie]]).
+    """
+    try:
+        subprocess.run(
+            [sys.executable, str(ROOT / "runtime" / "phase1_observer.py")],
+            cwd=str(ROOT),
+            check=False,
+            timeout=_OBSERVER_RERUN_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            "[customer-operator] WARNING the observer rerun exceeded "
+            f"{_OBSERVER_RERUN_TIMEOUT_SECONDS}s and was killed. The command's own "
+            "write landed; the derived customer surfaces may be one cycle stale "
+            "until the next sidecar run."
+        )
 
 
 def render_customer_status(items: list[dict[str, Any]], current: dict[str, Any] | None) -> str:
     browser_sync = load_browser_sync()
     counts = browser_sync.get("counts") or {}
+    # State the posture FIRST. With the lane off these counts stop moving, and
+    # an unexplained frozen count reads as a broken producer -- the operator
+    # asked for the difference to be visible, not inferred.
+    lane_phrase = operator_surface_phrase(load_message_lane())
     lines = [
         "Duck Ops customer status:",
         f"- Packets: {len(items)}",
@@ -1739,6 +1779,11 @@ def render_customer_status(items: list[dict[str, Any]], current: dict[str, Any] 
         f"- Waiting on customer: {int(counts.get('threads_waiting_on_customer') or 0)}",
         f"- Resolved threads: {int(counts.get('resolved_threads') or 0)}",
     ]
+    if lane_phrase:
+        lines.insert(1, f"- {lane_phrase}")
+        lines.append("- New Etsy threads / Active followups / Waiting on customer / "
+                     "Resolved threads are a frozen inbox snapshot. Packets, refunds "
+                     "and replacements come from orders and are still live.")
     if current:
         lines.append(f"- Current packet: {current.get('short_id')} | {current.get('title')}")
     if items:
@@ -1766,6 +1811,11 @@ def render_browser_threads(kind: str) -> str:
         heading = "Duck Ops customer followups in motion:"
 
     lines = [heading, f"- Count: {len(filtered)}"]
+    lane_phrase = operator_surface_phrase(load_message_lane())
+    if lane_phrase:
+        lines.append(f"- {lane_phrase}")
+        lines.append("- Nothing is reading or answering these; they are a frozen "
+                     "snapshot, not a queue waiting on you.")
     if not filtered:
         lines.append("- None right now.")
         return "\n".join(lines)
@@ -1847,6 +1897,9 @@ def handle_customer_text(text: str) -> str:
         )
 
     if command == "preview":
+        if not replies_allowed():
+            write_customer_operator_outputs(packet_payload, operator_state)
+            return refusal_message(load_message_lane())
         target = _resolve_target_thread_packet(items, operator_state, target_token)
         if not target:
             write_customer_operator_outputs(packet_payload, operator_state)
@@ -1888,6 +1941,9 @@ def handle_customer_text(text: str) -> str:
         return "\n".join(lines)
 
     if command == "confirm":
+        if not replies_allowed():
+            write_customer_operator_outputs(packet_payload, operator_state)
+            return refusal_message(load_message_lane())
         target = _resolve_target_thread_packet(items, operator_state, target_token)
         if not target:
             write_customer_operator_outputs(packet_payload, operator_state)
@@ -1999,6 +2055,9 @@ def handle_customer_text(text: str) -> str:
         return f"Recorded Etsy browser capture for {target.get('short_id')}."
 
     if command.startswith("state::"):
+        if command == "state::reply_drafted" and not replies_allowed():
+            write_customer_operator_outputs(packet_payload, operator_state)
+            return refusal_message(load_message_lane())
         target = _resolve_target_thread_packet(items, operator_state, target_token)
         if not target:
             write_customer_operator_outputs(packet_payload, operator_state)

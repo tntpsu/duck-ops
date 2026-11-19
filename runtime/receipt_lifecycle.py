@@ -254,10 +254,18 @@ SUPERSESSION_KEYS: dict[str, str] = {
 #: lane is one entry rather than another branch in whichever card notices
 #: first. Value: (config filename under duck-ops/config, key path to the
 #: boolean). The caller does the file IO; this module does the reading.
-EXTERNAL_LANE_ENABLED_SWITCHES: dict[str, tuple[str, tuple[str, ...]]] = {
-    # 2026-11-18: the operator answers Etsy messages with their own Grok bot,
-    # so the read-only customer-inbox lane that staged our drafts is off.
-    "customer_reply": ("etsy_browser_batch.json", ("customer_read", "enabled")),
+#: Value: (config filename under duck-ops/config, one or more key paths to a
+#: boolean). The lane is off when ANY named switch is off -- a lane needs every
+#: one of its switches to do work, so one of them being false is enough.
+EXTERNAL_LANE_ENABLED_SWITCHES: dict[str, tuple[str, tuple[tuple[str, ...], ...]]] = {
+    # 2026-11-18: the operator answers Etsy messages with their own Grok bot.
+    # TWO switches, because they are genuinely separate decisions: reads could
+    # come back for context without re-enabling replies. Either one being off
+    # means nothing will progress a customer_reply receipt.
+    "customer_reply": (
+        "etsy_browser_batch.json",
+        (("customer_message_reply", "enabled"), ("customer_read", "enabled")),
+    ),
 }
 
 
@@ -274,13 +282,18 @@ def external_switch_is_off(lane: str, config_payload: Any) -> bool:
     entry = EXTERNAL_LANE_ENABLED_SWITCHES.get(lane)
     if entry is None:
         return False
-    _, key_path = entry
-    node: Any = config_payload
-    for key in key_path:
-        if not isinstance(node, dict) or key not in node:
-            return False
-        node = node[key]
-    return isinstance(node, bool) and node is False
+    _, key_paths = entry
+    for key_path in key_paths:
+        node: Any = config_payload
+        reachable = True
+        for key in key_path:
+            if not isinstance(node, dict) or key not in node:
+                reachable = False
+                break
+            node = node[key]
+        if reachable and isinstance(node, bool) and node is False:
+            return True
+    return False
 
 
 def classify_receipt(

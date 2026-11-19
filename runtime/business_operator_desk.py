@@ -17,6 +17,7 @@ from typing import Any, Callable
 from dependency_health import DEPENDENCY_HEALTH_MD_PATH, build_dependency_health
 from etsy_browser_guard import blocked_status as etsy_browser_blocked_status
 from inventory_truth import INVENTORY_TRUTH_MD_PATH, build_inventory_truth
+from etsy_message_lane import load_message_lane, operator_surface_phrase
 from lane_pause import read_lane_pause
 from nightly_action_summary import format_operator_duck_name, load_master_roadmap_focus
 from operator_interface_contracts import build_interface_contract_summary
@@ -4179,6 +4180,15 @@ def render_business_operator_desk_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"  Do: {command_text}{secondary_text}")
 
     lines.extend(["", "## Customer Queue", ""])
+
+    _message_lane = load_message_lane()
+    if _message_lane.off:
+        # Message replies are off; packets driven by ORDERS (refund,
+        # replacement) are not. Saying which is which here stops the next
+        # reader concluding the whole customer lane is broken.
+        lines.append(f"_{operator_surface_phrase(_message_lane)} "
+                     "Order-driven packets below (refunds, replacements) are still live._")
+        lines.append("")
 
     customer_items = sections.get("customer_packets") or []
     if not customer_items:

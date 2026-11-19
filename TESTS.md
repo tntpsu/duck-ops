@@ -9841,3 +9841,113 @@ park a backlog) → 3 red; reading a missing key as OFF → 7 red.
 open thread, now parked rather than graded, with a drafted $45 reply and an
 unprocessed newer message. Parking it means the card stops nagging; it does
 not mean the customer stopped waiting.
+
+## Surface 162 — Etsy messages off, Etsy reviews on (2026-11-18, operator: "disable the Etsy replies to messages but keep the review lane replying")
+
+Two lanes that share a browser session and nothing else. Conflating them is the
+mistake `runtime/etsy_message_lane.py` exists to make impossible: it never reads,
+writes or implies anything about `review_reply`, and a test asserts that no value
+of the review switch can change the message posture.
+
+Two switches, because they are genuinely separate decisions:
+
+| switch | question | now |
+|---|---|---|
+| `customer_read.enabled` | may we OPEN a message thread | false |
+| `customer_message_reply.enabled` | may we stage, type or send a reply | false |
+| `review_reply.enabled` | may we post a REVIEW reply | **true, untouched** |
+
+### The two accessors fail in opposite directions, on purpose
+
+This is the whole point of the module. When the config cannot be read:
+
+| accessor | returns | why |
+|---|---|---|
+| `replies_allowed()` | **False** | an unreadable switch must never authorise typing into a customer's thread |
+| `lane_is_off()` | **False** (not off) | an unreadable switch must never silently park a queue of waiting customers |
+
+Getting those the same way round either posts an unapproved reply or hides a
+backlog. Both directions are tested, and both mutations were caught.
+
+| Use case | On | Off | Unreadable | Typo'd value |
+|---|---|---|---|---|
+| May we reply? | `test_only_an_explicit_true_allows_a_reply` | same | `test_a_missing_config_refuses_the_reply_but_does_not_park_the_queue` | `"true"` → refused, same test |
+| Is the lane off? | `test_both_on` | `test_replies_off_reads_on` | same test as above, opposite assertion | `test_only_a_real_boolean_false_switches_a_lane_off` |
+| Reply commands | `tests/test_customer_operator.py` setUp pins the lane ON | `test_every_reply_staging_command_refuses` (preview, confirm, drafted) | — | — |
+| Side effects | — | `test_it_refuses_before_reaching_any_side_effect` | — | — |
+| Review lane | `test_the_committed_config_still_has_review_replies_enabled` | `test_no_review_lane_switch_can_change_the_message_posture` | — | — |
+
+**All three** staging commands are gated, not just `preview`: `customer drafted`
+stages a reply too, and gating one branch of a multi-branch mechanism is the
+incomplete fix this stack keeps shipping
+([[feedback_incomplete_fix_enumerate_all_branches]]).
+
+### Surfaces now state the posture instead of going quiet
+
+`customer threads` reported **208 threads "needs browser review"** with nothing
+reading them, and the nightly email said "208 new Etsy thread(s) still need
+first review. Next step: use `customer threads`" — pointing at a command that
+now refuses. An off lane and an empty lane rendered identically.
+
+Four surfaces take the phrase from one helper: `customer status`,
+`customer threads`, the nightly action summary (sections 2 and 3) and the
+Business Desk Customer Queue. Each names what is frozen and what is not —
+packets, refunds and replacements come from ORDERS and are still live, so
+"the counts above are stale" would itself have been a false alarm.
+
+### Retiring C376 (peter) took writes to TWO stores
+
+| store | write | who reads it |
+|---|---|---|
+| `state/etsy_conversation_browser_captures.json` | `follow_up_state: resolved` via `customer resolved C376` | the packet / queue / nightly builders |
+| `state/workflow_control/customer-reply-c376.json` | `dismissed` / `operator_retired_lane_handed_to_external_bot` | the receipt card |
+
+Retiring in the receipt alone leaves a zombie in the capture
+([[feedback_retire_artifacts_in_authoritative_store]]). Verified: 0
+customer_reply receipts are graded at all now, and
+`_normalized_browser_follow_up_state` on the new capture returns `resolved`.
+
+**Short ids are reassigned per run, so identity was verified before writing.**
+`C376` resolved through the production resolver to `browser_thread::C376`,
+"peter", `etsy-thread::peter`, carrying the Grave Digger draft. That check was
+not paranoia: `C301`, which pointed at R Henderson this morning, now points at
+a different buyer entirely.
+
+### A test whose isolation depended on the guard it tested
+
+The first version of `WithEtsyMessageRepliesSwitchedOffTests` pinned only the
+guard and used the real state paths. It passed — because the guard returned
+before touching anything. Then a mutation run removed the guard, and the test
+wrote a fake `draft_reply: "here is a reply"` onto a **real buyer's thread**
+(`etsy-thread::4009493548`, overwriting even the buyer's name) and started a
+20-minute observer. No Etsy call was made and no receipt was written, but
+production state was wrong for six minutes.
+
+Repaired from the 2026-10-09 Drive-mirror copy of the captures file, field for
+field, with the entry count confirmed unchanged (59/59) and Peter's retirement
+verified intact. The mirror earned its keep in a way nobody designed it for.
+
+The class now redirects all **eight** module path constants to a tmp dir and
+backstops the four side-effect functions, so the mutation is caught by an
+assertion instead of by a write. Proven by md5 of the live captures file across
+the whole mutation run: unchanged.
+
+**Mutation-verified** (5 run, 5 caught): `replies_allowed` failing open → 2 red;
+accepting any truthy value → 2 red; `lane_is_off` failing closed → 2 red;
+ungating `customer drafted` → 2 red; treating a string `"false"` as a decision →
+7 red.
+
+### Also fixed, found by the existing ratchet
+
+`_rerun_observer`'s `subprocess.run` had **no timeout** — an operator command
+could hang on the observer forever, the same class as the two sidecar wedges.
+It was entry `customer_operator.py:1728` on the UNREVIEWED list in
+`test_no_untimed_smtp.py`; my import shifted the line, the ratchet failed, and
+the honest fix was to review it rather than re-number it. Now bounded at 2400s
+(measured runtime 17–21 min) with a loud line on expiry. **The ratchet shrank
+from 17 entries to 16**, which is the only direction it is allowed to move.
+
+**Open:** `customer_read` being off means the capture file stops refreshing, so
+every customer surface is reading a snapshot that will keep ageing. Nothing
+grades its age — the surfaces now SAY it is frozen, but no card would notice if
+the operator turned reads back on and the producer then failed.

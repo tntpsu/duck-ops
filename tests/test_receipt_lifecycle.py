@@ -448,19 +448,42 @@ class LanesSwitchedOffSomewhereOtherThanAFlowSpec(unittest.TestCase):
         # The anti-rot guard. A renamed config would otherwise make the switch
         # silently unreachable and the lane permanently 'on'.
         config_dir = Path(rl.__file__).resolve().parents[1] / "config"
-        for lane, (filename, key_path) in \
+        for lane, (filename, key_paths) in \
                 rl.EXTERNAL_LANE_ENABLED_SWITCHES.items():
-            with self.subTest(lane=lane):
-                path = config_dir / filename
-                self.assertTrue(path.exists(), f"{lane}: {path} is gone")
-                payload = json.loads(path.read_text())
-                node = payload
-                for key in key_path:
-                    self.assertIsInstance(node, dict, f"{lane}: {key_path} is unreachable")
-                    self.assertIn(key, node, f"{lane}: {key_path} is unreachable")
-                    node = node[key]
-                self.assertIsInstance(
-                    node, bool, f"{lane}: {key_path} is not a boolean")
+            path = config_dir / filename
+            self.assertTrue(path.exists(), f"{lane}: {path} is gone")
+            payload = json.loads(path.read_text())
+            self.assertTrue(key_paths, f"{lane}: declares no switches at all")
+            for key_path in key_paths:
+                with self.subTest(lane=lane, key_path=key_path):
+                    node = payload
+                    for key in key_path:
+                        self.assertIsInstance(node, dict, f"{lane}: {key_path} is unreachable")
+                        self.assertIn(key, node, f"{lane}: {key_path} is unreachable")
+                        node = node[key]
+                    self.assertIsInstance(
+                        node, bool, f"{lane}: {key_path} is not a boolean")
+
+    def test_any_one_switch_being_off_is_enough(self):
+        # A lane needs ALL its switches to do work, so one false is enough.
+        for payload in (
+            {"customer_message_reply": {"enabled": False}, "customer_read": {"enabled": True}},
+            {"customer_message_reply": {"enabled": True}, "customer_read": {"enabled": False}},
+            {"customer_message_reply": {"enabled": False}, "customer_read": {"enabled": False}},
+        ):
+            with self.subTest(payload=payload):
+                self.assertTrue(rl.external_switch_is_off("customer_reply", payload))
+
+    def test_all_switches_on_means_the_lane_is_on(self):
+        self.assertFalse(rl.external_switch_is_off("customer_reply", {
+            "customer_message_reply": {"enabled": True},
+            "customer_read": {"enabled": True},
+        }))
+
+    def test_an_unreachable_switch_does_not_mask_a_reachable_off_one(self):
+        # customer_read missing entirely; the reply switch still says off.
+        self.assertTrue(rl.external_switch_is_off(
+            "customer_reply", {"customer_message_reply": {"enabled": False}}))
 
     def test_a_receipt_in_the_switched_off_lane_is_parked_not_overdue(self):
         # End to end through the real classifier, with the lane handed in the

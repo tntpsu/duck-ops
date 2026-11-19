@@ -60,7 +60,6 @@ _SUBPROCESS_ONLY = {"run", "Popen", "check_output", "check_call"}
 #: ([[feedback_residual_risk_needs_a_tracked_home]] -- the risk is listed
 #: here and in TESTS.md Surface 137, not left as prose).
 UNREVIEWED = {
-    "customer_operator.py:1728",
     "drive_mirror.py:684",
     "drive_mirror.py:813",
     "engineering_governance_digest.py:104",

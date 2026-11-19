@@ -36,6 +36,12 @@
     "disabled_because": "Operator runs Etsy message replies through their own Grok bot. This lane was read-only (it never typed or sent a reply) but it opened message threads in the trusted Etsy session and staged drafts, which is duplicated effort now. Turning it off also returns its share of the etsy_browser_guard pacing budget to the review-reply drain, which the reads were being paced out to protect.",
     "resume_hint": "Set enabled back to true if the Grok bot stops covering Etsy messages. Nothing else needs changing: order-driven custom-build detection reads paid Etsy orders, not messages, so it is unaffected."
   },
+  "customer_message_reply": {
+    "enabled": false,
+    "disabled_on": "2026-11-18",
+    "disabled_because": "The operator's own Grok bot answers Etsy messages. Duck Ops must not stage, type or send a reply to an Etsy message -- not even one the operator asks for by hand -- so two systems never answer the same customer. This is a SEPARATE switch from customer_read above: reads could be turned back on for context without re-enabling replies.",
+    "resume_hint": "Set enabled back to true only if the Grok bot stops covering Etsy messages. `customer preview` and `customer confirm` refuse while this is false; review_reply below is a different lane and is unaffected."
+  },
   "review_reply": {
     "enabled": true,
     "queue_publish_ready": true,

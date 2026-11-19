@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -9,6 +10,8 @@ RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
+import etsy_message_lane
+import nightly_action_summary
 from nightly_action_summary import (
     build_nightly_action_summary,
     render_nightly_action_summary_html,
@@ -17,6 +20,26 @@ from nightly_action_summary import (
 
 
 class NightlyActionSummaryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        """Pin the Etsy MESSAGE lane ON for this class.
+
+        These tests describe the behaviour of a running lane. Without the pin
+        they read config/etsy_browser_batch.json, so they described whatever
+        posture the operator happened to have set -- and three of them went red
+        the moment the lane was switched off on 2026-11-18. The lane-OFF
+        behaviour has its own tests rather than being inherited from a config
+        file ([[feedback_test_isolation_from_production_state]]).
+        """
+        lane_on = etsy_message_lane.MessageLanePosture(
+            reads_enabled=True, replies_enabled=True, off=False,
+            note=None, resume_hint=None, known=True)
+        for target, value in (("load_message_lane", lambda *a, **k: lane_on),
+                              ("replies_allowed", lambda *a, **k: True)):
+            if hasattr(nightly_action_summary, target):
+                patcher = mock.patch.object(nightly_action_summary, target, value)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+
     def test_issues_split_reply_vs_decision_not_duplicated(self) -> None:
         # Regression (2026-06-16): both sections used to render the SAME merged
         # attention list. They must split by status: reply_needed -> "needs

@@ -30,6 +30,8 @@ FOLLOW_UP_ACTION_ORDER = {
 }
 
 TOP_CUSTOMER_ACTION_LIMIT = 5
+from etsy_message_lane import load_message_lane, operator_surface_phrase
+
 SAFE_ETSY_INBOX_URL = "https://www.etsy.com/messages?ref=hdr_user_menu-messages"
 MASTER_ROADMAP_PATH = Path("/Users/philtullai/ai-agents/duck-ops/output/operator/master_roadmap.md")
 
@@ -837,11 +839,24 @@ def render_nightly_action_summary_markdown(payload: dict[str, Any]) -> str:
     if not new_thread_items:
         lines.append("No brand-new Etsy threads are waiting for first review right now.")
     else:
-        lines.append(
-            f"{len(new_thread_items)} new Etsy thread(s) still need first review. "
-            "These are intentionally collapsed so tonight's email stays focused on actions already on your side."
-        )
-        lines.append("Next step: use `customer threads` when you want to triage the fresh inbox.")
+        _lane = load_message_lane()
+        if _lane.off:
+            # Without this the nightly email says "208 threads still need first
+            # review" and points at a triage command that now refuses -- a
+            # nightly reminder of a backlog the operator deliberately handed
+            # to their own bot.
+            lines.append(
+                f"{len(new_thread_items)} Etsy thread(s) sit in the last inbox snapshot, "
+                "and nothing is reading them."
+            )
+            lines.append(f"{operator_surface_phrase(_lane)}")
+            lines.append("No action needed here: this is a frozen snapshot, not a queue.")
+        else:
+            lines.append(
+                f"{len(new_thread_items)} new Etsy thread(s) still need first review. "
+                "These are intentionally collapsed so tonight's email stays focused on actions already on your side."
+            )
+            lines.append("Next step: use `customer threads` when you want to triage the fresh inbox.")
 
     lines.extend(["", "## 3. Customer Status Counts", ""])
     waiting_count = int(counts.get("customer_waiting_on_customer") or 0)
@@ -855,7 +870,12 @@ def render_nightly_action_summary_markdown(payload: dict[str, Any]) -> str:
         if waiting_count > 0:
             lines.append("- Those waiting-on-customer threads are intentionally omitted from tonight's action queue.")
     else:
-        lines.append("No customer followups are currently in motion.")
+        _lane = load_message_lane()
+        if _lane.off:
+            lines.append("No customer followups are in motion, and none will be: "
+                         f"{operator_surface_phrase(_lane)}")
+        else:
+            lines.append("No customer followups are currently in motion.")
 
     lines.extend(["", "## 4. Buy Replacement Labels Now", ""])
     replacement_label_items = sections.get("buy_replacement_labels_now") or []

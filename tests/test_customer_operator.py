@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ RUNTIME_DIR = Path(__file__).resolve().parents[1] / "runtime"
 if str(RUNTIME_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_DIR))
 
+import etsy_message_lane
 import customer_operator
 from customer_operator import (
     _best_browser_url,
@@ -31,6 +33,26 @@ from customer_operator import (
 
 
 class CustomerOperatorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        """Pin the Etsy MESSAGE lane ON for this class.
+
+        These tests describe the behaviour of a running lane. Without the pin
+        they read config/etsy_browser_batch.json, so they described whatever
+        posture the operator happened to have set -- and three of them went red
+        the moment the lane was switched off on 2026-11-18. The lane-OFF
+        behaviour has its own tests rather than being inherited from a config
+        file ([[feedback_test_isolation_from_production_state]]).
+        """
+        lane_on = etsy_message_lane.MessageLanePosture(
+            reads_enabled=True, replies_enabled=True, off=False,
+            note=None, resume_hint=None, known=True)
+        for target, value in (("load_message_lane", lambda *a, **k: lane_on),
+                              ("replies_allowed", lambda *a, **k: True)):
+            if hasattr(customer_operator, target):
+                patcher = mock.patch.object(customer_operator, target, value)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+
     def test_parse_customer_drafted_command(self) -> None:
         command, target, note = parse_customer_command("customer drafted C301 Thanks, I can do blue.")
         self.assertEqual(command, "state::reply_drafted")
@@ -610,3 +632,99 @@ class CustomerOperatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WithEtsyMessageRepliesSwitchedOffTests(unittest.TestCase):
+    """2026-11-18: the operator's own Grok bot answers Etsy messages, so Duck
+    Ops must not stage, type or send one -- not even when the operator asks by
+    hand. Two systems answering the same customer is the failure being
+    prevented, so the guard refuses rather than warns."""
+
+    def setUp(self) -> None:
+        # EVERY prod path redirected to a tmp dir FIRST, before the guard is
+        # pinned. The first version of this class pinned only the guard, so
+        # its isolation depended on the very thing it was testing: a mutation
+        # run that removed the guard wrote a fake "here is a reply" draft onto
+        # a real buyer's thread in production state and started a 20-minute
+        # observer. A test whose safety rests on the guard under test is not
+        # isolated ([[feedback_test_isolation_from_production_state]]).
+        self.ctx = tempfile.TemporaryDirectory()
+        root = Path(self.ctx.name)
+        self.addCleanup(self.ctx.cleanup)
+        for const in ("PACKETS_PATH", "OPERATOR_STATE_PATH",
+                      "ETSY_BROWSER_CAPTURES_PATH", "ETSY_BROWSER_SYNC_PATH",
+                      "REVIEW_REPLY_EXECUTION_AUTH_PATH",
+                      "REVIEW_REPLY_DISCOVERY_SESSIONS_PATH",
+                      "CURRENT_CARD_PATH", "QUEUE_CARD_PATH"):
+            patcher = mock.patch.object(
+                customer_operator, const, root / f"{const.lower()}.json")
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        # And a backstop on the two side effects a staged reply would reach.
+        for const in ("_record_browser_capture", "_rerun_observer",
+                      "_stage_reply_preview_in_trusted_etsy_session",
+                      "_confirm_reply_preview_in_trusted_etsy_session"):
+            patcher = mock.patch.object(customer_operator, const)
+            self.addCleanup(patcher.stop)
+            setattr(self, const.strip("_"), patcher.start())
+
+        self.browser_sync = {"generated_at": "2026-04-11T12:00:00-04:00", "counts": {}, "items": [
+            {"linked_customer_short_id": "C301", "conversation_thread_key": "etsy-thread::test",
+             "conversation_contact": "Test Buyer", "browser_review_status": "captured",
+             "follow_up_state": "reply_drafted", "draft_reply": "a staged draft"}]}
+        patcher = mock.patch.object(
+            customer_operator, "load_browser_sync", lambda *a, **k: self.browser_sync)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        lane_off = etsy_message_lane.MessageLanePosture(
+            reads_enabled=False, replies_enabled=False, off=True,
+            note="Grok bot answers these.", resume_hint="flip it back", known=True)
+        for target, value in (("load_message_lane", lambda *a, **k: lane_off),
+                              ("replies_allowed", lambda *a, **k: False)):
+            patcher = mock.patch.object(customer_operator, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_every_reply_staging_command_refuses(self):
+        # All three, not just preview: gating one branch of a multi-branch
+        # mechanism is the incomplete fix this stack keeps shipping
+        # ([[feedback_incomplete_fix_enumerate_all_branches]]).
+        for text in ("customer preview C301",
+                     "customer confirm C301",
+                     "customer drafted C301 here is a reply"):
+            with self.subTest(text=text):
+                out = customer_operator.handle_customer_text(text)
+                self.assertIn("switched off", out)
+                self.assertIn("did not stage anything", out)
+                self.assertIn("Grok bot answers these.", out)
+
+    def test_it_refuses_before_reaching_any_side_effect(self):
+        customer_operator.handle_customer_text("customer preview C301")
+        customer_operator.handle_customer_text("customer confirm C301")
+        customer_operator.handle_customer_text("customer drafted C301 a reply")
+        self.stage_reply_preview_in_trusted_etsy_session.assert_not_called()
+        self.confirm_reply_preview_in_trusted_etsy_session.assert_not_called()
+        self.record_browser_capture.assert_not_called()
+        self.rerun_observer.assert_not_called()
+
+    def test_it_refuses_even_for_a_thread_that_does_not_exist(self):
+        # The guard must not depend on resolving a target: a refusal that only
+        # fires for known threads is not a guard.
+        out = customer_operator.handle_customer_text("customer preview C99999")
+        self.assertIn("switched off", out)
+        self.assertNotIn("couldn't find", out)
+
+    def test_read_only_and_closing_commands_still_work(self):
+        # Turning replies off must not take away the ability to look at a
+        # thread or to close one out.
+        for text in ("customer status", "customer threads"):
+            with self.subTest(text=text):
+                out = customer_operator.handle_customer_text(text)
+                self.assertNotIn("did not stage anything", out)
+
+    def test_the_operator_is_told_where_the_switch_is(self):
+        out = customer_operator.handle_customer_text("customer preview C301")
+        self.assertIn("customer_message_reply.enabled", out)
+        self.assertIn("flip it back", out)
+        self.assertIn("REVIEW replies are a separate lane", out)
