@@ -1673,7 +1673,7 @@ Sibling of the 11-day `pacing_cooldown` wedge (Fix A, 73f2096): that added throt
 **Fix (SHIPPED 2026-07-14):**
 - **Deterministic quality cross-check** `_seo_title_quality(title, subject)` in `shopify_seo_review.py` — checks length 45-70, subject presence (core concept retained), keyword-stuffing (`duck`>3, brand repeat), multi-separator, placeholder. Stronger than the length-only `_title_needs_fallback`; catches confidently-wrong LLM output.
 - **Golden fixture** `tests/fixtures/shopify_seo_golden.json` — products/pages incl. a near-dup pair, each with a `subject` constraint. Regression rule: append every real miss.
-- **Gated eval** `scripts/eval_shopify_seo.py` — runs the REAL LLM on the golden set, scores with `_seo_title_quality` + a dup-differentiation check, gates at **≥90% quality pass AND 100% dup-group distinctness**, exit 0/1, NOT in default pytest.
+- **Gated eval** `scripts/eval_shopify_seo.py` — runs the REAL LLM on the golden set, scores with `_seo_title_quality` + a dup-differentiation check, exit 0/1, NOT in default pytest. **Gate re-cut 2026-11-19 (Surface 165):** the original **≥90% quality pass** threshold was unsatisfiable by construction and had never passed — it gated on `subject_missing`, which `_LIVE_QUALITY_ISSUE_CODES` deliberately excludes, and the fixture's dup pair shares one subject while being required to produce DISTINCT titles, so the two conditions contradicted each other (and 8 resources cannot resolve 90% anyway). Now gates on **0 blocking codes AND 0 template fallbacks AND dup distinctness** — stricter on what production enforces — with advisory codes printed and counted but not gating.
 - Unit tests pin the scorer (good/short/off-subject/stuffed/placeholder).
 
 **By dimension:** unit (deterministic scorer, 5 cases); gated eval (real API, manual). **STATUS: SHIPPED 2026-07-14.** **Live guard SHIPPED 2026-07-16:** `_flag_low_quality_titles` runs `_seo_title_quality` on the FINAL proposed title (post-fallback) and routes clear-cut failures (`_LIVE_QUALITY_ISSUE_CODES` — length/placeholder/stuffing/brand-repeat/multi-separator; excludes the heuristic `subject_missing` to avoid false-positives) to `title_needs_review` + `apply_seo_title=False`; email shows "NEEDS REVIEW (…issues)" instead of shipping a plausible-but-bad title or a silent canned fallback. 2 build tests (stuffed→needs_review+not-applied; good→applies). Suite green (1082). **Remaining follow-up (P2):** close the OUTCOME loop — per-page GSC clicks before/after an apply (open-loop gap from the roadmap audit).
@@ -10135,10 +10135,14 @@ dir (never production, never emailed). **STATUS: SHIPPED 2026-11-19** —
   way deliberately — an ABSENT field has no weak copy to improve on — but it is
   now the only review type with no model in the loop, and that is a choice
   nothing tests.
-- `scripts/eval_shopify_seo.py` scores `_generate_proposals` and has never
-  scored the path that reaches the operator. The gated eval should be re-run now
-  that the category batch actually uses the generator, and its promotion gate has
-  never been exercised against a reasoning model.
+- ~~`scripts/eval_shopify_seo.py` should be re-run~~ **DONE 2026-11-19**: re-run
+  against gpt-5.5 and **PASS** (0 blocking, 0 template fallbacks, dup
+  differentiation PASS, 3/8 advisory `subject_missing`). Running it is what
+  exposed that the old gate could never pass; see the Surface 61 entry. Still
+  open: the fixture is 8 resources and 1 dup pair, which is too small to resolve
+  a rate-based gate, and `subject_missing` false-positives on exactly the
+  reworded titles the lane now produces — it wants a real differentiation check,
+  not a token-presence one.
 - Nothing caps SEO proposal spend. A category batch is unbounded (`limit=0`), so
   `weak_description` is 9 chunks per build, and the kickoff can rebuild daily.
 - `openai_helper` has **no** `DUCK_TEST_MODE` refusal of its own; the guard added
