@@ -10361,14 +10361,17 @@ computed from `written_at`, which on a derived index rebuilt daily is always
 212 days ([[feedback_grade_runs_against_runtime_state]]).
 
 **Open after this surface:**
-- **`SEO_REVIEW_CATEGORY_ORDER` is now only a tie-break**, but it still defines
+- ~~**`SEO_REVIEW_CATEGORY_ORDER` is now only a tie-break**, but it still defines
   which categories EXIST and is still a hardcoded list in
   `shopify_seo_review.py` rather than config, unlike every other rule the stack
-  now reads from `seo_rules.json`.
-- The input-sanity card's staleness thresholds (24h/48h) assume the kickoff runs
-  daily. Nothing asserts that the launchd job firing the kickoff is actually
-  alive, so a dead scheduler shows as a stale ledger rather than as a dead
-  scheduler ([[feedback_verify_the_job_is_firing_first]]).
+  now reads from `seo_rules.json`.~~ CLOSED by Surface 168.
+- ~~The input-sanity card's staleness thresholds (24h/48h) assume the kickoff
+  runs daily. Nothing asserts that the launchd job firing the kickoff is
+  actually alive, so a dead scheduler shows as a stale ledger rather than as a
+  dead scheduler.~~ **This item was WRONG** — `scheduler_health.py` has graded
+  `shopify_seo_kickoff_daily` from its plist all along. Surface 168 added the
+  missing ATTRIBUTION instead of a duplicate canary, and the real gap it found
+  was different: the job running while its ledger rebuild fails silently.
 - `issue_persists` now has a count in the email but no THRESHOLD: nothing goes
   yellow when it grows, so a rules problem affecting many resources still reads
   as a line of prose in one batch email.
@@ -10376,6 +10379,132 @@ computed from `written_at`, which on a derived index rebuilt daily is always
   will stay yellow until a re-sweep is spent. That is correct but means the card
   starts life non-green, and a permanently-yellow card is one the operator
   learns to ignore.
-- The `weak_description` category (66 items, never served) is now top of the
+- ~~The `weak_description` category (66 items, never served) is now top of the
   ranking after `missing_title`'s single item. Nothing caps batch size, so that
-  will build a 66-item / 9-chunk batch the first time it is reached.
+  will build a 66-item / 9-chunk batch the first time it is reached.~~ CLOSED by
+  Surface 168 (capped at 15; 2 model calls).
+
+## Surface 168 — a cap on what one reply can write, the producer named, and the last rule list moved (2026-11-19, operator: "Go for all 3")
+
+**1. One review email may no longer ask for the whole category.** The daily
+kickoff calls `send_shopify_seo_review_email(limit=0, …)`, and `limit=0` means
+"every eligible resource". Measured on the live audit the moment the Surface 167
+ranking put `weak_description` second:
+
+| category | eligible | batch after cap | deferred | model calls (was → now) |
+|---|---|---|---|---|
+| `weak_description` | 66 | 15 | 51 | 9 → 2 |
+| `weak_title` | 23 | 15 | 8 | 3 → 2 |
+| `near_duplicate_title` | 2 | 2 | 0 | 1 → 1 |
+| `missing_title` | 1 | 1 | 0 | 1 → 1 |
+
+Cost is the smaller half of it. The email truncates its item list at
+`preview_limit` (15) while the approval reply applies **every** item in the run,
+so an uncapped 66-item batch asked one `apply` to write 66 live Shopify fields,
+**51 of which the email never rendered**. The cap is set to the preview limit so
+"approved" and "shown" are the same set, and a test pins that relation rather
+than either number ([[feedback_pin_the_rule_not_the_reading]]).
+
+Three properties make the cap safe rather than lossy:
+
+- **The remainder is a deferral, not a drop.** An applied resource gets a ledger
+  row and falls out of the eligible set, so the next batch in that category is
+  the next slice. The cap is only safe *because* Surface 166 exists; without the
+  ledger the same top 15 would be re-proposed forever.
+- **It is visible.** `eligible_item_count`, `deferred_item_count`, `batch_cap`
+  and `batch_cap_source` land on the payload, and the email says "This batch is
+  15 of 66 … the other 51 are not dropped" ([[feedback_no_silent_caps]]). An
+  unexplained 15 out of 66 reads as "that was all there was".
+- **It never splits a duplicate group.** `_flag_title_differentiation` and the
+  generation prompt can only see titles that are IN the batch, so a group cut by
+  the cap would be differentiated against an empty sibling list and could land
+  straight back on the absent sibling's live title. The cap overshoots by a
+  sibling instead.
+
+An unreadable cap fails **closed** to one chunk (8), not open to 66 — the
+plausible fallback here is precisely the behaviour being removed
+([[feedback_plausible_fallbacks_mask_failure]]) — and the email says the
+fallback was used, so a config typo cannot quietly shrink every batch forever.
+
+**2. The staleness thresholds now name their producer — and the open item that
+asked for this was wrong.** Surface 167 recorded "nothing asserts that the
+launchd job firing the kickoff is actually alive". That is false:
+`scheduler_health.py` has graded `shopify_seo_kickoff_daily` from its plist all
+along (verified: healthy, last start 2026-11-19T07:35:02, exit 0, in a roster of
+51 jobs). Building a second canary would have been two records of one fact, and
+the one nobody reads is always the wrong one — the same mistake the ledger
+itself avoided by being a derived index.
+
+What was actually missing is the **join**. The ledger card said "the ledger is
+60h stale" (a symptom) while the scheduler card said "that job has not started
+since Tuesday" (the cause), and nothing connected them. The card now reads the
+scheduler's verdict for its own producer and names it in the reason. Severity
+stays owned by the ledger's own facts — a fresh ledger is trustworthy however it
+got fresh, and answering "is the lane running?" twice is how one root cause
+becomes three unrelated-looking complaints ([[duck-health grouping]]).
+
+The join also exposes one failure **nothing else can see**: the job RAN and the
+ledger did not move. The kickoff's rebuild is loud-but-not-fatal by design, so a
+broken rebuild prints to a log and the kickoff still exits 0 — healthy
+scheduler, stale ledger, no complaint anywhere ([[feedback_swallowed_errors_lie]]).
+Detected by comparing the job's `last_start_at` against the ledger's
+`rebuilt_at`: in a healthy run the rebuild stamp is always later, because the
+kickoff rebuilds before anything else it does. That is a CONFIRMED failure, not
+the 24h threshold's guess, so it is red on the first day.
+
+**3. `SEO_REVIEW_CATEGORY_SPECS` and `SEO_REVIEW_CATEGORY_ORDER` moved to
+config.** They were the last rule tables in this lane living in code while the
+bands, severities and quality vocabulary had all moved to `seo_rules.json` — and
+they are rules in the same sense, because they decide which auditor codes become
+proposable work and which fields a batch may write. Derivation verified
+byte-identical against a snapshot of both tables taken before the move. Two
+guards that did not exist before: every category's `issue_codes` must be a
+declared auditor code (a typo makes a category permanently empty, which reads
+exactly like a clean one), and no code may feed two categories (the same
+resource offered under two different write rules).
+
+**`review_batch` does NOT bump `seo_rules_version`**, and a test pins that it
+lives outside the `platforms` block. The version records which COPY RULES a
+resource's text was written under, and every ledger row below the current
+version re-enters the queue — bumping it for a batch-size change would
+re-propose all 156 indexed resources, the exact catalogue-wide sweep the
+backfill exists to prevent.
+
+| | Happy | Larger than the cap | Explicit limit | Cap disabled | Dup group straddles | Config unreadable | Wrong job / stale probe |
+|---|---|---|---|---|---|---|---|
+| Batch is capped | `test_a_category_smaller_than_the_cap_is_sent_whole` | `test_sixty_six_eligible_resources_do_not_become_a_sixty_six_item_batch` | `test_an_explicit_limit_beats_the_configured_cap` | `test_a_disabled_cap_sends_everything` | — | `test_an_unreadable_cap_fails_closed_to_one_chunk` | `test_the_cap_only_applies_to_category_batches` |
+| Deferral is visible | `test_a_full_batch_says_nothing_about_batch_size` | `test_the_email_says_how_many_are_open_and_that_they_are_not_lost`, `test_the_markdown_carries_the_same_two_numbers` | — | — | — | `test_the_email_says_so_when_the_cap_came_from_the_fallback` | — |
+| Dup groups kept whole | `test_without_duplicates_the_cap_is_exact`, `test_a_cap_at_or_above_the_input_returns_everything` | — | — | — | `test_a_group_straddling_the_cap_is_kept_whole`, `test_a_group_entirely_past_the_cap_is_deferred_whole`, `test_no_resource_is_kept_twice` | — | — |
+| Cap ≤ what the email shows | `test_the_cap_does_not_exceed_what_the_email_shows` | — | — | — | — | `test_an_absent_cap_raises_rather_than_meaning_unlimited`, `test_a_non_integer_cap_raises` | — |
+| Cap is not a copy rule | `test_the_cap_lives_outside_the_versioned_copy_rules` | — | — | — | — | — | — |
+| Producer attribution | `test_the_verdict_is_carried_even_when_it_changes_nothing`, `test_a_fresh_ledger_stays_green_whatever_the_scheduler_says` | — | — | — | — | `test_a_missing_scheduler_file_does_not_break_the_card`, `test_a_corrupt_scheduler_file_does_not_break_the_card` | `test_it_reads_our_job_not_the_first_row_in_the_roster`, `test_a_stale_scheduler_verdict_is_a_fact_about_the_probe`, `test_a_job_absent_from_the_roster_is_reported_as_absent` |
+| Ran-without-rebuilding | — | — | — | — | — | `test_a_job_that_ran_after_the_last_rebuild_is_red_on_the_first_day` | — |
+| Dead producer named | — | — | — | — | — | `test_a_dead_kickoff_is_named_as_the_cause_of_a_stale_ledger`, `test_a_healthy_job_with_a_stale_ledger_points_at_the_rebuild` | — |
+| Categories from config | `test_the_review_module_derives_both_tables_from_the_config`, `test_keys_are_unique` | — | — | — | — | `test_an_absent_category_list_raises` | `test_every_category_code_is_a_declared_issue_code`, `test_no_issue_code_feeds_two_categories`, `test_every_category_writes_at_least_one_field`, `test_every_category_has_a_key_a_label_and_a_code` |
+
+**By dimension:** unit + patched-seam tests, no LLM and no network; the cap
+measured against the live 355-resource audit and the live ledger; category
+derivation proved byte-identical to the pre-move literals; the card loader
+exercised against a missing, corrupt and stale `scheduler_health.json` and
+against a roster that holds a DIFFERENT red SEO-named job.
+**STATUS: SHIPPED 2026-11-19** — `duckAgent/config/seo_rules.json`,
+`runtime/seo_rules_config.py`, `runtime/shopify_seo_review.py`,
+`duckAgent/.../viewer.py`, `tests/test_seo_batch_cap.py` (15 tests),
+`tests/test_seo_rules_config.py` (+11 tests), and
+`duckAgent/tests/test_seo_copy_ledger_cards.py` (+10 tests).
+
+**Open after this surface:**
+- **`missing_only_bulk` is still uncapped** and still template-only. It is not
+  on the kickoff path, so no scheduled run can reach it, but an operator running
+  it by hand gets the pre-168 behaviour.
+- **A dismissed batch blocks its own tail.** Dismissal writes no receipt and so
+  no ledger row, so the same 15 come back next time that category is ranked. The
+  category-level least-recently-served sort means the lane moves on rather than
+  parking, but the deferred remainder of a repeatedly-dismissed category is
+  unreachable until one batch is applied. Nothing reports that shape.
+- `issue_persists` still has a count and no threshold (carried from Surface 167).
+- The adoption card still starts life yellow at 156 of 156 behind (carried).
+- The batch cap is one number for nine categories. A template-only category
+  costs nothing per item and a model-generated one costs a chunk per eight, so
+  one cap is a compromise; per-category caps are a config shape away but nothing
+  yet says the single number is wrong.

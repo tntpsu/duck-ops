@@ -21,73 +21,41 @@ REVIEW_STATE_DIR = DUCK_OPS_ROOT / "state" / "shopify_seo_review"
 REVIEW_RUN_DIR = REVIEW_STATE_DIR / "runs"
 REVIEW_OUTPUT_MD = DUCK_OPS_ROOT / "output" / "operator" / "shopify_seo_review.md"
 
-SEO_REVIEW_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
-    "missing_title": {
-        "label": "Missing SEO titles",
-        "issue_codes": {"missing_seo_title"},
-        "apply_title": True,
-        "apply_description": False,
-    },
-    "missing_description": {
-        "label": "Missing SEO descriptions",
-        "issue_codes": {"missing_seo_description"},
-        "apply_title": False,
-        "apply_description": True,
-    },
-    "long_title": {
-        "label": "SEO titles too long",
-        "issue_codes": {"long_seo_title"},
-        "apply_title": True,
-        "apply_description": False,
-    },
-    "long_description": {
-        "label": "SEO descriptions too long",
-        "issue_codes": {"long_seo_description"},
-        "apply_title": False,
-        "apply_description": True,
-    },
-    "short_title": {
-        "label": "SEO titles too short",
-        "issue_codes": {"short_seo_title"},
-        "apply_title": True,
-        "apply_description": False,
-    },
-    "duplicate_title": {
-        "label": "Duplicate SEO titles",
-        "issue_codes": {"duplicate_seo_title"},
-        "apply_title": True,
-        "apply_description": False,
-    },
-    "near_duplicate_title": {
-        "label": "Near-duplicate SEO titles",
-        "issue_codes": {"near_duplicate_seo_title"},
-        "apply_title": True,
-        "apply_description": False,
-    },
-    "weak_title": {
-        "label": "Weak or raw-match SEO titles",
-        "issue_codes": {"seo_title_matches_raw_title", "weak_generic_seo_title"},
-        "apply_title": True,
-        "apply_description": False,
-    },
-    "weak_description": {
-        "label": "Weak or generic SEO descriptions",
-        "issue_codes": {"low_value_seo_copy", "weak_generic_seo_description"},
-        "apply_title": False,
-        "apply_description": True,
-    },
-}
-SEO_REVIEW_CATEGORY_ORDER = [
-    "missing_title",
-    "missing_description",
-    "long_title",
-    "long_description",
-    "short_title",
-    "duplicate_title",
-    "near_duplicate_title",
-    "weak_title",
-    "weak_description",
-]
+def _load_review_categories() -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """The SEO review categories, from the shared rules config.
+
+    Until 2026-11-19 this was two hardcoded literals here: a spec dict and an
+    order list. They were the last rule tables in this lane that lived in code
+    while the bands, severities and quality vocabulary had all moved to
+    `duckAgent/config/seo_rules.json` -- and they are rules in exactly the same
+    sense, because they decide which auditor codes become proposable work and
+    which fields a batch may write.
+
+    A config that cannot be read RAISES at import, like the bands above. There
+    is no safe default: an empty category table is a lane that reports nothing
+    to do forever, which reads exactly like a healthy queue.
+    """
+    specs: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for entry in _seo_rules_config.review_categories():
+        key = str(entry.get("key") or "").strip()
+        if not key:
+            continue
+        specs[key] = {
+            "label": str(entry.get("label") or key),
+            "issue_codes": {str(code) for code in (entry.get("issue_codes") or ())},
+            "apply_title": bool(entry.get("apply_title")),
+            "apply_description": bool(entry.get("apply_description")),
+        }
+        order.append(key)
+    if not specs:
+        raise _seo_rules_config.SeoRulesConfigError(
+            "review_categories produced no usable categories"
+        )
+    return specs, order
+
+
+SEO_REVIEW_CATEGORY_SPECS, SEO_REVIEW_CATEGORY_ORDER = _load_review_categories()
 
 
 def _ensure_duckagent_python() -> None:
@@ -1418,6 +1386,71 @@ def _display_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
+# Fail-closed cap used only when `review_batch.max_items_per_batch` cannot be
+# read. One model call, never zero and never 66 -- and the payload says the
+# fallback was used, so a config typo is visible rather than merely printed.
+_BATCH_CAP_FALLBACK = _PROPOSAL_CHUNK_SIZE
+
+
+def _category_batch_cap(limit: int = 0) -> tuple[int, str]:
+    """How many resources one category batch may carry, and where that came from.
+
+    An explicit `--limit` wins (an operator asking for 40 gets 40). Otherwise
+    the shared config decides. Before 2026-11-19 nothing capped this at all:
+    the kickoff passes `limit=0` meaning "every eligible resource", which for
+    `weak_description` is 66 -- 9 model calls, and 66 live fields written on a
+    single one-word reply.
+    """
+    if limit and limit > 0:
+        return int(limit), "explicit_limit"
+    try:
+        return int(_seo_rules_config.max_items_per_batch()), "config"
+    except Exception as exc:
+        print(
+            f"[shopify-seo] WARNING review_batch.max_items_per_batch unreadable "
+            f"({type(exc).__name__}: {exc}); capping at {_BATCH_CAP_FALLBACK}."
+        )
+        return _BATCH_CAP_FALLBACK, "fallback"
+
+
+def _cap_batch_keeping_dup_groups(
+    resources: list[dict[str, Any]],
+    cap: int,
+) -> list[dict[str, Any]]:
+    """Take the first `cap` resources without ever splitting a duplicate group.
+
+    A duplicate group has to be generated together: the differentiation
+    instruction and `_flag_title_differentiation` can only see titles that are
+    IN the batch, so a group cut by the cap would get a proposal differentiated
+    from nothing and could land straight back on its absent sibling's live
+    title. Overshooting the cap by a sibling or two is the cheaper error, and is
+    the same "budget per item, never drop the tail" rule the other operator-
+    facing caps follow ([[feedback_no_silent_caps]]).
+    """
+    if cap <= 0 or len(resources) <= cap:
+        return list(resources)
+    by_id = {str(resource.get("id") or ""): resource for resource in resources}
+    members_of: dict[str, list[str]] = {}
+    for ids in _title_differentiation_groups(resources).values():
+        for rid in ids:
+            members_of[str(rid)] = [str(i) for i in ids]
+    kept: list[dict[str, Any]] = []
+    taken: set[str] = set()
+    for resource in resources:
+        if len(kept) >= cap:
+            break
+        rid = str(resource.get("id") or "")
+        if rid in taken:
+            continue
+        for member_id in members_of.get(rid, [rid]):
+            member = by_id.get(member_id)
+            if member is None or member_id in taken:
+                continue
+            taken.add(member_id)
+            kept.append(member)
+    return kept
+
+
 def build_shopify_seo_review(
     *,
     limit: int = 10,
@@ -1431,17 +1464,33 @@ def build_shopify_seo_review(
         audit_payload = build_shopify_seo_audit()
 
     proposal_error: str | None = None
+    eligible_item_count: int | None = None
+    batch_cap = 0
+    batch_cap_source = ""
     if review_type == "missing_only_bulk":
         # A genuinely ABSENT field has no weak copy to improve on, so the
         # deterministic template is an honest answer here.
         selected = _select_missing_only_candidates(audit_payload, limit=limit if limit > 0 else None)
         proposals: list[dict[str, Any]] = []
     elif review_type == "issue_category_batch":
-        selected = _select_issue_category_candidates(
+        # Select EVERY eligible resource first, then cap. The eligible count is
+        # what tells the operator the remainder exists; capping inside the
+        # selector would hide it, and a cap nobody can see reads as "that is
+        # all there was".
+        eligible = _select_issue_category_candidates(
             audit_payload,
             issue_category=str(issue_category or ""),
-            limit=limit if limit > 0 else None,
+            limit=None,
         )
+        eligible_item_count = len(eligible)
+        batch_cap, batch_cap_source = _category_batch_cap(limit)
+        selected = _cap_batch_keeping_dup_groups(eligible, batch_cap)
+        if len(selected) < eligible_item_count:
+            print(
+                f"[shopify-seo] {issue_category}: {eligible_item_count} eligible, "
+                f"sending {len(selected)} (cap {batch_cap} from {batch_cap_source}); "
+                f"{eligible_item_count - len(selected)} deferred to the next batch."
+            )
         proposals, proposal_error = _generate_proposals_fail_soft(selected)
     else:
         selected = _select_review_candidates(audit_payload, limit=limit)
@@ -1527,6 +1576,18 @@ def build_shopify_seo_review(
         "shopify_domain": audit_payload.get("shopify_domain") or "",
         "audit_generated_at": audit_payload.get("generated_at"),
         "item_count": len(items),
+        # How many resources this category still has eligible, versus how many
+        # this batch carries. A cap the operator cannot see reads as "that was
+        # all there was"; these two numbers are what make the remainder a
+        # deferral rather than a silent drop ([[feedback_no_silent_caps]]).
+        "eligible_item_count": eligible_item_count,
+        "deferred_item_count": (
+            max(0, int(eligible_item_count) - len(items))
+            if eligible_item_count is not None
+            else 0
+        ),
+        "batch_cap": batch_cap,
+        "batch_cap_source": batch_cap_source,
         "preview_limit": preview_limit,
         "kind_counts": _kind_counts(items),
         "approval_action": _approval_action(
@@ -1604,6 +1665,12 @@ def render_shopify_seo_review_markdown(payload: dict[str, Any]) -> str:
         f"- Review type: `{review_type}`",
         f"- Category: `{payload.get('category_label', '')}`" if payload.get("category_label") else "",
         f"- Items: `{item_count}`",
+        (
+            f"- Eligible in this category: `{payload.get('eligible_item_count')}`"
+            f" (cap `{payload.get('batch_cap')}`, `{payload.get('deferred_item_count')}` deferred)"
+            if int(payload.get("deferred_item_count") or 0) > 0
+            else ""
+        ),
         f"- Approval action: `{approval_action}`",
         "",
     ]
@@ -1708,6 +1775,25 @@ def render_shopify_seo_review_email(payload: dict[str, Any]) -> tuple[str, str, 
     # the same generator would produce the same copy -- but absent and
     # unreported, "the rules need changing" is indistinguishable from "the
     # queue is empty" ([[feedback_swallowed_errors_lie]]).
+    # The batch cap. The remainder is a DEFERRAL, so say which batch it comes
+    # in; an unexplained 15 out of 66 reads as "that was all there was".
+    deferred = int(payload.get("deferred_item_count") or 0)
+    eligible_total = payload.get("eligible_item_count")
+    if deferred > 0 and eligible_total:
+        deferred_text = (
+            f"This batch is {item_count} of {int(eligible_total)} resources this category "
+            f"still has open (cap {payload.get('batch_cap')} per email). The other "
+            f"{deferred} are not dropped — once these are applied they drop out of the "
+            "queue and the next batch is the next slice."
+        )
+        if str(payload.get("batch_cap_source") or "") == "fallback":
+            deferred_text += (
+                " NOTE: the configured cap could not be read, so a conservative "
+                "fallback was used — check review_batch.max_items_per_batch."
+            )
+        text_lines.extend([f"Batch size: {deferred_text}", ""])
+        html_parts.append(f"<p><strong>Batch size:</strong> {deferred_text}</p>")
+
     withheld = payload.get("ledger_withheld_counts") or {}
     persists = int(withheld.get("issue_persists") or 0)
     if persists:

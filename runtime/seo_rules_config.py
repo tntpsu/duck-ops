@@ -131,3 +131,46 @@ def title_quality_codes() -> dict[str, dict[str, Any]]:
 
 def blocking_title_quality_codes() -> frozenset[str]:
     return frozenset(c for c, spec in title_quality_codes().items() if spec.get("blocking"))
+
+
+def review_batch() -> dict[str, Any]:
+    return dict(load_seo_rules().get("review_batch") or {})
+
+
+def max_items_per_batch() -> int:
+    """How many resources one category review email may carry.
+
+    Raises rather than defaulting. A plausible default here is an UNCAPPED
+    batch -- 66 resources, 9 model calls and 66 live fields written on one
+    one-word reply, which is exactly what this key exists to stop.
+    """
+    batch = review_batch()
+    if "max_items_per_batch" not in batch:
+        raise SeoRulesConfigError(
+            f"{CONFIG_PATH} has no review_batch.max_items_per_batch"
+        )
+    try:
+        return int(batch["max_items_per_batch"])
+    except (TypeError, ValueError) as exc:
+        raise SeoRulesConfigError(
+            f"{CONFIG_PATH} review_batch.max_items_per_batch is not an integer"
+        ) from exc
+
+
+def review_categories() -> list[dict[str, Any]]:
+    """The ordered SEO review category definitions.
+
+    Raises when absent or empty: an empty list is not "no categories
+    configured", it is a lane that reports nothing to do forever, which reads
+    exactly like a healthy queue ([[feedback_plausible_fallbacks_mask_failure]]).
+    """
+    raw = load_seo_rules().get("review_categories")
+    if not isinstance(raw, list) or not raw:
+        raise SeoRulesConfigError(
+            f"{CONFIG_PATH} has no review_categories list; the SEO review lane "
+            "cannot know which categories exist"
+        )
+    entries = [dict(entry) for entry in raw if isinstance(entry, dict)]
+    if not entries:
+        raise SeoRulesConfigError(f"{CONFIG_PATH} review_categories has no objects")
+    return entries

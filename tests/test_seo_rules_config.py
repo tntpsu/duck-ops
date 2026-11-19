@@ -326,3 +326,204 @@ class TheTwoPlatformsKeepTheirOwnPolicies(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheReviewCategoriesAreTheOneDefinition(unittest.TestCase):
+    """The category table was the last rule list living in code.
+
+    Until 2026-11-19 `SEO_REVIEW_CATEGORY_SPECS` and `SEO_REVIEW_CATEGORY_ORDER`
+    were two hardcoded literals in shopify_seo_review.py, while the bands,
+    severities and quality vocabulary had all moved to the config -- and they
+    are rules in exactly the same sense, because they decide which auditor
+    codes become proposable work and which fields a batch may write.
+    """
+
+    def test_every_category_code_is_a_declared_issue_code(self):
+        """A typo'd code makes that category permanently empty.
+
+        Nothing would raise: the selector looks for resources carrying a code
+        that no auditor ever emits, finds none, and the kickoff reports the
+        category as having nothing to do. A dead category reads exactly like a
+        clean one.
+        """
+        declared = set(config.issue_codes())
+        self.assertTrue(declared, "the config declares no issue codes at all")
+        for entry in config.review_categories():
+            for code in entry.get("issue_codes") or ():
+                with self.subTest(category=entry.get("key"), code=code):
+                    self.assertIn(
+                        code, declared,
+                        f"category {entry.get('key')!r} feeds on issue code {code!r}, "
+                        "which no auditor declares -- that category can never "
+                        "collect a resource",
+                    )
+
+    def test_no_issue_code_feeds_two_categories(self):
+        """One code in two categories proposes the same resource twice.
+
+        The two categories can carry different `apply_title` /
+        `apply_description` flags, so the same resource would be offered under
+        two different write rules, and whichever batch the operator approved
+        second would re-write a field the first had already fixed.
+        """
+        seen: dict[str, str] = {}
+        for entry in config.review_categories():
+            key = str(entry.get("key"))
+            for code in entry.get("issue_codes") or ():
+                with self.subTest(code=code):
+                    self.assertNotIn(
+                        str(code), seen,
+                        f"issue code {code!r} feeds both {seen.get(str(code))!r} "
+                        f"and {key!r}",
+                    )
+                seen[str(code)] = key
+
+    def test_every_category_writes_at_least_one_field(self):
+        for entry in config.review_categories():
+            with self.subTest(category=entry.get("key")):
+                self.assertTrue(
+                    entry.get("apply_title") or entry.get("apply_description"),
+                    f"category {entry.get('key')!r} may write neither field, so a "
+                    "batch in it can only ever be a no-op",
+                )
+
+    def test_every_category_has_a_key_a_label_and_a_code(self):
+        for entry in config.review_categories():
+            with self.subTest(category=entry.get("key")):
+                self.assertTrue(str(entry.get("key") or "").strip())
+                self.assertTrue(str(entry.get("label") or "").strip())
+                self.assertTrue(entry.get("issue_codes"))
+
+    def test_keys_are_unique(self):
+        keys = [str(e.get("key")) for e in config.review_categories()]
+        self.assertEqual(len(keys), len(set(keys)), f"duplicate category keys in {keys}")
+
+    def test_the_review_module_derives_both_tables_from_the_config(self):
+        """No second copy in code, and the ORDER survives the move.
+
+        The order is now only a tie-break in the ranking, but it is the
+        tie-break that makes a system with no run history reproduce the old
+        round-robin behaviour -- so a reordering of the config is a behaviour
+        change, not a cosmetic one.
+        """
+        import shopify_seo_review as ssr
+
+        expected_order = [str(e.get("key")) for e in config.review_categories()]
+        self.assertEqual(list(ssr.SEO_REVIEW_CATEGORY_ORDER), expected_order)
+        self.assertEqual(set(ssr.SEO_REVIEW_CATEGORY_SPECS), set(expected_order))
+        for entry in config.review_categories():
+            spec = ssr.SEO_REVIEW_CATEGORY_SPECS[str(entry.get("key"))]
+            with self.subTest(category=entry.get("key")):
+                self.assertEqual(spec["label"], entry.get("label"))
+                self.assertEqual(spec["issue_codes"], {str(c) for c in entry["issue_codes"]})
+                self.assertEqual(spec["apply_title"], bool(entry.get("apply_title")))
+                self.assertEqual(spec["apply_description"], bool(entry.get("apply_description")))
+
+    def test_an_absent_category_list_raises(self):
+        """An empty table is a lane that reports nothing to do forever."""
+        import importlib
+        import tempfile
+
+        module = importlib.reload(config)
+        original = module.CONFIG_PATH
+        try:
+            for payload in ({"seo_rules_version": 1}, {"seo_rules_version": 1, "review_categories": []}):
+                with self.subTest(payload=payload):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        bad = Path(tmp) / "seo_rules.json"
+                        bad.write_text(json.dumps(payload), encoding="utf-8")
+                        module.CONFIG_PATH = bad
+                        module.load_seo_rules.cache_clear()
+                        with self.assertRaises(module.SeoRulesConfigError):
+                            module.review_categories()
+        finally:
+            module.CONFIG_PATH = original
+            module.load_seo_rules.cache_clear()
+
+
+class TheBatchCapIsConfiguredAndIsNotACopyRule(unittest.TestCase):
+    """How many resources one review email may carry.
+
+    Nothing capped this until 2026-11-19: the kickoff passes `limit=0` meaning
+    "every eligible resource", which for `weak_description` was 66 -- nine
+    model calls and 66 live fields written on a single one-word reply.
+    """
+
+    def test_a_cap_is_declared_and_is_an_integer(self):
+        self.assertIsInstance(config.max_items_per_batch(), int)
+
+    def test_the_cap_does_not_exceed_what_the_email_shows(self):
+        """Otherwise the operator approves copy they were never shown.
+
+        The email truncates its item list at `preview_limit` while the approval
+        reply still applies EVERY item in the run, so a cap above the preview
+        asks for blind approval. Pinned as a relation, not a number: raise one
+        and the other has to move too.
+        """
+        import shopify_seo_review as ssr
+
+        cap = config.max_items_per_batch()
+        if cap <= 0:
+            self.skipTest("cap disabled")
+        payload = {"items": [{"id": str(i)} for i in range(cap)], "preview_limit": 15}
+        self.assertEqual(
+            len(ssr._display_items(payload)), cap,
+            "the batch cap is larger than the email's preview limit, so the "
+            "operator would be asked to approve items the email never rendered",
+        )
+
+    def test_an_absent_cap_raises_rather_than_meaning_unlimited(self):
+        """A plausible default here IS the 66-item batch."""
+        import importlib
+        import tempfile
+
+        module = importlib.reload(config)
+        original = module.CONFIG_PATH
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bad = Path(tmp) / "seo_rules.json"
+                bad.write_text(json.dumps({"seo_rules_version": 1}), encoding="utf-8")
+                module.CONFIG_PATH = bad
+                module.load_seo_rules.cache_clear()
+                with self.assertRaises(module.SeoRulesConfigError):
+                    module.max_items_per_batch()
+        finally:
+            module.CONFIG_PATH = original
+            module.load_seo_rules.cache_clear()
+
+    def test_a_non_integer_cap_raises(self):
+        import importlib
+        import tempfile
+
+        module = importlib.reload(config)
+        original = module.CONFIG_PATH
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bad = Path(tmp) / "seo_rules.json"
+                bad.write_text(
+                    json.dumps({"seo_rules_version": 1, "review_batch": {"max_items_per_batch": "lots"}}),
+                    encoding="utf-8",
+                )
+                module.CONFIG_PATH = bad
+                module.load_seo_rules.cache_clear()
+                with self.assertRaises(module.SeoRulesConfigError):
+                    module.max_items_per_batch()
+        finally:
+            module.CONFIG_PATH = original
+            module.load_seo_rules.cache_clear()
+
+    def test_the_cap_lives_outside_the_versioned_copy_rules(self):
+        """Changing a batch size must never need a seo_rules_version bump.
+
+        `seo_rules_version` records which COPY RULES a resource's text was
+        written under, and every ledger row below the current version re-enters
+        the review queue. If the batch cap lived inside `platforms`, raising it
+        would look like a copy-rule change and a bump would re-propose the
+        whole indexed catalogue.
+        """
+        rules = config.load_seo_rules()
+        self.assertIn("review_batch", rules)
+        for platform, profile in (rules.get("platforms") or {}).items():
+            with self.subTest(platform=platform):
+                self.assertNotIn("max_items_per_batch", profile)
+                self.assertNotIn("review_batch", profile)
