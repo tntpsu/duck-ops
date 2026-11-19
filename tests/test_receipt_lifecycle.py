@@ -13,6 +13,7 @@ mistakes made while writing it:
 """
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -400,3 +401,78 @@ class TheLiveStoreIsFullyDeclaredTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LanesSwitchedOffSomewhereOtherThanAFlowSpec(unittest.TestCase):
+    """`paused_lanes` globs `<lane>_execution.json`, so a lane gated elsewhere
+    could never be found paused. customer_reply is gated by duck-ops'
+    etsy_browser_batch.json, and the operator switched it off on 2026-11-18
+    (their own Grok bot answers Etsy messages now). Without this, Peter's open
+    thread and every future one would keep aging and redden the card about a
+    lane nobody runs."""
+
+    def test_a_real_false_reads_as_off(self):
+        cfg = {"customer_read": {"enabled": False}}
+        self.assertTrue(rl.external_switch_is_off("customer_reply", cfg))
+
+    def test_a_real_true_reads_as_on(self):
+        cfg = {"customer_read": {"enabled": True}}
+        self.assertFalse(rl.external_switch_is_off("customer_reply", cfg))
+
+    def test_a_lane_with_no_declared_switch_is_never_paused_by_this(self):
+        cfg = {"customer_read": {"enabled": False}}
+        for lane in ("meme", "jeepfact", "weekly", ""):
+            with self.subTest(lane=lane):
+                self.assertFalse(
+                    rl.external_switch_is_off(lane, cfg))
+
+    def test_it_fails_toward_grading_not_toward_parking(self):
+        # Each of these is "I cannot tell", and the safe reading of that is to
+        # keep grading the receipts. A missing config must never be able to
+        # park a real backlog.
+        for payload in ({}, None, [], "off", {"customer_read": {}},
+                        {"customer_read": None}, {"other": {"enabled": False}}):
+            with self.subTest(payload=payload):
+                self.assertFalse(
+                    rl.external_switch_is_off("customer_reply", payload))
+
+    def test_a_stringy_false_is_not_a_boolean_false(self):
+        for value in ("false", "False", "off", 0, "", None):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    rl.external_switch_is_off(
+                        "customer_reply", {"customer_read": {"enabled": value}}),
+                    "only a real boolean false declares a pause")
+
+    def test_every_declared_switch_names_a_config_that_exists(self):
+        # The anti-rot guard. A renamed config would otherwise make the switch
+        # silently unreachable and the lane permanently 'on'.
+        config_dir = Path(rl.__file__).resolve().parents[1] / "config"
+        for lane, (filename, key_path) in \
+                rl.EXTERNAL_LANE_ENABLED_SWITCHES.items():
+            with self.subTest(lane=lane):
+                path = config_dir / filename
+                self.assertTrue(path.exists(), f"{lane}: {path} is gone")
+                payload = json.loads(path.read_text())
+                node = payload
+                for key in key_path:
+                    self.assertIsInstance(node, dict, f"{lane}: {key_path} is unreachable")
+                    self.assertIn(key, node, f"{lane}: {key_path} is unreachable")
+                    node = node[key]
+                self.assertIsInstance(
+                    node, bool, f"{lane}: {key_path} is not a boolean")
+
+    def test_a_receipt_in_the_switched_off_lane_is_parked_not_overdue(self):
+        # End to end through the real classifier, with the lane handed in the
+        # way the loader hands it.
+        # A DECLARED pair, or the receipt reads as unclassified and the test
+        # proves nothing -- which is exactly what the first draft of it did.
+        receipt = _receipt(
+            "customer_reply", "awaiting_reply", "reply_preview_staged", days_old=400)
+        hot = _classify(receipt, paused_lanes=set())
+        parked = _classify(receipt, paused_lanes={"customer_reply"})
+        self.assertTrue(parked.paused, "a paused lane's receipt must say so")
+        self.assertEqual(rl.overdue_items([parked]), [])
+        self.assertNotEqual(
+            rl.overdue_items([hot]), [],
+            "positive control: ungated, this receipt IS overdue")

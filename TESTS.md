@@ -9727,3 +9727,117 @@ are not being picked".
 
 Not caused by the day's work, but it blocked both pushes, so it was fixed
 rather than noted.
+
+## Surface 160 — the drain's disguise was what the watchdog killed (2026-11-18, operator: "Do 1")
+
+`duck_ops_sidecar` was killed at **exactly** its 1800s timeout on the 18:00
+run, and the wrapper recorded `status: timeout` beside `exit_code: 0`. The
+timeout was not a hang. It was the job's own anti-fingerprint sleep.
+
+Timeline from the run log, 2026-11-18:
+
+| time | event |
+|---|---|
+| 18:00:04 | START |
+| 18:21:15 | observer finishes — **21 min of a 30 min budget** |
+| 18:27:32 | `review_drain` starts, `sleep 938` (would end ~18:43) |
+| 18:30:04 | watchdog TERMs the tree |
+
+Three defects, one on top of the other:
+
+**1. The jitter was drawn with no reference to the budget.** `RANDOM % 1801`
+is 0-30 min, appended as the LAST step of a 30-minute budget that the steps
+above had already spent ~27 minutes of. It could never fit. Not "usually
+tight" — arithmetically impossible on any day the drain was scheduled.
+
+**2. The sidecar swallowed its own SIGTERM.** `trap cleanup EXIT INT TERM HUP`
+with a handler that `return 0`s makes zsh run the handler and then **resume**.
+So the kill did not stop the run: it released the lock, let the killed step
+fall through to its next command, ran the drain **immediately at 18:30:0x**,
+and printed `END :: exit=0`. The jitter was not merely lost, it was inverted
+into the one fixed daily timestamp it existed to prevent — and then SIGKILL
+arrived 10s later, mid-browser-automation. Rehearsed both forms:
+
+| trap form | exit code | log |
+|---|---|---|
+| `trap cleanup EXIT INT TERM HUP` | **0** | `RESUMED-AFTER-SIGNAL`, `END :: exit=0` |
+| `trap 'on_signal TERM 15' TERM` | **143** | `SIGNALLED`, stops |
+
+**3. The job could not see its own deadline.** Both numbers that matter lived
+only inside `run_with_receipt.sh`. They are now exported as
+`DUCK_JOB_TIMEOUT_SECONDS` / `DUCK_JOB_STARTED_EPOCH`, so any wrapped job can
+pace itself.
+
+The arithmetic moved out of the shell into `runtime/drain_window.py`, which is
+tested; the shell only resolves inputs and reads an exit code. The plist's
+timeout went to 3600s — the two real wedges this watchdog was added for were
+**8 hours and 3 days**, so an hour still catches them, while 1800s was below
+the job's own honest runtime.
+
+| Use case | Happy | No room | No deadline | Malformed input |
+|---|---|---|---|---|
+| Size the sleep to the budget left | `test_the_same_run_fits_comfortably_at_the_raised_timeout` | `test_the_old_fixed_range_would_have_overrun_and_this_one_cannot` | `test_no_timeout_means_no_watchdog_so_the_full_range_is_safe` | `test_a_malformed_export_is_absent_not_zero` |
+| Never overrun | `test_sleep_plus_the_drain_always_finishes_inside_the_budget` (375 subtests, every elapsed/timeout pair) | `test_a_skip_asks_for_no_sleep_at_all` | `test_a_deadline_with_unknown_elapsed_drops_the_jitter_but_keeps_the_drain` | `test_a_zero_timeout_is_read_as_absent_not_as_already_expired` |
+| The shell can act on it | `test_it_exits_zero_and_prints_the_sleep_when_it_fits` | `test_it_exits_seventy_five_when_the_drain_does_not_fit` | — | — |
+
+**Mutation-verified** (5 run, 5 caught): restoring the blind 0-1800s draw →
+166 red; turning a no-room skip into a 0-second sleep → 116 red; reading a
+zero timeout as already-expired → 1 red.
+
+**Open:** the observer step takes 17-21 minutes by itself and nothing grades
+that. It is the reason the budget was tight, and a 10% drift in it is
+invisible today.
+
+## Surface 161 — a lane gated outside a FlowSpec can never be found paused (2026-11-18, operator: "I have a Groc bot do it")
+
+The operator answers Etsy messages with their own Grok bot, so the
+customer-inbox lane is off: `config/etsy_browser_batch.json` →
+`customer_read.enabled: false`. Nothing was replying — `customer_inbox_refresh`
+is read-only by construction ("It never types customer replies or clicks
+send/submit"), and the send path is three operator-typed commands ending in a
+human pressing Send in Etsy. What was running was the read + the staged draft.
+
+The trap: `paused_lanes` is built by globbing `<lane>_execution.json`, and
+`customer_reply` has no such file. So the lane would read as **on** forever,
+and its receipts — including Peter's genuinely open thread — would keep aging
+until Surface 155's card went red about work the operator deliberately
+stopped. The same false red that card exists to prevent, through the back
+door.
+
+Declared as data next to the policy it modifies
+(`receipt_lifecycle.EXTERNAL_LANE_ENABLED_SWITCHES`), so the next such lane is
+one entry and not another branch in whichever card notices first.
+
+| Use case | Lane on | Lane off | Can't tell | Provider skew |
+|---|---|---|---|---|
+| customer_reply receipts | `test_with_the_lane_on_the_receipt_is_overdue` | `test_with_the_lane_off_the_same_receipt_is_parked_and_the_card_is_green` | `test_a_missing_switch_config_keeps_grading`, `test_a_malformed_switch_config_keeps_grading_without_raising` | `test_an_older_duck_ops_without_the_declaration_still_grades` |
+| Reading the switch | `test_a_real_true_reads_as_on` | `test_a_real_false_reads_as_off` | `test_it_fails_toward_grading_not_toward_parking`, `test_a_stringy_false_is_not_a_boolean_false` | — |
+| The switch stays reachable | `test_every_declared_switch_names_a_config_that_exists` | — | — | — |
+| The slot still completes | `test_disabled_does_not_fail_or_block_the_slot` | `test_a_disabled_lane_reports_disabled_and_does_no_browser_work` | — | — |
+
+Fails toward **grading**: an absent file, a missing key or a string `"false"`
+all read as "not paused", because a missing config must never be able to park
+a real backlog silently.
+
+**Two isolation gaps this exposed, both of the same shape as the morning's:**
+
+1. My new read of duck-ops' config was uninjected, so five card tests started
+   grading against the operator's live switches. `duck_ops_config_dir` is now
+   a parameter, pinned at all 7 call sites.
+2. `run_slot(config=None)` falls back to `load_config()`, so **four** tests in
+   `test_etsy_browser_batch.py` had been asserting the operator's posture
+   rather than their own fixture since they were written. Three went red the
+   moment the switch flipped. Now pinned to `_all_lanes_on()`, with an AST
+   guard (`test_no_test_here_inherits_the_operators_live_config`) so the next
+   one cannot inherit it either.
+
+Baseline-checked both: reverting each file to HEAD and re-running proved the
+failures were mine, not pre-existing.
+
+**Mutation-verified:** dropping the strict-boolean check (so `"false"` would
+park a backlog) → 3 red; reading a missing key as OFF → 7 red.
+
+**Still the operator's:** `customer_reply::C376` (peter) — the one genuinely
+open thread, now parked rather than graded, with a drafted $45 reply and an
+unprocessed newer message. Parking it means the card stops nagging; it does
+not mean the customer stopped waiting.

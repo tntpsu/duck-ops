@@ -16,6 +16,27 @@ if str(RUNTIME_DIR) not in sys.path:
 import etsy_browser_batch  # noqa: E402
 
 
+
+def _all_lanes_on() -> dict:
+    """An explicit config with every sub-lane on.
+
+    `run_slot(config=None)` falls back to `load_config()`, i.e. the operator's
+    live config/etsy_browser_batch.json. Four tests here took that fallback,
+    so they asserted the operator's current posture rather than their own
+    fixture: three went red on 2026-11-18 the moment customer_read was
+    switched off. Pass a config; never inherit one
+    ([[feedback_test_isolation_from_production_state]]).
+    """
+    return {
+        "enabled": True,
+        "session_timeout_seconds": 720,
+        "due_grace_minutes": 20,
+        "customer_read": {"enabled": True, "max_threads_per_session": 2},
+        "review_reply": {"enabled": True, "max_replies_per_session": 5},
+        "relist": {"enabled": True, "max_per_session": 1},
+    }
+
+
 class EtsyBrowserBatchTests(unittest.TestCase):
     def test_build_daily_schedule_creates_three_slots_and_one_relist_slot(self) -> None:
         schedule = etsy_browser_batch.build_daily_schedule(
@@ -150,6 +171,7 @@ class EtsyBrowserBatchTests(unittest.TestCase):
             ):
                 result = etsy_browser_batch.run_slot(
                     slot_id="morning",
+                    config=_all_lanes_on(),
                     now=datetime.fromisoformat("2026-04-23T09:20:00-04:00"),
                 )
 
@@ -225,7 +247,8 @@ class EtsyBrowserBatchTests(unittest.TestCase):
                 mock.patch.object(etsy_browser_batch, "record_workflow_transition"),
             ):
                 etsy_browser_batch.run_slot(
-                    slot_id="morning", now=datetime.fromisoformat("2026-04-23T09:20:00-04:00"),
+                    slot_id="morning",
+                    config=_all_lanes_on(), now=datetime.fromisoformat("2026-04-23T09:20:00-04:00"),
                 )
 
         self.assertIn("drain", order)
@@ -344,6 +367,7 @@ class EtsyBrowserBatchTests(unittest.TestCase):
             ):
                 result = etsy_browser_batch.run_slot(
                     slot_id="morning",
+                    config=_all_lanes_on(),
                     now=datetime.fromisoformat("2026-04-23T09:20:00-04:00"),
                 )
 
@@ -492,6 +516,7 @@ class EtsyBrowserBatchTests(unittest.TestCase):
             ):
                 result = etsy_browser_batch.run_slot(
                     slot_id="morning",
+                    config=_all_lanes_on(),
                     now=datetime.fromisoformat("2026-04-23T09:20:00-04:00"),
                 )
 
@@ -506,3 +531,61 @@ class EtsyBrowserBatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CustomerReadSwitchedOffTests(unittest.TestCase):
+    """2026-11-18: the operator answers Etsy messages with their own Grok bot,
+    so `customer_read.enabled` is false. The lane was read-only -- it never
+    typed or sent a reply -- but it opened message threads in the trusted Etsy
+    session and spent pacing budget the review-reply drain wanted."""
+
+    def test_a_disabled_lane_reports_disabled_and_does_no_browser_work(self) -> None:
+        with mock.patch.object(
+                etsy_browser_batch.customer_inbox_refresh, "run_refresh") as refresh:
+            result = etsy_browser_batch._run_customer_read_batch(
+                {"customer_read": {"enabled": False}},
+                {"window_start": None, "window_end": None},
+            )
+        refresh.assert_not_called()
+        self.assertEqual(result["status"], "disabled")
+        self.assertEqual(result["attempted"], 0)
+
+    def test_disabled_does_not_fail_or_block_the_slot(self) -> None:
+        # The slot's overall verdict is what the scheduler card grades. An
+        # intentional off-switch must read as `completed`, not `failed` --
+        # otherwise turning a lane off reddens the card that watches it.
+        overall = etsy_browser_batch._overall_status(
+            {"status": "disabled"}, {"status": "completed"}, {"status": "idle"})
+        self.assertEqual(overall, "completed")
+
+    def test_the_committed_config_matches_what_the_operator_set(self) -> None:
+        # Pins the DECISION, not a reading of it: if this flips back on, it
+        # should be because someone meant to.
+        config = etsy_browser_batch.load_config()
+        self.assertIs(config["customer_read"]["enabled"], False)
+        self.assertTrue(
+            str(config["customer_read"].get("disabled_because") or "").strip(),
+            "an off-switch needs a stated reason; the next reader has no other source")
+
+    def test_no_test_here_inherits_the_operators_live_config(self) -> None:
+        # `run_slot(config=None)` reads config/etsy_browser_batch.json. Four
+        # tests took that fallback and three of them went red when the
+        # operator flipped a switch. An AST check, not a grep: it found a
+        # fifth lane-pause reader this morning that reading the file missed.
+        import ast
+
+        source = Path(__file__).read_text(encoding="utf-8")
+        offenders = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name != "run_slot":
+                continue
+            if "config" not in {kw.arg for kw in node.keywords}:
+                offenders.append(node.lineno)
+        self.assertEqual(
+            offenders, [],
+            f"run_slot called without an explicit config at line(s) {offenders} — "
+            "use _all_lanes_on() or a config of your own")

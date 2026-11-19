@@ -30,8 +30,11 @@
     }
   ],
   "customer_read": {
-    "enabled": true,
-    "max_threads_per_session": 2
+    "enabled": false,
+    "max_threads_per_session": 2,
+    "disabled_on": "2026-11-18",
+    "disabled_because": "Operator runs Etsy message replies through their own Grok bot. This lane was read-only (it never typed or sent a reply) but it opened message threads in the trusted Etsy session and staged drafts, which is duplicated effort now. Turning it off also returns its share of the etsy_browser_guard pacing budget to the review-reply drain, which the reads were being paced out to protect.",
+    "resume_hint": "Set enabled back to true if the Grok bot stops covering Etsy messages. Nothing else needs changing: order-driven custom-build detection reads paid Etsy orders, not messages, so it is unaffected."
   },
   "review_reply": {
     "enabled": true,

@@ -242,6 +242,46 @@ SUPERSESSION_KEYS: dict[str, str] = {
     "customer_reply": "conversation_thread_key",
 }
 
+#: Lanes whose off-switch is NOT a `<lane>_execution.json` FlowSpec config.
+#:
+#: `paused_lanes` is built by globbing those FlowSpec configs, so a lane gated
+#: anywhere else can never be found paused -- and a receipt lane nobody runs
+#: keeps aging until the card goes red about work the operator deliberately
+#: stopped. That is the same false-red this module exists to prevent, arriving
+#: through the back door.
+#:
+#: Declared here as DATA, next to the policy it modifies, so the next such
+#: lane is one entry rather than another branch in whichever card notices
+#: first. Value: (config filename under duck-ops/config, key path to the
+#: boolean). The caller does the file IO; this module does the reading.
+EXTERNAL_LANE_ENABLED_SWITCHES: dict[str, tuple[str, tuple[str, ...]]] = {
+    # 2026-11-18: the operator answers Etsy messages with their own Grok bot,
+    # so the read-only customer-inbox lane that staged our drafts is off.
+    "customer_reply": ("etsy_browser_batch.json", ("customer_read", "enabled")),
+}
+
+
+def external_switch_is_off(lane: str, config_payload: Any) -> bool:
+    """True only when the lane's own config says, in a real boolean, that its
+    producer is switched off.
+
+    Fails toward GRADING: an absent file, a missing key, or a string "false"
+    returns False (not paused). A missing config must never be able to park a
+    real backlog silently -- that reading would be indistinguishable from the
+    allowlists that went quiet on this stack all November
+    ([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]]).
+    """
+    entry = EXTERNAL_LANE_ENABLED_SWITCHES.get(lane)
+    if entry is None:
+        return False
+    _, key_path = entry
+    node: Any = config_payload
+    for key in key_path:
+        if not isinstance(node, dict) or key not in node:
+            return False
+        node = node[key]
+    return isinstance(node, bool) and node is False
+
 
 def classify_receipt(
     receipt: Any,
