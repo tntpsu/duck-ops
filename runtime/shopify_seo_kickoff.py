@@ -66,48 +66,36 @@ def _load_audit_payload(*, force_audit: bool) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _high_severity_category(after_category: str | None, audit_payload: dict[str, Any]) -> str | None:
-    """The earliest category in ORDER holding a HIGH-severity resource, if any.
+def _choose_next_category(
+    after_category: str | None,
+    audit_payload: dict[str, Any],
+    *,
+    exclude: Any = (),
+) -> str | None:
+    """The top-ranked category with ledger-eligible work.
 
-    The round-robin cursor below is anti-starvation, but on its own it inverts
-    priority: a product with NO SEO title at all is high severity and sits in
-    `missing_title`, at the FRONT of the order — so once the cursor has walked
-    past it, those products queue behind every cosmetic category for a full
-    cycle (on 2026-10-11, 9 high-severity missing titles behind 93 weak-copy
-    items). High severity is already this lane's urgency signal: it is what
-    bypasses the email cadence gate for a same-day send. Honour it here too.
+    Delegates to `_next_issue_category`, which is now ranking-based, so this
+    module and `send_next_shopify_seo_category_review_email` cannot drift into
+    two different answers to "what goes next" -- which is the bug class that
+    produced three different SEO length bands in the first place.
     """
-    for category in SEO_REVIEW_CATEGORY_ORDER:
-        if category == after_category:
-            # Never re-pick the batch just worked, or a dismissed-but-still-
-            # failing category would be re-sent forever.
-            continue
-        for resource in _select_issue_category_candidates_for(audit_payload, category):
-            issues = resource.get("issues") if isinstance(resource.get("issues"), list) else []
-            if any(isinstance(i, dict) and str(i.get("severity") or "").lower() == "high" for i in issues):
-                return category
-    return None
-
-
-def _select_issue_category_candidates_for(audit_payload: dict[str, Any], category: str) -> list[dict[str, Any]]:
-    from shopify_seo_review import _select_issue_category_candidates
-
-    return _select_issue_category_candidates(audit_payload, issue_category=category)
-
-
-def _choose_next_category(after_category: str | None, audit_payload: dict[str, Any]) -> str | None:
-    """Advance past the category the lane last worked on, wrapping to the
-    front once the tail is empty. Always restarting at index 0 let a 1-item
-    `long_title` batch block 92 items in `weak_title`/`weak_description`
-    for weeks (2026-09-07). High-severity work jumps the queue."""
-    urgent = _high_severity_category(after_category, audit_payload)
-    if urgent:
-        return urgent
-    if after_category in SEO_REVIEW_CATEGORY_ORDER:
-        following = _next_issue_category(after_category, audit_payload)
-        if following:
-            return following
-    return _next_issue_category(None, audit_payload)
+    skip = [str(c) for c in (exclude or ())]
+    # Prefer anything over the category the lane just worked. The ranking sorts
+    # on the latest event recorded for a run, so an applied or dismissed batch
+    # already sinks to the bottom -- but only if that run file carries a
+    # timestamp. This makes the guarantee explicit rather than emergent, which
+    # is what the old cursor's `if category == after_category: continue` bought.
+    #
+    # A PREFERENCE, not an absolute: if the category just worked is the only
+    # one with eligible work left, sending it again beats sending nothing. The
+    # old cursor behaved the same way by wrapping to index 0.
+    if after_category and after_category not in skip:
+        preferred = _next_issue_category(
+            after_category, audit_payload, exclude=[*skip, str(after_category)]
+        )
+        if preferred:
+            return preferred
+    return _next_issue_category(after_category, audit_payload, exclude=skip)
 
 
 def _kickoff_status_for(payload: dict[str, Any] | None) -> str:
@@ -126,6 +114,22 @@ def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
     if force_audit or _audit_is_stale():
         build_shopify_seo_audit()
         audit_refreshed = True
+
+    # Keep the copy ledger in step with the receipts before anything selects
+    # against it. The apply path rebuilds it too, but an apply is not
+    # guaranteed to happen -- a dismissed batch writes no receipt -- and a
+    # ledger that lags the receipts suppresses nothing it should while
+    # proposing work that is already done. It is a derived index, so this is
+    # idempotent.
+    ledger_rows = None
+    try:
+        import seo_copy_ledger
+
+        ledger_rows = int(seo_copy_ledger.rebuild_ledger().get("rows_written") or 0)
+    except Exception as exc:
+        # Loud, never fatal: over-proposing is visible to the operator, while a
+        # kickoff that dies sends nothing and looks like a quiet day.
+        print(f"[shopify_seo_kickoff] SEO copy ledger rebuild failed: {exc}")
 
     latest_review = _load_latest_review()
     latest_status = str(latest_review.get("status") or "").strip().lower()
@@ -183,8 +187,10 @@ def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
     # differentiated that way), and without this the lane advances one step a
     # day and re-parks the moment it reaches one.
     skipped: list[str] = []
+    tried: list[str] = []
     payload = None
     for _ in range(len(SEO_REVIEW_CATEGORY_ORDER)):
+        tried.append(next_category)
         payload = send_shopify_seo_review_email(
             limit=0,
             force_audit=False,
@@ -195,7 +201,7 @@ def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
         if str(payload.get("status") or "") != "not_reviewable":
             break
         skipped.append(str(payload.get("category_label") or next_category))
-        following = _choose_next_category(next_category, audit_payload)
+        following = _choose_next_category(next_category, audit_payload, exclude=tried)
         if not following or following == next_category:
             payload = None
             break
@@ -223,6 +229,7 @@ def kickoff_shopify_seo_review(*, force_audit: bool = False) -> dict[str, Any]:
         "item_count": int(payload.get("item_count") or 0),
         "skipped_categories": skipped,
         "audit_refreshed": audit_refreshed,
+        "ledger_rows": ledger_rows,
     }
 
 

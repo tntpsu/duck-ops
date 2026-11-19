@@ -10277,3 +10277,105 @@ restores the old behaviour with no code change.
 - Etsy has **no auditor at all**, so `accept` equals `generate` there and nothing
   grades Etsy copy after it ships. The filler rotation, the banned-term policy
   and the 120–140 floor are enforced only at write time.
+
+## Surface 167 — the cursor retired, the ledger kept fresh, and the count nobody could see (2026-11-19, operator: "Go on all 3")
+
+Three follow-ups to Surface 166, each closing a way its work could have been
+undone quietly.
+
+**1. The round-robin cursor is gone.** `_next_issue_category` walked
+SEO_REVIEW_CATEGORY_ORDER one step a day and wrapped. Three faults, all in this
+repo's own history:
+
+| Fault | Evidence | Why the ranking fixes it |
+|---|---|---|
+| Inverted priority | 9 high-severity missing titles queued behind 93 weak-copy items (2026-10-11) | Severity is the PRIMARY sort key, not an override bolted on top of a walk |
+| A day burnt per empty category | the kickoff carried a walk-forward loop to step past no-op batches | A category with no ledger-eligible work does not appear at all |
+| Starvation bounded by POSITION | `weak_title`'s 23 items waited behind a nine-category walk however long since last offered | Second sort key is least-recently-served, so the wait is bounded by time |
+
+The ranking lives in the SELECTION module, not the kickoff, so
+`send_next_shopify_seo_category_review_email` and the kickoff cannot drift into
+two different answers to "what goes next" — the bug class that produced three
+different SEO length bands in the first place.
+
+**2. The ledger is rebuilt on a cadence**, in the daily kickoff (before anything
+selects against it) and after every apply (`_refresh_audit_artifacts`). Both are
+loud-but-never-fatal: a stale ledger over-proposes, which is visible, while a
+kickoff that dies sends nothing and looks like a quiet day.
+
+**3. `issue_persists` reaches the operator.** It was computed, correct, and
+reported nowhere. A resource the lane already rewrote under the CURRENT rules
+that the auditor still flags is withheld by design — another pass with the same
+rules and generator would produce the same copy — but withheld and uncounted,
+"the rules need changing" is indistinguishable from "the queue is empty". Now in
+the run payload AND the operator email, alongside `template_fallback_counts`,
+which had been payload-only since Surface 165.
+
+| | Happy | High severity present | Longest-unserved | Category empty | Just worked | Stale/corrupt | No payload |
+|---|---|---|---|---|---|---|---|
+| Severity outranks size | — | `test_a_high_severity_category_is_chosen_over_a_bigger_one` | `test_severity_wins_even_when_it_was_served_most_recently` | — | — | — | — |
+| Starvation bounded by time | `test_the_historical_order_is_only_a_tie_break` | — | `test_the_longest_unserved_category_goes_first`, `test_a_category_never_served_counts_as_the_longest_wait` | — | — | — | — |
+| Empty categories cost nothing | — | — | — | `test_categories_with_no_eligible_work_are_absent`, `test_a_category_the_ledger_emptied_is_absent` | — | `test_nothing_eligible_means_no_next_category` | — |
+| Walk-forward stays alive | — | — | — | `test_an_excluded_category_is_skipped` | `test_excluding_everything_returns_none_rather_than_looping` | — | — |
+| Service history | `test_the_newest_run_per_category_wins` | — | `test_the_latest_EVENT_counts_not_the_build_time`, `test_an_apply_timestamp_also_counts_as_served` | — | `test_a_dismissed_run_still_counts_as_served` | `test_a_missing_runs_directory_is_not_a_crash` | — |
+| Just-worked guard | — | — | — | `test_it_is_a_preference_not_an_absolute` | `test_the_last_worked_category_is_skipped` | — | — |
+| `issue_persists` surfaced | `test_nothing_withheld_counts_nothing` | — | — | — | `test_a_persisting_issue_is_counted` | `test_an_unreadable_ledger_counts_nothing_rather_than_guessing` | — |
+| Counting is side-effect free | `test_counting_does_not_change_what_is_proposed` | — | — | — | — | — | — |
+| Card: input sanity | `test_a_fresh_populated_ledger_is_green`, `test_no_receipts_at_all_is_green_not_broken` | — | — | — | — | `test_a_stale_ledger_is_yellow_at_one_cadence`, `test_a_very_stale_ledger_is_red_at_two_cadences`, `test_an_empty_ledger_with_receipts_is_red`, `test_a_corrupt_ledger_is_red_not_a_crash` | `test_both_cards_are_registered_with_no_payload_at_all` |
+| Card: adoption throughput | `test_all_rows_at_the_current_version_is_green`, `test_no_rows_is_green` | — | `test_the_age_is_measured_from_verified_at_not_written_at` | — | `test_rows_below_the_current_version_are_yellow_not_red` | `test_it_never_raises_on_a_nonsense_root` | same |
+| Card registration | `test_both_cards_are_registered` | — | — | — | — | `test_a_red_input_card_gives_the_operator_a_command_to_run` | `test_the_two_cards_do_not_share_an_id_with_anything_else` |
+
+**By dimension:** unit + patched-seam tests, no LLM and no network; both loaders
+exercised against a nonsense root to prove they never raise; both cards
+registered unconditionally and checked for id collision; verified live by
+refreshing `state/system_health.json` (64 → **66 cards**, input sanity GREEN at
+156 rows / 176 receipts, adoption YELLOW at 156 behind).
+**STATUS: SHIPPED 2026-11-19** — `runtime/shopify_seo_review.py`,
+`runtime/shopify_seo_kickoff.py`, `duckAgent/helpers/shopify_seo_review_helper.py`,
+`duckAgent/.../viewer.py`, `tests/test_seo_category_ranking.py` (21 tests),
+`duckAgent/tests/test_seo_copy_ledger_cards.py` (18 tests).
+
+**Two regressions this surface nearly shipped**, both caught by existing tests
+that turned out to encode real rules rather than stale readings:
+
+- **The walk-forward loop died.** The ranking is deterministic and does not read
+  "what went last", so when the kickoff asked for the next category after a
+  no-op batch it got the SAME dead category back, saw it equal to the one just
+  tried, and gave up — burning the day the walk-forward exists to save. Fixed
+  with an exclusion set threaded through the ranking.
+- **A long-built, recently-dismissed category could be re-picked immediately.**
+  The service history read only `generated_at`, which is the BUILD time. The
+  live 11-04 `weak_title` run is exactly this shape: generated 11-04, emailed
+  11-09, dismissed 11-19. Reading only the build time made it look served two
+  weeks ago, reopening the dismissed-but-still-failing loop the old cursor
+  needed an explicit `continue` to avoid. Now the history takes the latest of
+  `generated_at`, `emailed_at`, `applied_at`, `dismissed_at` and
+  `apply_result.applied_at`, and the kickoff ALSO prefers anything over the
+  category just worked — made explicit rather than left emergent, because a run
+  file written by an older code path might carry no terminal timestamp at all.
+
+Also fixed while building the throughput card: `oldest_unadopted_age_days` was
+computed from `written_at`, which on a derived index rebuilt daily is always
+~now — it reported **40 minutes for copy written on 2026-04-20**. It now reads
+`verified_at`, the time Shopify was confirmed to hold the value, and reports
+212 days ([[feedback_grade_runs_against_runtime_state]]).
+
+**Open after this surface:**
+- **`SEO_REVIEW_CATEGORY_ORDER` is now only a tie-break**, but it still defines
+  which categories EXIST and is still a hardcoded list in
+  `shopify_seo_review.py` rather than config, unlike every other rule the stack
+  now reads from `seo_rules.json`.
+- The input-sanity card's staleness thresholds (24h/48h) assume the kickoff runs
+  daily. Nothing asserts that the launchd job firing the kickoff is actually
+  alive, so a dead scheduler shows as a stale ledger rather than as a dead
+  scheduler ([[feedback_verify_the_job_is_firing_first]]).
+- `issue_persists` now has a count in the email but no THRESHOLD: nothing goes
+  yellow when it grows, so a rules problem affecting many resources still reads
+  as a line of prose in one batch email.
+- The adoption card is yellow for a backfilled catalogue (156 of 156 behind) and
+  will stay yellow until a re-sweep is spent. That is correct but means the card
+  starts life non-green, and a permanently-yellow card is one the operator
+  learns to ignore.
+- The `weak_description` category (66 items, never served) is now top of the
+  ranking after `missing_title`'s single item. Nothing caps batch size, so that
+  will build a 66-item / 9-chunk batch the first time it is reached.

@@ -7,7 +7,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import seo_rules_config as _seo_rules_config
 from email_cadence_gate import log_cadence_decision, should_send_email
@@ -880,14 +880,202 @@ def _withhold_ledger_current(
     return kept
 
 
-def _next_issue_category(after_category: str | None, audit_payload: dict[str, Any]) -> str | None:
-    start_index = -1
-    if after_category in SEO_REVIEW_CATEGORY_ORDER:
-        start_index = SEO_REVIEW_CATEGORY_ORDER.index(str(after_category))
-    for category in SEO_REVIEW_CATEGORY_ORDER[start_index + 1 :]:
-        if _select_issue_category_candidates(audit_payload, issue_category=category, limit=1):
-            return category
-    return None
+def ledger_withheld_counts(
+    audit_payload: dict[str, Any],
+    *,
+    issue_category: str,
+    ledger: dict[str, Any] | None = None,
+) -> dict[str, int]:
+    """How many resources the ledger held back in one category, and why.
+
+    `_select_issue_category_candidates` returns only what it KEEPS, so the
+    withheld resources leave no trace in the batch. That matters most for
+    `issue_persists`: a resource the lane already rewrote under the current
+    rules that the auditor STILL flags. Withholding it is right -- regenerating
+    with the same rules and the same generator would produce the same copy --
+    but withholding it silently is how a rules problem becomes invisible. The
+    count is the signal that the rules or the generator need changing, not that
+    the queue is empty.
+
+    Recomputed rather than captured during selection, so it has no side effect
+    on the batch and cannot change what is proposed.
+    """
+    counts: dict[str, int] = {}
+    spec = _category_spec(issue_category)
+    if not spec:
+        return counts
+    wanted = set(spec.get("issue_codes") or set())
+    resources = (
+        audit_payload.get("resources")
+        if isinstance(audit_payload.get("resources"), list)
+        else []
+    )
+    try:
+        import seo_copy_ledger as _ledger_mod
+
+        book = ledger if ledger is not None else _ledger_mod.load_ledger()
+    except Exception:
+        return counts
+    if book.get("load_error"):
+        return counts
+    rows = book.get("rows") or {}
+    for resource in resources:
+        if not isinstance(resource, dict):
+            continue
+        codes = _issue_codes(resource)
+        if not (codes & wanted):
+            continue
+        resource_id = resource.get("resource_id") or resource.get("id")
+        if not resource_id:
+            continue
+        verdict = _ledger_mod.classify_resource(
+            rows.get(_ledger_mod.row_key("shopify", resource_id)),
+            live_values={
+                "seo_title": resource.get("seo_title"),
+                "seo_description": resource.get("seo_description"),
+            },
+            issue_codes=sorted(codes),
+        )
+        if verdict.get("needs_work"):
+            continue
+        key = str(verdict.get("trigger") or verdict.get("observation") or "withheld")
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _category_service_history() -> dict[str, str]:
+    """When each category was last put in front of the operator.
+
+    Derived from the run files the lane already writes, so the ranking needs no
+    state file of its own. A DISMISSED run counts as served, deliberately: the
+    old cursor needed a special case ("never re-pick the batch just worked")
+    because a dismissed-but-still-failing category would otherwise be re-sent
+    forever. Here a dismissal stamps a recent time and the category sorts last
+    on its own.
+    """
+    history: dict[str, str] = {}
+    runs_dir = DUCK_OPS_ROOT / "state" / "shopify_seo_review" / "runs"
+    if not runs_dir.exists():
+        return history
+    for run_path in runs_dir.glob("*.json"):
+        payload = _load_json(run_path, {})
+        if not isinstance(payload, dict):
+            continue
+        category = str(payload.get("seo_category") or "").strip()
+        if not category:
+            continue
+        # The LATEST thing that happened to the run, not when it was built.
+        # `generated_at` alone is the build time, so a batch built in October
+        # and dismissed today still read as "served in October" and could be
+        # re-picked the next morning -- the dismissed-but-still-failing loop
+        # the old cursor needed an explicit special case to avoid. The 11-04
+        # weak_title batch is exactly this shape: generated 11-04, emailed
+        # 11-09, dismissed 11-19.
+        served = ""
+        for key in ("generated_at", "emailed_at", "applied_at", "dismissed_at"):
+            stamp = str(payload.get(key) or "").strip()
+            if stamp > served:
+                served = stamp
+        apply_result = payload.get("apply_result")
+        if isinstance(apply_result, dict):
+            stamp = str(apply_result.get("applied_at") or "").strip()
+            if stamp > served:
+                served = stamp
+        if not served:
+            continue
+        if served > history.get(category, ""):
+            history[category] = served
+    return history
+
+
+def _category_has_high_severity(resources: list[dict[str, Any]]) -> bool:
+    for resource in resources:
+        issues = resource.get("issues") if isinstance(resource.get("issues"), list) else []
+        if any(
+            isinstance(i, dict) and str(i.get("severity") or "").lower() == "high"
+            for i in issues
+        ):
+            return True
+    return False
+
+
+def rank_issue_categories(
+    audit_payload: dict[str, Any], *, exclude: Iterable[str] = ()
+) -> list[dict[str, Any]]:
+    """Every category with ledger-eligible work, most deserving first.
+
+    This replaced a fixed-order round-robin cursor on 2026-11-19. The cursor
+    walked SEO_REVIEW_CATEGORY_ORDER one step per day and wrapped, which had
+    three faults the ranking does not:
+
+      * It inverted priority. A product with NO SEO title is high severity and
+        sits at the FRONT of the order, so once the cursor walked past it those
+        products queued behind every cosmetic category for a full cycle (9
+        high-severity missing titles behind 93 weak-copy items, 2026-10-11).
+        That was patched with a high-severity override bolted on top of the
+        walk; here severity is the primary sort key rather than an exception.
+      * It spent a day per empty category, so the kickoff had to walk forward
+        through categories that built into a no-op batch. A category with no
+        eligible work simply does not appear in this ranking.
+      * Starvation was bounded by POSITION, not time. `weak_title`'s 23 items
+        waited behind a nine-category walk however long it had been since they
+        were last offered. The second sort key is least-recently-served, so the
+        wait is bounded by time instead.
+
+    Because `_select_issue_category_candidates` consults the copy ledger, a
+    category whose every item was already rewritten under the current rules is
+    empty here and is never chosen.
+    """
+    history = _category_service_history()
+    # `exclude` is for categories ALREADY TRIED in this run that built into a
+    # no-op batch. The ranking is deterministic and does not read "what went
+    # last", so without this the kickoff's walk-forward loop re-picks the same
+    # dead category, sees it equal to the one it just tried, and gives up --
+    # burning the day the walk-forward exists to save.
+    skip = {str(c) for c in (exclude or ())}
+    ranked: list[dict[str, Any]] = []
+    for position, category in enumerate(SEO_REVIEW_CATEGORY_ORDER):
+        if category in skip:
+            continue
+        candidates = _select_issue_category_candidates(audit_payload, issue_category=category)
+        if not candidates:
+            continue
+        ranked.append(
+            {
+                "category": category,
+                "eligible": len(candidates),
+                "high_severity": _category_has_high_severity(candidates),
+                # "" sorts before any ISO timestamp, so a category never served
+                # is the longest-unserved by construction.
+                "last_served_at": history.get(category, ""),
+                "order_position": position,
+            }
+        )
+    ranked.sort(
+        key=lambda row: (
+            not row["high_severity"],
+            row["last_served_at"],
+            row["order_position"],
+        )
+    )
+    return ranked
+
+
+def _next_issue_category(
+    after_category: str | None,
+    audit_payload: dict[str, Any],
+    *,
+    exclude: Iterable[str] = (),
+) -> str | None:
+    """The top-ranked category with eligible work.
+
+    `after_category` is no longer read for ORDERING: the run file the lane just
+    wrote gives that category the newest `last_served_at`, so it sorts last
+    without a special case. The parameter stays so every existing call site and
+    test seam keeps working.
+    """
+    ranked = rank_issue_categories(audit_payload, exclude=exclude)
+    return ranked[0]["category"] if ranked else None
 
 
 class SeoProposalGenerationRefused(RuntimeError):
@@ -1357,6 +1545,17 @@ def build_shopify_seo_review(
         # category batch was 100% template and nothing said so.
         "template_fallback_counts": _template_fallback_counts(items),
         "proposal_generation_error": proposal_error,
+        # What the copy ledger held back in this category, and why. The
+        # important entry is `issue_persists`: resources the lane already
+        # rewrote under the CURRENT rules that the auditor still flags. They
+        # are correctly absent from the batch, and reporting the count is what
+        # keeps "the rules need changing" from looking like "the queue is
+        # empty".
+        "ledger_withheld_counts": (
+            ledger_withheld_counts(audit_payload, issue_category=issue_category)
+            if issue_category
+            else {}
+        ),
         # Surface 82e: asking the operator to approve a batch in which every
         # field was withheld parks the whole lane on a reply that could only
         # ever be a lie. `near_duplicate_title` does this by construction --
@@ -1500,6 +1699,38 @@ def render_shopify_seo_review_email(payload: dict[str, Any]) -> tuple[str, str, 
         scope_text = " | ".join(f"{kind.title()}s: {count}" for kind, count in sorted(kind_counts.items()))
         text_lines.extend([f"Scope: {scope_text}", ""])
         html_parts.append(f"<p><strong>Scope:</strong> {scope_text}</p>")
+    # Two numbers that existed only in the run payload until 2026-11-19, which
+    # meant neither reached the person who could act on them.
+    #
+    # `issue_persists` is the important one: resources this lane already
+    # rewrote under the CURRENT rules that the auditor still flags. They are
+    # correctly absent from the batch -- another pass with the same rules and
+    # the same generator would produce the same copy -- but absent and
+    # unreported, "the rules need changing" is indistinguishable from "the
+    # queue is empty" ([[feedback_swallowed_errors_lie]]).
+    withheld = payload.get("ledger_withheld_counts") or {}
+    persists = int(withheld.get("issue_persists") or 0)
+    if persists:
+        persists_text = (
+            f"Not in this batch: {persists} resource(s) in this category were already "
+            "rewritten under the current SEO rules and the auditor still flags them. "
+            "Another pass would produce the same copy, so they are withheld — this is a "
+            "rules or generator problem to look at, not a backlog to approve."
+        )
+        text_lines.extend([persists_text, ""])
+        html_parts.append(f"<p><strong>Not in this batch:</strong> {persists_text.split(': ', 1)[1]}</p>")
+
+    fallbacks = payload.get("template_fallback_counts") or {}
+    templated = int(fallbacks.get("title") or 0) + int(fallbacks.get("description") or 0)
+    if templated:
+        template_text = (
+            f"{templated} of the field(s) this run would write came from the deterministic "
+            "template rather than the model. A template is a plausible-looking answer to "
+            "\"this copy is too generic\", so it is worth a look before approving."
+        )
+        text_lines.extend([template_text, ""])
+        html_parts.append(f"<p><strong>Template fallbacks:</strong> {template_text}</p>")
+
     if hidden_count > 0:
         text_lines.extend([f"Showing the first {len(display_items)} items below. {hidden_count} more are included in this run.", ""])
         html_parts.append(
