@@ -148,9 +148,24 @@ class RefusalTests(_DropRoot):
         self.drop("notes.pdf", b"%PDF-1.4\n" + b"\x00" * 64)
         self.assertIn("not an accepted type", self._reason(self.scan()))
 
-    def test_a_missing_sidecar_is_refused(self) -> None:
-        self.drop("lonely.png", sidecar=None)
-        self.assertIn("no sidecar", self._reason(self.scan()))
+    def test_a_missing_sidecar_is_WAITED_ON_not_refused(self) -> None:
+        """Changed deliberately on 2026-11-20; this test asserted the bug.
+
+        An asset with no sidecar is INCOMPLETE, not invalid -- the two files of
+        a drop do not arrive together, and the contract asks the agent to send
+        the asset first. Refusing it on sight (which is what "no sidecar"
+        was) destroyed a finished post: the lane moved the asset to rejected/
+        before its sidecar had a chance to land. Surface 171 in TESTS.md has
+        the sequence. The waiting behaviour and its two conditions are covered
+        in test_express_drop.py::AHalfArrivedDropIsWaitedOnNotRefused.
+        """
+        asset = self.drop("lonely.png", sidecar=None)
+        manifest = self.scan()
+        self.assertEqual(manifest["rejected_count"], 0,
+                         f"refused: {manifest['rejected']}")
+        self.assertTrue(asset.is_file(), "the asset must stay in the inbox")
+        self.assertEqual(manifest["incomplete_count"], 1)
+        self.assertEqual(manifest["incomplete"][0]["missing"], "sidecar")
 
     def test_unparseable_sidecar_json_is_refused(self) -> None:
         asset = self.drop("bad.png")

@@ -191,6 +191,13 @@ def _isolate_drop_intake(monkeypatch, tmp_path):
     monkeypatch.setattr(
         drop_intake, "DROP_FEEDBACK_PATH", tmp_path / "drop_feedback.json"
     )
+    # Same treatment, same reason: this one records how many scans a
+    # half-arrived drop has survived, and that count is what decides whether
+    # it gets refused. A fixture row would make the lane refuse, or keep
+    # waiting on, a real drop.
+    monkeypatch.setattr(
+        drop_intake, "DROP_INCOMPLETE_PATH", tmp_path / "drop_incomplete.json"
+    )
     yield
 
 

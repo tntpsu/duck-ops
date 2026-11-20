@@ -727,23 +727,48 @@ class TheAgentIsToldWhatActuallyHappened(_ExpressRoot):
         self.assertIn("publish_error", drop_intake.MIRROR_DROP_README)
 
 
-class ASidecarWithNoAssetIsNotSilent(_ExpressRoot):
-    """Surface 171 — the orphan sidecar, found by the lane's first real use.
+class AHalfArrivedDropIsWaitedOnNotRefused(_ExpressRoot):
+    """Surface 171 — a drop arrives as TWO files and they do not arrive together.
 
-    `scan_inbox` skips every `.json` in the inbox, on the correct grounds that
-    a sidecar is found THROUGH its asset. The consequence was that a sidecar
-    with no asset was invisible everywhere: never a proposal, so absent from
-    `status.json`'s `drops`; never refused, so absent from `rejected/`; and
-    skipped by the loop, so absent from the manifest. Measured 2026-11-19 —
-    Gemini wrote a sidecar for a post whose `.mp4` never arrived, and eleven
-    hours later nothing anywhere said so. The agent believed it had dropped a
-    post; we believed nothing had arrived.
+    Found twice in one day, in opposite directions:
+
+      1. A sidecar with no asset was invisible everywhere. `scan_inbox` skips
+         every `.json` on the correct grounds that a sidecar is found THROUGH
+         its asset, so an orphan reached neither the manifest, nor `rejected/`,
+         nor the agent's status file. Gemini wrote one at 21:25 and eleven
+         hours later nothing said so.
+      2. The fix for (1) then destroyed a real post, because the grace was
+         asymmetric and far shorter than the scan cadence. A lone sidecar got
+         30 minutes; a sidecar-LESS ASSET got none at all, refused on the spot
+         by `validate_drop` -- and the contract told the agent to send the
+         asset first. Against a scan that runs every four hours, the first
+         scan to see a drop was usually the one that killed it:
+
+           21:25  sidecar written, video not up yet
+           10:16  the 30-minute grace refuses the "orphan", MOVES the sidecar
+           11:03  the video arrives, asset-first as instructed
+           12:15  the scan finds a video whose sidecar was deleted at 10:16
+
+    Both halves now get the same treatment, and nothing is refused until it
+    has been seen incomplete twice AND waited longer than two scan cadences.
     """
 
-    def orphan(self, name: str = "post.mp4.json", *, age: int = 60,
-               body: dict | None = None) -> Path:
+    def scan(self, *, now: float | None = None) -> dict:
+        """The real entry point, not the inner function.
+
+        `conftest._isolate_drop_intake` already redirects
+        DROP_INCOMPLETE_PATH to a per-test tmp file, so this exercises the
+        production code path -- including the ledger write that the
+        DUCK_TEST_MODE guard would refuse against the real one.
+        """
+        return drop_intake.scan_inbox(self.root, now=now)
+
+    def summary(self) -> dict:
+        return drop_intake.incomplete_drop_summary()
+
+    def lone_sidecar(self, name: str = "post.mp4.json", *, age: int = 60) -> Path:
         side = self.inbox / name
-        side.write_text(json.dumps(body if body is not None else {
+        side.write_text(json.dumps({
             "caption": "Beer duck or whiskey duck?",
             "lane": drop_intake.EXPRESS_LANE,
             "publish_at": "asap",
@@ -754,104 +779,309 @@ class ASidecarWithNoAssetIsNotSilent(_ExpressRoot):
         os.utime(side, (old, old))
         return side
 
-    def test_an_orphan_sidecar_is_reported_at_all(self):
-        self.orphan()
-        manifest = drop_intake.scan_inbox(self.root)
-        self.assertEqual(manifest["incomplete_count"], 1)
-        row = manifest["incomplete"][0]
-        self.assertEqual(row["expected_asset"], "post.mp4")
-        self.assertEqual(row["state"], "waiting_for_asset")
-
-    def test_it_is_not_counted_as_accepted_or_rejected(self):
-        # It is neither: an incomplete drop is a fourth outcome, and folding
-        # it into one of the other two would misreport both.
-        self.orphan()
-        manifest = drop_intake.scan_inbox(self.root)
-        self.assertEqual(manifest["accepted_count"], 0)
-        self.assertEqual(manifest["rejected_count"], 0)
-        self.assertEqual(manifest["waiting_count"], 0)
-
-    def test_inside_the_grace_window_it_is_left_alone(self):
-        # The asset may still be coming up from Drive, and a video is the slow
-        # half. Refusing a good drop because its file is large would be worse
-        # than waiting.
-        side = self.orphan(age=60)
-        drop_intake.scan_inbox(self.root)
-        self.assertTrue(side.is_file(), "a recent orphan must not be moved")
-
-    def test_past_the_grace_window_it_is_refused_with_a_readable_reason(self):
-        side = self.orphan(age=drop_intake.ORPHAN_SIDECAR_GRACE_SECONDS + 120)
-        manifest = drop_intake.scan_inbox(self.root)
-        self.assertFalse(side.is_file(), "a stale orphan should leave the inbox")
-        row = manifest["incomplete"][0]
-        self.assertEqual(row["state"], "refused")
-        self.assertIn("without its asset", row["reason"])
-        self.assertIn("post.mp4", row["reason"])
-        # The reason has to reach the agent, which means a file in rejected/.
-        reasons = list((self.root / drop_intake.REJECTED_DIR).glob("*.reason.txt"))
-        self.assertEqual(len(reasons), 1)
-        self.assertIn("Re-send both", reasons[0].read_text())
-
-    def test_the_refusal_says_which_order_to_send_in(self):
-        # Actionable, not just descriptive: asset first, then sidecar, so a
-        # post is never read before its file is there.
-        self.orphan(age=drop_intake.ORPHAN_SIDECAR_GRACE_SECONDS + 120)
-        manifest = drop_intake.scan_inbox(self.root)
-        self.assertIn("upload the asset first", manifest["incomplete"][0]["reason"])
-
-    def test_a_sidecar_with_its_asset_is_not_an_orphan(self):
-        # Positive control. Without it this whole class could pass by calling
-        # every sidecar an orphan, which would refuse every real drop.
-        self.accept()
-        manifest = drop_intake.scan_inbox(self.root)
-        self.assertEqual(manifest["incomplete_count"], 0)
-
-    def test_the_bare_sidecar_spelling_finds_its_asset_too(self):
-        # `post.json` beside `post.png` is the other accepted spelling, and
-        # reading it as an orphan would refuse a drop that is complete.
-        asset = self.inbox / "post.png"
-        asset.write_bytes(PNG)
-        self.orphan("post.json")
-        old = time.time() - 300
+    def lone_asset(self, name: str = "post.mp4", *, age: int = 60,
+                   data: bytes = MP4) -> Path:
+        asset = self.inbox / name
+        asset.write_bytes(data)
+        old = time.time() - age
         os.utime(asset, (old, old))
-        manifest = drop_intake.scan_inbox(self.root)
-        self.assertEqual(manifest["incomplete_count"], 0)
+        return asset
 
-    def test_what_the_sidecar_declared_is_carried_back(self):
-        # So the operator reading the log, and the agent reading status.json,
-        # can see WHICH post is missing its file rather than only a filename.
-        self.orphan()
-        row = drop_intake.scan_inbox(self.root)["incomplete"][0]
-        self.assertEqual(row["declared"]["lane"], drop_intake.EXPRESS_LANE)
-        self.assertEqual(row["declared"]["source_agent"], "gemini-post-writer")
+    # -- the symmetry itself ------------------------------------------------
 
-    def test_an_unparseable_orphan_is_still_reported(self):
-        # A sidecar we cannot read is itself a message about the contract, and
-        # dropping it on a parse error is how the original blind spot worked.
+    def test_a_lone_sidecar_is_reported(self):
+        self.lone_sidecar()
+        row = self.scan()["incomplete"][0]
+        self.assertEqual(row["have"], "sidecar")
+        self.assertEqual(row["missing"], "asset")
+        self.assertEqual(row["state"], "waiting_for_other_half")
+
+    def test_a_lone_asset_is_reported_not_refused(self):
+        # THE REGRESSION. This used to raise "no sidecar" inside validate_drop
+        # and move the asset to rejected/ on its first sighting.
+        asset = self.lone_asset()
+        manifest = self.scan()
+        self.assertEqual(manifest["rejected_count"], 0,
+                         f"refused: {manifest['rejected']}")
+        self.assertTrue(asset.is_file(), "the asset must stay in the inbox")
+        row = manifest["incomplete"][0]
+        self.assertEqual(row["have"], "asset")
+        self.assertEqual(row["missing"], "sidecar")
+
+    def test_both_directions_get_the_same_grace(self):
+        # Stated as a property rather than two numbers, because the whole bug
+        # was that these two cases were governed by different rules.
+        for which in ("sidecar", "asset"):
+            with self.subTest(have=which):
+                for f in self.inbox.iterdir():
+                    f.unlink()
+                drop_intake.DROP_INCOMPLETE_PATH.unlink(missing_ok=True)
+                (self.lone_sidecar if which == "sidecar" else self.lone_asset)(
+                    age=drop_intake.INCOMPLETE_DROP_GRACE_SECONDS + 3600)
+                first = self.scan()["incomplete"][0]
+                self.assertEqual(first["state"], "waiting_for_other_half",
+                                 "one scan must never be enough to refuse")
+                second = self.scan()["incomplete"][0]
+                self.assertEqual(second["state"], "refused")
+
+    def test_the_grace_is_longer_than_the_scan_cadence(self):
+        # The arithmetic that actually failed. The scan runs every 4 hours, so
+        # a grace under one cadence means a drop is judged the first time it
+        # is ever seen. Pinned as a relation, not as today's number.
+        scan_cadence_seconds = 4 * 3600
+        self.assertGreater(drop_intake.INCOMPLETE_DROP_GRACE_SECONDS,
+                           scan_cadence_seconds)
+        self.assertGreaterEqual(drop_intake.MIN_SCANS_BEFORE_REFUSING_INCOMPLETE, 2)
+
+    # -- the two conditions -------------------------------------------------
+
+    def test_one_scan_is_never_enough_however_old(self):
+        self.lone_sidecar(age=30 * 86400)
+        self.assertEqual(self.scan()["incomplete"][0]["state"],
+                         "waiting_for_other_half")
+
+    def test_many_scans_are_never_enough_if_it_is_young(self):
+        # A burst of manual runs must not convict a drop that arrived minutes
+        # ago: the age is what says the other half is not coming.
+        self.lone_sidecar(age=60)
+        for _ in range(5):
+            row = self.scan()["incomplete"][0]
+        self.assertEqual(row["state"], "waiting_for_other_half")
+        self.assertGreaterEqual(row["scans_seen"], 5)
+
+    def test_refused_only_when_both_conditions_hold(self):
+        side = self.lone_sidecar(age=drop_intake.INCOMPLETE_DROP_GRACE_SECONDS + 60)
+        self.scan()
+        manifest = self.scan()
+        self.assertEqual(manifest["incomplete"][0]["state"], "refused")
+        self.assertFalse(side.is_file())
+        notes = list((self.root / drop_intake.REJECTED_DIR).glob("*.incomplete.txt"))
+        self.assertEqual(len(notes), 1)
+        text = notes[0].read_text()
+        self.assertIn("never completed", text)
+        self.assertIn("send BOTH files again", text)
+
+    def test_the_refusal_warns_that_the_other_half_will_not_pair(self):
+        # The exact confusion that cost the post: the agent sent the missing
+        # half, and its partner had already been moved out of the inbox.
+        self.lone_sidecar(age=drop_intake.INCOMPLETE_DROP_GRACE_SECONDS + 60)
+        self.scan()
+        reason = self.scan()["incomplete"][0]["reason"]
+        self.assertIn("will not pair with anything", reason)
+        self.assertIn("MOVED", reason)
+
+    # -- completion ---------------------------------------------------------
+
+    def test_the_other_half_arriving_completes_the_drop(self):
+        # The whole point. A waited-on drop must actually be accepted when
+        # its partner lands, including after several scans saw it incomplete.
+        self.lone_asset(name="post.mp4", age=600)
+        self.scan()
+        self.scan()
+        side = self.inbox / "post.mp4.json"
+        side.write_text(json.dumps({
+            "caption": "Beer duck or whiskey duck?",
+            "lane": drop_intake.EXPRESS_LANE, "publish_at": "asap",
+            "post_ready": True, "source_agent": "gemini-post-writer",
+        }), encoding="utf-8")
+        old = time.time() - 600
+        os.utime(side, (old, old))
+        manifest = self.scan()
+        self.assertEqual(manifest["accepted_count"], 1,
+                         f"refused: {manifest['rejected']}")
+        self.assertEqual(manifest["incomplete"], [])
+
+    def test_a_complete_drop_is_never_called_incomplete(self):
+        # Positive control. Without it this whole class could pass by calling
+        # every drop incomplete, which would stop the lane entirely.
+        self.accept()
+        self.assertEqual(self.scan()["incomplete"], [])
+
+    def test_the_bare_sidecar_spelling_pairs_too(self):
+        self.lone_asset(name="post.png", data=PNG, age=600)
+        side = self.inbox / "post.json"
+        side.write_text(json.dumps({
+            "caption": "c", "lane": drop_intake.EXPRESS_LANE,
+            "publish_at": "asap", "post_ready": True,
+            "source_agent": "a"}), encoding="utf-8")
+        old = time.time() - 600
+        os.utime(side, (old, old))
+        self.assertEqual(self.scan()["incomplete"], [])
+
+    # -- a file that can never become valid --------------------------------
+
+    def test_an_impossible_type_is_still_refused_immediately(self):
+        # Waiting only helps a drop that could still become good. An .exe is
+        # not going to be rescued by a sidecar.
+        self.lone_asset(name="payload.exe", data=b"MZ\x00\x00", age=600)
+        manifest = self.scan()
+        self.assertEqual(manifest["rejected_count"], 1)
+        self.assertIn("not an accepted type", manifest["rejected"][0]["reason"])
+        self.assertEqual(manifest["incomplete"], [])
+
+    # -- the durable ledger (what makes "a fair chance" answerable) ---------
+
+    def test_the_count_survives_across_scans(self):
+        self.lone_sidecar(age=600)
+        self.assertEqual(self.scan()["incomplete"][0]["scans_seen"], 1)
+        self.assertEqual(self.scan()["incomplete"][0]["scans_seen"], 2)
+        self.assertEqual(self.scan()["incomplete"][0]["scans_seen"], 3)
+
+    def test_the_summary_outlives_the_scan_that_saw_it(self):
+        # The operator-visible half of the fix: the per-scan manifest showed an
+        # incomplete drop for exactly one 4-hour cadence and then forgot it, so
+        # whether anyone ever saw it was luck.
+        self.lone_sidecar(age=600)
+        self.scan()
+        summary = self.summary()
+        self.assertEqual(summary["waiting_count"], 1)
+        self.assertEqual(summary["waiting"][0]["missing"], "asset")
+        self.assertEqual(summary["waiting"][0]["source_agent"],
+                         "gemini-post-writer")
+
+    def test_a_completion_is_recorded_as_the_rate_denominator(self):
+        self.lone_asset(age=600)
+        self.scan()
+        side = self.inbox / "post.mp4.json"
+        side.write_text(json.dumps({
+            "caption": "c", "lane": drop_intake.EXPRESS_LANE,
+            "publish_at": "asap", "post_ready": True,
+            "source_agent": "gemini-post-writer"}), encoding="utf-8")
+        old = time.time() - 600
+        os.utime(side, (old, old))
+        self.scan()
+        summary = self.summary()
+        self.assertEqual(summary["completed_7d"], 1)
+        self.assertEqual(summary["refused_7d"], 0)
+        self.assertEqual(summary["refused_rate_7d"], 0.0)
+
+    def test_a_refusal_is_counted_and_attributed(self):
+        self.lone_sidecar(age=drop_intake.INCOMPLETE_DROP_GRACE_SECONDS + 60)
+        self.scan()
+        self.scan()
+        summary = self.summary()
+        self.assertEqual(summary["refused_7d"], 1)
+        self.assertEqual(summary["refused_rate_7d"], 1.0)
+        # Attributed, because one lost upload is noise and the same agent
+        # losing one every day is a broken producer.
+        self.assertEqual(summary["refused_by_agent_7d"],
+                         {"gemini-post-writer": 1})
+
+    def test_the_rate_has_no_value_rather_than_a_fake_zero(self):
+        # A rate over nothing is not 0.0 ([[feedback_a_number_needs_its_denominator]]).
+        summary = self.summary()
+        self.assertIsNone(summary["refused_rate_7d"])
+        self.assertEqual(summary["resolved_7d"], 0)
+
+    def test_an_unparseable_lone_sidecar_is_still_tracked(self):
         side = self.inbox / "broken.mp4.json"
         side.write_text("{not json", encoding="utf-8")
-        old = time.time() - 60
+        old = time.time() - 600
         os.utime(side, (old, old))
-        manifest = drop_intake.scan_inbox(self.root)
-        self.assertEqual(manifest["incomplete_count"], 1)
-        self.assertEqual(manifest["incomplete"][0]["declared"], {})
+        row = self.scan()["incomplete"][0]
+        self.assertEqual(row["declared"], {})
+        self.assertEqual(row["missing"], "asset")
 
-    def test_the_agent_status_file_lists_it(self):
-        # The channel that actually reaches the agent. It is listed nowhere
-        # else: not a proposal, so not in `drops`; not yet refused, so not in
-        # `refused_this_scan`.
-        self.orphan()
-        manifest = drop_intake.scan_inbox(self.root)
+    def test_the_ledger_refuses_to_write_production_under_test_mode(self):
+        # Layer 2 of the three-layer policy for a new prod-path constant. Note
+        # it has to name the FROZEN path explicitly: the conftest redirect
+        # (layer 1) means `DROP_INCOMPLETE_PATH` is already a tmp file here,
+        # which is the whole point -- the guard is the backstop for when that
+        # redirect is missing, never the thing tests rely on.
+        with self.assertRaises(drop_intake.TestModeRefusalError):
+            drop_intake._write_incomplete_ledger(
+                drop_intake._FROZEN_PRODUCTION_INCOMPLETE_PATH, {}, [])
+
+    def test_the_agent_status_file_lists_a_waiting_drop(self):
+        self.lone_sidecar(age=600)
+        manifest = self.scan()
         path = drop_intake.write_status_file(
             self.root, {}, incomplete=manifest["incomplete"])
         payload = json.loads(path.read_text())
-        rows = payload["incomplete_this_scan"]
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["expected_asset"], "post.mp4")
-        self.assertEqual(rows[0]["state"], "waiting_for_asset")
-        self.assertIn("incomplete_this_scan", payload["doc"])
+        row = payload["incomplete_this_scan"][0]
+        self.assertEqual(row["state"], "waiting_for_other_half")
+        self.assertEqual(row["missing"], "asset")
+        self.assertIn("WAITED on, not refused", payload["doc"])
 
-    def test_the_contract_tells_the_agent_to_send_the_asset_first(self):
-        self.assertIn("Upload the asset BEFORE the sidecar",
-                      drop_intake.MIRROR_DROP_README)
-        self.assertIn("waiting_for_asset", drop_intake.MIRROR_DROP_README)
+    def test_the_contract_no_longer_tells_the_agent_order_matters(self):
+        # The advice that caused the loss. It must be gone, not softened.
+        readme = drop_intake.MIRROR_DROP_README
+        self.assertNotIn("Upload the asset BEFORE the sidecar", readme)
+        self.assertIn("the order does not matter", readme)
+        self.assertIn("waiting_for_other_half", readme)
+
+
+class NoTestPollutionInTheIncompleteLedger(unittest.TestCase):
+    """Layer 3 for `drop_incomplete.json` — audit the real file.
+
+    Layers 1 and 2 are the conftest redirect and the DUCK_TEST_MODE write
+    guard. This is the one that catches a test which bypasses both, which is
+    how three earlier prod-path constants were polluted in ten days.
+
+    A fixture row here is not inert. `scans_seen` is what decides whether a
+    half-arrived drop gets refused, so a stale fixture entry under a real
+    stem could either refuse a genuine drop early or keep waiting on one
+    forever.
+    """
+
+    PRODUCTION = Path(__file__).resolve().parents[1] / "state" / "drop_incomplete.json"
+
+    #: Stems used by the tests above. A real drop is named after its post.
+    FIXTURE_STEMS = frozenset({"post", "broken", "payload", "a", "b", "x"})
+
+    def test_the_live_ledger_holds_no_fixture_stems(self):
+        if not self.PRODUCTION.is_file():
+            self.skipTest("no live incomplete ledger yet")
+        payload = json.loads(self.PRODUCTION.read_text(encoding="utf-8"))
+        pending = payload.get("pending") or {}
+        history = payload.get("history") or []
+        found = {s for s in pending if s in self.FIXTURE_STEMS}
+        found |= {str(h.get("stem")) for h in history
+                  if isinstance(h, dict) and h.get("stem") in self.FIXTURE_STEMS}
+        self.assertEqual(
+            found, set(),
+            "fixture stems in the live incomplete ledger — a test bypassed "
+            "both the conftest redirect and the DUCK_TEST_MODE guard: "
+            f"{sorted(found)}")
+
+    def test_the_live_ledger_has_the_shape_its_readers_expect(self):
+        # A hand-edited or half-written file would make the card lie rather
+        # than fail, so the audit checks the shape too.
+        if not self.PRODUCTION.is_file():
+            self.skipTest("no live incomplete ledger yet")
+        payload = json.loads(self.PRODUCTION.read_text(encoding="utf-8"))
+        self.assertIsInstance(payload.get("pending"), dict)
+        self.assertIsInstance(payload.get("history"), list)
+
+
+class TheWaitingClockIsTheSameEverywhere(_ExpressRoot):
+    """One question, one number.
+
+    The card read `first_seen_at` and the agent's status file read the age of
+    the half actually present, so a drop whose file predated the scan that
+    found it was reported as 0.0h on one surface and 3.3h on the other.
+    """
+
+    def test_the_summary_reports_the_age_of_the_half_that_is_here(self):
+        asset = self.inbox / "post.mp4"
+        asset.write_bytes(MP4)
+        old = time.time() - 4 * 3600
+        os.utime(asset, (old, old))
+        manifest = drop_intake.scan_inbox(self.root)
+        summary = drop_intake.incomplete_drop_summary()
+        self.assertAlmostEqual(summary["waiting"][0]["hours_waiting"], 4.0, delta=0.2)
+        # And it agrees with what the agent is told.
+        self.assertAlmostEqual(
+            manifest["incomplete"][0]["newest_half_age_seconds"] / 3600.0,
+            summary["waiting"][0]["hours_waiting"], delta=0.2)
+
+    def test_our_first_sighting_is_still_recorded_separately(self):
+        # Both facts are useful; they just are not the same fact.
+        asset = self.inbox / "post.mp4"
+        asset.write_bytes(MP4)
+        old = time.time() - 4 * 3600
+        os.utime(asset, (old, old))
+        drop_intake.scan_inbox(self.root)
+        row = drop_intake.incomplete_drop_summary()["waiting"][0]
+        self.assertAlmostEqual(row["first_seen_hours_ago"], 0.0, delta=0.2)
+        self.assertGreater(row["hours_waiting"], row["first_seen_hours_ago"])

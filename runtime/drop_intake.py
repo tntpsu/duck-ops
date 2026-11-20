@@ -155,6 +155,7 @@ def _refuse_test_mode_prod_write(path: Path) -> None:
     frozen = {
         _FROZEN_PRODUCTION_PROPOSALS_PATH: "proposal ledger",
         _FROZEN_PRODUCTION_FEEDBACK_PATH: "feedback ledger",
+        _FROZEN_PRODUCTION_INCOMPLETE_PATH: "incomplete-drop ledger",
     }
     which = frozen.get(resolved)
     if which:
@@ -303,18 +304,41 @@ MAX_SIDECAR_BYTES = 64 * 1024
 #: still arriving from Drive is never parsed as a complete one.
 QUIESCENT_SECONDS = 45
 
-#: How long a sidecar may sit with no asset beside it before it is refused.
-#: An agent writes the two halves separately, and a video is the slow half, so
-#: for a while "the asset is not here" means "it is still uploading" -- but
-#: only for a while. Measured 2026-11-19: Gemini wrote a sidecar for a post
-#: whose .mp4 never arrived, and eleven hours later nothing anywhere said so,
-#: because the scan skips .json files on the (correct) grounds that a sidecar
-#: is found through its asset. An orphan was therefore invisible to the
-#: manifest, to `rejected/`, and to the agent's own status file: it believed it
-#: had dropped a post, we believed nothing had arrived, and neither could see
-#: the other ([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]] --
-#: zero findings describes which files the gate OPENED).
-ORPHAN_SIDECAR_GRACE_SECONDS = 30 * 60
+#: A drop arrives as TWO files and they do not arrive together. Until both are
+#: present it is INCOMPLETE -- not invalid -- and the only safe response is to
+#: wait, because refusing one half destroys a post that was still on its way.
+#:
+#: Both numbers are derived from the scan cadence, not guessed. The scan runs
+#: every four hours (com.philtullai.duckops.drop-intake, 00:15/04:15/...), so
+#: a grace shorter than one cadence means a drop is judged the first time it is
+#: ever seen and never gets a second chance. Measured the hard way on
+#: 2026-11-20, in a sequence where every component did what it was told:
+#:
+#:   21:25  Gemini writes the sidecar; the video is not up yet
+#:   10:16  a 30-MINUTE grace refuses the "orphan" and MOVES the sidecar out
+#:   11:03  Gemini uploads the video -- asset first, as the README instructs
+#:   12:15  the scan finds a video whose sidecar was deleted 47 minutes earlier
+#:
+#: A 30-minute window against a 4-hour cadence is a coin flip, and losing it
+#: cost a finished post. Two conditions now have to agree before anything is
+#: refused, so neither a long cadence nor a burst of manual runs can convict a
+#: drop on its own ([[feedback_never_grade_an_open_window]]).
+INCOMPLETE_DROP_GRACE_SECONDS = 8 * 3600      # two scan cadences
+MIN_SCANS_BEFORE_REFUSING_INCOMPLETE = 2      # seen incomplete twice, not once
+
+#: Durable, because "has this drop had a fair chance to complete?" cannot be
+#: answered from one scan. The per-scan manifest is rewritten whole, so an
+#: incomplete drop recorded only there is forgotten by the next run and every
+#: scan sees a brand new problem it has no history for. It is also what makes
+#: the refusal RATE measurable: one lost upload is noise, the same agent
+#: losing one every day is a broken producer.
+DROP_INCOMPLETE_PATH = REPO_ROOT / "state" / "drop_incomplete.json"
+_FROZEN_PRODUCTION_INCOMPLETE_PATH = (
+    REPO_ROOT / "state" / "drop_incomplete.json").resolve()
+
+#: How many resolved drops the ledger remembers. Enough to compute a rate over
+#: weeks without the file growing forever.
+INCOMPLETE_HISTORY_LIMIT = 200
 
 
 class DropRefused(RuntimeError):
@@ -755,6 +779,24 @@ def scan_inbox(drop_root: Path | None = None, *,
             if asset.is_symlink() or (sidecar.exists() and sidecar.is_symlink()):
                 raise DropRefused("symlinks are not accepted; drop the real file")
 
+            # An asset whose sidecar has not arrived is INCOMPLETE, not
+            # invalid, and the incomplete pass below owns it. `validate_drop`
+            # used to refuse it here on the spot -- zero grace for the half
+            # the contract tells the agent to send FIRST -- while a sidecar
+            # with no asset got a grace window. That asymmetry is what
+            # destroyed a finished post on 2026-11-20.
+            #
+            # A file type that can never be valid is still refused now rather
+            # than left to sit for eight hours: waiting only helps a drop that
+            # could still become good.
+            if not sidecar.exists():
+                if asset.suffix.lower() not in _IMAGE_EXTS | _VIDEO_EXTS:
+                    raise DropRefused(
+                        f"{asset.suffix or 'no extension'} is not an accepted "
+                        f"type ({', '.join(sorted(_IMAGE_EXTS | _VIDEO_EXTS))})"
+                        " -- and no sidecar arrived for it either")
+                continue
+
             # Both halves must have settled: a sidecar that is still arriving
             # parses as truncated json and reads as a malformed drop.
             if not _is_quiescent(asset, now=now, settle=settle) or (
@@ -806,10 +848,11 @@ def scan_inbox(drop_root: Path | None = None, *,
             "approval": "operator_required",
         })
 
-    # Sidecars with no asset. The loop above cannot see these by design -- it
-    # finds a sidecar THROUGH its asset -- so they need their own pass or they
-    # are reported nowhere at all.
-    manifest["incomplete"] = _collect_orphan_sidecars(drop_root, inbox, now=now)
+    # Half-arrived drops, in either direction. The loop above cannot see a
+    # lone sidecar by design -- it finds one THROUGH its asset -- and it
+    # deliberately leaves a sidecar-less asset to this pass rather than
+    # refusing a drop that is still arriving.
+    manifest["incomplete"] = _collect_incomplete_drops(drop_root, inbox, now=now)
 
     manifest["accepted_count"] = len(manifest["accepted"])
     manifest["rejected_count"] = len(manifest["rejected"])
@@ -838,68 +881,272 @@ def _asset_for_sidecar(sidecar: Path) -> tuple[str, bool]:
     return f"{sidecar.stem}.<ext>", False
 
 
-def _collect_orphan_sidecars(drop_root: Path, inbox: Path, *,
-                             now: float | None = None) -> list[dict]:
-    """Surface every sidecar whose asset is missing, and refuse the stale ones.
+def _read_incomplete_ledger(path: Path) -> dict:
+    payload = _read_json_file(Path(path))
+    pending = payload.get("pending")
+    history = payload.get("history")
+    return {
+        "pending": pending if isinstance(pending, dict) else {},
+        "history": [h for h in (history if isinstance(history, list) else [])
+                    if isinstance(h, dict)],
+    }
 
-    Inside the grace window this only REPORTS: the asset may still be on its
-    way up from Drive, and refusing a good drop because its video is large
-    would be worse than waiting. Past the window the sidecar is moved to
-    `rejected/` with a reason written beside it, which is the only channel
-    that reaches the agent that wrote it.
+
+def _write_incomplete_ledger(path: Path, pending: dict, history: list) -> None:
+    _refuse_test_mode_prod_write(path)
+    trimmed = history[-INCOMPLETE_HISTORY_LIMIT:]
+    _write_json_atomic(Path(path), {
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "pending": pending,
+        "history": trimmed,
+        # Computed by the PRODUCER and stored, so the OS card is a ~2ms read
+        # of a cached payload rather than a second implementation of the same
+        # arithmetic (the producer-on-schedule + cheap-reader convention).
+        "summary": _summarise_incomplete(pending, trimmed),
+    })
+
+
+def _incomplete_halves(inbox: Path) -> dict[str, dict]:
+    """Every stem in the inbox that has one half and not the other.
+
+    Symmetric on purpose. A sidecar with no asset and an asset with no sidecar
+    are the SAME situation -- a drop mid-upload -- and the lane used to treat
+    them as opposites: the sidecar got a grace window while the asset was
+    refused on the spot by `validate_drop`'s "no sidecar" check. The agent is
+    told to send the asset first, so the half with no grace at all was the one
+    the contract asked for first.
     """
-    current = time.time() if now is None else now
-    out: list[dict] = []
-    for sidecar in sorted(inbox.iterdir()):
-        if sidecar.is_dir() or sidecar.name.startswith("."):
+    assets: dict[str, Path] = {}
+    sidecars: dict[str, Path] = {}
+    for item in sorted(inbox.iterdir()):
+        if item.is_dir() or item.name.startswith("."):
             continue
-        if sidecar.suffix.lower() != ".json":
+        if item.suffix.lower() == ".json":
+            expected, _present = _asset_for_sidecar(item)
+            sidecars[Path(expected).stem] = item
+        else:
+            assets[item.stem] = item
+
+    out: dict[str, dict] = {}
+    for stem in set(assets) | set(sidecars):
+        asset, sidecar = assets.get(stem), sidecars.get(stem)
+        if asset is not None and sidecar is not None:
+            continue  # complete; the asset loop owns it
+        present = asset or sidecar
+        if present is None:  # pragma: no cover - unreachable
             continue
-        expected, present = _asset_for_sidecar(sidecar)
-        if present:
-            continue  # the loop above owns it
         try:
-            age = current - sidecar.stat().st_mtime
+            newest = present.stat().st_mtime
         except OSError:  # pragma: no cover - vanished mid-scan
             continue
         declared: dict = {}
-        try:
-            payload = json.loads(sidecar.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                declared = {k: payload.get(k) for k in
-                            ("lane", "caption", "source_agent", "publish_at")}
-        except Exception:
-            declared = {}
-        row = {
-            "sidecar": sidecar.name,
-            "stem": Path(sidecar.stem).stem,
-            "expected_asset": expected,
-            "age_seconds": int(age),
+        if sidecar is not None:
+            try:
+                payload = json.loads(sidecar.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    declared = {k: payload.get(k) for k in
+                                ("lane", "caption", "source_agent", "publish_at")}
+            except Exception:
+                declared = {}
+        out[stem] = {
+            "stem": stem,
+            "have": "asset" if asset is not None else "sidecar",
+            "missing": "sidecar" if asset is not None else "asset",
+            "present_name": present.name,
+            "expected_name": (f"{present.name}.json" if asset is not None
+                              else _asset_for_sidecar(sidecar)[0]),
+            "newest_half_at": newest,
             "declared": declared,
-            "state": "waiting_for_asset",
+            "_paths": [p for p in (asset, sidecar) if p is not None],
         }
-        if age > ORPHAN_SIDECAR_GRACE_SECONDS:
-            reason = (
-                f"the sidecar arrived without its asset. Nothing named "
-                f"\"{expected}\" is in {INBOX_DIR}/, and it has been "
-                f"{int(age // 60)} minutes. Both halves must land: upload the "
-                f"asset first, then the sidecar, so the post is never read "
-                f"before its file is there. Re-send both.\n\n"
-                f"NOTE: the rest of this sidecar has not been checked. Every "
-                f"other rule -- the caption, the lane, source_agent, "
-                f"post_ready, publish_at -- is checked only when both halves "
-                f"are present, by one validator, so there is no second "
-                f"opinion here that could disagree with it. A re-send can "
-                f"therefore still be refused for a different reason.")
-            rejected_dir = drop_root / REJECTED_DIR
-            moved = _move(sidecar, rejected_dir)
-            (rejected_dir / f"{moved.stem}.reason.txt").write_text(
-                f"Refused {datetime.now().astimezone().isoformat()}\n\n"
-                f"{reason}\n", encoding="utf-8")
-            row["state"] = "refused"
-            row["reason"] = reason
-        out.append(row)
     return out
+
+
+def _collect_incomplete_drops(drop_root: Path, inbox: Path, *,
+                              now: float | None = None,
+                              ledger_path: Path | None = None) -> list[dict]:
+    """Track every half-arrived drop across scans, and refuse only the dead.
+
+    Waiting is the default. A drop is refused only once BOTH of these hold:
+    it has been seen incomplete on `MIN_SCANS_BEFORE_REFUSING_INCOMPLETE`
+    separate scans, and its newest half is older than
+    `INCOMPLETE_DROP_GRACE_SECONDS`. One condition alone is not enough -- the
+    scan count can be inflated by manual runs, and the age alone convicts a
+    drop the first time it is ever seen, which is the bug that cost a finished
+    post on 2026-11-20.
+    """
+    current = time.time() if now is None else now
+    path = Path(ledger_path) if ledger_path is not None else DROP_INCOMPLETE_PATH
+    ledger = _read_incomplete_ledger(path)
+    pending, history = ledger["pending"], ledger["history"]
+
+    live = _incomplete_halves(inbox)
+    stamp = datetime.now().astimezone().isoformat()
+
+    # A stem that was incomplete and is not any more either completed (both
+    # halves landed, and the asset loop has taken it) or was refused by this
+    # function on an earlier scan. Either way it stops being pending, and the
+    # completion is what gives the refusal rate a denominator
+    # ([[feedback_a_number_needs_its_denominator]]).
+    for stem in [s for s in pending if s not in live]:
+        row = pending.pop(stem)
+        history.append({
+            "stem": stem, "outcome": "completed", "at": stamp,
+            "scans_seen": int(row.get("scans_seen") or 0),
+            "was_missing": row.get("missing"),
+            "source_agent": (row.get("declared") or {}).get("source_agent"),
+        })
+
+    out: list[dict] = []
+    for stem, found in sorted(live.items()):
+        row = pending.get(stem) or {"first_seen_at": stamp, "scans_seen": 0}
+        # Counted once per scan, keyed on the stem, so two assets in one scan
+        # cannot inflate each other's count.
+        row["scans_seen"] = int(row.get("scans_seen") or 0) + 1
+        row["last_seen_at"] = stamp
+        for key in ("have", "missing", "present_name", "expected_name", "declared"):
+            row[key] = found[key]
+        age = current - found["newest_half_at"]
+        row["newest_half_age_seconds"] = int(age)
+        pending[stem] = row
+
+        record = {k: v for k, v in row.items()}
+        record["stem"] = stem
+        record["state"] = "waiting_for_other_half"
+
+        stale = (row["scans_seen"] >= MIN_SCANS_BEFORE_REFUSING_INCOMPLETE
+                 and age > INCOMPLETE_DROP_GRACE_SECONDS)
+        if stale:
+            reason = (
+                f"this drop never completed. {found['present_name']} is here "
+                f"and \"{found['expected_name']}\" -- its {found['missing']} "
+                f"-- never arrived, across {row['scans_seen']} scans and "
+                f"{int(age // 3600)} hours. Both halves have to land for a "
+                f"post to exist.\n\n"
+                f"The {found['have']} has been MOVED to {REJECTED_DIR}/, so "
+                f"sending only the {found['missing']} now will not pair with "
+                f"anything -- send BOTH files again. Either order is fine and "
+                f"the gap between them does not matter: this lane waits "
+                f"{INCOMPLETE_DROP_GRACE_SECONDS // 3600} hours and across "
+                f"{MIN_SCANS_BEFORE_REFUSING_INCOMPLETE} scans before giving "
+                f"up.\n\n"
+                f"NOTE: the rest of this drop has not been checked. Every "
+                f"other rule -- the caption, the lane, source_agent, "
+                f"post_ready, publish_at, the file type -- is checked only "
+                f"when both halves are present, by one validator, so there "
+                f"is no second opinion here that could disagree with it. A "
+                f"re-send can still be refused for a different reason.")
+            rejected_dir = drop_root / REJECTED_DIR
+            moved_name = None
+            for item in found["_paths"]:
+                moved = _move(item, rejected_dir)
+                moved_name = moved_name or moved
+            if moved_name is not None:
+                (rejected_dir / f"{Path(moved_name.stem).stem}.incomplete.txt"
+                 ).write_text(f"Refused {stamp}\n\n{reason}\n",
+                              encoding="utf-8")
+            record["state"] = "refused"
+            record["reason"] = reason
+            pending.pop(stem, None)
+            history.append({
+                "stem": stem, "outcome": "refused", "at": stamp,
+                "scans_seen": int(row.get("scans_seen") or 0),
+                "was_missing": found["missing"],
+                "hours_waited": round(age / 3600.0, 1),
+                "source_agent": (found.get("declared") or {}).get("source_agent"),
+            })
+        record.pop("_paths", None)
+        out.append(record)
+
+    _write_incomplete_ledger(path, pending, history)
+    return out
+
+
+def incomplete_drop_summary(*, ledger_path: Path | None = None,
+                            now: datetime | None = None) -> dict:
+    """What is half-arrived right now, and how often that happens.
+
+    Durable, so the answer does not depend on whether the operator happened to
+    look during the one scan interval that saw it -- the per-scan manifest
+    showed an incomplete drop for exactly one 4-hour cadence and then forgot
+    it, which made "did anyone see it" a matter of luck.
+    """
+    path = Path(ledger_path) if ledger_path is not None else DROP_INCOMPLETE_PATH
+    ledger = _read_incomplete_ledger(path)
+    out = _summarise_incomplete(ledger["pending"], ledger["history"], now=now)
+    out["_state_path"] = str(path)
+    return out
+
+
+def _summarise_incomplete(pending: dict, history: list, *,
+                          now: datetime | None = None) -> dict:
+    current = now or datetime.now().astimezone()
+
+    def _hours(stamp: Any) -> float | None:
+        try:
+            parsed = datetime.fromisoformat(str(stamp))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return (current - parsed).total_seconds() / 3600.0
+
+    waiting = []
+    for stem, row in sorted(pending.items()):
+        waiting.append({
+            "stem": stem,
+            "have": row.get("have"),
+            "missing": row.get("missing"),
+            "expected_name": row.get("expected_name"),
+            "scans_seen": int(row.get("scans_seen") or 0),
+            # The age of the half that IS here, not of our first sighting of
+            # it. Those differ whenever a file predates the scan that found
+            # it, and the card and status.json were reporting 0.0h and 3.3h
+            # for the same drop -- two clocks for one question is how a
+            # surface stops being believed.
+            "hours_waiting": round(
+                float(row.get("newest_half_age_seconds") or 0) / 3600.0, 1),
+            "first_seen_hours_ago": (lambda h: round(h, 1) if h is not None else None)(
+                _hours(row.get("first_seen_at"))),
+            "source_agent": (row.get("declared") or {}).get("source_agent"),
+        })
+
+    refused = [h for h in history if str(h.get("outcome")) == "refused"]
+    completed = [h for h in history if str(h.get("outcome")) == "completed"]
+
+    def _within(rows: list, days: float) -> list:
+        out = []
+        for row in rows:
+            h = _hours(row.get("at"))
+            if h is not None and h <= days * 24:
+                out.append(row)
+        return out
+
+    refused_7d = _within(refused, 7)
+    completed_7d = _within(completed, 7)
+    # The denominator is every incomplete drop that RESOLVED, not every drop
+    # the lane ever saw: a complete drop was never half-arrived and does not
+    # belong in this rate.
+    resolved_7d = len(refused_7d) + len(completed_7d)
+    by_agent: dict[str, int] = {}
+    for row in refused_7d:
+        key = str(row.get("source_agent") or "unknown")
+        by_agent[key] = by_agent.get(key, 0) + 1
+
+    return {
+        "generated_at": current.isoformat(),
+        "waiting": waiting,
+        "waiting_count": len(waiting),
+        "refused_7d": len(refused_7d),
+        "completed_7d": len(completed_7d),
+        "resolved_7d": resolved_7d,
+        "refused_rate_7d": (round(len(refused_7d) / resolved_7d, 3)
+                            if resolved_7d else None),
+        "refused_by_agent_7d": by_agent,
+        "grace_hours": INCOMPLETE_DROP_GRACE_SECONDS // 3600,
+        "min_scans": MIN_SCANS_BEFORE_REFUSING_INCOMPLETE,
+        "recent_refusals": refused[-5:],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1439,9 +1686,10 @@ misunderstanding every week.
 **`status.json`** — read this first, every time. It is rewritten on every
 scan and says what happened to every file you have sent:
 
-    waiting_for_asset     your sidecar is here and its asset is not, so
-                          this is not a post yet. Listed under
-                          `incomplete_this_scan`, refused after 30 minutes
+    waiting_for_other_half  one of the two files is here and the other is
+                          not, so this is not a post yet. Listed under
+                          `incomplete_this_scan`. Waited on for 8 hours and
+                          two scans, THEN refused -- so there is no hurry
     waiting_for_a_human   accepted, the operator has not decided yet
     approved              approved, waiting for its lane's run (or, on
                           express, for the next ten-minute pass)
@@ -1465,14 +1713,24 @@ If a file you sent is not listed at all, it was refused before it became a
 proposal: look in `rejected/` for a `.reason.txt` with the same name. Those
 reasons are written for you, not for us -- they say what to change.
 
-**Upload the asset BEFORE the sidecar.** A sidecar whose asset is missing is
-not a post: it appears under `incomplete_this_scan` in `status.json` as
-`waiting_for_asset` while we assume the file is still coming up from Drive,
-and after 30 minutes it is refused with a reason in `rejected/`. Sending the
-two halves in that order means a drop is never read before its file is there,
-and it means an upload that silently failed shows up as a refusal you can act
-on rather than as a post that never happens. Measured 2026-11-19: a sidecar
-arrived whose `.mp4` never did, and for eleven hours nothing said so.
+**Both halves have to land, and the order does not matter.** A drop with only
+one of its two files is INCOMPLETE, not refused: it appears under
+`incomplete_this_scan` in `status.json` as `waiting_for_other_half`, and this
+lane waits 8 hours AND two scans before it gives up. So a slow video upload is
+fine, and a sidecar written minutes before its asset is fine.
+
+What is NOT fine is sending one half and never the other. When a drop does
+time out, whichever half arrived is moved to `rejected/` with a
+`.incomplete.txt` beside it -- which means sending the missing half afterwards
+will not pair with anything. Send BOTH files again.
+
+This was learned expensively on 2026-11-20. An earlier version of this file
+told you to upload the asset first, and the lane then gave a lone sidecar 30
+minutes before refusing it -- against a scan that runs every 4 hours, so the
+first scan to see a drop was usually also the one that killed it. One finished
+post was lost that way: the sidecar was refused and moved at 10:16, the video
+arrived at 11:03, and the scan at 12:15 found a video whose sidecar was gone.
+Nothing you did was wrong. The lane now waits long enough to be sure.
 
 Each drop also echoes `publish_at` as we resolved it, which is the field to
 check when a time did not land where you expected.
@@ -1660,9 +1918,9 @@ def write_status_file(drop_root: Path, proposals: dict,
         "doc": ("What happened to each file you dropped. Rewritten every scan. "
                 "`state` is one of: waiting_for_a_human, approved, scheduled, "
                 "published, publish_failed, declined, not_ready, "
-                "missed_window. `incomplete_this_scan` lists sidecars whose "
-                "asset never arrived -- those are not posts yet and will be "
-                "refused if the file does not land. "
+                "missed_window. `incomplete_this_scan` lists drops where only "
+                "one of the two files has arrived -- those are not posts yet. "
+                "They are WAITED on, not refused, until both halves land. "
                 "`publish_failed` means a run took it and "
                 "every platform refused it: nothing was posted, it will not "
                 "be retried, and `publish_error` says why. If something "
@@ -1682,10 +1940,13 @@ def write_status_file(drop_root: Path, proposals: dict,
         # had no way to tell a lost upload from a post we simply had not got
         # to yet.
         "incomplete_this_scan": [
-            {"sidecar": r.get("sidecar"),
-             "expected_asset": r.get("expected_asset"),
+            {"stem": r.get("stem"),
+             "have": r.get("have"),
+             "missing": r.get("missing"),
+             "waiting_for": r.get("expected_name"),
              "state": r.get("state"),
-             "minutes_waiting": int((r.get("age_seconds") or 0) // 60),
+             "scans_seen": r.get("scans_seen"),
+             "hours_waiting": round((r.get("newest_half_age_seconds") or 0) / 3600.0, 1),
              "reason": r.get("reason")}
             for r in (incomplete or []) if isinstance(r, dict)
         ],
@@ -1925,10 +2186,10 @@ def main(argv: list[str] | None = None) -> int:
     # Loud about an orphan, because it is the one outcome that used to be
     # reported nowhere ([[feedback_swallowed_errors_lie]]).
     for row in manifest.get("incomplete") or []:
-        print(f"[drop-intake] INCOMPLETE {row.get('sidecar')}: no "
-              f"{row.get('expected_asset')} after "
-              f"{int((row.get('age_seconds') or 0) // 60)} min "
-              f"({row.get('state')})")
+        print(f"[drop-intake] INCOMPLETE {row.get('stem')}: have "
+              f"{row.get('have')}, waiting for {row.get('expected_name')} "
+              f"({int((row.get('newest_half_age_seconds') or 0) // 3600)}h, "
+              f"scan {row.get('scans_seen')}) -> {row.get('state')}")
 
     print(f"[drop-intake] accepted={manifest.get('accepted_count', 0)} "
           f"rejected={manifest.get('rejected_count', 0)} "

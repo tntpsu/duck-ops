@@ -10774,86 +10774,156 @@ and heartbeat before committing — not by a test.
   `drop waiting` shows `when:` per express drop; it does not yet show what
   happened to one already sent.
 
-## Surface 171 — the sidecar whose asset never arrived (2026-11-20, found by the lane's first real use)
+## Surface 171 — a drop arrives as TWO files, and they do not arrive together (2026-11-20)
 
-The express lane's first real inbound drop did not fail validation. It was
-never seen at all.
+Found twice in one day, in opposite directions, with the second finding caused
+by the fix for the first. Worth recording in that order, because the second
+mistake is the more instructive one.
+
+### Round 1 — a lone sidecar was invisible everywhere
 
 Gemini wrote `inbox/this_or_that_thursday_beer_vs_whiskey_dash.mp4.json` at
 21:25 on 2026-11-19. The `.mp4` never arrived. Eleven hours later — verified by
-searching the whole folder, including for a dataless Drive placeholder — the
-sidecar sat alone, and **nothing anywhere said so**:
+searching the whole folder including for a dataless Drive placeholder — the
+sidecar sat alone and **nothing anywhere said so**: not the manifest, because
+`scan_inbox` skips every `.json` on the correct grounds that a sidecar is found
+THROUGH its asset; not `rejected/`, because refusals happen only inside that
+loop; not `status.json`, because an orphan never becomes a proposal.
 
-- not the manifest, because `scan_inbox` skips every `.json` in the inbox on
-  the correct grounds that a sidecar is found THROUGH its asset
-  (`if asset.suffix.lower() == ".json": continue`);
-- not `rejected/`, because a refusal only happens inside that loop;
-- not `status.json`, because an orphan never becomes a proposal, so it is
-  absent from `drops`, and until refused it is absent from
-  `refused_this_scan` too.
+The selection blind spot again ([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]]):
+`.env.clean` was skipped by a suffix test, an orphan sidecar by an extension
+test. Both guards worked exactly as written.
 
-The agent believed it had dropped a post. We believed nothing had arrived.
-Neither could see the other, and the operator had no surface that disagreed.
+### Round 2 — the fix destroyed a finished post
 
-This is the selection blind spot again, in a second shape
-([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]]): zero findings
-describes which files the gate OPENED. `.env.clean` was skipped by a suffix
-test; an orphan sidecar is skipped by an extension test. Both guards were
-working exactly as written.
+The round-1 fix gave a lone sidecar a **30-minute** grace and then moved it to
+`rejected/`. Three things were wrong with that, and together they cost the
+post:
 
-**The fix** — a second pass, `_collect_orphan_sidecars`, because the asset loop
-cannot see these by construction:
+1. **The grace was shorter than the scan cadence.** The scan runs every FOUR
+   hours (00:15/04:15/08:15/12:15/16:15/20:15). A 30-minute window means a drop
+   is judged the first time it is ever seen and never gets a second chance.
+   This was never measured against the cadence — it was a guess that read
+   plausibly.
+2. **The grace was asymmetric.** A lone sidecar got 30 minutes; a sidecar-LESS
+   ASSET got *zero*, refused on the spot by `validate_drop`'s "no sidecar"
+   check. The two are the same situation — a drop mid-upload.
+3. **The contract told the agent to send the asset first** — i.e. to lead with
+   the half that had no grace at all.
 
-| Age of the orphan | Behaviour |
+The sequence, in which every component did what it was told:
+
+```
+21:25  Gemini writes the sidecar; the video is not up yet
+10:16  the 30-minute grace refuses the "orphan" and MOVES the sidecar out
+11:03  Gemini uploads the video -- asset first, exactly as the README said
+12:15  the scheduled scan finds a video whose sidecar was deleted at 10:16
+       -> "no sidecar: expected ...json describing ...mp4"
+```
+
+Gemini read the refusal, re-sent the half it knew was missing, and that was the
+right move. The lane threw the post away anyway.
+
+### The fix that holds
+
+**Symmetric, cadence-derived, and it waits.** `_incomplete_halves` groups the
+inbox BY STEM and finds any stem with one half and not the other, in either
+direction. Nothing is refused until **both** of these hold:
+
+| Condition | Why both are needed |
 |---|---|
-| Inside `ORPHAN_SIDECAR_GRACE_SECONDS` (30 min) | REPORTED as `waiting_for_asset` and left alone — a video is the slow half and the upload may be in flight; refusing a good drop because its file is large is the worse failure |
-| Past the grace | Moved to `rejected/` with a `.reason.txt`, reported as `refused` |
+| Seen incomplete on ≥ `MIN_SCANS_BEFORE_REFUSING_INCOMPLETE` (2) scans | The age alone convicts a drop the first time it is ever seen — the round-2 bug |
+| Newest half older than `INCOMPLETE_DROP_GRACE_SECONDS` (8h = two cadences) | The scan count alone can be inflated by manual runs |
 
-Surfaced in three places that each had the gap: `manifest["incomplete"]` with
-`incomplete_count`, `status.json`'s `incomplete_this_scan`, and a loud
-`[drop-intake] INCOMPLETE ...` log line per orphan
-([[feedback_swallowed_errors_lie]]).
+Both numbers are now DERIVED from the 4-hour cadence and a test pins the
+relation rather than the values (`test_the_grace_is_longer_than_the_scan_cadence`),
+so a cadence change that invalidates them fails the suite instead of silently
+eating posts ([[feedback_pin_the_rule_not_the_reading]]).
 
-**The refusal names what it did NOT check.** Only the asset's absence is
-checked on this path; every other rule (caption, lane, `source_agent`,
-`post_ready`, `publish_at`) runs in `validate_drop` when both halves are
-present. Duplicating those rules into the orphan path would have given the
-lane two answers to "is this sidecar valid" that drift apart, so the reason
-says plainly that a re-send can still be refused for a different reason. The
-cost is a possible second round trip; the alternative is a second validator.
+A file type that can never become valid is still refused immediately — waiting
+only helps a drop that could still become good.
 
-**Measured on the real drop**, after the fix, against the live folder: refused
-at 771 minutes, sidecar moved out of `inbox/`, reason written where Drive
-carries it back, `status.json` listing it, production ledger byte-identical
-before and after. And separately proven in a sandbox — Gemini's exact sidecar
-plus a real `.mp4` from a previously accepted drop — that the re-send will
-ALSO be refused for a missing `source_agent`, and that with that one field
-added it validates cleanly as `lane: express`, `media_type: video`,
-`publish_at: asap`, `post_ready: true`. Worth knowing before the re-send, not
-after it.
+### What made it answerable: a durable ledger (the item recorded as "open" yesterday)
 
-**Covered** — `tests/test_express_drop.py` (76 tests, +11): that an orphan is
-reported at all; that it counts as neither accepted nor rejected nor waiting
-(a fourth outcome, and folding it into one of the others misreports both);
-that the grace window leaves a recent one in place; that a stale one is
-refused with a reason naming the expected filename and the send order; that
-what the sidecar declared is carried back so the operator sees WHICH post is
-missing its file; that an unparseable orphan is still reported (dropping it on
-a parse error is how the original blind spot worked); that `status.json` lists
-it; and two positive controls — a sidecar WITH its asset is not an orphan, and
-the bare `post.json` beside `post.png` spelling finds its asset — without
-which the whole class could pass by refusing every real drop.
+"Has this drop had a fair chance to complete?" cannot be answered from one
+scan. `state/drop_incomplete.json` holds `pending` (per stem: first seen, last
+seen, `scans_seen`, which half is here, what it is waiting for, what the
+sidecar declared) and `history` (each resolution as `completed` or `refused`).
+This is the mechanism the fix needs, not an observability nicety.
+
+It also answers the rate question: `refused_7d` over `resolved_7d`, where the
+denominator is every incomplete drop that RESOLVED — a complete drop was never
+half-arrived and does not belong in that rate
+([[feedback_a_number_needs_its_denominator]]). Refusals are attributed by
+`source_agent`, because one lost upload is noise and the same agent losing one
+every day is a broken producer.
+
+Three isolation layers in the same commit, per policy, since this is a new
+module-level prod-path constant: the conftest redirect in **both** repos
+(duckAgent had none at all for duck-ops' drop ledgers, which worked only
+because the express tests happen to patch the loader), the `DUCK_TEST_MODE`
+frozen-path guard, and a post-suite audit of the live file. The guard caught my
+own first test harness writing production, which is exactly its job.
+
+### The card
+
+`drop_intake_sanity` reads the ledger's stored `summary`, not the per-scan
+manifest — the manifest is rewritten every four hours, so an incomplete drop
+was visible for one cadence and then forgotten, making "did anyone see it" a
+matter of luck. The producer computes the summary and the card is a ~2ms read
+of it, one implementation of the arithmetic.
+
+| State | Verdict |
+|---|---|
+| ≥2 refused in 7 days | **RED**, with the rate, its denominator, and the agent named if one lost more than one |
+| 1 refused in 7 days | **YELLOW** — a single loss is not yet a producer problem, and a test pins that it is not blamed on the agent |
+| A drop still waiting | **YELLOW**/`scheduled_refresh`, saying out loud that this is the designed state and how long the lane will wait |
+| Nothing waiting, nothing refused | **GREEN** |
+
+**One clock, not two.** The card read `first_seen_at` while `status.json` read
+the age of the half present, and the same drop was reported as 0.0h and 3.3h.
+Both facts are useful; they are not the same fact. `hours_waiting` is now the
+age of the half that is actually here on both surfaces, with
+`first_seen_hours_ago` kept separately.
+
+**Covered** — `tests/test_express_drop.py` (90 tests, +25): both directions
+reported; a lone asset reported and NOT refused (the regression); the symmetry
+asserted as a property over both cases rather than as two numbers; one scan
+never enough however old; many scans never enough if young; the refusal
+warning that the other half will not pair with anything; the other half
+arriving actually completing the drop after several incomplete scans; an
+impossible type still refused at once; the count surviving across scans; the
+rate with its denominator and `None` rather than a fake 0.0 over nothing;
+attribution; the test-mode guard against the frozen path; and three positive
+controls — a complete drop is never called incomplete, the bare `post.json`
+spelling pairs, and the README no longer tells the agent that order matters.
+Plus `creative_agent/runtime/tests/test_drop_intake_cards.py` (73 tests, +12)
+for the card's five verdicts, the yellow-vs-red distinction, the
+single-loss-is-not-blamed rule, and three degenerate-ledger cases.
+
+**Verified live, on the real drop.** The video was restored to `inbox/` (only
+the video: restoring both halves would have completed the pair and been refused
+for a missing `source_agent`, throwing both away again) and two real scans now
+report `waiting_for_other_half` at scan 1 and scan 2 instead of refusing it.
+Production proposal ledger byte-identical across both.
 
 **Open after this surface:**
-- **One refusal does not name every problem.** Deliberate, per above, but it
-  means a re-send can bounce twice. The fix, if it is ever worth it, is to
+- **`source_agent` is still missing from Gemini's sidecar**, so the re-send
+  will be refused once more unless that field is added. Known from a sandbox
+  run against the real sidecar plus a real `.mp4`; with the field added it
+  validates cleanly as `express` / `video` / `asap` / `post_ready: true`.
+- **The restored video has a deadline.** It arrived 11:03, so it crosses the
+  8-hour grace around 19:03 and the 20:15 scan will refuse it if the sidecar
+  has not landed. Correct behaviour, worth knowing.
+- **One refusal still does not name every problem.** The incomplete path
+  checks only the missing half, and says so. The fix, if ever worth it, is to
   extract the sidecar-only field checks out of `validate_drop` so both paths
-  call ONE implementation — not to copy them.
-- **`notes` as a JSON object is `str()`-ed into the proposal**, producing
-  `"{'hook_status': ...}"` in the ledger. Harmless but ugly; the contract
-  says notes is prose and the agent sent structure.
-- **Nothing grades orphan RATE.** One lost upload is noise; the same agent
-  losing uploads every day is a broken producer, and no card counts them.
+  call ONE implementation — never to copy them.
+- **`notes` as a JSON object is `str()`-ed into the proposal.** Harmless but
+  ugly; the contract says prose and the agent sent structure.
+- **Nothing reconciles a stem refused in `rejected/` against a later re-send
+  of the same stem.** `_move` de-duplicates with `_v2`, so a re-sent drop
+  becomes a new stem and the history does not connect them.
 
 ## Surface 130 addendum — a live receipt pair with no declared policy (2026-11-20)
 
