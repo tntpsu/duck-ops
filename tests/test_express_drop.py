@@ -560,3 +560,168 @@ class TheContractIsRepublishedOnEveryScan(_ExpressRoot):
             self.assertIn("WARNING contract README not refreshed", source)
         manifest = drop_intake.scan_inbox(self.root)
         self.assertEqual(manifest["accepted_count"], 1)
+
+
+class TheLedgerLearnsWhatThePlatformsDid(_ExpressRoot):
+    """Surface 170 — the claim is not the outcome.
+
+    Until `publish_status` existed the ledger's story stopped at the claim, so
+    a drop that rendered, uploaded and was then refused by Facebook AND
+    Instagram was indistinguishable from one that went live. `_drop_state`
+    told the producing agent "a scheduled run took it; it is on the lane"
+    either way, and that status file is the only channel that agent has.
+    """
+
+    def claimed(self, **kw) -> dict:
+        self.accept(**kw)
+        drop_intake.set_approval("post", True, ledger_path=self.ledger)
+        drop = drop_intake.claim_for_lane(
+            drop_intake.EXPRESS_LANE, claimed_by="express::run1",
+            ledger_path=self.ledger)
+        self.assertIsNotNone(drop, "setup: the drop should have been claimable")
+        return drop
+
+    def entry(self) -> dict:
+        return json.loads(self.ledger.read_text())["proposals"]["post"]
+
+    def test_a_failed_publish_is_recorded_on_the_entry(self):
+        self.claimed()
+        drop_intake.record_publish_outcome(
+            "post", status="failed", error="(#200) permissions error",
+            run_id="express_1", ledger_path=self.ledger)
+        entry = self.entry()
+        self.assertEqual(entry["publish_status"], "failed")
+        self.assertEqual(entry["publish_error"], "(#200) permissions error")
+        self.assertEqual(entry["publish_run_id"], "express_1")
+        self.assertTrue(entry["publish_outcome_at"])
+
+    def test_a_failed_publish_does_NOT_make_the_drop_claimable_again(self):
+        # The whole reason the claim is written BEFORE the publish: a retry
+        # would re-publish something that may already be half-public. Letting
+        # a failure reopen the claim would undo that guarantee.
+        self.claimed()
+        drop_intake.record_publish_outcome(
+            "post", status="failed", error="both platforms refused",
+            ledger_path=self.ledger)
+        self.assertEqual(
+            drop_intake.claimable_for_lane(
+                drop_intake.EXPRESS_LANE, ledger_path=self.ledger), [])
+        self.assertIsNone(drop_intake.claim_for_lane(
+            drop_intake.EXPRESS_LANE, claimed_by="express::run2",
+            ledger_path=self.ledger))
+
+    def test_the_outcome_never_rewrites_the_approval_or_the_claim(self):
+        # Four orthogonal axes, one meaning each
+        # ([[feedback_status_fields_one_meaning]]). Folding the outcome into
+        # `approval` would make "the operator said yes" and "the platform
+        # said yes" the same fact.
+        self.claimed()
+        before = self.entry()
+        drop_intake.record_publish_outcome(
+            "post", status="failed", ledger_path=self.ledger)
+        after = self.entry()
+        for field in ("approval", "approved_at", "approved_by",
+                      "claimed_by", "claimed_at", "post_ready", "lane"):
+            self.assertEqual(before[field], after[field], field)
+
+    def test_an_unknown_status_is_refused_rather_than_stored(self):
+        # A plausible default here writes a green outcome over a real
+        # failure, which is the exact shape of the bug this surface closes.
+        self.claimed()
+        with self.assertRaises(drop_intake.DropRefused) as caught:
+            drop_intake.record_publish_outcome(
+                "post", status="probably_fine", ledger_path=self.ledger)
+        self.assertIn("not a publish outcome", str(caught.exception))
+        self.assertNotIn("publish_status", self.entry())
+
+    def test_an_unknown_stem_is_refused(self):
+        self.claimed()
+        with self.assertRaises(drop_intake.DropRefused):
+            drop_intake.record_publish_outcome(
+                "not_a_drop", status="failed", ledger_path=self.ledger)
+
+    def test_every_status_the_publisher_emits_is_one_this_accepts(self):
+        # The publisher and the ledger must share one vocabulary, or a
+        # perfectly good outcome raises inside the sidecar and the entry keeps
+        # reading as "claimed, outcome unknown" forever. These four strings
+        # are the ones helpers/express_drop_publisher.py::publish_one sets on
+        # `out["status"]`.
+        for status in ("published_now", "scheduled", "partial", "failed"):
+            with self.subTest(status=status):
+                self.assertIn(status, drop_intake.PUBLISH_OUTCOME_STATES)
+
+
+class TheAgentIsToldWhatActuallyHappened(_ExpressRoot):
+    """`status.json` is the producing agent's ONLY channel.
+
+    A failure it is never told about teaches it nothing, so the next drop
+    arrives with the same problem.
+    """
+
+    def state_for(self, **outcome) -> tuple[str, str]:
+        entry = {"lane": drop_intake.EXPRESS_LANE, "post_ready": True,
+                 "approval": "approved", "claimed_by": "express::run1",
+                 "claimed_at": _in(minutes=-5), "publish_at": "asap",
+                 **outcome}
+        return drop_intake._drop_state(entry)
+
+    def test_a_claimed_but_failed_drop_does_not_report_published(self):
+        state, detail = self.state_for(publish_status="failed",
+                                       publish_error="(#200) permissions error")
+        self.assertEqual(state, "publish_failed")
+        self.assertIn("every platform refused", detail)
+        self.assertIn("(#200) permissions error", detail)
+        self.assertIn("Nothing was posted", detail)
+
+    def test_a_failed_drop_is_told_it_will_not_be_retried(self):
+        # Otherwise the rational move is to wait, and nothing ever comes.
+        _state, detail = self.state_for(publish_status="failed")
+        self.assertIn("NOT be retried", detail)
+
+    def test_a_partial_publish_warns_against_re_sending(self):
+        state, detail = self.state_for(
+            publish_status="partial", publish_platforms=["instagram"],
+            publish_error="facebook: (#100) invalid scheduled_publish_time")
+        self.assertEqual(state, "published")
+        self.assertIn("instagram", detail)
+        self.assertIn("do not re-send", detail)
+
+    def test_a_live_publish_names_the_platforms(self):
+        state, detail = self.state_for(
+            publish_status="published_now",
+            publish_platforms=["facebook", "instagram"])
+        self.assertEqual(state, "published")
+        self.assertIn("facebook", detail)
+        self.assertIn("instagram", detail)
+
+    def test_a_claim_with_no_outcome_yet_is_unchanged(self):
+        # The pre-existing answer, kept for a drop claimed by a lane that
+        # predates the write-back. Honest about the gap: it says a run took
+        # it, which is exactly what is known.
+        state, detail = self.state_for()
+        self.assertEqual(state, "published")
+        self.assertIn("took it", detail)
+
+    def test_the_status_file_carries_the_outcome_fields(self):
+        self.accept()
+        drop_intake.set_approval("post", True, ledger_path=self.ledger)
+        drop_intake.claim_for_lane(drop_intake.EXPRESS_LANE,
+                                   claimed_by="express::run1",
+                                   ledger_path=self.ledger)
+        drop_intake.record_publish_outcome(
+            "post", status="failed", error="both platforms refused",
+            ledger_path=self.ledger)
+        proposals = json.loads(self.ledger.read_text())["proposals"]
+        path = drop_intake.write_status_file(self.root, proposals)
+        payload = json.loads(path.read_text())
+        row = payload["drops"]["post"]
+        self.assertEqual(row["state"], "publish_failed")
+        self.assertEqual(row["publish_status"], "failed")
+        self.assertEqual(row["publish_error"], "both platforms refused")
+        # And the vocabulary the file documents has to include it, or the
+        # agent reads a state the doc says cannot happen.
+        self.assertIn("publish_failed", payload["doc"])
+
+    def test_the_contract_readme_explains_a_failed_publish(self):
+        self.assertIn("publish_failed", drop_intake.MIRROR_DROP_README)
+        self.assertIn("publish_error", drop_intake.MIRROR_DROP_README)

@@ -1056,6 +1056,65 @@ def claim_for_lane(lane: str, *, claimed_by: str,
     return {**entry, "stem": stem}
 
 
+# What happened when the lane actually tried to send it. A FOURTH axis, kept
+# separate from the three already on the entry on purpose
+# ([[feedback_status_fields_one_meaning]]): `approval` says whether it may go,
+# `claimed_by` says who took it, `post_ready` says whether its producer
+# finished it, and this says what the platforms did. Folding the outcome into
+# any of the others would make "taken" and "sent" the same fact, which is
+# exactly the confusion this exists to end.
+PUBLISH_OUTCOME_STATES = frozenset({
+    "published_now",  # live on every platform now
+    "scheduled",      # accepted by every platform, holding for its time
+    "partial",        # at least one platform took it, at least one refused
+    "failed",         # nothing took it
+})
+
+
+def record_publish_outcome(stem: str, *, status: str,
+                           platforms: Any = (),
+                           error: str = "",
+                           run_id: str = "",
+                           at: datetime | None = None,
+                           ledger_path: Path | None = None) -> dict:
+    """Record what the platforms did with an already-claimed drop.
+
+    Until this existed the ledger's story stopped at the claim, so a drop that
+    was rendered, uploaded and then refused by both platforms was
+    indistinguishable from one that went live -- `_drop_state` told the
+    producing agent "a scheduled run took it; it is on the lane" either way,
+    and that status file is the ONLY channel that agent has. The operator had
+    no better view: the failure lived for ten minutes in a sidecar heartbeat
+    that the next pass overwrote, and in a log nobody reads.
+
+    Never changes `approval` or `claimed_by`. A failed publish must NOT make
+    the drop claimable again: re-publishing something that may already be
+    public is the worse of the two failures, which is the same reason the
+    claim is written before the publish is attempted. Releasing it is the
+    operator's call, by approving a fresh drop.
+
+    Raises DropRefused for an unknown status or an unknown stem -- a
+    plausible-looking default here would write a green outcome over a real
+    failure ([[feedback_plausible_fallbacks_mask_failure]]).
+    """
+    if status not in PUBLISH_OUTCOME_STATES:
+        raise DropRefused(
+            f"{status!r} is not a publish outcome; expected one of "
+            f"{', '.join(sorted(PUBLISH_OUTCOME_STATES))}")
+    path = Path(ledger_path) if ledger_path is not None else DROP_PROPOSALS_PATH
+    proposals = _read_ledger(path)
+    entry = proposals.get(stem)
+    if entry is None:
+        raise DropRefused(f"no proposal named {stem}")
+    entry["publish_status"] = status
+    entry["publish_outcome_at"] = (at or datetime.now().astimezone()).isoformat()
+    entry["publish_platforms"] = [str(p) for p in (platforms or [])]
+    entry["publish_error"] = str(error or "")
+    entry["publish_run_id"] = str(run_id or "")
+    _write_ledger(path, proposals)
+    return {**entry, "stem": stem}
+
+
 MIRROR_DROP_README = """# myJeepDuck drop folder
 
 Finished posts go here. An agent writes TWO files with the same stem into
@@ -1282,7 +1341,12 @@ scan and says what happened to every file you have sent:
                           express, for the next ten-minute pass)
     scheduled             taken and handed to the platforms, holding until
                           the publish_at you asked for
-    published             a run took it; it is on the lane
+    published             a run took it and the platforms accepted it.
+                          `published_on` lists which ones
+    publish_failed        a run took it and EVERY platform refused it.
+                          Nothing was posted, it will not be retried, and
+                          `publish_error` says why. Fix what the error
+                          names and send a new version
     declined              the operator said no; it will never be posted
     not_ready             accepted, but post_ready was false, so no run
                           will ever take it
@@ -1298,8 +1362,16 @@ reasons are written for you, not for us -- they say what to change.
 Each drop also echoes `publish_at` as we resolved it, which is the field to
 check when a time did not land where you expected.
 
+Once a run has tried, three more fields appear: `publish_status`,
+`published_on` and `publish_error`. A `published` drop with only one entry in
+`published_on` went out on that platform and was refused by the other, so
+`publish_error` is worth reading even on a success.
+
 A run of `declined`, or a pile of `not_ready`, is the signal to ask rather
-than to send more of the same. So is a `missed_window`: it means the gap
+than to send more of the same. A `publish_failed` is the strongest such
+signal, because the operator had already said yes: whatever `publish_error`
+names was ours or yours, and asking in `feedback/` beats sending the same
+post again. So is a `missed_window`: it means the gap
 between your sending and the operator approving was longer than the lead time
 you left, so leave more of it or send `asap` and let the approval set the
 time.
@@ -1348,10 +1420,41 @@ def _drop_state(entry: dict) -> tuple[str, str]:
     tells it only that we have fields.
     """
     if entry.get("claimed_by"):
+        # The claim is not the outcome. Before `publish_status` existed this
+        # branch answered "published" for every claimed drop, including one
+        # whose render succeeded and whose platforms both refused it -- a flat
+        # lie to the only channel the producing agent has, and the one failure
+        # nothing else could see.
+        outcome = str(entry.get("publish_status") or "")
+        err = str(entry.get("publish_error") or "").strip()
+        took = ", ".join(str(p) for p in (entry.get("publish_platforms") or []))
+        if outcome == "failed":
+            return ("publish_failed",
+                    "a run took it and every platform refused it"
+                    + (f": {err}" if err else "")
+                    + ". It will NOT be retried -- re-send a new version. "
+                      "Nothing was posted.")
+        if outcome == "partial":
+            return ("published",
+                    f"a run took it and {took or 'some platforms'} accepted it, "
+                    f"while the rest refused it"
+                    + (f": {err}" if err else "")
+                    + ". Partly public -- do not re-send the same post without "
+                      "checking what is already live.")
+        if outcome == "scheduled":
+            return ("scheduled",
+                    f"taken and accepted by {took or 'the platforms'}, holding "
+                    f"until {entry.get('publish_at')}")
+        if outcome == "published_now":
+            return ("published", f"live on {took or 'the platforms'}")
         state, when = publish_window(entry)
         if state == "scheduled" and when is not None:
             return ("scheduled",
                     f"taken and scheduled to publish at {when.isoformat()}")
+        # Claimed with no outcome recorded. Honest about the gap rather than
+        # guessing: a run that dies between the claim and the publish lands
+        # here, and so does a drop claimed by a lane that predates the
+        # outcome write-back.
         return ("published", "a scheduled run took it; it is on the lane")
     approval = str(entry.get("approval") or "")
     if approval == "declined":
@@ -1426,12 +1529,24 @@ def write_status_file(drop_root: Path, proposals: dict,
             # out here rather than from a post five hours early.
             "publish_at": entry.get("publish_at") or None,
             "publish_at_overridden_by": entry.get("publish_at_overridden_by"),
+            # What the platforms did, once a run has tried. Null until then.
+            # Without this an agent could see that its post was TAKEN and
+            # never that it was refused, so a drop that failed for a reason
+            # the agent controls -- a caption the platform rejected, an asset
+            # it could not render -- taught it nothing and came back the same
+            # way next time.
+            "publish_status": entry.get("publish_status") or None,
+            "publish_error": entry.get("publish_error") or None,
+            "published_on": entry.get("publish_platforms") or None,
         }
     payload = {
         "generated_at": now.isoformat(),
         "doc": ("What happened to each file you dropped. Rewritten every scan. "
                 "`state` is one of: waiting_for_a_human, approved, scheduled, "
-                "published, declined, not_ready, missed_window. If something "
+                "published, publish_failed, declined, not_ready, "
+                "missed_window. `publish_failed` means a run took it and "
+                "every platform refused it: nothing was posted, it will not "
+                "be retried, and `publish_error` says why. If something "
                 "you sent is not listed at all it was refused before it "
                 "became a proposal -- look in "
                 f"{REJECTED_DIR}/ for a .reason.txt with the same name."),

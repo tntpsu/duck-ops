@@ -10627,18 +10627,149 @@ asserted by content, not by eyeball.
   guesses is worse than one that admits it cannot see.
 
 **Open after this surface:**
-- **No OS card distinguishes an express failure from an idle express lane.**
-  The heartbeat carries `express_published` and `express_error`, and the claim
-  canary catches approved-but-unclaimed, but nothing grades a pass that renders
-  and then fails at both platforms every ten minutes. Today that reads as a
-  claimed drop that never appears, visible only in the sidecar log.
-- **`MAX_PER_PASS` is 3 and nothing reports a backlog.** Four approved express
-  drops publish over two passes, which is right, but ten would take four and
-  no surface says so.
-- **A failed express publish leaves the drop claimed.** That is deliberate —
+- ~~**No OS card distinguishes an express failure from an idle express lane.**~~
+  **CLOSED by Surface 170 below** — and the fix had to start one layer lower
+  than this item assumed: `express_published` was `len(published)`, which
+  counts ATTEMPTS, so a pass that failed three posts reported three publishes.
+  A card built on that field would have graded a lie.
+- **`MAX_PER_PASS` is 3 and nothing reports a backlog.** Partly addressed by
+  Surface 170: the claim canary no longer reds on a drop that is unclaimed
+  because the pass was full (a 20-minute grace, which covers a simultaneous
+  backlog of six). A sustained backlog above that is still unreported.
+- **A failed express publish leaves the drop claimed.** Still deliberate —
   re-publishing something that may already be public is the worse failure —
-  but it means a render bug consumes approved posts one per pass with no
-  retry path short of a re-send from the agent.
+  but Surface 170 means it is no longer SILENT: the ledger records the
+  outcome, the OS card reds naming the stem, and the producing agent reads
+  `publish_failed` in `status.json`. A retry path is still absent by choice.
 - **Facebook gets a still for a video express post**, matching the meme lane.
   Documented in the agent README rather than fixed; a Facebook video path
   would be the only one of its kind in the system.
+
+## Surface 170 — did the express post actually go out? (2026-11-19, operator: "Do 1")
+
+The three cards on the agent drop folder before this one all stop at the same
+moment: sanity asks whether an arriving drop is usable, throughput asks whether
+anything happens to it, and its claim canary reds when an approved drop is
+still unclaimed after its lane has run. Nothing looked past the claim.
+
+Everything that can go wrong AFTER it is where this lane is thinnest. The
+express pass renders the dropped file, uploads a panel to Shopify Files, and
+calls Facebook and Instagram. When both refuse, `publish_one` returns a dict
+with `status: "failed"`, `publish_due_express_drops` returns normally, the
+sidecar exits 0, and the ledger still says `claimed_by: express::...`. The
+operator approved a post, every component reported healthy, and nothing was
+published.
+
+**Three defects, found in this order, each one under the last.**
+
+**1. The claim was the only thing recorded, so `_drop_state` lied to the
+agent.** A claimed drop answered `("published", "a scheduled run took it; it
+is on the lane")` whether it went live or was refused by both platforms, and
+`status.json` is the ONLY channel the producing agent has. A failure it is
+never told about teaches it nothing, so the next drop arrives with the same
+problem. Fixed with `record_publish_outcome(stem, status=...)` on the duck-ops
+ledger — a FOURTH axis beside approval / claim / post_ready
+([[feedback_status_fields_one_meaning]]): `approval` says whether it may go,
+`claimed_by` says who took it, and `publish_status` says what the platforms
+did. It refuses an unknown status rather than storing it, because a plausible
+default here writes a green outcome over a real failure. It never reopens the
+claim: a retry would re-publish something that may already be half-public,
+which is the same reason the claim is written before the publish is attempted.
+
+**2. The heartbeat counted attempts and called them publishes.**
+`express_published: len(express.get("published") or [])` — but `published[]`
+holds one entry per drop the pass TRIED, failures included. A pass that
+rendered three posts and had both platforms refuse all three wrote
+`express_published: 3` with `express_error` empty, because the pass itself did
+not raise. **Any card built on that field would have graded a lie**, which is
+why the item recorded under Surface 169 ("add a card") could not be done as
+written. Now counted by outcome: `express_attempted`, `express_published`
+(live statuses only), `express_failed`, `express_by_status`, and
+`express_last_failure` naming the stem and the platform's error — a count
+cannot be acted on.
+
+**3. One field carried a fault and a benign note, and the first version of the
+card went RED on a healthy idle system.** `express_error` was set from
+`express.get("error") or express.get("detail")`, and `detail` is where a
+healthy pass records "nothing approved and due". Measured live: the brand new
+card reported *"The express pass itself failed on its last run: nothing
+approved and due"*. Fixed at the producer, not by teaching the card which
+strings are harmless: `express_error` is a fault, `express_detail` is why a
+healthy pass did nothing, and a claim that raises now goes to `error` where it
+belonged. The benign `"nothing approved and due"` default is also no longer
+written over the top of a real error.
+
+**The card** — `express_publish`, "Express Drop Publishing", registered
+unconditionally with a yellow fallback:
+
+| State | Verdict |
+|---|---|
+| A claimed drop with `publish_status: failed` | **RED**, naming the stem and the platform error, and saying the drop is CONSUMED so it needs a fresh send rather than a wait |
+| Claimed, no outcome, past 30 min | **RED** — the run died between the claim and the publish; whether anything reached a platform is reported as UNKNOWN rather than guessed either way |
+| `publish_status: partial` | **YELLOW** — partly public; do not re-send without checking what is live |
+| Express pass switched off with approved drops waiting | **YELLOW** — the approval reply promised a post nothing will collect |
+| `express_error` set (a real fault) | **RED** |
+| No express drop ever claimed | **GREEN**, "the lane is new" — idle is not broken |
+
+**Severity boundaries are by construction, not by judgement.** A drop is
+either unclaimed (the claim canary's card) or claimed (this one), so one root
+cause can never light both. The IG publish queue card owns the sidecar's
+heartbeat freshness, and this card does not retell it — pinned by
+`test_the_card_does_not_regrade_the_sidecar_heartbeat_lag`, because answering
+one dead sidecar twice is how one root cause becomes two unrelated-looking
+complaints.
+
+**A false red the express lane created in the EXISTING canary.** The claim
+canary reds when an approved drop is unclaimed after its lane ran. That is
+sound for a weekly lane, which claims one drop per run. Express claims up to
+`MAX_PER_PASS = 3` per ten-minute pass, so with four approved at once the
+fourth is legitimately unclaimed after the next pass — and the canary would
+have said "that run published something else" on the day the lane got busy.
+`_DROP_LANE_CLAIM_GRACE_MINUTES = {"express": 20.0}` holds the verdict for two
+passes ([[feedback_rolling_window_metrics_lag_fixes]]: the grace must be at
+least the lane's own pacing). Mutation-verified: removing the grace fails
+`test_an_express_drop_unclaimed_for_one_pass_is_not_yet_missed` and nothing
+else, and the detector still fires past the grace.
+
+**A card must not red on a file whose format predates it.** The heartbeat on
+disk at deploy time was written by the previous sidecar, with the benign note
+in `express_error`. The presence of `express_detail` is the marker that the
+writer knows the difference; absent, the card declines to read a fault out of
+it — a fact about the file, not about the lane
+([[feedback_a_failed_probe_is_a_fact_about_the_probe]]). Self-clears on the
+next ten-minute pass.
+
+**Covered** — `tests/test_express_drop.py` (65 tests, +13: the ledger axis,
+the refusal of an unknown status, that an outcome never rewrites the approval
+or the claim, that a failure does not reopen the claim, and that every status
+the publisher emits is one the ledger accepts — the two vocabularies must be
+one list or a good outcome raises inside the sidecar);
+`duckAgent/tests/test_express_drop_publisher.py` (45 tests, +14: every exit
+from `publish_one` records something, enumerated
+[[feedback_incomplete_fix_enumerate_all_branches]], since an un-recorded exit
+lands in the 30-minute unresolved bucket and reads as a stall; a ledger write
+failure does not fail a post that already went out
+[[feedback_receipts_never_load_bearing]]; and the heartbeat accounting, where
+a partial counts as failed and an unknown status is never counted as
+published); `duckAgent/creative_agent/runtime/tests/test_drop_intake_cards.py`
+(61 tests, +22: the card's six verdicts, the two severity boundaries, the
+pre-split heartbeat with a positive control, registration on an empty payload,
+and the express pacing grace with a weekly-lane control).
+
+**Verified live, not just in tests**: the card reads GREEN against production
+state ("the lane is new"), `state/system_health.json` went 66 → 67 cards, and
+the false RED above was found by running the loader against the real ledger
+and heartbeat before committing — not by a test.
+
+**Open after this surface:**
+- **A sustained express backlog above six is unreported.** The pacing grace
+  covers two passes; ten approved drops take four and no surface says so.
+- **Nothing retries a failed express publish**, by choice. The operator has to
+  ask the agent for a fresh drop, and the card now says so in those words.
+- **The 30-minute unresolved window cannot tell a dead run from a dead
+  write-back.** Both report UNKNOWN, which is honest but means the operator
+  checks both platforms by hand. A receipt written before the platform call
+  would narrow it.
+- **`publish_status` has no consumer in the operator's `drop` command.**
+  `drop waiting` shows `when:` per express drop; it does not yet show what
+  happened to one already sent.
