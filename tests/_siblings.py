@@ -58,6 +58,7 @@ def sibling_repo(name: str) -> Path | None:
 
 def skip_without_siblings(case, *names: str) -> None:
     """Skip `case` naming every sibling this runner does not have."""
+    _assert_named(*names)
     missing = [name for name in names if sibling_repo(name) is None]
     if missing:
         case.skipTest(
@@ -118,3 +119,47 @@ def skip_without_preview_helpers(case) -> None:
         case.skipTest(
             "duckAgent's helpers.duck_video_helper / image_lane_reel are not "
             "importable here, so no preview frames can be built")
+
+
+def shared_seo_rules_readable() -> bool:
+    """Whether `duckAgent/config/seo_rules.json` can actually be read.
+
+    `runtime/seo_rules_config.load_seo_rules` RAISES when it cannot find that
+    file, and it is right to: the bands it carries decide what copy gets
+    written to live Shopify fields, and a plausible default there would ship
+    silently wrong SEO ([[feedback_plausible_fallbacks_mask_failure]]). That
+    raise happens at IMPORT time in nine `shopify_seo_*` modules, so on a
+    runner without the private duckAgent checkout they do not fail a test --
+    they fail COLLECTION, and the whole suite exits 2.
+
+    Which is a fact about the runner, not about the code
+    ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]). Gate on the file
+    being readable, exactly as the production code does, rather than on the
+    directory existing.
+    """
+    sibling = sibling_repo("duckAgent")
+    if sibling is None:
+        return False
+    path = sibling / "config" / "seo_rules.json"
+    try:
+        import json
+
+        json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return True
+
+
+def _assert_named(*names: str) -> None:
+    """A guard called with no names is not a guard.
+
+    `skip_without_siblings(self)` with no sibling named has an empty `missing`
+    list, so it never skips -- it reads as protection and provides none. One
+    of the two call sites was written that way and nothing noticed until the
+    CI condition was rehearsed locally, because on the Mac both siblings
+    exist and the guard is a no-op either way.
+    """
+    if not names:
+        raise AssertionError(
+            "skip_without_siblings() needs at least one sibling name "
+            "(e.g. \"duckAgent\") or it can never skip anything")

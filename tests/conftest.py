@@ -24,6 +24,7 @@ are always wrong here.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -604,3 +605,89 @@ def _no_outbound_mail_or_whatsapp_from_tests(monkeypatch):
     monkeypatch.setattr(smtplib, "SMTP", _refuse_smtp)
     monkeypatch.setattr(smtplib, "SMTP_SSL", _refuse_smtp)
     monkeypatch.setattr(subprocess, "run", _filtered_run)
+
+import _siblings  # noqa: E402  (tests/ is on sys.path)
+
+
+# --------------------------------------------------------------------------
+# Modules that cannot even be IMPORTED without the private duckAgent sibling.
+#
+# `seo_rules_config` raises when `duckAgent/config/seo_rules.json` is absent,
+# and that raise is correct -- those bands decide what copy is written to live
+# Shopify fields, so a default there would ship silently wrong SEO. But the
+# raise fires at import time, so on duck-ops' PUBLIC CI runner (which checks
+# out the private sibling only when DUCKAGENT_RO_TOKEN is set) nine modules
+# fail COLLECTION and the suite exits 2 instead of reporting skips.
+#
+# This repo's established answer to a missing sibling is to skip BY NAME and
+# say what the runner could not check ([[tests/_siblings.py]]). A collection
+# skip is the only form of that available to a module whose imports cannot
+# run, so it is applied here in one place rather than in nine files -- and
+# keyed on the import markers rather than a list of filenames, so a NEW
+# shopify_seo test is covered without anyone remembering to add it.
+#
+# Rehearse the CI condition before pushing anything cross-repo:
+#     DUCK_OPS_NO_SIBLINGS=1 pytest tests -q
+# Runtime modules that RAISE on import without the private duckAgent sibling.
+# `seo_rules_config.load_seo_rules` raises when
+# `duckAgent/config/seo_rules.json` is absent, and that is correct: those
+# bands decide what copy is written to live Shopify fields, so a default
+# there would ship silently wrong SEO
+# ([[feedback_plausible_fallbacks_mask_failure]]). The raise fires at IMPORT
+# time in the modules that compute band constants at module scope, so on
+# duck-ops' PUBLIC CI runner -- which checks out the private sibling only
+# when DUCKAGENT_RO_TOKEN is set -- those modules fail COLLECTION and the
+# whole suite exits 2 instead of reporting skips.
+#
+# This repo's established answer to a missing sibling is to skip BY NAME and
+# say what the runner could not check (tests/_siblings.py). A collection skip
+# is the only form available to a module whose imports cannot run.
+#
+# Which modules those are is DISCOVERED, not predicted: each candidate is
+# actually imported here and only the ones that genuinely fail are treated as
+# unavailable. Predicting from import statements ignored 13 test modules where
+# only 9 were broken, and silently dropping coverage on a runner is the same
+# class of problem as a red suite -- it just looks green.
+#
+# Rehearse the CI condition before pushing anything cross-repo:
+#     DUCK_OPS_NO_SIBLINGS=1 pytest tests -q
+_SIBLING_DEPENDENT_RUNTIME = (
+    "seo_rules_config",
+    "seo_copy_ledger",
+    "shopify_seo_audit",
+    "shopify_seo_review",
+    "shopify_seo_kickoff",
+)
+
+collect_ignore: list[str] = []
+
+if not _siblings.shared_seo_rules_readable():
+    import importlib
+
+    _unimportable: list[str] = []
+    for _name in _SIBLING_DEPENDENT_RUNTIME:
+        try:
+            importlib.import_module(_name)
+        except Exception:
+            _unimportable.append(_name)
+
+    if _unimportable:
+        _import_re = re.compile(
+            r"^\s*(?:import|from)\s+(?:" + "|".join(_unimportable) + r")\b",
+            re.MULTILINE)
+        _tests_dir = Path(__file__).resolve().parent
+        for _path in sorted(_tests_dir.glob("test_*.py")):
+            try:
+                _text = _path.read_text(encoding="utf-8")
+            except OSError:  # pragma: no cover - unreadable test file
+                continue
+            if _import_re.search(_text):
+                collect_ignore.append(_path.name)
+
+    if collect_ignore:
+        print(
+            "[conftest] duckAgent/config/seo_rules.json is not readable here, "
+            f"so {', '.join(_unimportable)} cannot be imported. These modules "
+            "are SKIPPED rather than failing collection: "
+            + ", ".join(collect_ignore)
+        )

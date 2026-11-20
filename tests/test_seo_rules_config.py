@@ -214,7 +214,11 @@ class TheNewduckBuilderAgreesWithTheAuditorTwoReposOver(unittest.TestCase):
     """
 
     def setUp(self):
-        skip_without_siblings(self)
+        # Named, because `skip_without_siblings` skips only the siblings it is
+        # GIVEN: called with no names its `missing` list is always empty and
+        # the guard never fires. It read as protected and was not, which only
+        # surfaced when the CI condition was finally rehearsed locally.
+        skip_without_siblings(self, "duckAgent")
 
     def test_the_newduck_title_band_cannot_produce_an_auditor_reject(self):
         duck_agent = sibling_repo("duckAgent")
