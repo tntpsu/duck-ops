@@ -11155,3 +11155,50 @@ week staying green, and the missing-field guard.
   with no pointer to the one that finally worked.
 - **Nothing has yet published an express post.** The whole lane is proven up to
   the platform calls and no further.
+
+## Surface 174 — the scan accepts, the digest mails, and only the wrapper runs both (2026-11-20)
+
+Operator: *"Shouldn't I have gotten an email to approve?"* Yes — and the reason
+they did not is worth recording, because nothing was broken.
+
+`drop_digest.py` exists and works. It is deliberately NOT called by
+`drop_intake.py`; the launchd wrapper `duckAgent_runtime/run_drop_intake.sh`
+runs the scan and then the digest, in that order, with a comment explaining
+why: a mail failure must not fail a good scan, and no sender should be
+reachable from the scan module's tests
+([[feedback_test_runs_reach_the_outside_world]], which has already bitten five
+times).
+
+The cost of that separation is that invoking the documented entry point
+`runtime/drop_intake.py` by hand accepts a drop and tells nobody. That is what
+happened: every scan today was run by hand during development, so the post sat
+`operator_required` for an hour while the operator waited for mail only the
+wrapper sends. The digest's own logic was healthy throughout — a dry run
+reported `send=True reason=new_items` — and the next scheduled 20:15 fire would
+have sent it.
+
+Verified, then sent: `last_sent_at` moved from 2026-11-17T20:15 (`all_clear`)
+to 2026-11-20T17:18 (`new_items`), carrying an inline poster frame extracted
+from the dropped video.
+
+**Not fixed by moving the sender into the scan.** That would put an email
+sender one import away from every test of this module, which is the trap that
+mailed the operator four times in one pytest run. The scan now SAYS it mails
+nobody, naming both the digest and the wrapper, and only when something is
+actually waiting on a human — on an empty scan the same line would be noise
+six times a day.
+
+**Covered** — `tests/test_express_drop.py` (134 tests, +3): that the scan's
+source contains no `send_email`/`smtplib`/`sendmail` at all (the property that
+keeps a test from mailing the operator, asserted directly rather than assumed),
+that an accepting scan names the digest and the wrapper, and that an empty scan
+stays quiet.
+
+**Open after this surface:**
+- **The digest's cadence is only exercised by the wrapper.** `scheduler_health`
+  grades `drop_intake_scan`, which is the SCAN's receipt; a digest that failed
+  every time would show only as a stderr line in the job log, and nothing
+  counts consecutive digest failures.
+- **No card reads `state/drop_digest.json`.** The throughput card knows a drop
+  is waiting; nothing knows whether the operator was ever TOLD. Those are
+  different facts, and today they disagreed for an hour.

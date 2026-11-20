@@ -1570,3 +1570,47 @@ class RecoveryIsCountedNotJustFailure(_ExpressRoot):
         summary = self.summary()
         self.assertEqual(summary["refused_7d"], 2)
         self.assertEqual(summary["distinct_posts_refused_7d"], 1)
+
+
+class TheScanSaysItDoesNotMailAnyone(_ExpressRoot):
+    """Surface 174 — the notification lives one layer up from the scan.
+
+    `drop_intake.py` accepts drops; `drop_digest.py` mails about them; the
+    launchd wrapper runs them in sequence. That split is deliberate -- a mail
+    failure must not fail a good scan, and no sender should be reachable from
+    this module's tests ([[feedback_test_runs_reach_the_outside_world]]).
+
+    Its cost is that running the scan by hand accepts a drop and tells nobody.
+    On 2026-11-20 a post sat approved-pending for an hour while the operator
+    waited for an email that only the wrapper sends. The scan now says so.
+    """
+
+    def test_the_scan_still_sends_no_email_itself(self):
+        # The property that matters most: this module must stay unreachable
+        # from a sender, so a test of it can never mail the operator.
+        source = Path(drop_intake.__file__).read_text(encoding="utf-8")
+        for sender in ("send_email", "smtplib", "sendmail"):
+            self.assertNotIn(sender, source,
+                             f"{sender} must not be reachable from the scan")
+
+    def test_an_accepting_scan_names_the_digest(self):
+        import contextlib, io
+
+        self.drop()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            drop_intake.main(["--drop-root", str(self.root)])
+        out = buf.getvalue()
+        self.assertIn("sends no email", out)
+        self.assertIn("drop_digest.py", out)
+        self.assertIn("run_drop_intake.sh", out)
+
+    def test_an_empty_scan_stays_quiet(self):
+        # The reminder is for the case where something is waiting on a human.
+        # On an empty scan it would be noise six times a day.
+        import contextlib, io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            drop_intake.main(["--drop-root", str(self.root)])
+        self.assertNotIn("sends no email", buf.getvalue())

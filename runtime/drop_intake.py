@@ -2521,6 +2521,23 @@ def main(argv: list[str] | None = None) -> int:
               f"{note.get('subject') or note.get('file')}")
     for rec in manifest.get("rejected", []):
         print(f"  REFUSED {rec['asset']}: {rec['reason']}", file=sys.stderr)
+
+    # This scan does NOT mail anybody. `drop_digest.py` does, and the launchd
+    # wrapper (duckAgent_runtime/run_drop_intake.sh) runs the two in sequence
+    # -- deliberately, so a mail failure cannot fail a good scan and so no
+    # sender is reachable from this module's tests
+    # ([[feedback_test_runs_reach_the_outside_world]]).
+    #
+    # The cost of that separation is that running THIS file by hand accepts a
+    # drop and tells nobody, which is exactly what happened on 2026-11-20: a
+    # post sat approved-pending for an hour while the operator waited for an
+    # email that only the wrapper sends. So say it, rather than leaving the
+    # next person to find out the same way.
+    if manifest.get("accepted_count") or notes:
+        print("[drop-intake] NOTE this scan sends no email. If you ran this "
+              "file directly, run `runtime/drop_digest.py` too (or the "
+              "wrapper duckAgent_runtime/run_drop_intake.sh, which does both) "
+              "or nothing will tell the operator.")
     return 0
 
 
