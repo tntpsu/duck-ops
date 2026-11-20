@@ -10773,3 +10773,104 @@ and heartbeat before committing — not by a test.
 - **`publish_status` has no consumer in the operator's `drop` command.**
   `drop waiting` shows `when:` per express drop; it does not yet show what
   happened to one already sent.
+
+## Surface 171 — the sidecar whose asset never arrived (2026-11-20, found by the lane's first real use)
+
+The express lane's first real inbound drop did not fail validation. It was
+never seen at all.
+
+Gemini wrote `inbox/this_or_that_thursday_beer_vs_whiskey_dash.mp4.json` at
+21:25 on 2026-11-19. The `.mp4` never arrived. Eleven hours later — verified by
+searching the whole folder, including for a dataless Drive placeholder — the
+sidecar sat alone, and **nothing anywhere said so**:
+
+- not the manifest, because `scan_inbox` skips every `.json` in the inbox on
+  the correct grounds that a sidecar is found THROUGH its asset
+  (`if asset.suffix.lower() == ".json": continue`);
+- not `rejected/`, because a refusal only happens inside that loop;
+- not `status.json`, because an orphan never becomes a proposal, so it is
+  absent from `drops`, and until refused it is absent from
+  `refused_this_scan` too.
+
+The agent believed it had dropped a post. We believed nothing had arrived.
+Neither could see the other, and the operator had no surface that disagreed.
+
+This is the selection blind spot again, in a second shape
+([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]]): zero findings
+describes which files the gate OPENED. `.env.clean` was skipped by a suffix
+test; an orphan sidecar is skipped by an extension test. Both guards were
+working exactly as written.
+
+**The fix** — a second pass, `_collect_orphan_sidecars`, because the asset loop
+cannot see these by construction:
+
+| Age of the orphan | Behaviour |
+|---|---|
+| Inside `ORPHAN_SIDECAR_GRACE_SECONDS` (30 min) | REPORTED as `waiting_for_asset` and left alone — a video is the slow half and the upload may be in flight; refusing a good drop because its file is large is the worse failure |
+| Past the grace | Moved to `rejected/` with a `.reason.txt`, reported as `refused` |
+
+Surfaced in three places that each had the gap: `manifest["incomplete"]` with
+`incomplete_count`, `status.json`'s `incomplete_this_scan`, and a loud
+`[drop-intake] INCOMPLETE ...` log line per orphan
+([[feedback_swallowed_errors_lie]]).
+
+**The refusal names what it did NOT check.** Only the asset's absence is
+checked on this path; every other rule (caption, lane, `source_agent`,
+`post_ready`, `publish_at`) runs in `validate_drop` when both halves are
+present. Duplicating those rules into the orphan path would have given the
+lane two answers to "is this sidecar valid" that drift apart, so the reason
+says plainly that a re-send can still be refused for a different reason. The
+cost is a possible second round trip; the alternative is a second validator.
+
+**Measured on the real drop**, after the fix, against the live folder: refused
+at 771 minutes, sidecar moved out of `inbox/`, reason written where Drive
+carries it back, `status.json` listing it, production ledger byte-identical
+before and after. And separately proven in a sandbox — Gemini's exact sidecar
+plus a real `.mp4` from a previously accepted drop — that the re-send will
+ALSO be refused for a missing `source_agent`, and that with that one field
+added it validates cleanly as `lane: express`, `media_type: video`,
+`publish_at: asap`, `post_ready: true`. Worth knowing before the re-send, not
+after it.
+
+**Covered** — `tests/test_express_drop.py` (76 tests, +11): that an orphan is
+reported at all; that it counts as neither accepted nor rejected nor waiting
+(a fourth outcome, and folding it into one of the others misreports both);
+that the grace window leaves a recent one in place; that a stale one is
+refused with a reason naming the expected filename and the send order; that
+what the sidecar declared is carried back so the operator sees WHICH post is
+missing its file; that an unparseable orphan is still reported (dropping it on
+a parse error is how the original blind spot worked); that `status.json` lists
+it; and two positive controls — a sidecar WITH its asset is not an orphan, and
+the bare `post.json` beside `post.png` spelling finds its asset — without
+which the whole class could pass by refusing every real drop.
+
+**Open after this surface:**
+- **One refusal does not name every problem.** Deliberate, per above, but it
+  means a re-send can bounce twice. The fix, if it is ever worth it, is to
+  extract the sidecar-only field checks out of `validate_drop` so both paths
+  call ONE implementation — not to copy them.
+- **`notes` as a JSON object is `str()`-ed into the proposal**, producing
+  `"{'hook_status': ...}"` in the ledger. Harmless but ugly; the contract
+  says notes is prose and the agent sent structure.
+- **Nothing grades orphan RATE.** One lost upload is noise; the same agent
+  losing uploads every day is a broken producer, and no card counts them.
+
+## Surface 130 addendum — a live receipt pair with no declared policy (2026-11-20)
+
+`TheLiveStoreIsFullyDeclaredTests` went red mid-session on
+`review_execution/approved/queued_for_execution`. Not a regression from the
+express work (that test imports neither `drop_intake` nor anything express):
+three Etsy review-reply receipts were written at 10:15 while the express work
+was in progress, by the review-reply lane, and that triple had never appeared
+in the live store before.
+
+The test is the alarm working as designed — the policy table's whole purpose
+is to have no blind spot, and it found one the moment the live store grew a
+new shape. Declared as `_pending(7, ...)`: `review_reply_executor` treats this
+receipt as the DURABLE source of truth and rehydrates the queue file from it,
+so these are genuinely in flight, and 7 days matches the
+`reply_preview_staged` state it follows because it is the same work one step
+later and the drain is designed to clear a backlog over days (2/session x 3
+windows/day). A tighter window would alarm on the pacing rather than on a
+stall. The number is the operator's to change; the declaration is what the
+test requires.

@@ -221,6 +221,17 @@ POLICY: dict[tuple[str, str], Policy] = {
         3, "a customer is waiting on a reply"),
     ("customer_reply", "thread_observed"): _pending(
         3, "a customer thread seen but not triaged"),
+    # The step BETWEEN staged and submitted: approved and waiting on the
+    # drain. `review_reply_executor` treats this receipt as the durable source
+    # of truth and rehydrates the queue file from it, so these are genuinely
+    # in flight rather than a per-run log. Same 7 days as the staged state it
+    # follows, because it is the same work one step later and the drain is
+    # DESIGNED to clear a backlog over days (2/session x 3 windows/day) -- a
+    # tighter window would alarm on the pacing rather than on a stall
+    # ([[feedback_rolling_window_metrics_lag_fixes]]). Measured 2026-11-20:
+    # 3 receipts, newest 0d.
+    ("review_execution", "queued_for_execution"): _pending(
+        7, "approved and queued; the drain paces 2/session x 3 windows/day"),
     ("review_execution", "submit_confirmed"): _pending(
         2, "submitted to Etsy; verification should follow the same day"),
     ("occasion_tags", "awaiting_operator_approval"): _pending(
