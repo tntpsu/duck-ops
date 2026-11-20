@@ -11195,10 +11195,85 @@ that an accepting scan names the digest and the wrapper, and that an empty scan
 stays quiet.
 
 **Open after this surface:**
-- **The digest's cadence is only exercised by the wrapper.** `scheduler_health`
-  grades `drop_intake_scan`, which is the SCAN's receipt; a digest that failed
-  every time would show only as a stderr line in the job log, and nothing
-  counts consecutive digest failures.
-- **No card reads `state/drop_digest.json`.** The throughput card knows a drop
-  is waiting; nothing knows whether the operator was ever TOLD. Those are
-  different facts, and today they disagreed for an hour.
+- ~~**The digest's cadence is only exercised by the wrapper.**~~ **Addressed
+  by Surface 175**: a digest failing every run leaves pending drops untold,
+  which the new card reds on past two cadences. Consecutive failures still are
+  not counted directly — the symptom is graded, not the job.
+- ~~**No card reads `state/drop_digest.json`.**~~ **CLOSED by Surface 175
+  below** — with a stated limitation: it catches a BROKEN notification, not a
+  slow one, so it would not have caught today's hour-long gap.
+
+## Surface 175 — was the operator TOLD, and can their answer be HEARD? (2026-11-20)
+
+The approval card knows a drop is waiting. Nothing knew whether anyone had
+been INFORMED, and those are different facts: they disagreed for an hour today
+with every card green, and the operator asked the question directly.
+
+Two checks in one card, because this lane's notification is a round trip and
+either direction fails on its own.
+
+**TOLD** — a pending proposal that no SENT digest has ever mentioned. Compares
+the pending stems against `drop_digest.json`'s record of what the last sent
+email covered. The subtle part: **silence is not the fault here.**
+`drop_digest.py` deliberately stays quiet when nothing has changed — that is
+the whole design, so it does not send six identical emails a day
+([[feedback_cadence_bypass_keys_must_be_rare]]) — which means a stale
+`last_sent_at` proves nothing on its own and only an UNTOLD pending item is
+evidence. A test pins that a 200-hour-old digest with nothing pending is green.
+
+**HEARD** — the reply poller's own liveness, from `operator_reply_health.json`.
+An approval reply sits in the mailbox until `operator_inbox_poller` runs, and
+if that stops, every approval silently stops arriving while the drop sits
+pending and looks exactly like an operator who has not answered. Canary at the
+scheduler layer ([[feedback_verify_the_job_is_firing_first]]), and it
+**outranks** the TOLD check — diagnosing "untold" first would send the operator
+to the wrong job.
+
+Thresholds are multiples of the cadence that produces the signal, found by
+reading the plists rather than guessed: the drop scan (and therefore the
+digest) fires every 4h, the duck-ops sidecar (and therefore the poller) every
+6h. A window shorter than one cadence convicts a drop before the job that
+would tell anyone has had a chance to run.
+
+| State | Verdict |
+|---|---|
+| Poller silent > 24h (4 cadences) | **RED** — approvals unread |
+| Untold pending > 8h (2 digest cadences) | **RED** — the mail step is failing, not pending |
+| Untold pending > 4h (1 cadence) | **YELLOW** — usually means the scan was run by hand |
+| Poller silent > 12h (2 cadences) | **YELLOW** |
+| Everything waiting has been emailed about | **GREEN**, naming the last digest and its reason |
+| Nothing pending | **GREEN** — nothing to tell |
+
+**Stated limitation: this would NOT have caught today.** The drop was accepted
+at 16:20 and the digest went at 17:18 — 58 minutes untold, well inside one
+cadence, correctly green. The card detects a notification that is BROKEN, not
+one that is merely slow, and today's complaint was about the cadence itself.
+Recording that rather than implying the card closes the incident.
+
+**The real finding underneath it**, measured from the plists: an express
+`asap` post's worst-case latency from drop to live is roughly **10 hours** even
+with instant human approval — up to 4h for the scan+digest to ask, up to 6h for
+the poller to read the answer, then ~10 min for the express runner. For a lane
+whose entire purpose is "send this now", the binding constraint is the 6-hourly
+poller, not anything in the lane itself.
+
+**Covered** — `creative_agent/runtime/tests/test_drop_intake_cards.py` (100
+tests, +16): a covered drop green; an untold drop inside one cadence still
+green (the false-alarm case); yellow past one cadence naming the hand-run
+cause; red past two blaming the mail step; silence with nothing pending not a
+fault; approved and claimed drops excluded from "awaiting notification"; a dead
+poller red and outranking the told check; a slow poller yellow; missing poller
+state reported rather than assumed healthy; the thresholds pinned as multiples
+of the real cadences; junk in all three state files; the last digest's coverage
+carried so the two lists can be read side by side; plus registration on an
+empty payload and a distinct-question check against the approval card.
+
+**Open after this surface:**
+- **The express lane's approval latency is dominated by a 6-hourly poller.**
+  Raising the sidecar cadence (or giving the drop lane its own poll) is the
+  only thing that makes `publish_at: asap` mean anything close to "now".
+- **Consecutive digest failures are still not counted.** The card grades the
+  symptom (untold drops), not the job, so a digest that fails every run looks
+  the same as a scan nobody ran.
+- **Nothing verifies a reply was UNDERSTOOD.** `operator_reply_health.json`
+  records refusals, and the card reads only its freshness.
