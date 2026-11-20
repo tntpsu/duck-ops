@@ -11051,14 +11051,107 @@ wrong message. Pinned on the distinctive phrase instead, and the fixture
 cleaned so the case under test is the only problem present.
 
 **Open after this surface:**
-- **`notes` as a JSON object is still `str()`-ed into the proposal**, producing
-  `"{'hook_status': ...}"` in the ledger. Harmless, ugly, and the contract says
-  prose while the agent sends structure — the honest fix is to accept both and
-  normalise, or refuse the object and say so.
+- ~~**`notes` as a JSON object is `str()`-ed into the proposal.**~~
+  **CLOSED by Surface 173 below** — both shapes accepted and normalised.
 - **A re-send is grouped but not RECONCILED.** The ledger can say one post
   failed three times; nothing marks the earlier attempts superseded, so
   `rejected/` keeps every version with no pointer to the one that finally
   worked.
-- **Nothing counts how many round trips a post took to be accepted.** The
-  repeat-offender count only sees refusals, so a post that bounced twice and
-  then succeeded reports two failures and no recovery.
+- ~~**Nothing counts how many round trips a post took to be accepted.**~~
+  **CLOSED by Surface 173 below.**
+
+## Surface 173 — both shapes of `notes`, and counting recovery (2026-11-20)
+
+Two open items closed, plus the lane's first real inbound post accepted
+end to end.
+
+### `notes` arrives in either shape, and is normalised to prose
+
+The contract asks for prose; the agent has twice sent a JSON object keyed by
+what each note is about (`hook_status`, `audio_note`). **Both are reasonable** —
+structure is how an agent naturally writes several distinct notes, prose is
+what the operator reads — so neither is refused. `str()` on a dict was putting
+Python repr (`"{'hook_status': ...}"`) into the ledger and in front of a human.
+
+`_normalise_notes` turns a mapping into one labelled line per entry
+(`hook_status` → `hook status: ...`), a list into one line per item, and
+anything else into its own string. It never raises and never refuses: a note is
+the least load-bearing field in the sidecar, and failing a finished post over
+the shape of a comment is the wrong trade.
+
+Falsy input keeps the OLD `str(notes or "")` behaviour exactly — `notes: 0`
+was `""` and stays `""` rather than becoming the note "0". A test subTest
+caught that my first implementation had changed it, which is the kind of
+incidental behaviour change that is invisible until something depends on it.
+
+Verified on the real artifact: the live sidecar Gemini sent, read from the
+file rather than transcribed, normalises to `hook status: Hook text ('POV:
+...') is already burned into the frames` with no braces or quotes.
+
+### Recovery is counted, not just failure
+
+The history only ever recorded failure, so a post refused twice and then
+accepted reported two refusals and no recovery. **"The lane is broken" and "it
+costs the agent two tries" call for opposite responses**, and a refusal count
+cannot distinguish them.
+
+The incomplete ledger's history now records every terminal outcome, not just
+incomplete-drop resolutions:
+
+| Outcome | Meaning |
+|---|---|
+| `completed` | an incomplete drop got its other half |
+| `refused` | an incomplete drop timed out |
+| `refused_validation` | a complete drop whose fields were wrong (previously only in the per-scan manifest, so it could never be connected to a re-send) |
+| `accepted` | it became a proposal |
+
+Grouped by `base_stem`, that answers `refusals_before_accept` per post,
+`recovered_7d`, and `worst_round_trip`. Two refusals by DIFFERENT mechanisms
+— a lost upload then a bad field — count as one story about one post.
+
+**An accepted post is removed from `repeat_offenders`.** It is no longer an
+open problem however many times it bounced on the way, and leaving it there
+would hold the card red over a post that went out. A test asserts both
+directions: two refusals with no success IS an open problem, and the third
+attempt succeeding clears it while still reporting the cost.
+
+The card gains a fourth verdict ahead of the loud one: a week where **every**
+refused post was later accepted is YELLOW/`scheduled_refresh` naming the worst
+round trip, because nothing was lost but each round trip is a wait. Guarded by
+`distinct_posts_or`, so a summary written by a producer older than that field
+does not read as zero — zero would make "everything recovered" trivially true
+and hide a real loss behind a reassuring message. A test pins exactly that.
+
+Also ordered: refusals AFTER an acceptance do not count toward it, or a later
+unrelated failure retroactively makes an easy acceptance look hard.
+
+### The lane's first real inbound post, accepted
+
+`this_or_that_thursday_beer_vs_whiskey_dash` — express, video, `publish_at:
+asap`, `post_ready: true` — is in the ledger as `operator_required`. Its
+`source_agent` reads `gemini (clip + caption) + claude (source_agent field,
+2026-11-20)`, following the convention the earlier accepted drops set when a
+human filled in a declaration: say who wrote which part rather than letting
+one name imply all of it.
+
+**Covered** — `tests/test_express_drop.py` (131 tests, +20): notes as prose,
+object, list, nested object, number, every falsy shape, truncation, and the
+real live sidecar; plus acceptance and validation refusal recorded in history,
+a post accepted on the second try reporting a round trip, an accepted post
+ceasing to be a repeat offender (with the two-refusals-no-success control), a
+first-time acceptance NOT counted as a recovery, ordering, and the two
+mechanisms counting as one story. Plus
+`creative_agent/runtime/tests/test_drop_intake_cards.py` (84 tests, +6) for
+the recovered-week verdict, the worst round trip, a post that never recovered
+still being loud, an open repeat offender outranking any recovery, a clean
+week staying green, and the missing-field guard.
+
+**Open after this surface:**
+- **The round-trip count starts now.** Today's two real refusals pre-date the
+  history recording, so this post reports `refusals_before_accept: 0` when it
+  actually took three attempts. The ledger only knows what it recorded, and
+  backfilling from `rejected/` filenames would be a guess.
+- **A re-send is grouped but not RECONCILED.** `rejected/` keeps every version
+  with no pointer to the one that finally worked.
+- **Nothing has yet published an express post.** The whole lane is proven up to
+  the platform calls and no further.

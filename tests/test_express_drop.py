@@ -1389,3 +1389,184 @@ class ACompletePairIsAlsoToldEverything(_ExpressRoot):
         # must still be a list rather than None.
         self.assertIsInstance(caught.exception.problems, list)
         self.assertTrue(caught.exception.problems)
+
+
+class NotesArriveInEitherShape(_ExpressRoot):
+    """Surface 173 — the agent sends structure, the contract asks for prose.
+
+    Both are reasonable. Structure is how an agent naturally writes several
+    distinct notes; prose is what the operator reads. `str()` on a dict put
+    Python repr -- `"{'hook_status': ...}"` -- into the ledger and in front of
+    a human, and refusing the object would cost a round trip over the least
+    load-bearing field in the sidecar.
+    """
+
+    def notes_of(self, raw) -> str:
+        fields, problems = drop_intake.sidecar_field_values(
+            {"caption": "c", "lane": drop_intake.EXPRESS_LANE,
+             "publish_at": "asap", "post_ready": True,
+             "source_agent": "a", "notes": raw}, media_type="video")
+        self.assertEqual(problems, [], "notes must never refuse a drop")
+        return fields["notes"]
+
+    def test_prose_is_unchanged(self):
+        self.assertEqual(self.notes_of("just a sentence"), "just a sentence")
+
+    def test_an_object_becomes_labelled_prose_not_python_repr(self):
+        # The exact shape Gemini sent on 2026-11-19 and again on 11-20.
+        out = self.notes_of({
+            "hook_status": "already burned into the frames",
+            "audio_note": "two bass thumps synced to whip-pans"})
+        self.assertIn("hook status: already burned into the frames", out)
+        self.assertIn("audio note: two bass thumps", out)
+        self.assertNotIn("{", out)
+        self.assertNotIn("'", out)
+
+    def test_a_list_becomes_one_line_per_item(self):
+        out = self.notes_of(["first note", "second note"])
+        self.assertEqual(out.splitlines(), ["first note", "second note"])
+
+    def test_a_nested_object_is_still_readable(self):
+        out = self.notes_of({"audio": {"bpm": 120, "source": "generated"}})
+        self.assertIn("audio:", out)
+        self.assertIn("bpm: 120", out)
+        self.assertNotIn("{", out)
+
+    def test_an_empty_shape_is_empty_not_the_word_none(self):
+        # `str(None)` is "None", which would read to the operator as a note
+        # that says None.
+        for raw in (None, "", {}, [], 0):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.notes_of(raw), "")
+
+    def test_a_number_is_its_own_string(self):
+        self.assertEqual(self.notes_of(7), "7")
+
+    def test_it_is_truncated_like_prose_always_was(self):
+        self.assertEqual(len(self.notes_of({"k": "x" * 5000})),
+                         drop_intake.MAX_NOTES_CHARS)
+
+    def test_the_real_live_sidecar_normalises(self):
+        # Read from the actual file Gemini sent, not a transcription of it.
+        live = Path(os.path.expanduser(
+            "~/Library/CloudStorage/GoogleDrive-tullaipsu@gmail.com/My Drive/"
+            "DuckDrop/rejected/this_or_that_thursday_beer_vs_whiskey_dash.mp4.json"))
+        if not live.is_file():
+            self.skipTest("the live sidecar has moved on")
+        raw = json.loads(live.read_text())["notes"]
+        out = self.notes_of(raw)
+        self.assertIn("hook status:", out)
+        self.assertNotIn("{", out)
+
+
+class RecoveryIsCountedNotJustFailure(_ExpressRoot):
+    """Surface 173 — a post that bounced and then went out is not a failure.
+
+    The history only ever recorded failure, so a post refused twice and then
+    accepted reported two refusals and no recovery. That overstates how broken
+    the lane is, and "the lane is broken" and "it costs the agent two tries"
+    call for opposite responses.
+    """
+
+    GOOD = {"caption": "Beer duck or whiskey duck?",
+            "lane": drop_intake.EXPRESS_LANE, "publish_at": "asap",
+            "post_ready": True, "source_agent": "gemini-post-writer"}
+
+    def send(self, stem: str, body: dict | None = None, *,
+             with_asset: bool = True) -> None:
+        if with_asset:
+            asset = self.inbox / f"{stem}.png"
+            asset.write_bytes(PNG)
+            os.utime(asset, (time.time() - 300,) * 2)
+        side = self.inbox / f"{stem}.png.json"
+        side.write_text(json.dumps(body or self.GOOD), encoding="utf-8")
+        os.utime(side, (time.time() - 300,) * 2)
+
+    def summary(self) -> dict:
+        return drop_intake.incomplete_drop_summary()
+
+    def test_an_acceptance_is_recorded_in_the_history(self):
+        self.send("duck_fact")
+        drop_intake.scan_inbox(self.root)
+        ledger = json.loads(drop_intake.DROP_INCOMPLETE_PATH.read_text())
+        row = ledger["history"][-1]
+        self.assertEqual(row["outcome"], "accepted")
+        self.assertEqual(row["base_stem"], "duck_fact")
+        self.assertEqual(self.summary()["accepted_7d"], 1)
+
+    def test_a_validation_refusal_is_recorded_too(self):
+        # It used to live only in the per-scan manifest, so it could not be
+        # connected to a later re-send of the same post.
+        bad = {k: v for k, v in self.GOOD.items() if k != "source_agent"}
+        self.send("duck_fact", bad)
+        drop_intake.scan_inbox(self.root)
+        ledger = json.loads(drop_intake.DROP_INCOMPLETE_PATH.read_text())
+        row = ledger["history"][-1]
+        self.assertEqual(row["outcome"], "refused_validation")
+        self.assertIn("source_agent", row["reason"])
+
+    def test_a_post_accepted_on_the_second_try_reports_a_round_trip(self):
+        bad = {k: v for k, v in self.GOOD.items() if k != "source_agent"}
+        self.send("duck_fact", bad)
+        drop_intake.scan_inbox(self.root)          # refused
+        self.send("duck_fact_v2")
+        drop_intake.scan_inbox(self.root)          # accepted
+        summary = self.summary()
+        self.assertEqual(summary["recovered_7d"], 1)
+        self.assertEqual(summary["worst_round_trip"], 1)
+        trip = summary["round_trips"][0]
+        self.assertEqual(trip["post"], "duck_fact")
+        self.assertEqual(trip["accepted_as"], "duck_fact_v2")
+        self.assertEqual(trip["refusals_before_accept"], 1)
+
+    def test_an_accepted_post_stops_being_a_repeat_offender(self):
+        # THE POINT. Two refusals then success must not leave the card red
+        # over a post that went out.
+        bad = {k: v for k, v in self.GOOD.items() if k != "source_agent"}
+        self.send("duck_fact", bad)
+        drop_intake.scan_inbox(self.root)
+        self.send("duck_fact_v2", bad)
+        drop_intake.scan_inbox(self.root)
+        self.assertEqual(len(self.summary()["repeat_offenders"]), 1,
+                         "two refusals and no success IS an open problem")
+        self.send("duck_fact_v3")
+        drop_intake.scan_inbox(self.root)
+        summary = self.summary()
+        self.assertEqual(summary["repeat_offenders"], [])
+        self.assertEqual(summary["recovered_7d"], 1)
+        self.assertEqual(summary["worst_round_trip"], 2)
+
+    def test_a_first_time_acceptance_is_not_a_recovery(self):
+        # Positive control: a clean post must not be counted as a recovery,
+        # or every accepted drop inflates the number.
+        self.send("duck_fact")
+        drop_intake.scan_inbox(self.root)
+        summary = self.summary()
+        self.assertEqual(summary["accepted_7d"], 1)
+        self.assertEqual(summary["recovered_7d"], 0)
+        self.assertEqual(summary["worst_round_trip"], 0)
+
+    def test_refusals_AFTER_an_acceptance_do_not_count_toward_it(self):
+        # The arithmetic has to be ordered, or a later unrelated failure
+        # retroactively makes an easy acceptance look hard.
+        self.send("duck_fact")
+        drop_intake.scan_inbox(self.root)
+        bad = {k: v for k, v in self.GOOD.items() if k != "source_agent"}
+        self.send("duck_fact_v2", bad)
+        drop_intake.scan_inbox(self.root)
+        self.assertEqual(self.summary()["round_trips"][0]["refusals_before_accept"], 0)
+
+    def test_an_incomplete_timeout_and_a_field_refusal_count_as_one_story(self):
+        # A post that lost its upload and then arrived with a bad field has
+        # failed twice, by two different mechanisms, at the same post.
+        self.send("duck_fact", with_asset=False)
+        os.utime(self.inbox / "duck_fact.png.json",
+                 (time.time() - (drop_intake.INCOMPLETE_DROP_GRACE_SECONDS + 60),) * 2)
+        drop_intake.scan_inbox(self.root)
+        drop_intake.scan_inbox(self.root)          # incomplete timeout
+        bad = {k: v for k, v in self.GOOD.items() if k != "source_agent"}
+        self.send("duck_fact_v2", bad)
+        drop_intake.scan_inbox(self.root)          # field refusal
+        summary = self.summary()
+        self.assertEqual(summary["refused_7d"], 2)
+        self.assertEqual(summary["distinct_posts_refused_7d"], 1)

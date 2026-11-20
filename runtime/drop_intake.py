@@ -561,6 +561,61 @@ def _magic_matches(path: Path, suffix: str) -> bool:
     return False
 
 
+#: `notes` is prose for the operator, and the contract says so -- but the
+#: agent has sent a JSON OBJECT twice now, keyed by what each note is about
+#: (`hook_status`, `audio_note`). Both shapes are reasonable: structure is how
+#: an agent naturally writes several distinct notes, and prose is what a human
+#: reads. So both are accepted and normalised to prose HERE, rather than
+#: refused (which costs a round trip over something nobody is confused about)
+#: or `str()`-ed (which put `"{'hook_status': ...}"` Python repr into the
+#: ledger and in front of the operator).
+MAX_NOTES_CHARS = 2000
+
+
+def _normalise_notes(raw: Any) -> str:
+    """Whatever the agent sent, as something an operator can read.
+
+    A mapping becomes one labelled line per entry, which is what it was
+    already expressing; a list becomes one line per item; anything else is its
+    own string. Never raises and never refuses: a note is the least
+    load-bearing field in the sidecar, and failing a finished post over the
+    shape of a comment would be the wrong trade.
+    """
+    # Exactly the old `str(notes or "")` semantics for anything falsy, so a
+    # nonsense value's behaviour is unchanged by this: `notes: 0` was "" and
+    # stays "", rather than becoming the note "0".
+    if not raw:
+        return ""
+    if isinstance(raw, str):
+        return raw[:MAX_NOTES_CHARS]
+
+    def _label(key: Any) -> str:
+        # hook_status -> "hook status", so it reads as prose rather than code.
+        return str(key).replace("_", " ").strip()
+
+    try:
+        if isinstance(raw, dict):
+            lines = [f"{_label(k)}: {_flatten_note(v)}" for k, v in raw.items()]
+        elif isinstance(raw, (list, tuple)):
+            lines = [_flatten_note(v) for v in raw]
+        else:
+            lines = [str(raw)]
+    except Exception:  # pragma: no cover - defensive
+        lines = [str(raw)]
+    return "\n".join(x for x in lines if x)[:MAX_NOTES_CHARS]
+
+
+def _flatten_note(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return "; ".join(f"{str(k).replace('_', ' ')}: {_flatten_note(v)}"
+                         for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return "; ".join(_flatten_note(v) for v in value)
+    return str(value)
+
+
 def sidecar_field_values(meta: dict, *,
                          lanes: frozenset[str] | None = None,
                          media_type: str | None = None,
@@ -721,7 +776,7 @@ def sidecar_field_values(meta: dict, *,
         "closing_line": closing,
         "closing_at": float(closing_at),
         "source_agent": source_agent,
-        "notes": str(meta.get("notes") or "")[:2000],
+        "notes": _normalise_notes(meta.get("notes")),
         "on_screen_hook_text": hook,
         "post_ready": post_ready,
     }
@@ -933,7 +988,9 @@ def scan_inbox(drop_root: Path | None = None, *,
     # lone sidecar by design -- it finds one THROUGH its asset -- and it
     # deliberately leaves a sidecar-less asset to this pass rather than
     # refusing a drop that is still arriving.
-    manifest["incomplete"] = _collect_incomplete_drops(drop_root, inbox, now=now)
+    manifest["incomplete"] = _collect_incomplete_drops(
+        drop_root, inbox, now=now,
+        accepted=manifest["accepted"], rejected=manifest["rejected"])
 
     manifest["accepted_count"] = len(manifest["accepted"])
     manifest["rejected_count"] = len(manifest["rejected"])
@@ -1118,7 +1175,9 @@ def _incomplete_extra_problems(found: dict) -> str:
 
 def _collect_incomplete_drops(drop_root: Path, inbox: Path, *,
                               now: float | None = None,
-                              ledger_path: Path | None = None) -> list[dict]:
+                              ledger_path: Path | None = None,
+                              accepted: Any = (),
+                              rejected: Any = ()) -> list[dict]:
     """Track every half-arrived drop across scans, and refuse only the dead.
 
     Waiting is the default. A drop is refused only once BOTH of these hold:
@@ -1136,6 +1195,29 @@ def _collect_incomplete_drops(drop_root: Path, inbox: Path, *,
 
     live = _incomplete_halves(inbox)
     stamp = datetime.now().astimezone().isoformat()
+
+    # This scan's terminal outcomes, in the same history as the incomplete
+    # ones. Without them the history only ever recorded FAILURE: a post that
+    # bounced twice and then went through reported two refusals and no
+    # recovery, which overstates how broken the lane is. Grouped by post, so
+    # "accepted on the third attempt" is answerable at all.
+    for row in (accepted or []):
+        if not isinstance(row, dict):
+            continue
+        stem = str(row.get("stem") or "")
+        if stem:
+            history.append({"stem": stem, "base_stem": base_stem(stem),
+                            "outcome": "accepted", "at": stamp,
+                            "source_agent": row.get("source_agent")})
+    for row in (rejected or []):
+        if not isinstance(row, dict):
+            continue
+        stem = str(row.get("stem") or "")
+        if stem:
+            history.append({"stem": stem, "base_stem": base_stem(stem),
+                            "outcome": "refused_validation", "at": stamp,
+                            "reason": str(row.get("reason") or "")[:300],
+                            "source_agent": row.get("source_agent")})
 
     # A stem that was incomplete and is not any more either completed (both
     # halves landed, and the asset loop has taken it) or was refused by this
@@ -1243,8 +1325,13 @@ def _summarise_incomplete(pending: dict, history: list, *,
             parsed = parsed.astimezone()
         return (current - parsed).total_seconds() / 3600.0
 
-    refused = [h for h in history if str(h.get("outcome")) == "refused"]
+    # "refused" is an incomplete drop that timed out; "refused_validation" is
+    # a complete drop whose fields were wrong. Both are a post that did not
+    # make it, and a post bouncing for one and then the other is one story.
+    refused = [h for h in history
+               if str(h.get("outcome")) in {"refused", "refused_validation"}]
     completed = [h for h in history if str(h.get("outcome")) == "completed"]
+    accepted_rows = [h for h in history if str(h.get("outcome")) == "accepted"]
 
     waiting = []
     for stem, row in sorted(pending.items()):
@@ -1299,8 +1386,33 @@ def _summarise_incomplete(pending: dict, history: list, *,
         slot["stems"].append(str(row.get("stem") or ""))
         slot["last_at"] = row.get("at")
         slot["last_missing"] = row.get("was_missing")
+    # How many tries a post needed before it was accepted. The refusal count
+    # alone cannot tell "the lane is broken" from "the agent got it right on
+    # the second go", and those call for opposite responses.
+    accepted_posts: dict[str, dict] = {}
+    for row in accepted_rows:
+        key = str(row.get("base_stem") or base_stem(str(row.get("stem") or "")))
+        slot = accepted_posts.setdefault(key, {"at": None, "stem": None})
+        slot["at"] = row.get("at")
+        slot["stem"] = row.get("stem")
+    round_trips = []
+    for key, slot in accepted_posts.items():
+        before = sum(1 for r in refused
+                     if str(r.get("base_stem")
+                            or base_stem(str(r.get("stem") or ""))) == key
+                     and str(r.get("at") or "") < str(slot["at"] or ""))
+        round_trips.append({"post": key, "accepted_as": slot["stem"],
+                            "accepted_at": slot["at"],
+                            "refusals_before_accept": before})
+    round_trips.sort(key=lambda r: -int(r["refusals_before_accept"]))
+    recovered = [r for r in round_trips if r["refusals_before_accept"] > 0]
+
+    # A post that has SINCE been accepted is not an open problem, however many
+    # times it bounced on the way -- its story is a round trip, not a failure,
+    # and leaving it here would keep the card red over a post that went out.
     repeat_offenders = sorted(
-        ({"post": k, **v} for k, v in attempts.items() if v["refused"] > 1),
+        ({"post": k, **v} for k, v in attempts.items()
+         if v["refused"] > 1 and k not in accepted_posts),
         key=lambda r: -int(r["refused"]))
     # The denominator is every incomplete drop that RESOLVED, not every drop
     # the lane ever saw: a complete drop was never half-arrived and does not
@@ -1326,6 +1438,14 @@ def _summarise_incomplete(pending: dict, history: list, *,
         # with a single post and an agent losing uploads look identical in a
         # bare count ([[feedback_a_number_needs_its_denominator]]).
         "repeat_offenders": repeat_offenders,
+        # Recovery, not just failure. A post refused twice and then accepted
+        # is the contract working slowly; reporting only the two refusals says
+        # the lane is broken when the finding is that it costs two tries.
+        "round_trips": round_trips[:10],
+        "accepted_7d": len(_within(accepted_rows, 7)),
+        "recovered_7d": len(recovered),
+        "worst_round_trip": (round_trips[0]["refusals_before_accept"]
+                             if round_trips else 0),
         "distinct_posts_refused_7d": len({
             str(r.get("base_stem") or base_stem(str(r.get("stem") or "")))
             for r in refused_7d}),
