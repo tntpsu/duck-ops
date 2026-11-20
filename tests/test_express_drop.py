@@ -1085,3 +1085,307 @@ class TheWaitingClockIsTheSameEverywhere(_ExpressRoot):
         row = drop_intake.incomplete_drop_summary()["waiting"][0]
         self.assertAlmostEqual(row["first_seen_hours_ago"], 0.0, delta=0.2)
         self.assertGreater(row["hours_waiting"], row["first_seen_hours_ago"])
+
+
+class OneRefusalNamesEveryProblem(_ExpressRoot):
+    """Surface 172 — the field rules have ONE implementation, two readers.
+
+    The cost of not having this, measured 2026-11-20: the incomplete path
+    reported a missing asset and said nothing about the sidecar, so Gemini
+    re-sent and was refused a second time for a `source_agent` nobody had
+    mentioned. Copying the rules into that path would have given the lane two
+    answers to "is this sidecar valid"; extracting them gives it one.
+    """
+
+    def sidecar_only(self, body: dict, *, age: int = 600,
+                     name: str = "post.mp4.json") -> Path:
+        side = self.inbox / name
+        side.write_text(json.dumps(body), encoding="utf-8")
+        old = time.time() - age
+        os.utime(side, (old, old))
+        return side
+
+    GOOD = {"caption": "Beer duck or whiskey duck?",
+            "lane": drop_intake.EXPRESS_LANE, "publish_at": "asap",
+            "post_ready": True, "source_agent": "gemini-post-writer"}
+
+    # -- the extraction kept validate_drop's behaviour exactly --------------
+
+    def test_a_single_mistake_still_raises_the_message_it_always_did(self):
+        reason = self.refusal(**{"lane": "not_a_lane"})
+        self.assertIn("not a known lane", reason)
+
+    def test_validate_drop_raises_the_FIRST_problem_not_a_list(self):
+        # The order the checks used to run is part of the contract: an agent
+        # fixing one field at a time must not see the messages reorder.
+        meta = {**self.GOOD}
+        meta.pop("caption")
+        meta["lane"] = "not_a_lane"
+        _fields, problems = drop_intake.sidecar_field_values(meta)
+        self.assertIn("caption", problems[0])
+        self.assertTrue(any("not a known lane" in p for p in problems))
+
+    def test_the_shared_function_skips_the_check_that_needs_the_asset(self):
+        # media_type is the one rule that cannot be answered without the file.
+        # No publish_at: on a weekly lane that is its own separate problem,
+        # and it also contains the word "publishes", which is what made the
+        # first version of this assertion match the wrong message.
+        meta = {"caption": "c", "lane": "duckvideo", "post_ready": True,
+                "source_agent": "gemini-post-writer"}
+        _f, with_image = drop_intake.sidecar_field_values(
+            meta, media_type="image")
+        _f, without = drop_intake.sidecar_field_values(meta, media_type=None)
+        marker = "and this is an image"
+        self.assertTrue(any(marker in p for p in with_image),
+                        "duckvideo takes video only, so an image is a problem")
+        self.assertFalse(any(marker in p for p in without))
+        self.assertEqual(without, [], "nothing else about this is wrong")
+
+    def test_a_clean_sidecar_has_no_problems(self):
+        # Positive control: a collector that always finds something is useless.
+        _fields, problems = drop_intake.sidecar_field_values(
+            self.GOOD, media_type="video")
+        self.assertEqual(problems, [])
+
+    def test_it_collects_every_problem_not_just_the_first(self):
+        meta = {"lane": "not_a_lane", "post_ready": "yes",
+                "closing_at": "soon"}
+        _fields, problems = drop_intake.sidecar_field_values(meta)
+        joined = " | ".join(problems)
+        for expected in ("caption", "not a known lane", "source_agent",
+                         "post_ready", "closing_at"):
+            self.assertIn(expected, joined)
+
+    # -- the payoff: told while it is still WAITING -------------------------
+
+    def test_a_waiting_sidecar_is_told_its_field_problems_now(self):
+        # THE REGRESSION. Learning about a missing source_agent eight hours
+        # later, on a second refusal, is what cost the round trip.
+        meta = {**self.GOOD}
+        meta.pop("source_agent")
+        self.sidecar_only(meta)
+        row = drop_intake.scan_inbox(self.root)["incomplete"][0]
+        self.assertEqual(row["state"], "waiting_for_other_half")
+        self.assertTrue(any("source_agent" in p for p in row["sidecar_problems"]))
+
+    def test_field_problems_do_NOT_cause_an_early_refusal(self):
+        # Still incomplete, so still waited on: the agent can re-send a fixed
+        # sidecar and keep the half that already arrived.
+        meta = {**self.GOOD}
+        meta.pop("source_agent")
+        side = self.sidecar_only(meta)
+        drop_intake.scan_inbox(self.root)
+        self.assertTrue(side.is_file())
+
+    def test_the_agent_status_file_carries_them(self):
+        meta = {**self.GOOD}
+        meta.pop("source_agent")
+        self.sidecar_only(meta)
+        manifest = drop_intake.scan_inbox(self.root)
+        path = drop_intake.write_status_file(
+            self.root, {}, incomplete=manifest["incomplete"])
+        row = json.loads(path.read_text())["incomplete_this_scan"][0]
+        self.assertTrue(any("source_agent" in p for p in row["sidecar_problems"]))
+
+    # -- and on the refusal, when it comes ---------------------------------
+
+    def test_the_refusal_lists_the_other_problems_too(self):
+        meta = {**self.GOOD}
+        meta.pop("source_agent")
+        self.sidecar_only(
+            meta, age=drop_intake.INCOMPLETE_DROP_GRACE_SECONDS + 60)
+        drop_intake.scan_inbox(self.root)
+        reason = drop_intake.scan_inbox(self.root)["incomplete"][0]["reason"]
+        self.assertIn("would ALSO have been refused", reason)
+        self.assertIn("source_agent", reason)
+        self.assertIn("every field rule your sidecar breaks", reason)
+
+    def test_a_clean_sidecar_is_told_the_asset_is_the_only_problem(self):
+        self.sidecar_only(
+            self.GOOD, age=drop_intake.INCOMPLETE_DROP_GRACE_SECONDS + 60)
+        drop_intake.scan_inbox(self.root)
+        reason = drop_intake.scan_inbox(self.root)["incomplete"][0]["reason"]
+        self.assertIn("The sidecar itself is fine", reason)
+
+    def test_a_missing_sidecar_says_its_fields_were_not_read(self):
+        # Honest about the gap rather than implying a clean bill of health:
+        # with no sidecar there is nothing to check.
+        asset = self.inbox / "post.mp4"
+        asset.write_bytes(MP4)
+        old = time.time() - (drop_intake.INCOMPLETE_DROP_GRACE_SECONDS + 60)
+        os.utime(asset, (old, old))
+        drop_intake.scan_inbox(self.root)
+        reason = drop_intake.scan_inbox(self.root)["incomplete"][0]["reason"]
+        self.assertIn("only the missing file was checked", reason)
+        self.assertIn("have been read yet", reason)
+
+
+class AReSendIsConnectedToWhatItReplaces(_ExpressRoot):
+    """Surface 172 — four attempts at one post are not four posts.
+
+    Gemini names a retry after the attempt it replaces: the live accepted/
+    folder holds `..._standoff`, `_v2`, `_v3` and `_v4` of one post. The
+    ledger keyed everything by the raw stem, so the history could not say
+    "this same post has now failed three times", and the refusal rate read as
+    a broad producer problem when it was one post bouncing.
+    """
+
+    def test_a_resend_marker_is_stripped(self):
+        for raw, expected in (
+            ("duck_fact_v2", "duck_fact"),
+            ("duck_fact_V3", "duck_fact"),
+            ("duck_fact.v2", "duck_fact"),
+            ("duck_fact-v10", "duck_fact"),
+            ("holiday_horror_dash_standoff_v4", "holiday_horror_dash_standoff"),
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(drop_intake.base_stem(raw), expected)
+
+    def test_a_move_collision_stamp_is_stripped(self):
+        self.assertEqual(
+            drop_intake.base_stem("duck_fact.20261120-141500"), "duck_fact")
+
+    def test_both_markers_together_are_stripped(self):
+        self.assertEqual(
+            drop_intake.base_stem("duck_fact_v2.20261120-141500"), "duck_fact")
+
+    def test_a_name_that_merely_ends_in_v_plus_words_is_untouched(self):
+        # Not a re-send marker: `v` followed by digits is, `beer_vs_whiskey`
+        # is not, and treating it as one would merge unrelated posts.
+        for raw in ("beer_vs_whiskey", "duck_v", "duck_version", "v2"):
+            with self.subTest(raw=raw):
+                self.assertEqual(drop_intake.base_stem(raw), raw)
+
+    def test_the_real_live_stems_group_to_one_post(self):
+        # The names actually in the Drive folder, not invented ones.
+        live = ["mid_november_holiday_horror_dash_standoff",
+                "mid_november_holiday_horror_dash_standoff_v2",
+                "mid_november_holiday_horror_dash_standoff_v3",
+                "mid_november_holiday_horror_dash_standoff_v4"]
+        self.assertEqual(len({drop_intake.base_stem(s) for s in live}), 1)
+
+    # -- what the grouping buys ---------------------------------------------
+
+    def refuse_one(self, stem: str) -> None:
+        side = self.inbox / f"{stem}.mp4.json"
+        side.write_text(json.dumps({
+            "caption": "c", "lane": drop_intake.EXPRESS_LANE,
+            "publish_at": "asap", "post_ready": True,
+            "source_agent": "gemini-post-writer"}), encoding="utf-8")
+        old = time.time() - (drop_intake.INCOMPLETE_DROP_GRACE_SECONDS + 60)
+        os.utime(side, (old, old))
+        drop_intake.scan_inbox(self.root)
+        drop_intake.scan_inbox(self.root)
+
+    def test_history_records_the_post_a_stem_belongs_to(self):
+        self.refuse_one("duck_fact_v2")
+        ledger = json.loads(drop_intake.DROP_INCOMPLETE_PATH.read_text())
+        row = ledger["history"][-1]
+        self.assertEqual(row["stem"], "duck_fact_v2")
+        self.assertEqual(row["base_stem"], "duck_fact")
+
+    def test_two_attempts_at_one_post_are_named_as_a_repeat(self):
+        self.refuse_one("duck_fact")
+        self.refuse_one("duck_fact_v2")
+        summary = drop_intake.incomplete_drop_summary()
+        self.assertEqual(summary["refused_7d"], 2)
+        # ...but ONE post, which is the distinction the bare count hid.
+        self.assertEqual(summary["distinct_posts_refused_7d"], 1)
+        self.assertEqual(len(summary["repeat_offenders"]), 1)
+        offender = summary["repeat_offenders"][0]
+        self.assertEqual(offender["post"], "duck_fact")
+        self.assertEqual(offender["refused"], 2)
+        self.assertEqual(sorted(offender["stems"]), ["duck_fact", "duck_fact_v2"])
+
+    def test_two_different_posts_are_not_a_repeat(self):
+        # Positive control: the grouping must not merge unrelated posts, or
+        # every busy week looks like one broken post.
+        self.refuse_one("duck_fact")
+        self.refuse_one("beer_vs_whiskey")
+        summary = drop_intake.incomplete_drop_summary()
+        self.assertEqual(summary["distinct_posts_refused_7d"], 2)
+        self.assertEqual(summary["repeat_offenders"], [])
+
+    def test_a_waiting_drop_knows_how_often_this_post_already_failed(self):
+        # A drop waiting for its second file is routine. The third attempt at
+        # the same post waiting again is a contract problem.
+        self.refuse_one("duck_fact")
+        self.refuse_one("duck_fact_v2")
+        side = self.inbox / "duck_fact_v3.mp4.json"
+        side.write_text(json.dumps({
+            "caption": "c", "lane": drop_intake.EXPRESS_LANE,
+            "publish_at": "asap", "post_ready": True,
+            "source_agent": "gemini-post-writer"}), encoding="utf-8")
+        old = time.time() - 600
+        os.utime(side, (old, old))
+        drop_intake.scan_inbox(self.root)
+        row = drop_intake.incomplete_drop_summary()["waiting"][0]
+        self.assertEqual(row["post"], "duck_fact")
+        self.assertEqual(row["prior_refusals"], 2)
+
+
+class TheContractExplainsBothNewMechanisms(_ExpressRoot):
+    def test_the_readme_tells_the_agent_problems_arrive_while_it_waits(self):
+        readme = drop_intake.MIRROR_DROP_README
+        self.assertIn("sidecar_problems", readme)
+        self.assertIn("all of them, not", readme)
+
+    def test_the_readme_asks_for_the_retry_naming_it_already_uses(self):
+        readme = drop_intake.MIRROR_DROP_README
+        self.assertIn("duck_fact_v2", readme)
+        self.assertIn("one post with three attempts", readme)
+
+
+class ACompletePairIsAlsoToldEverything(_ExpressRoot):
+    """The case Gemini's re-send actually hits.
+
+    Both halves present means `validate_drop` runs, and it raises on the FIRST
+    problem -- which is the right exception contract and the wrong thing to
+    write into `rejected/`. The reason file now lists them all, while
+    `str(exc)` and the manifest's `reason` stay exactly what they were.
+    """
+
+    def test_the_reason_file_lists_every_problem(self):
+        self.drop(**{"lane": "not_a_lane"}, publish_at="asap")
+        # No source_agent either: two unrelated problems in one drop.
+        side = self.inbox / "post.png.json"
+        meta = json.loads(side.read_text())
+        meta.pop("source_agent")
+        meta["post_ready"] = "yes"
+        side.write_text(json.dumps(meta), encoding="utf-8")
+        old = time.time() - 300
+        os.utime(side, (old, old))
+
+        manifest = drop_intake.scan_inbox(self.root)
+        self.assertEqual(manifest["rejected_count"], 1)
+        text = next((self.root / drop_intake.REJECTED_DIR)
+                    .glob("*.reason.txt")).read_text()
+        self.assertIn("not a known lane", text)
+        self.assertIn("source_agent", text)
+        self.assertIn("post_ready", text)
+        self.assertIn("fix them all in one pass", text)
+
+    def test_the_manifest_reason_is_still_just_the_first(self):
+        # The exception contract is unchanged: one refusal, one message.
+        # Several existing tests read `_reason(...)` and must keep working.
+        reason = self.refusal(**{"lane": "not_a_lane"})
+        self.assertIn("not a known lane", reason)
+        self.assertNotIn("fix them all", reason)
+
+    def test_a_single_problem_writes_an_unchanged_reason_file(self):
+        # No list, no preamble, for the common case of one mistake.
+        self.drop(**{"lane": "not_a_lane"}, publish_at=None)
+        drop_intake.scan_inbox(self.root)
+        text = next((self.root / drop_intake.REJECTED_DIR)
+                    .glob("*.reason.txt")).read_text()
+        self.assertIn("not a known lane", text)
+        self.assertNotIn("AND these", text)
+
+    def test_the_exception_carries_the_list_for_other_callers(self):
+        with self.assertRaises(drop_intake.DropRefused) as caught:
+            drop_intake.validate_drop(
+                self.inbox / "nope.png", self.inbox / "nope.png.json")
+        # A refusal raised before the fields are read has one problem, and it
+        # must still be a list rather than None.
+        self.assertIsInstance(caught.exception.problems, list)
+        self.assertTrue(caught.exception.problems)

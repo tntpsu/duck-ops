@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -343,7 +344,20 @@ INCOMPLETE_HISTORY_LIMIT = 200
 
 class DropRefused(RuntimeError):
     """A drop that may not become a proposal. Carries an operator-readable
-    reason, which is written beside the file so the agent can see it."""
+    reason, which is written beside the file so the agent can see it.
+
+    `problems` holds EVERY rule the drop breaks, when they are all known. The
+    exception's message stays the first one, so callers and tests that read
+    `str(exc)` are unchanged, but the reason file written into `rejected/`
+    lists them all -- an agent that has to fix one field per round trip
+    through Drive is the cost that this exists to remove, measured on
+    2026-11-20 when a re-send was refused for a field the first refusal had
+    not mentioned.
+    """
+
+    def __init__(self, message: str, *, problems: list[str] | None = None):
+        super().__init__(message)
+        self.problems = list(problems or [message])
 
 
 @dataclass
@@ -358,6 +372,9 @@ class DropRecord:
     caption_chars: int = 0
     source_agent: str = ""
     received_at: str = ""
+    #: Every rule the drop broke, when they are all known. `reason` stays the
+    #: first one so existing readers are unchanged.
+    problems: list = field(default_factory=list)
 
 
 #: Lanes that actually CONSUME a drop -- i.e. whose scheduled run calls the
@@ -544,6 +561,173 @@ def _magic_matches(path: Path, suffix: str) -> bool:
     return False
 
 
+def sidecar_field_values(meta: dict, *,
+                         lanes: frozenset[str] | None = None,
+                         media_type: str | None = None,
+                         ) -> tuple[dict, list[str]]:
+    """Normalise a sidecar's own fields, and list every rule they break.
+
+    ONE implementation with two readers. `validate_drop` raises the first
+    problem, so a single mistake still produces exactly the message it always
+    did. The incomplete-drop path calls it with `media_type=None` -- the asset
+    is not here, so the one check that needs it is skipped -- and reports the
+    whole list, because a refusal that names one problem at a time costs the
+    agent a round trip through Drive per field.
+
+    Extracted rather than copied on 2026-11-20. A second copy of these rules
+    would be a second answer to "is this sidecar valid", and the two would
+    disagree the first time either changed -- which is the same reason the
+    claim, the publish window and the lane list each have exactly one home.
+
+    Order matters: the problems come out in the order the checks used to run,
+    so `problems[0]` is the refusal the old code would have raised. A check
+    whose input is already broken is skipped rather than guessed at.
+    """
+    lanes = lanes if lanes is not None else allowed_lanes()
+    problems: list[str] = []
+
+    caption = meta.get("caption")
+    cleaned = ""
+    if not isinstance(caption, str) or not caption.strip():
+        problems.append("the sidecar needs a non-empty \"caption\"")
+    else:
+        # Control characters other than newline/tab have no place in a caption
+        # and are how a terminal-rendered surface gets hijacked.
+        cleaned = "".join(ch for ch in caption if ch in "\n\t" or ch >= " ")
+        if len(cleaned) > MAX_CAPTION_CHARS:
+            problems.append(
+                f"the caption is {len(cleaned)} characters; the limit is "
+                f"{MAX_CAPTION_CHARS}")
+
+    lane = str(meta.get("lane") or "").strip()
+    lane_known = lane in lanes
+    if not lane_known:
+        problems.append(
+            f"\"lane\": {lane or '(missing)'} is not a known lane "
+            f"({', '.join(sorted(lanes))})")
+    else:
+        # Needs the asset, so it is skipped when only the sidecar is here.
+        accepted = accepted_media_types(lane)
+        if media_type is not None and accepted and media_type not in accepted:
+            problems.append(
+                f"the \"{lane}\" lane publishes {_media_phrase(accepted)}, and "
+                f"this is {'an' if media_type == 'image' else 'a'} {media_type}. "
+                "It would be accepted here and then fail when the lane tried to "
+                "use it.")
+        consuming = consuming_lanes()
+        if lane not in consuming:
+            # Refused rather than accepted, because accepting is the worse
+            # failure: the operator approves it and believes it is scheduled,
+            # and it never runs. Say what to do instead of just saying no.
+            problems.append(
+                f"the \"{lane}\" lane cannot take a drop yet -- nothing in it "
+                "claims one, so this file would be approved and then never "
+                "published. Lanes that can take a drop today: "
+                f"{', '.join(sorted(consuming))}. Ask for \"{lane}\" to be "
+                "wired if you need it.")
+
+    source_agent = str(meta.get("source_agent") or "").strip()
+    if not source_agent:
+        problems.append(
+            "the sidecar needs \"source_agent\" naming who made this")
+
+    # Defaults FALSE, and a non-boolean is refused rather than coerced.
+    # This is the field that decides whether a scheduled flow may publish the
+    # drop in place of its own work, so "absent" must never read as "ready" --
+    # and the string "false" must never read as True, which is exactly what
+    # bool() would have done with it.
+    post_ready = meta.get("post_ready", False)
+    if not isinstance(post_ready, bool):
+        problems.append(
+            '"post_ready" must be true or false (a JSON boolean), not '
+            f'{type(post_ready).__name__}')
+        post_ready = False
+
+    # The text burned INTO the video, as distinct from the caption posted
+    # beside it. A dropped clip arrives without it: the agent writes the words
+    # and the lane composites them, because a reel with no on-screen text reads
+    # as an unfinished repost. Optional -- a clip whose maker already rendered
+    # text into the frames should leave this out rather than get two copies.
+    hook = meta.get("on_screen_hook_text", "")
+    if not isinstance(hook, str):
+        problems.append(
+            '"on_screen_hook_text" must be a string, not '
+            f'{type(hook).__name__}')
+        hook = ""
+    else:
+        hook = "".join(ch for ch in hook if ch >= " ").strip()
+        if len(hook) > MAX_HOOK_CHARS:
+            problems.append(
+                f"\"on_screen_hook_text\" is {len(hook)} characters; the limit "
+                f"is {MAX_HOOK_CHARS} because it has to stay legible burned "
+                "over a phone-sized frame")
+
+    # The second beat. `overlay_hook_line` can composite a SECOND card along
+    # the bottom from `closing_at` seconds onward, and that is the right home
+    # for a punchline: the first drop's hook was one sentence with a payoff
+    # ("...turns green (and your holiday dash crew isn't having it)") and at
+    # 132 characters it did not fit the frame as one card. Trimming it to fit
+    # cost the joke. Two beats fit where one does not.
+    closing = meta.get("closing_line", "")
+    if not isinstance(closing, str):
+        problems.append(
+            f'"closing_line" must be a string, not {type(closing).__name__}')
+        closing = ""
+    else:
+        closing = "".join(ch for ch in closing if ch >= " ").strip()
+        if len(closing) > MAX_HOOK_CHARS:
+            problems.append(
+                f'"closing_line" is {len(closing)} characters; the limit is '
+                f"{MAX_HOOK_CHARS}")
+    closing_at = meta.get("closing_at", 0.0)
+    if not isinstance(closing_at, (int, float)) or isinstance(closing_at, bool):
+        problems.append(
+            f'"closing_at" must be a number of seconds, not '
+            f"{type(closing_at).__name__}")
+        closing_at = 0.0
+    else:
+        if closing_at < 0:
+            problems.append('"closing_at" cannot be negative')
+        if closing and not closing_at:
+            problems.append(
+                '"closing_line" needs "closing_at" -- the second card appears '
+                "from that many seconds in, and 0 would stack it on the hook")
+
+    # WHEN it goes out. Only the express lane has this question to answer --
+    # every other lane's time comes from its own weekly window, so a
+    # `publish_at` there would be silently ignored, which is the exact shape
+    # of lie this contract keeps having to fix. Refused instead, naming the
+    # lane that does honour it.
+    publish_at_raw = meta.get("publish_at")
+    publish_at = ""
+    if lane == EXPRESS_LANE:
+        try:
+            kind, when = resolve_publish_at(publish_at_raw)
+            publish_at = (PUBLISH_AT_ASAP if kind == PUBLISH_AT_ASAP
+                          else when.isoformat())
+        except DropRefused as exc:
+            problems.append(str(exc))
+    elif publish_at_raw is not None:
+        problems.append(
+            f'"publish_at" has no meaning on the "{lane}" lane -- that '
+            f"lane publishes on its own weekly day, so the time would be "
+            f'ignored. Use "lane": "{EXPRESS_LANE}" for a post that goes '
+            "out at a time you choose, or drop the field.")
+
+    fields = {
+        "lane": lane,
+        "publish_at": publish_at,
+        "caption": cleaned.strip(),
+        "closing_line": closing,
+        "closing_at": float(closing_at),
+        "source_agent": source_agent,
+        "notes": str(meta.get("notes") or "")[:2000],
+        "on_screen_hook_text": hook,
+        "post_ready": post_ready,
+    }
+    return fields, problems
+
+
 def validate_drop(asset: Path, sidecar: Path, *,
                   lanes: frozenset[str] | None = None) -> dict:
     """Decide whether one asset+sidecar pair may become a proposal.
@@ -592,133 +776,18 @@ def validate_drop(asset: Path, sidecar: Path, *,
     if not isinstance(meta, dict):
         raise DropRefused("the sidecar json must be an object")
 
-    caption = meta.get("caption")
-    if not isinstance(caption, str) or not caption.strip():
-        raise DropRefused("the sidecar needs a non-empty \"caption\"")
-    # Control characters other than newline/tab have no place in a caption and
-    # are how a terminal-rendered surface gets hijacked.
-    cleaned = "".join(ch for ch in caption if ch in "\n\t" or ch >= " ")
-    if len(cleaned) > MAX_CAPTION_CHARS:
-        raise DropRefused(
-            f"the caption is {len(cleaned)} characters; the limit is "
-            f"{MAX_CAPTION_CHARS}")
-
-    lane = str(meta.get("lane") or "").strip()
-    if lane not in lanes:
-        raise DropRefused(
-            f"\"lane\": {lane or '(missing)'} is not a known lane "
-            f"({', '.join(sorted(lanes))})")
+    # The asset IS here, so the media-vs-lane check can run.
     media_type = "image" if suffix in _IMAGE_EXTS else "video"
-    accepted = accepted_media_types(lane)
-    if accepted and media_type not in accepted:
-        raise DropRefused(
-            f"the \"{lane}\" lane publishes {_media_phrase(accepted)}, and "
-            f"this is {'an' if media_type == 'image' else 'a'} {media_type}. "
-            "It would be accepted here and then fail when the lane tried to "
-            "use it.")
-    consuming = consuming_lanes()
-    if lane not in consuming:
-        # Refused rather than accepted, because accepting is the worse
-        # failure: the operator approves it and believes it is scheduled,
-        # and it never runs. Say what to do instead of just saying no.
-        raise DropRefused(
-            f"the \"{lane}\" lane cannot take a drop yet -- nothing in it "
-            "claims one, so this file would be approved and then never "
-            "published. Lanes that can take a drop today: "
-            f"{', '.join(sorted(consuming))}. Ask for \"{lane}\" to be "
-            "wired if you need it.")
+    fields, problems = sidecar_field_values(meta, lanes=lanes,
+                                            media_type=media_type)
+    # The FIRST problem, so the message an agent gets for a single mistake is
+    # byte-identical to what it was before this was extracted. The list is for
+    # the incomplete path, which has no asset to validate against and reports
+    # everything at once rather than bouncing the agent once per field.
+    if problems:
+        raise DropRefused(problems[0], problems=problems)
 
-    source_agent = str(meta.get("source_agent") or "").strip()
-    if not source_agent:
-        raise DropRefused("the sidecar needs \"source_agent\" naming who made this")
-
-    # Defaults FALSE, and a non-boolean is refused rather than coerced.
-    # This is the field that decides whether a scheduled flow may publish the
-    # drop in place of its own work, so "absent" must never read as "ready" --
-    # and the string "false" must never read as True, which is exactly what
-    # bool() would have done with it.
-    post_ready = meta.get("post_ready", False)
-    if not isinstance(post_ready, bool):
-        raise DropRefused(
-            '"post_ready" must be true or false (a JSON boolean), not '
-            f'{type(post_ready).__name__}'
-        )
-
-    # The text burned INTO the video, as distinct from the caption posted
-    # beside it. A dropped clip arrives without it: the agent writes the words
-    # and the lane composites them, because a reel with no on-screen text reads
-    # as an unfinished repost. Optional -- a clip whose maker already rendered
-    # text into the frames should leave this out rather than get two copies.
-    hook = meta.get("on_screen_hook_text", "")
-    if not isinstance(hook, str):
-        raise DropRefused(
-            '"on_screen_hook_text" must be a string, not '
-            f'{type(hook).__name__}')
-    hook = "".join(ch for ch in hook if ch >= " ").strip()
-    if len(hook) > MAX_HOOK_CHARS:
-        raise DropRefused(
-            f"\"on_screen_hook_text\" is {len(hook)} characters; the limit is "
-            f"{MAX_HOOK_CHARS} because it has to stay legible burned over a "
-            "phone-sized frame")
-
-    # The second beat. `overlay_hook_line` can composite a SECOND card along
-    # the bottom from `closing_at` seconds onward, and that is the right home
-    # for a punchline: the first drop's hook was one sentence with a payoff
-    # ("...turns green (and your holiday dash crew isn't having it)") and at
-    # 132 characters it did not fit the frame as one card. Trimming it to fit
-    # cost the joke. Two beats fit where one does not.
-    closing = meta.get("closing_line", "")
-    if not isinstance(closing, str):
-        raise DropRefused(
-            f'"closing_line" must be a string, not {type(closing).__name__}')
-    closing = "".join(ch for ch in closing if ch >= " ").strip()
-    if len(closing) > MAX_HOOK_CHARS:
-        raise DropRefused(
-            f'"closing_line" is {len(closing)} characters; the limit is '
-            f"{MAX_HOOK_CHARS}")
-    closing_at = meta.get("closing_at", 0.0)
-    if not isinstance(closing_at, (int, float)) or isinstance(closing_at, bool):
-        raise DropRefused(
-            f'"closing_at" must be a number of seconds, not '
-            f"{type(closing_at).__name__}")
-    if closing_at < 0:
-        raise DropRefused('"closing_at" cannot be negative')
-    if closing and not closing_at:
-        raise DropRefused(
-            '"closing_line" needs "closing_at" -- the second card appears '
-            "from that many seconds in, and 0 would stack it on the hook")
-
-    # WHEN it goes out. Only the express lane has this question to answer --
-    # every other lane's time comes from its own weekly window, so a
-    # `publish_at` there would be silently ignored, which is the exact shape
-    # of lie this contract keeps having to fix. Refused instead, naming the
-    # lane that does honour it.
-    publish_at_raw = meta.get("publish_at")
-    if lane == EXPRESS_LANE:
-        kind, when = resolve_publish_at(publish_at_raw)
-        publish_at = PUBLISH_AT_ASAP if kind == PUBLISH_AT_ASAP else when.isoformat()
-    else:
-        if publish_at_raw is not None:
-            raise DropRefused(
-                f'"publish_at" has no meaning on the "{lane}" lane -- that '
-                f"lane publishes on its own weekly day, so the time would be "
-                f'ignored. Use "lane": "{EXPRESS_LANE}" for a post that goes '
-                "out at a time you choose, or drop the field.")
-        publish_at = ""
-
-    return {
-        "lane": lane,
-        "publish_at": publish_at,
-        "caption": cleaned.strip(),
-        "closing_line": closing,
-        "closing_at": float(closing_at),
-        "media_type": "image" if suffix in _IMAGE_EXTS else "video",
-        "source_agent": source_agent,
-        "notes": str(meta.get("notes") or "")[:2000],
-        "on_screen_hook_text": hook,
-        "bytes": size,
-        "post_ready": post_ready,
-    }
+    return {**fields, "media_type": media_type, "bytes": size}
 
 
 def _move(src: Path, dest_dir: Path) -> Path:
@@ -815,8 +884,20 @@ def scan_inbox(drop_root: Path | None = None, *,
                 _move(sidecar, rejected_dir)
             # Written beside the file so Drive carries the reason back up to
             # whoever dropped it, instead of it living only in our logs.
+            #
+            # EVERY problem, not just the one the exception carries. A refusal
+            # that names one field at a time costs a round trip through Drive
+            # per field: on 2026-11-20 a re-send was refused for a
+            # `source_agent` the first refusal had never mentioned, because
+            # the first refusal stopped at the first problem it found.
+            problems = [str(x) for x in (getattr(exc, "problems", None) or [str(exc)])]
+            body = str(exc) if len(problems) == 1 else (
+                f"{problems[0]}\n\nAND these, in the same drop -- fix them all "
+                f"in one pass rather than one per re-send:\n"
+                + "\n".join(f"  - {x}" for x in problems[1:]))
+            record.problems = problems
             (rejected_dir / f"{moved.stem}.reason.txt").write_text(
-                f"Refused {record.received_at}\n\n{exc}\n", encoding="utf-8")
+                f"Refused {record.received_at}\n\n{body}\n", encoding="utf-8")
             manifest["rejected"].append(record.__dict__)
             continue
 
@@ -881,6 +962,37 @@ def _asset_for_sidecar(sidecar: Path) -> tuple[str, bool]:
     return f"{sidecar.stem}.<ext>", False
 
 
+_RESEND_SUFFIX = re.compile(r"^(?P<base>.+?)[._-]v(?P<n>\d+)$", re.IGNORECASE)
+_MOVE_STAMP_SUFFIX = re.compile(r"^(?P<base>.+)\.\d{8}-\d{6}$")
+
+
+def base_stem(stem: str) -> str:
+    """The POST a stem belongs to, with any re-send marker stripped.
+
+    Gemini names a retry after the attempt it replaces -- the live folder
+    holds `..._standoff`, `..._standoff_v2`, `_v3`, `_v4` -- and `_move`
+    appends a `.YYYYMMDD-HHMMSS` stamp when a name collides in `rejected/`.
+    Neither is a different post, but the ledger keyed everything by the raw
+    stem, so four attempts at one post counted as four unrelated drops and the
+    refusal history could not say "this same post has now failed three times".
+
+    Grouping on the agent's OWN convention rather than inventing one: it is
+    already doing this and already telling us, in the only place it can.
+    """
+    out = str(stem or "")
+    for _ in range(4):  # a stamped re-send can carry both markers
+        stamped = _MOVE_STAMP_SUFFIX.match(out)
+        if stamped:
+            out = stamped.group("base")
+            continue
+        resend = _RESEND_SUFFIX.match(out)
+        if resend:
+            out = resend.group("base")
+            continue
+        break
+    return out
+
+
 def _read_incomplete_ledger(path: Path) -> dict:
     payload = _read_json_file(Path(path))
     pending = payload.get("pending")
@@ -940,14 +1052,26 @@ def _incomplete_halves(inbox: Path) -> dict[str, dict]:
         except OSError:  # pragma: no cover - vanished mid-scan
             continue
         declared: dict = {}
+        problems: list[str] = []
         if sidecar is not None:
             try:
                 payload = json.loads(sidecar.read_text(encoding="utf-8"))
-                if isinstance(payload, dict):
-                    declared = {k: payload.get(k) for k in
-                                ("lane", "caption", "source_agent", "publish_at")}
-            except Exception:
-                declared = {}
+            except Exception as exc:
+                problems = [f"the sidecar json does not parse: {exc}"]
+                payload = None
+            if isinstance(payload, dict):
+                declared = {k: payload.get(k) for k in
+                            ("lane", "caption", "source_agent", "publish_at")}
+                # Every field rule, checked NOW rather than when the asset
+                # finally lands. One implementation, called with no media type
+                # because the asset is not here yet. This is what turns the
+                # waiting period into something useful: an agent can fix a
+                # missing `source_agent` while its video is still uploading,
+                # instead of learning about it on a second refusal hours later.
+                _values, problems = sidecar_field_values(payload,
+                                                         media_type=None)
+            elif payload is not None:
+                problems = ["the sidecar json must be an object"]
         out[stem] = {
             "stem": stem,
             "have": "asset" if asset is not None else "sidecar",
@@ -957,9 +1081,39 @@ def _incomplete_halves(inbox: Path) -> dict[str, dict]:
                               else _asset_for_sidecar(sidecar)[0]),
             "newest_half_at": newest,
             "declared": declared,
+            "sidecar_problems": problems,
             "_paths": [p for p in (asset, sidecar) if p is not None],
         }
     return out
+
+
+def _incomplete_extra_problems(found: dict) -> str:
+    """The rest of the refusal: what else is wrong, or what was not checked.
+
+    A refusal that names one problem at a time costs a round trip through
+    Drive per field, which is exactly what happened on 2026-11-20 -- the
+    missing asset was reported, the missing `source_agent` was not, and the
+    re-send was refused again for the field nobody had mentioned.
+
+    These come from `sidecar_field_values`, the same function `validate_drop`
+    raises from, so there is no second opinion that could disagree with it.
+    """
+    problems = [str(p) for p in (found.get("sidecar_problems") or [])]
+    if found.get("have") != "sidecar":
+        return ("NOTE: only the missing file was checked. Your sidecar is not "
+                "here, so none of its fields -- the caption, the lane, "
+                "source_agent, post_ready, publish_at -- have been read yet. "
+                "A re-send can still be refused for one of those.")
+    if not problems:
+        return ("The sidecar itself is fine: every field rule passes, so the "
+                "asset is the only thing missing. Its file type is the one "
+                "thing still unchecked, because that needs the file.")
+    listed = "\n".join(f"  - {p}" for p in problems)
+    return ("While you are re-sending, these would ALSO have been refused, so "
+            f"fix them in the same pass:\n{listed}\n\n"
+            "That is every field rule your sidecar breaks, not just the first "
+            "one. Only its file type is still unchecked, because that needs "
+            "the asset.")
 
 
 def _collect_incomplete_drops(drop_root: Path, inbox: Path, *,
@@ -991,7 +1145,8 @@ def _collect_incomplete_drops(drop_root: Path, inbox: Path, *,
     for stem in [s for s in pending if s not in live]:
         row = pending.pop(stem)
         history.append({
-            "stem": stem, "outcome": "completed", "at": stamp,
+            "stem": stem, "base_stem": base_stem(stem),
+            "outcome": "completed", "at": stamp,
             "scans_seen": int(row.get("scans_seen") or 0),
             "was_missing": row.get("missing"),
             "source_agent": (row.get("declared") or {}).get("source_agent"),
@@ -1004,7 +1159,8 @@ def _collect_incomplete_drops(drop_root: Path, inbox: Path, *,
         # cannot inflate each other's count.
         row["scans_seen"] = int(row.get("scans_seen") or 0) + 1
         row["last_seen_at"] = stamp
-        for key in ("have", "missing", "present_name", "expected_name", "declared"):
+        for key in ("have", "missing", "present_name", "expected_name",
+                    "declared", "sidecar_problems"):
             row[key] = found[key]
         age = current - found["newest_half_at"]
         row["newest_half_age_seconds"] = int(age)
@@ -1030,12 +1186,7 @@ def _collect_incomplete_drops(drop_root: Path, inbox: Path, *,
                 f"{INCOMPLETE_DROP_GRACE_SECONDS // 3600} hours and across "
                 f"{MIN_SCANS_BEFORE_REFUSING_INCOMPLETE} scans before giving "
                 f"up.\n\n"
-                f"NOTE: the rest of this drop has not been checked. Every "
-                f"other rule -- the caption, the lane, source_agent, "
-                f"post_ready, publish_at, the file type -- is checked only "
-                f"when both halves are present, by one validator, so there "
-                f"is no second opinion here that could disagree with it. A "
-                f"re-send can still be refused for a different reason.")
+                + _incomplete_extra_problems(found))
             rejected_dir = drop_root / REJECTED_DIR
             moved_name = None
             for item in found["_paths"]:
@@ -1049,7 +1200,8 @@ def _collect_incomplete_drops(drop_root: Path, inbox: Path, *,
             record["reason"] = reason
             pending.pop(stem, None)
             history.append({
-                "stem": stem, "outcome": "refused", "at": stamp,
+                "stem": stem, "base_stem": base_stem(stem),
+                "outcome": "refused", "at": stamp,
                 "scans_seen": int(row.get("scans_seen") or 0),
                 "was_missing": found["missing"],
                 "hours_waited": round(age / 3600.0, 1),
@@ -1091,10 +1243,22 @@ def _summarise_incomplete(pending: dict, history: list, *,
             parsed = parsed.astimezone()
         return (current - parsed).total_seconds() / 3600.0
 
+    refused = [h for h in history if str(h.get("outcome")) == "refused"]
+    completed = [h for h in history if str(h.get("outcome")) == "completed"]
+
     waiting = []
     for stem, row in sorted(pending.items()):
+        key = base_stem(stem)
+        prior = sum(1 for r in refused
+                    if str(r.get("base_stem") or base_stem(str(r.get("stem") or "")))
+                    == key)
         waiting.append({
             "stem": stem,
+            "post": key,
+            # How many earlier attempts at this same post were thrown away.
+            # A drop waiting for its second file is routine; the third attempt
+            # at the same post waiting again is a contract problem.
+            "prior_refusals": prior,
             "have": row.get("have"),
             "missing": row.get("missing"),
             "expected_name": row.get("expected_name"),
@@ -1111,9 +1275,6 @@ def _summarise_incomplete(pending: dict, history: list, *,
             "source_agent": (row.get("declared") or {}).get("source_agent"),
         })
 
-    refused = [h for h in history if str(h.get("outcome")) == "refused"]
-    completed = [h for h in history if str(h.get("outcome")) == "completed"]
-
     def _within(rows: list, days: float) -> list:
         out = []
         for row in rows:
@@ -1124,6 +1285,23 @@ def _summarise_incomplete(pending: dict, history: list, *,
 
     refused_7d = _within(refused, 7)
     completed_7d = _within(completed, 7)
+
+    # Attempts at the SAME POST, across the agent's re-send naming. Without
+    # this, four tries at one post read as four unrelated drops: the rate
+    # looked like a broad producer problem when it was one post bouncing, and
+    # a post that had failed three times was never named as such.
+    attempts: dict[str, dict] = {}
+    for row in refused:
+        key = str(row.get("base_stem") or base_stem(str(row.get("stem") or "")))
+        slot = attempts.setdefault(key, {"refused": 0, "stems": [],
+                                         "last_at": None, "last_missing": None})
+        slot["refused"] += 1
+        slot["stems"].append(str(row.get("stem") or ""))
+        slot["last_at"] = row.get("at")
+        slot["last_missing"] = row.get("was_missing")
+    repeat_offenders = sorted(
+        ({"post": k, **v} for k, v in attempts.items() if v["refused"] > 1),
+        key=lambda r: -int(r["refused"]))
     # The denominator is every incomplete drop that RESOLVED, not every drop
     # the lane ever saw: a complete drop was never half-arrived and does not
     # belong in this rate.
@@ -1143,6 +1321,14 @@ def _summarise_incomplete(pending: dict, history: list, *,
         "refused_rate_7d": (round(len(refused_7d) / resolved_7d, 3)
                             if resolved_7d else None),
         "refused_by_agent_7d": by_agent,
+        # Distinct questions: `refused_by_agent_7d` asks whether a PRODUCER is
+        # broken, this asks whether one POST keeps failing. A contract problem
+        # with a single post and an agent losing uploads look identical in a
+        # bare count ([[feedback_a_number_needs_its_denominator]]).
+        "repeat_offenders": repeat_offenders,
+        "distinct_posts_refused_7d": len({
+            str(r.get("base_stem") or base_stem(str(r.get("stem") or "")))
+            for r in refused_7d}),
         "grace_hours": INCOMPLETE_DROP_GRACE_SECONDS // 3600,
         "min_scans": MIN_SCANS_BEFORE_REFUSING_INCOMPLETE,
         "recent_refusals": refused[-5:],
@@ -1724,6 +1910,18 @@ time out, whichever half arrived is moved to `rejected/` with a
 `.incomplete.txt` beside it -- which means sending the missing half afterwards
 will not pair with anything. Send BOTH files again.
 
+**While a drop waits, we check the half that IS here and tell you everything
+wrong with it.** If your sidecar arrived first, `incomplete_this_scan` carries
+a `sidecar_problems` list naming every field rule it breaks -- all of them, not
+the first one -- so you can fix them and re-send the sidecar before the asset
+has even finished uploading. The same list appears in the refusal if the drop
+times out. Only the file type is left unchecked, because that needs the file.
+
+**Name a retry after the post it replaces** -- `duck_fact_v2`, `duck_fact_v3`
+-- which is what you already do. We group those, so a post that keeps failing
+is reported as one post with three attempts rather than three unrelated
+failures, and the operator sees that the problem is the post rather than you.
+
 This was learned expensively on 2026-11-20. An earlier version of this file
 told you to upload the asset first, and the lane then gave a lone sidecar 30
 minutes before refusing it -- against a scan that runs every 4 hours, so the
@@ -1947,6 +2145,9 @@ def write_status_file(drop_root: Path, proposals: dict,
              "state": r.get("state"),
              "scans_seen": r.get("scans_seen"),
              "hours_waiting": round((r.get("newest_half_age_seconds") or 0) / 3600.0, 1),
+             # Surfaced while it is still WAITING, so a field can be fixed
+             # before the other half even lands.
+             "sidecar_problems": r.get("sidecar_problems") or [],
              "reason": r.get("reason")}
             for r in (incomplete or []) if isinstance(r, dict)
         ],

@@ -10915,15 +10915,15 @@ Production proposal ledger byte-identical across both.
 - **The restored video has a deadline.** It arrived 11:03, so it crosses the
   8-hour grace around 19:03 and the 20:15 scan will refuse it if the sidecar
   has not landed. Correct behaviour, worth knowing.
-- **One refusal still does not name every problem.** The incomplete path
-  checks only the missing half, and says so. The fix, if ever worth it, is to
-  extract the sidecar-only field checks out of `validate_drop` so both paths
-  call ONE implementation — never to copy them.
+- ~~**One refusal still does not name every problem.**~~ **CLOSED by Surface
+  172 below**, by extraction rather than by copying.
 - **`notes` as a JSON object is `str()`-ed into the proposal.** Harmless but
   ugly; the contract says prose and the agent sent structure.
-- **Nothing reconciles a stem refused in `rejected/` against a later re-send
-  of the same stem.** `_move` de-duplicates with `_v2`, so a re-sent drop
-  becomes a new stem and the history does not connect them.
+- ~~**Nothing reconciles a stem refused in `rejected/` against a later
+  re-send.**~~ **CLOSED by Surface 172 below.** The note above was also wrong
+  about the mechanism: `_move` appends a `.YYYYMMDD-HHMMSS` stamp, not `_v2`.
+  The `_v2`/`_v3`/`_v4` pattern in the live folder is the AGENT's own retry
+  convention, which is what made grouping possible without inventing one.
 
 ## Surface 130 addendum — a live receipt pair with no declared policy (2026-11-20)
 
@@ -10944,3 +10944,121 @@ later and the drain is designed to clear a backlog over days (2/session x 3
 windows/day). A tighter window would alarm on the pacing rather than on a
 stall. The number is the operator's to change; the declaration is what the
 test requires.
+
+## Surface 172 — one refusal names every problem, and a re-send knows what it replaces (2026-11-20)
+
+Two items carried open from Surface 171, both closed the same day, both
+motivated by the same measured cost: **a round trip through Drive per field.**
+
+The sequence that paid for this. The incomplete-drop refusal reported the
+missing asset and said nothing about the sidecar sitting right next to it;
+Gemini re-sent, and the complete pair was then refused for a `source_agent`
+that no earlier message had ever mentioned. Two refusals, two waits, for two
+problems that were both knowable at the first one.
+
+### Part 1 — extract the field rules, never copy them
+
+`validate_drop` interleaved asset checks with sidecar-field checks and raised
+on the first failure, so the incomplete path (which has no asset) could not
+reuse any of it. The tempting fix — re-checking a few obvious fields in the
+incomplete path — would have given the lane TWO answers to "is this sidecar
+valid", and they would have disagreed the first time either changed. That is
+the same reason the claim, the publish window and the lane list each have
+exactly one home.
+
+`sidecar_field_values(meta, *, lanes=None, media_type=None)` is now the single
+implementation, returning `(normalised_fields, problems)`:
+
+| Reader | How it uses the result |
+|---|---|
+| `validate_drop` | raises `problems[0]`, so a single mistake produces the **byte-identical** message it always did |
+| the incomplete path | passes `media_type=None` (the asset is not here, so the one check needing it is skipped) and reports the whole list |
+
+Ordering is part of the contract: the checks run in the order they always did,
+so `problems[0]` is the refusal the old code would have raised and an agent
+fixing one field at a time never sees the messages reorder. A check whose input
+is already broken is skipped rather than guessed at.
+
+**The payoff is that a waiting drop gets told immediately.** A sidecar that
+arrives first now carries `sidecar_problems` in `status.json` naming every
+field rule it breaks, while its video is still uploading — instead of learning
+about it on a second refusal hours later. A test pins that those problems do
+**not** cause an early refusal: the drop is still incomplete, and the agent can
+re-send a corrected sidecar and keep the half that already landed.
+
+**And a complete pair gets it too**, which is the case a re-send actually hits.
+`DropRefused` now carries a `problems` list; `str(exc)` and the manifest's
+`reason` stay the first problem (several existing tests read exactly that),
+while the `.reason.txt` written into `rejected/` lists them all under "fix them
+all in one pass rather than one per re-send". A single-problem refusal writes
+an unchanged file — no list, no preamble, for the common case.
+
+Verified against the REAL artifact: Gemini's actual sidecar plus the actual
+video, run through a sandbox scan, produces exactly one problem
+(`source_agent`), so its re-send will succeed with that one field added. That
+is a measurement, not an inference from reading the code.
+
+### Part 2 — group a re-send with the post it replaces
+
+The Surface 171 note said `_move` de-duplicates with `_v2`. **That was wrong**
+— `_move` appends a `.YYYYMMDD-HHMMSS` stamp. The `_v2`/`_v3`/`_v4` names in
+the live `accepted/` folder (four versions of one holiday-standoff post) are
+the AGENT's own retry convention. Grouping on a convention it already follows,
+and already tells us about, beats inventing one and asking it to adopt it.
+
+`base_stem()` strips a trailing `_v<n>` (any of `_v2`, `.v2`, `-v10`, `_V3`)
+and a `_move` stamp, including both together. A positive control pins what it
+must NOT touch: `beer_vs_whiskey`, `duck_version`, `duck_v` and a bare `v2` are
+unchanged, because merging unrelated posts would make every busy week look like
+one broken post. Another test runs the four real live stems and asserts they
+collapse to one.
+
+What the grouping buys, all of it previously unanswerable:
+
+- `distinct_posts_refused_7d` beside `refused_7d` — two refusals of ONE post is
+  not two posts failing.
+- `repeat_offenders`, naming the post, its attempt count and the stems, so the
+  operator can find them.
+- `prior_refusals` on a waiting drop: a drop waiting for its second file is
+  routine, and the third attempt at the same post waiting again is not.
+
+**The card distinguishes the two diagnoses**, which a bare count never could:
+the same post failing repeatedly is a **contract problem with that post**;
+several different posts failing is a **producer problem**. The post-level
+diagnosis outranks the per-agent one because it is more specific, and a test
+pins that a single loss asserts neither — with one data point there is no
+pattern, and claiming one would be a guess.
+
+**Covered** — `tests/test_express_drop.py` (124 tests, +34): the extraction
+preserving `validate_drop`'s first-problem message and ordering; the
+asset-dependent check skipped when the asset is absent, with a positive control
+that a clean sidecar yields an empty list (a collector that always finds
+something is useless); all problems collected rather than the first; a waiting
+sidecar told immediately and NOT refused early; the status file carrying them;
+the refusal listing them; a clean sidecar told the asset is the only problem; a
+missing sidecar told its fields were never read; `base_stem` across five retry
+spellings plus four must-not-touch controls plus the real live stems; history
+recording the post a stem belongs to; two attempts at one post reported as one
+repeat offender; two different posts reported as neither; and a waiting drop
+knowing how often its post already failed. Plus
+`creative_agent/runtime/tests/test_drop_intake_cards.py` (78 tests, +5) for the
+two diagnoses, their precedence, and the single-loss control.
+
+**One assertion of mine was wrong and got fixed, not worked around.** A test
+asserted the media-vs-lane check was skipped by matching on the word
+"publishes" — which also appears in the `publish_at` refusal, so it matched the
+wrong message. Pinned on the distinctive phrase instead, and the fixture
+cleaned so the case under test is the only problem present.
+
+**Open after this surface:**
+- **`notes` as a JSON object is still `str()`-ed into the proposal**, producing
+  `"{'hook_status': ...}"` in the ledger. Harmless, ugly, and the contract says
+  prose while the agent sends structure — the honest fix is to accept both and
+  normalise, or refuse the object and say so.
+- **A re-send is grouped but not RECONCILED.** The ledger can say one post
+  failed three times; nothing marks the earlier attempts superseded, so
+  `rejected/` keeps every version with no pointer to the one that finally
+  worked.
+- **Nothing counts how many round trips a post took to be accepted.** The
+  repeat-offender count only sees refusals, so a post that bounced twice and
+  then succeeded reports two failures and no recovery.
