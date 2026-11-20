@@ -725,3 +725,133 @@ class TheAgentIsToldWhatActuallyHappened(_ExpressRoot):
     def test_the_contract_readme_explains_a_failed_publish(self):
         self.assertIn("publish_failed", drop_intake.MIRROR_DROP_README)
         self.assertIn("publish_error", drop_intake.MIRROR_DROP_README)
+
+
+class ASidecarWithNoAssetIsNotSilent(_ExpressRoot):
+    """Surface 171 — the orphan sidecar, found by the lane's first real use.
+
+    `scan_inbox` skips every `.json` in the inbox, on the correct grounds that
+    a sidecar is found THROUGH its asset. The consequence was that a sidecar
+    with no asset was invisible everywhere: never a proposal, so absent from
+    `status.json`'s `drops`; never refused, so absent from `rejected/`; and
+    skipped by the loop, so absent from the manifest. Measured 2026-11-19 —
+    Gemini wrote a sidecar for a post whose `.mp4` never arrived, and eleven
+    hours later nothing anywhere said so. The agent believed it had dropped a
+    post; we believed nothing had arrived.
+    """
+
+    def orphan(self, name: str = "post.mp4.json", *, age: int = 60,
+               body: dict | None = None) -> Path:
+        side = self.inbox / name
+        side.write_text(json.dumps(body if body is not None else {
+            "caption": "Beer duck or whiskey duck?",
+            "lane": drop_intake.EXPRESS_LANE,
+            "publish_at": "asap",
+            "post_ready": True,
+            "source_agent": "gemini-post-writer",
+        }), encoding="utf-8")
+        old = time.time() - age
+        os.utime(side, (old, old))
+        return side
+
+    def test_an_orphan_sidecar_is_reported_at_all(self):
+        self.orphan()
+        manifest = drop_intake.scan_inbox(self.root)
+        self.assertEqual(manifest["incomplete_count"], 1)
+        row = manifest["incomplete"][0]
+        self.assertEqual(row["expected_asset"], "post.mp4")
+        self.assertEqual(row["state"], "waiting_for_asset")
+
+    def test_it_is_not_counted_as_accepted_or_rejected(self):
+        # It is neither: an incomplete drop is a fourth outcome, and folding
+        # it into one of the other two would misreport both.
+        self.orphan()
+        manifest = drop_intake.scan_inbox(self.root)
+        self.assertEqual(manifest["accepted_count"], 0)
+        self.assertEqual(manifest["rejected_count"], 0)
+        self.assertEqual(manifest["waiting_count"], 0)
+
+    def test_inside_the_grace_window_it_is_left_alone(self):
+        # The asset may still be coming up from Drive, and a video is the slow
+        # half. Refusing a good drop because its file is large would be worse
+        # than waiting.
+        side = self.orphan(age=60)
+        drop_intake.scan_inbox(self.root)
+        self.assertTrue(side.is_file(), "a recent orphan must not be moved")
+
+    def test_past_the_grace_window_it_is_refused_with_a_readable_reason(self):
+        side = self.orphan(age=drop_intake.ORPHAN_SIDECAR_GRACE_SECONDS + 120)
+        manifest = drop_intake.scan_inbox(self.root)
+        self.assertFalse(side.is_file(), "a stale orphan should leave the inbox")
+        row = manifest["incomplete"][0]
+        self.assertEqual(row["state"], "refused")
+        self.assertIn("without its asset", row["reason"])
+        self.assertIn("post.mp4", row["reason"])
+        # The reason has to reach the agent, which means a file in rejected/.
+        reasons = list((self.root / drop_intake.REJECTED_DIR).glob("*.reason.txt"))
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("Re-send both", reasons[0].read_text())
+
+    def test_the_refusal_says_which_order_to_send_in(self):
+        # Actionable, not just descriptive: asset first, then sidecar, so a
+        # post is never read before its file is there.
+        self.orphan(age=drop_intake.ORPHAN_SIDECAR_GRACE_SECONDS + 120)
+        manifest = drop_intake.scan_inbox(self.root)
+        self.assertIn("upload the asset first", manifest["incomplete"][0]["reason"])
+
+    def test_a_sidecar_with_its_asset_is_not_an_orphan(self):
+        # Positive control. Without it this whole class could pass by calling
+        # every sidecar an orphan, which would refuse every real drop.
+        self.accept()
+        manifest = drop_intake.scan_inbox(self.root)
+        self.assertEqual(manifest["incomplete_count"], 0)
+
+    def test_the_bare_sidecar_spelling_finds_its_asset_too(self):
+        # `post.json` beside `post.png` is the other accepted spelling, and
+        # reading it as an orphan would refuse a drop that is complete.
+        asset = self.inbox / "post.png"
+        asset.write_bytes(PNG)
+        self.orphan("post.json")
+        old = time.time() - 300
+        os.utime(asset, (old, old))
+        manifest = drop_intake.scan_inbox(self.root)
+        self.assertEqual(manifest["incomplete_count"], 0)
+
+    def test_what_the_sidecar_declared_is_carried_back(self):
+        # So the operator reading the log, and the agent reading status.json,
+        # can see WHICH post is missing its file rather than only a filename.
+        self.orphan()
+        row = drop_intake.scan_inbox(self.root)["incomplete"][0]
+        self.assertEqual(row["declared"]["lane"], drop_intake.EXPRESS_LANE)
+        self.assertEqual(row["declared"]["source_agent"], "gemini-post-writer")
+
+    def test_an_unparseable_orphan_is_still_reported(self):
+        # A sidecar we cannot read is itself a message about the contract, and
+        # dropping it on a parse error is how the original blind spot worked.
+        side = self.inbox / "broken.mp4.json"
+        side.write_text("{not json", encoding="utf-8")
+        old = time.time() - 60
+        os.utime(side, (old, old))
+        manifest = drop_intake.scan_inbox(self.root)
+        self.assertEqual(manifest["incomplete_count"], 1)
+        self.assertEqual(manifest["incomplete"][0]["declared"], {})
+
+    def test_the_agent_status_file_lists_it(self):
+        # The channel that actually reaches the agent. It is listed nowhere
+        # else: not a proposal, so not in `drops`; not yet refused, so not in
+        # `refused_this_scan`.
+        self.orphan()
+        manifest = drop_intake.scan_inbox(self.root)
+        path = drop_intake.write_status_file(
+            self.root, {}, incomplete=manifest["incomplete"])
+        payload = json.loads(path.read_text())
+        rows = payload["incomplete_this_scan"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["expected_asset"], "post.mp4")
+        self.assertEqual(rows[0]["state"], "waiting_for_asset")
+        self.assertIn("incomplete_this_scan", payload["doc"])
+
+    def test_the_contract_tells_the_agent_to_send_the_asset_first(self):
+        self.assertIn("Upload the asset BEFORE the sidecar",
+                      drop_intake.MIRROR_DROP_README)
+        self.assertIn("waiting_for_asset", drop_intake.MIRROR_DROP_README)

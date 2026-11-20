@@ -303,6 +303,19 @@ MAX_SIDECAR_BYTES = 64 * 1024
 #: still arriving from Drive is never parsed as a complete one.
 QUIESCENT_SECONDS = 45
 
+#: How long a sidecar may sit with no asset beside it before it is refused.
+#: An agent writes the two halves separately, and a video is the slow half, so
+#: for a while "the asset is not here" means "it is still uploading" -- but
+#: only for a while. Measured 2026-11-19: Gemini wrote a sidecar for a post
+#: whose .mp4 never arrived, and eleven hours later nothing anywhere said so,
+#: because the scan skips .json files on the (correct) grounds that a sidecar
+#: is found through its asset. An orphan was therefore invisible to the
+#: manifest, to `rejected/`, and to the agent's own status file: it believed it
+#: had dropped a post, we believed nothing had arrived, and neither could see
+#: the other ([[feedback_a_clean_scan_is_only_as_wide_as_its_selection]] --
+#: zero findings describes which files the gate OPENED).
+ORPHAN_SIDECAR_GRACE_SECONDS = 30 * 60
+
 
 class DropRefused(RuntimeError):
     """A drop that may not become a proposal. Carries an operator-readable
@@ -793,10 +806,100 @@ def scan_inbox(drop_root: Path | None = None, *,
             "approval": "operator_required",
         })
 
+    # Sidecars with no asset. The loop above cannot see these by design -- it
+    # finds a sidecar THROUGH its asset -- so they need their own pass or they
+    # are reported nowhere at all.
+    manifest["incomplete"] = _collect_orphan_sidecars(drop_root, inbox, now=now)
+
     manifest["accepted_count"] = len(manifest["accepted"])
     manifest["rejected_count"] = len(manifest["rejected"])
     manifest["waiting_count"] = len(manifest["waiting"])
+    manifest["incomplete_count"] = len(manifest["incomplete"])
     return manifest
+
+
+def _asset_for_sidecar(sidecar: Path) -> tuple[str, bool]:
+    """(what asset this sidecar is waiting for, whether any such file exists).
+
+    Two spellings are accepted for a sidecar, so both are checked here:
+    `post.mp4.json` names its asset exactly, while a bare `post.json` matches
+    any `post.*` that is not itself a sidecar.
+    """
+    inner = Path(sidecar.stem)            # post.mp4.json -> post.mp4
+    if inner.suffix:                       # the exact-name spelling
+        return inner.name, (sidecar.parent / inner.name).is_file()
+    for sibling in sidecar.parent.iterdir():  # the bare spelling
+        if sibling == sidecar or sibling.is_dir():
+            continue
+        if sibling.suffix.lower() == ".json":
+            continue
+        if sibling.stem == sidecar.stem:
+            return sibling.name, True
+    return f"{sidecar.stem}.<ext>", False
+
+
+def _collect_orphan_sidecars(drop_root: Path, inbox: Path, *,
+                             now: float | None = None) -> list[dict]:
+    """Surface every sidecar whose asset is missing, and refuse the stale ones.
+
+    Inside the grace window this only REPORTS: the asset may still be on its
+    way up from Drive, and refusing a good drop because its video is large
+    would be worse than waiting. Past the window the sidecar is moved to
+    `rejected/` with a reason written beside it, which is the only channel
+    that reaches the agent that wrote it.
+    """
+    current = time.time() if now is None else now
+    out: list[dict] = []
+    for sidecar in sorted(inbox.iterdir()):
+        if sidecar.is_dir() or sidecar.name.startswith("."):
+            continue
+        if sidecar.suffix.lower() != ".json":
+            continue
+        expected, present = _asset_for_sidecar(sidecar)
+        if present:
+            continue  # the loop above owns it
+        try:
+            age = current - sidecar.stat().st_mtime
+        except OSError:  # pragma: no cover - vanished mid-scan
+            continue
+        declared: dict = {}
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                declared = {k: payload.get(k) for k in
+                            ("lane", "caption", "source_agent", "publish_at")}
+        except Exception:
+            declared = {}
+        row = {
+            "sidecar": sidecar.name,
+            "stem": Path(sidecar.stem).stem,
+            "expected_asset": expected,
+            "age_seconds": int(age),
+            "declared": declared,
+            "state": "waiting_for_asset",
+        }
+        if age > ORPHAN_SIDECAR_GRACE_SECONDS:
+            reason = (
+                f"the sidecar arrived without its asset. Nothing named "
+                f"\"{expected}\" is in {INBOX_DIR}/, and it has been "
+                f"{int(age // 60)} minutes. Both halves must land: upload the "
+                f"asset first, then the sidecar, so the post is never read "
+                f"before its file is there. Re-send both.\n\n"
+                f"NOTE: the rest of this sidecar has not been checked. Every "
+                f"other rule -- the caption, the lane, source_agent, "
+                f"post_ready, publish_at -- is checked only when both halves "
+                f"are present, by one validator, so there is no second "
+                f"opinion here that could disagree with it. A re-send can "
+                f"therefore still be refused for a different reason.")
+            rejected_dir = drop_root / REJECTED_DIR
+            moved = _move(sidecar, rejected_dir)
+            (rejected_dir / f"{moved.stem}.reason.txt").write_text(
+                f"Refused {datetime.now().astimezone().isoformat()}\n\n"
+                f"{reason}\n", encoding="utf-8")
+            row["state"] = "refused"
+            row["reason"] = reason
+        out.append(row)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1336,6 +1439,9 @@ misunderstanding every week.
 **`status.json`** — read this first, every time. It is rewritten on every
 scan and says what happened to every file you have sent:
 
+    waiting_for_asset     your sidecar is here and its asset is not, so
+                          this is not a post yet. Listed under
+                          `incomplete_this_scan`, refused after 30 minutes
     waiting_for_a_human   accepted, the operator has not decided yet
     approved              approved, waiting for its lane's run (or, on
                           express, for the next ten-minute pass)
@@ -1358,6 +1464,15 @@ scan and says what happened to every file you have sent:
 If a file you sent is not listed at all, it was refused before it became a
 proposal: look in `rejected/` for a `.reason.txt` with the same name. Those
 reasons are written for you, not for us -- they say what to change.
+
+**Upload the asset BEFORE the sidecar.** A sidecar whose asset is missing is
+not a post: it appears under `incomplete_this_scan` in `status.json` as
+`waiting_for_asset` while we assume the file is still coming up from Drive,
+and after 30 minutes it is refused with a reason in `rejected/`. Sending the
+two halves in that order means a drop is never read before its file is there,
+and it means an upload that silently failed shows up as a refusal you can act
+on rather than as a post that never happens. Measured 2026-11-19: a sidecar
+arrived whose `.mp4` never did, and for eleven hours nothing said so.
 
 Each drop also echoes `publish_at` as we resolved it, which is the field to
 check when a time did not land where you expected.
@@ -1501,6 +1616,7 @@ def _drop_state(entry: dict) -> tuple[str, str]:
 
 def write_status_file(drop_root: Path, proposals: dict,
                       *, refused: list[dict] | None = None,
+                      incomplete: list[dict] | None = None,
                       now: datetime | None = None) -> Path:
     """Publish what happened to every drop, where the agent can read it.
 
@@ -1544,7 +1660,10 @@ def write_status_file(drop_root: Path, proposals: dict,
         "doc": ("What happened to each file you dropped. Rewritten every scan. "
                 "`state` is one of: waiting_for_a_human, approved, scheduled, "
                 "published, publish_failed, declined, not_ready, "
-                "missed_window. `publish_failed` means a run took it and "
+                "missed_window. `incomplete_this_scan` lists sidecars whose "
+                "asset never arrived -- those are not posts yet and will be "
+                "refused if the file does not land. "
+                "`publish_failed` means a run took it and "
                 "every platform refused it: nothing was posted, it will not "
                 "be retried, and `publish_error` says why. If something "
                 "you sent is not listed at all it was refused before it "
@@ -1555,6 +1674,20 @@ def write_status_file(drop_root: Path, proposals: dict,
         "refused_this_scan": [
             {"asset": r.get("asset"), "reason": r.get("reason")}
             for r in (refused or []) if isinstance(r, dict)
+        ],
+        # A sidecar whose asset never arrived. Reported here because it can
+        # appear nowhere else: it never becomes a proposal, so it is absent
+        # from `drops` above, and until it is refused it is absent from
+        # `refused_this_scan` too. An agent that wrote one and saw nothing
+        # had no way to tell a lost upload from a post we simply had not got
+        # to yet.
+        "incomplete_this_scan": [
+            {"sidecar": r.get("sidecar"),
+             "expected_asset": r.get("expected_asset"),
+             "state": r.get("state"),
+             "minutes_waiting": int((r.get("age_seconds") or 0) // 60),
+             "reason": r.get("reason")}
+            for r in (incomplete or []) if isinstance(r, dict)
         ],
         "how_to_reply": (
             f"Write a .json, .md or .txt file into {FEEDBACK_DIR}/ to ask a "
@@ -1786,7 +1919,16 @@ def main(argv: list[str] | None = None) -> int:
     # an answer and an agent with no answer assumes the worst or repeats
     # itself.
     write_status_file(drop_root, proposals,
-                      refused=manifest.get("rejected") or [])
+                      refused=manifest.get("rejected") or [],
+                      incomplete=manifest.get("incomplete") or [])
+
+    # Loud about an orphan, because it is the one outcome that used to be
+    # reported nowhere ([[feedback_swallowed_errors_lie]]).
+    for row in manifest.get("incomplete") or []:
+        print(f"[drop-intake] INCOMPLETE {row.get('sidecar')}: no "
+              f"{row.get('expected_asset')} after "
+              f"{int((row.get('age_seconds') or 0) // 60)} min "
+              f"({row.get('state')})")
 
     print(f"[drop-intake] accepted={manifest.get('accepted_count', 0)} "
           f"rejected={manifest.get('rejected_count', 0)} "
