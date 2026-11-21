@@ -11597,3 +11597,55 @@ failure only, never on success, never raising, and really running here.
 - **Nothing reconciles `url_constructed_was`.** Older receipts across every
   lane still hold constructed Instagram URLs that do not resolve; only this
   run was corrected.
+
+## Surface 181 — the /new-flow audit the lane should have had first (2026-11-21)
+
+Operator: *"Seems you did a pretty bad job on this workflow. Should we have used a skill?"* Yes. The express lane was built across two days without invoking `/new-flow`, and this is what the checklist found when finally run against it.
+
+**Audit result: the CARDS were the strong part and the WIRING was the weak part** — the inverse of what I would have guessed, which is the whole argument for walking the list instead of trusting a sense of it.
+
+| Site | State before |
+|---|---|
+| 2 approval gate, 6 receipts, 12 two-card bracket, 13 TESTS.md, 15 launchd | ✅ |
+| 4 `DUCK_OPS_DECISION_GATEWAY_FLOWS` | ❌ |
+| 5 workflow control plane | ❌ zero express receipts in `state/workflow_control/` while a post was live |
+| 9 `duck_flows.py` FlowSpec | ❌ absent |
+| 11 `viewer_data.py` descriptions, 14 roadmap | ❌ |
+| 16 `/deploy-check`, 17 `/duck-bug-hunt` | ❌ never run |
+
+### What those omissions actually cost
+
+Sites 4, 5 and 10 compound into one operational hole: **the drop existed only in email and OS cards.** Measured before fixing — `review_queue.json` had no mention, `desk status` did not list it, `state/workflow_control/` had no receipt. So on 2026-11-20, when the digest did not fire and then an approval reply never arrived, **there was nowhere else to look.** The email-to-portal inversion exactly ([[feedback_email_to_portal_inversion]]).
+
+### Fixed
+
+**`build_drop_items`** puts every pending drop in the operator decision queue with a visible why, keyed on `drop::<lane>::<stem>` — the post's own identity, never a run id or directory, so a re-send cannot resolve its predecessor. It honours the auto/manual contract in BOTH directions ([[feedback_auto_manual_queue_contract]]): approved, declined and claimed drops stay out, and each exclusion has its own test.
+
+The why is operator-actionable, not descriptive: a missed window says *approving alone will NOT send it* and gives `drop approve <stem> now`; a `post_ready:false` drop says approval changes nothing; a weekly-lane drop gets no express timing copy, because it would be a lie there.
+
+**`_record_express_transition`** + **`_record_proposed`** put the lane on the shared control plane — `proposed` when the digest sends, `verified` on a confirmed publish carrying the permalinks, `blocked` on failure with a next action. `entity_id` is the STEM, not the run: a retry is the same workflow and a re-send is a different one.
+
+**A test caught a real gap in my own fix.** `publish_one` returns early on a render refusal and on a failed upload — the two failures where the drop is consumed and NOTHING was published, which is precisely what the Desk needs — and my first version recorded transitions only at the end, so those two exits had none. Extracted into `_record_blocked` and enumerated as a subTest over every exit ([[feedback_incomplete_fix_enumerate_all_branches]]).
+
+**`drops` FlowSpec**, carrying only what is true. Two fields are deliberately empty and the omissions are documented IN the spec so nobody fills them in later:
+
+- no `state_file`/probe keys — the probe reads `runs/<run_id>/<state_file>` keyed on the approval email's run id, and a drop's email carries `RUN:<date>` while its publish happens under `runs/express_<timestamp>/`. Declaring one would point reconciliation at a directory that never exists. `drops` therefore joins `non_publish_flows` in the contract test, with the reason.
+- no `reply_actions` — a `ReplyAction.text` is a FIXED mailto body and every drop command names its own stem. `drop_digest._reply_buttons` already builds per-stem actions through the SAME shared renderer, which is what the field exists to guarantee; a static tuple would be a second, unusable description. A test asserts the digest really does use the shared renderer, since the empty field rests on that claim.
+
+### Two of my own audit items were WRONG, and reading the code caught both before I wrote anything
+
+- **"`PILOT_PUBLISH_FLOWS += drops` makes it a queue artifact"** — no. That constant gates per-flow *publish-candidate builders*, and only `newduck` and `weekly_sale` have one. Adding `drops` there would have done nothing. The real producer is `build_review_items`.
+- **"FlowSpec needs `reply_actions`"** — no. The digest already uses the shared renderer with dynamic per-stem actions, which is better than a static tuple, not worse.
+
+This is the discipline working in the direction it failed all session: verify the shape fits *before* writing it.
+
+**Covered** — `tests/test_drops_in_operator_queue.py` (21 tests): a pending drop becoming an item, reachable through `build_review_items`, and SURFACING rather than sitting in the unsurfaced tail (three distinct failures, each its own test); the visible why; the exact reply; approved/declined/claimed each excluded; the missed-window and not-ready warnings; a weekly lane without express copy; absent and junk ledgers; the item cap; plus the FlowSpec's truthful fields and both documented omissions. And `duckAgent/tests/test_express_drop_publisher.py` (86 tests, +11) for verified/blocked, the entity being the post, a partial recording blocked not verified, side effect and verification carried, a bridge failure not failing the publish, the conftest no-op patch covering the module, and every failure exit recording exactly one transition.
+
+**Verified live**: the real builder against the real ledger returns 0 items because all five entries are approved or declined — and a positive control on a COPY of that ledger with one pending drop returns 1 item, surfaced, with the right reply command. Production ledger byte-identical throughout. Pollution check clean: no express receipts in the live `state/workflow_control/` after a full suite run.
+
+**Open after this surface (audit Tier 2/3, not yet done):**
+- **Express still reads credentials with `os.getenv` rather than importing `meta_helper`'s constants.** `flows/meme/steps.py` imports them; doing the same makes a wrong name impossible instead of merely caught. This is the fix for the bug that half-failed the first post.
+- **`_verify_published` uses raw `requests.get`**, a seam nothing else in the repo knows how to fake — which is exactly why a stub missed it and a real API call went out. Routing it through `make_request` puts it on the established channel.
+- **Sites 11 and 14 still open**: `viewer_data.py` friendly description, `master_roadmap.md` entry.
+- **`/duck-bug-hunt` has never run over this lane**, including before its first real post.
+- **The ratchet in `test_no_untimed_smtp.py` is keyed on `file:line`**, so any insertion above a grandfathered call reports it as new. Mine moved `review_loop.py:2917` to `:3009`; the call is unchanged.

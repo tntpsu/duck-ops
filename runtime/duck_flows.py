@@ -232,6 +232,38 @@ FLOWS: dict[str, FlowSpec] = {
         reply_actions=(ReplyAction("Reply Jeep Fact Publish", "jeepfact publish", "publish"),),
         handoff_actions={"approve": "publish", "needs_changes": "revise"},
     ),
+    "drops": FlowSpec(
+        name="drops",
+        # DELIBERATELY EMPTY, and each omission is a decision rather than an
+        # oversight -- filling them in would make this spec lie:
+        #
+        #   state_file / publish_status_key / publish_truthy_keys /
+        #   scheduled_at_keys: the publish-state probe reads
+        #   `runs/<run_id>/<state_file>`, keyed on the run id in the approval
+        #   email. A drop's approval email carries RUN:<date> while the
+        #   publish happens later under `runs/express_<timestamp>/`, so no
+        #   probe can join them. The drop ledger's own `publish_status` is the
+        #   authority for this lane (duck-ops/state/drop_proposals.json),
+        #   written by `record_publish_outcome` and read back from the
+        #   platform.
+        #
+        #   reply_actions: a ReplyAction's `text` is a FIXED mailto body, and
+        #   every drop command names its own stem (`drop approve <stem>`).
+        #   `drop_digest._reply_buttons` already builds per-stem actions
+        #   through the SAME shared renderer
+        #   (`helpers/email_reply_action_helper`), which is what this field
+        #   exists to guarantee -- so a static tuple here would be a second,
+        #   unusable description of buttons that already work.
+        handoff_actions={"approve": "publish", "decline": "revise"},
+        # DuckAgent's handle_mail_event listens on flow="drops" (main_agent
+        # line ~2123) and routes to duck-ops' own `apply_drop_text`.
+        handoff_target_flow="drops",
+        approval_meaning=(
+            "Approving publishes an outside agent's finished post. An "
+            "\"express\" drop goes out within about ten minutes; a weekly-lane "
+            "drop is published by that lane's next scheduled run instead of "
+            "the post it would have generated."),
+    ),
     "meme": FlowSpec(
         name="meme",
         state_file="state_meme.json",

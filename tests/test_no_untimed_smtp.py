@@ -69,7 +69,11 @@ UNREVIEWED = {
     "refresh_operator_surfaces.py:100",
     "repo_ci_status.py:111",
     "repo_ci_status.py:124",
-    "review_loop.py:2917",
+    # Was :2917 until 2026-11-21, when `build_drop_items` was inserted above
+    # it. The CALL is unchanged -- a line-keyed ratchet moves whenever
+    # anything is added earlier in the file, which is a known cost of keying
+    # on position rather than on the call.
+    "review_loop.py:3009",
     "review_reply_discovery.py:217",
     "review_reply_discovery.py:239",
     "secret_scan.py:92",

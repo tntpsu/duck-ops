@@ -518,6 +518,58 @@ def send(decision: dict, now: datetime | None = None) -> bool:
     return True
 
 
+def _record_proposed(decision: dict, *, now: datetime) -> None:
+    """Mark every drop this email asked about as `proposed`.
+
+    The shared workflow control plane is what the Business Desk reads for
+    follow-through, and the /new-flow checklist's minimum wiring is
+    "email sent -> proposed". Verified absent 2026-11-21: zero express
+    receipts in `state/workflow_control/` while a post was live, so the lane
+    was invisible there.
+
+    Cross-repo through duckAgent, the same way `_reply_buttons` already
+    reaches `email_reply_action_helper`. Never raises and never blocks the
+    send: the email is the job, this is bookkeeping about it.
+    """
+    stems = [str(s) for s in (decision.get("stems") or [])]
+    if not stems:
+        return
+    if str(os.environ.get(_TEST_MODE_ENV) or "").strip() in {"1", "true", "TRUE", "yes"}:
+        return
+    if str(DUCK_AGENT_ROOT) not in sys.path:
+        sys.path.insert(0, str(DUCK_AGENT_ROOT))
+    try:
+        from helpers.workflow_control_bridge import (  # type: ignore
+            record_shared_workflow_transition)
+    except Exception as exc:  # pragma: no cover - duckAgent absent
+        print(f"[drop-digest] WARNING no workflow transition: {exc}",
+              file=sys.stderr)
+        return
+    pending = {str(p.get("stem")): p for p in (decision.get("pending") or [])
+               if isinstance(p, dict)}
+    for stem in stems:
+        entry = pending.get(stem) or {}
+        try:
+            record_shared_workflow_transition(
+                workflow_id=f"express::{stem}",
+                lane=str(entry.get("lane") or "express"),
+                display_label=f"Express drop {stem}",
+                entity_id=stem,
+                run_id=now.strftime("%Y-%m-%d"),
+                state="proposed",
+                state_reason="approval_email_sent",
+                requires_confirmation=True,
+                next_action=f"Reply `drop approve {stem}` to publish it.",
+                metadata={"source_agent": entry.get("source_agent"),
+                          "media_type": entry.get("media_type"),
+                          "publish_at": entry.get("publish_at")},
+                history_summary="approval email sent",
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[drop-digest] WARNING transition not recorded for {stem}: "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -551,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
         decision = {**decision, "reason": "asked for it"}
 
     send(decision, now=now)
+    _record_proposed(decision, now=now)
     _write_state({
         "last_sent_at": now.isoformat(),
         "reason": decision["reason"],

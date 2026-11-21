@@ -1582,9 +1582,101 @@ def dedupe_trend_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
+#: An agent-dropped post waiting on the operator. MANUAL/gated lanes belong in
+#: the decision queue with a visible why, and auto lanes must stay out of it
+#: ([[feedback_auto_manual_queue_contract]]) -- express is as manual as a lane
+#: gets, because nothing writable from the drop folder can approve itself.
+#:
+#: Added 2026-11-21 after a /new-flow audit. The lane shipped with the digest
+#: email and four OS cards as its ONLY operator surfaces, so on 2026-11-20
+#: when the digest did not fire (it runs from the launchd wrapper, not the
+#: scan) and then an approval reply never arrived, there was nowhere else to
+#: look -- the drop existed in a ledger and on a card, and in no queue. That
+#: is the email-to-portal inversion exactly
+#: ([[feedback_email_to_portal_inversion]]): if the operator has to read an
+#: email to know something, the surface is wrong.
+MAX_DROP_OPERATOR_ITEMS = 10
+
+
+def build_drop_items(limit: int = MAX_DROP_OPERATOR_ITEMS) -> list[dict[str, Any]]:
+    """Pending agent drops as operator review items. Never raises.
+
+    Reads the DURABLE ledger, not the per-scan manifest: the manifest is
+    rewritten whole every four hours, so a queue built from it would empty
+    itself on the next scan that found nothing new.
+    """
+    items: list[dict[str, Any]] = []
+    try:
+        import drop_intake
+
+        proposals = drop_intake._read_ledger(drop_intake.DROP_PROPOSALS_PATH)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[review-loop] drop items unavailable: {exc}")
+        return items
+
+    for stem, entry in sorted((proposals or {}).items()):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("approval") or "") != "operator_required":
+            continue
+        if entry.get("claimed_by"):
+            continue
+        lane = str(entry.get("lane") or "")
+        ready = bool(entry.get("post_ready"))
+        caption = str(entry.get("caption") or "").strip()
+        received = str(entry.get("received_at") or "")
+        # The why, in the operator's terms. A queue entry with no reason is
+        # the thing the two-card bracket exists to avoid on cards, and it is
+        # no better here.
+        why = [
+            f"An outside agent ({entry.get('source_agent') or 'unknown'}) dropped "
+            f"a finished {entry.get('media_type') or 'post'} on the \"{lane}\" lane.",
+        ]
+        if lane == getattr(drop_intake, "EXPRESS_LANE", "express"):
+            window, when = drop_intake.publish_window(entry)
+            if window == "missed" and when is not None:
+                why.append(
+                    f"The time it asked for ({when.isoformat()}) has already "
+                    "passed, so approving it alone will NOT send it — release "
+                    f"it with `drop approve {stem} now`.")
+            elif window == drop_intake.PUBLISH_AT_ASAP:
+                why.append("It goes out within about ten minutes of approval.")
+            elif window == "scheduled" and when is not None:
+                why.append(f"It is held for {when.isoformat()} once approved.")
+        if not ready:
+            why.append("Its sidecar says post_ready:false, so no run will take "
+                       "it even if you approve — decline it or ask for a re-send.")
+        items.append({
+            # Keyed on the drop's own identity, never a directory or a run id:
+            # a re-sent drop is a different post and must not resolve this one
+            # (/new-flow Part 2 -- key the card on the THING).
+            "artifact_id": f"drop::{lane}::{stem}",
+            "concept_id": f"drop-concept::{stem}",
+            "artifact_type": "agent_drop",
+            "flow": "drops",
+            "run_id": received or now_iso(),
+            "created_at": received or now_iso(),
+            "title": caption[:80] or stem,
+            "theme": stem,
+            "decision": "needs_operator" if ready else "not_ready",
+            "review_status": "pending",
+            "human_review": "required",
+            "priority": "high" if ready else "medium",
+            "score": 0,
+            "reasoning": why,
+            "state_source": str(getattr(drop_intake, "DROP_PROPOSALS_PATH", "")),
+            "preview": caption[:280],
+            "action_frame": f"drop approve {stem}",
+        })
+        if len(items) >= max(1, int(limit)):
+            break
+    return items
+
+
 def build_review_items(state_bundle: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     items = build_quality_gate_items(state_bundle.get("quality_gate", {}))
     items.extend(build_trend_items(state_bundle.get("trend_ranker", {})))
+    items.extend(build_drop_items())
     items.sort(
         key=item_sort_key,
         reverse=True,

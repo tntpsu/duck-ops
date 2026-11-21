@@ -138,10 +138,21 @@ class FlowSpecContractTests(unittest.TestCase):
     def test_has_publish_state_partitions_correctly(self) -> None:
         """Flows that mutate external services directly without a
         per-run state file (shopify_seo, shopify_draft_activation,
-        design_brief_queue) must report has_publish_state == False so
+        design_brief_queue, drops) must report has_publish_state == False so
         the queue self-correction path skips them rather than trying
-        to read a nonexistent state file."""
-        non_publish_flows = {"shopify_seo", "shopify_draft_activation", "design_brief_queue"}
+        to read a nonexistent state file.
+
+        `drops` joined 2026-11-21. It is not that the lane has no state -- it
+        has a richer record than most, in duck-ops/state/drop_proposals.json
+        -- but that the state cannot be reached the way this probe reaches
+        one. The probe reads `runs/<run_id>/<state_file>` keyed on the run id
+        in the approval email, and a drop's email carries RUN:<date> while its
+        publish happens later under `runs/express_<timestamp>/`. Declaring a
+        state file would point reconciliation at a directory that never
+        exists, which is worse than declaring none.
+        """
+        non_publish_flows = {"shopify_seo", "shopify_draft_activation",
+                             "design_brief_queue", "drops"}
         for name, spec in duck_flows.FLOWS.items():
             if name in non_publish_flows:
                 self.assertFalse(
