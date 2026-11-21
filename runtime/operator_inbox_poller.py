@@ -47,6 +47,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tempfile
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header, make_header
@@ -503,12 +504,13 @@ def poll_inbox(*, dry_run: bool = False, limit: int = 25) -> list[dict[str, Any]
         _append_receipt(receipt)
         return [receipt]
 
-    client, _transport, error = connect_imap(settings)
+    client, error, attempts = _connect_with_retry(settings)
     if client is None:
         receipt = {
             "at": _now_iso(),
             "outcome": "imap_connect_failed",
             "reason": str(error or "unknown"),
+            "attempts": attempts,
         }
         _append_receipt(receipt)
         return [receipt]
@@ -545,6 +547,61 @@ def poll_inbox(*, dry_run: bool = False, limit: int = 25) -> list[dict[str, Any]
         print(f"[inbox-poller] WARNING reply-health state not written: {exc}",
               file=sys.stderr)
     return receipts
+
+#: Gmail refuses a connection when too many are already open -- Apple Mail on
+#: the same machine holds several, and the limit is per account, not per app.
+#: That refusal is TRANSIENT and it cost a full six-hour cycle on 2026-11-20:
+#: one `[ALERT] Too many simultaneous connections` at 18:16 meant an approval
+#: reply the operator had already sent went unread until the next run.
+#:
+#: Three attempts, backing off, is the whole fix. The budget is deliberately
+#: small: this runs inside a sidecar with other steps behind it, and a poller
+#: that hangs for minutes retrying is its own outage.
+IMAP_CONNECT_ATTEMPTS = 3
+IMAP_CONNECT_BACKOFF_SECONDS = (5.0, 15.0)
+
+
+def _connect_with_retry(settings: dict[str, Any], *,
+                        sleep=None,
+                        ) -> tuple[Any, str | None, list[dict[str, Any]]]:
+    """Connect, retrying a transient refusal. Returns (client, error, log).
+
+    Retries EVERY connect failure rather than matching on the error text. A
+    missing credential costs 20 wasted seconds once every six hours, which is
+    nothing; a string match that stops recognising Gmail's wording costs the
+    whole fix, silently ([[feedback_pin_the_rule_not_the_reading]]).
+    """
+    # Resolved at CALL time, not captured as a default: a default of
+    # `time.sleep` is bound when this function is defined, so patching
+    # `poller.time` cannot reach it and a test that thinks it stubbed the
+    # wait really waits twenty seconds (which is how this was found).
+    sleep = sleep or time.sleep
+    attempts: list[dict[str, Any]] = []
+    error: str | None = None
+    for index in range(max(1, IMAP_CONNECT_ATTEMPTS)):
+        client, _transport, error = connect_imap(settings)
+        attempts.append({
+            "at": _now_iso(),
+            "attempt": index + 1,
+            "ok": client is not None,
+            "error": None if client is not None else str(error or "unknown"),
+        })
+        if client is not None:
+            if index:
+                # Loud about a recovery too: a run that needed three tries is
+                # healthy today and a warning about tomorrow.
+                print(f"[operator-inbox-poller] connected on attempt "
+                      f"{index + 1} of {IMAP_CONNECT_ATTEMPTS}", file=sys.stderr)
+            return client, None, attempts
+        if index < IMAP_CONNECT_ATTEMPTS - 1:
+            delay = IMAP_CONNECT_BACKOFF_SECONDS[
+                min(index, len(IMAP_CONNECT_BACKOFF_SECONDS) - 1)]
+            print(f"[operator-inbox-poller] connect attempt {index + 1} "
+                  f"failed ({error}); retrying in {delay:.0f}s",
+                  file=sys.stderr)
+            sleep(delay)
+    return None, error, attempts
+
 
 #: Outcomes that mean THE MAILBOX WAS NEVER READ. A run that ends in one of
 #: these did not do its job, and until 2026-11-20 it still exited 0 -- so the

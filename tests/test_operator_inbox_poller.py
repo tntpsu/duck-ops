@@ -571,3 +571,100 @@ class AnUnreadMailboxIsAFailedRunTests(unittest.TestCase):
         self.assertIn("operator_inbox_poller.py", text)
         self.assertIn("poller_rc", text)
         self.assertIn("POLLER_FAILED", text)
+
+
+class ATransientRefusalIsRetriedTests(unittest.TestCase):
+    """Surface 178 — one refused connection cost a six-hour cycle.
+
+    Gmail refuses a connection when too many are already open, and the limit
+    is per ACCOUNT, not per app -- Apple Mail on the same machine holds
+    several. On 2026-11-20 that refusal at 18:16 meant an approval reply the
+    operator had already sent went unread until the next run.
+    """
+
+    def test_a_transient_refusal_is_retried_and_can_succeed(self):
+        calls: list[int] = []
+        slept: list[float] = []
+
+        def flaky(settings):
+            calls.append(1)
+            if len(calls) < 3:
+                return None, None, "[ALERT] Too many simultaneous connections."
+            return MagicMock(), "imap_ssl", None
+
+        with patch.object(poller, "connect_imap", flaky):
+            client, error, attempts = poller._connect_with_retry(
+                {"host": "h", "user": "u", "password": "p"},
+                sleep=slept.append)
+        self.assertIsNotNone(client)
+        self.assertIsNone(error)
+        self.assertEqual(len(attempts), 3)
+        self.assertTrue(attempts[-1]["ok"])
+        self.assertEqual(slept, list(poller.IMAP_CONNECT_BACKOFF_SECONDS))
+
+    def test_it_backs_off_rather_than_hammering(self):
+        # Retrying instantly cannot help a limit that clears as other
+        # connections close, and it would just spend the budget in one second.
+        self.assertTrue(all(d > 0 for d in poller.IMAP_CONNECT_BACKOFF_SECONDS))
+        self.assertEqual(len(poller.IMAP_CONNECT_BACKOFF_SECONDS),
+                         poller.IMAP_CONNECT_ATTEMPTS - 1)
+
+    def test_the_budget_stays_small(self):
+        # This runs inside a sidecar with other steps behind it, so a poller
+        # that hangs for minutes retrying is its own outage.
+        self.assertLessEqual(sum(poller.IMAP_CONNECT_BACKOFF_SECONDS), 60.0)
+
+    def test_an_exhausted_retry_still_reports_the_last_error(self):
+        with patch.object(poller, "connect_imap",
+                          lambda s: (None, None, "still refused")):
+            client, error, attempts = poller._connect_with_retry(
+                {"host": "h"}, sleep=lambda _d: None)
+        self.assertIsNone(client)
+        self.assertEqual(error, "still refused")
+        self.assertEqual(len(attempts), poller.IMAP_CONNECT_ATTEMPTS)
+        self.assertFalse(any(a["ok"] for a in attempts))
+
+    def test_the_wait_is_stubbable_at_all(self):
+        """Pins the call-time resolution.
+
+        With `sleep=time.sleep` as a DEFAULT, the reference is captured when
+        the function is defined, so `patch.object(poller.time, "sleep")` never
+        reaches it -- and a test that believes it stubbed the wait actually
+        waits the full backoff. The suite went from 0.2s to 20s, which is the
+        only reason it was noticed.
+        """
+        slept: list[float] = []
+        with patch.object(poller, "connect_imap",
+                          lambda s: (None, None, "refused")), \
+             patch.object(poller.time, "sleep", slept.append):
+            poller._connect_with_retry({"host": "h"})
+        self.assertEqual(slept, list(poller.IMAP_CONNECT_BACKOFF_SECONDS))
+
+    def test_a_first_try_success_sleeps_not_at_all(self):
+        # Positive control: the retry must not add latency to the normal case,
+        # which is every run but the rare one.
+        slept: list[float] = []
+        with patch.object(poller, "connect_imap",
+                          lambda s: (MagicMock(), "imap_ssl", None)):
+            client, _error, attempts = poller._connect_with_retry(
+                {"host": "h"}, sleep=slept.append)
+        self.assertIsNotNone(client)
+        self.assertEqual(attempts, [attempts[0]])
+        self.assertEqual(slept, [])
+
+    def test_the_attempt_log_reaches_the_receipt(self):
+        # So "it took three tries tonight" is visible after the fact rather
+        # than only in a log line nobody reads.
+        with patch.object(poller, "connect_imap",
+                          lambda s: (None, None, "refused")), \
+             patch.object(poller.time, "sleep", lambda _d: None), \
+             patch.object(poller, "_append_receipt", lambda r: None), \
+             patch.object(poller, "load_mailbox_settings",
+                          lambda c: {"enabled": True, "host": "h"}), \
+             patch.object(poller, "_trusted_operator_email",
+                          lambda: "op@example.com"), \
+             patch.object(poller, "_load_config", lambda: {}):
+            receipts = poller.poll_inbox()
+        self.assertEqual(receipts[0]["outcome"], "imap_connect_failed")
+        self.assertEqual(len(receipts[0]["attempts"]),
+                         poller.IMAP_CONNECT_ATTEMPTS)

@@ -11349,10 +11349,141 @@ dir is absent.
   Apple Mail's `maild` is running on this machine and the poller opens a
   connection every 6h; nothing counts concurrent connections or retries with
   backoff, so the next collision is a coin flip.
-- **The poller does not retry.** One refused connection costs a full 6-hour
-  cycle, which on this lane is the difference between a post going out tonight
-  and tomorrow morning.
+- ~~**The poller does not retry.**~~ **CLOSED by Surface 178 below.**
 - **duckAgent has no equivalent of
   `test_no_test_reaches_outside_its_own_checkout`.** Its CI caught the
   hardcoded path by failing; duck-ops catches it before the push. Porting the
   guard is a few lines and would have saved a red run today.
+
+## Surface 177 — the first real express post, and the line no test ever ran (2026-11-20)
+
+The lane published for real. Facebook took it; Instagram did not; and the two
+bugs behind that are the same bug.
+
+**The run itself worked.** Claimed 19:20:02, rendered the reel, uploaded poster
+and video to Shopify, published to Facebook (`554937081033679_1222779779967...`),
+recorded `partial` on the ledger 31 seconds later, and the Surface 170 card
+graded it `express_failed: 1, express_by_status: {partial: 1}` — correctly.
+
+### Bug 1 — a credential name that exists nowhere
+
+`_publish_instagram` read `IG_USER_ID`, falling back to `INSTAGRAM_USER_ID`.
+The name this repo uses is **`META_IG_USER_ID`** — 41 call sites to 2, and the
+only one in `.env`. The fallback chain made the line look thorough while
+guaranteeing it ended in nothing; both fallbacks are now gone, because a name
+set nowhere can only ever turn a clear missing-credential into a longer path to
+the same failure.
+
+**Thirty-one tests covered the Instagram path and every one patched
+`_publish_instagram`**, so the env read was the single line in that file
+nothing ever executed. A mock cannot test the name of the variable it replaces
+([[feedback_real_generation_test_beats_mocks]]).
+
+### Bug 2 — a successful post that writes no receipt
+
+`_receipt` read `result["post_id"]`. The real helper returns
+`{"status": "published_now", "creation_id": "...", "publish": {"id": "..."}}`
+— so a **successful** Instagram express post wrote no receipt at all and was
+invisible to the social performance collector forever, the lane's only way of
+measuring it. The test fakes returned `{"status": ..., "post_id": "ig-1"}`, a
+shape the real helper never produces. Now reads `publish.id` and `creation_id`
+too, and is LOUD when it finds no id rather than returning quietly.
+
+### Bug 3 — a partial with no reason
+
+The first real partial recorded `publish_error: ""`. The reason sat in
+`platform_results` and reached neither the ledger, the OS card, nor the
+producing agent's status file, so a half-public post looked like an
+unexplained one. The refusing platform's own error is now carried up.
+
+### The guard that would have caught bug 1
+
+`tests/test_required_credentials_are_declared.py`: every env var that is
+credential-shaped AND read next to a failure must be declared in
+`.env.example`. It works on a CI runner with no `.env`, because
+`.env.example` is tracked — and it does a second job, since a required
+credential nobody can discover from the example is one a fresh setup silently
+lacks. It immediately found **`META_PAGE_ACCESS_TOKEN`**: required by three
+lanes, absent from the example. Added.
+
+Scope is deliberately narrow, and the narrowing was MEASURED rather than
+assumed. A first pass flagged 41 "credential-shaped" names; reading them showed
+almost all are lane switches (`MEME_RENDER_PROVIDER`, `DUCKVIDEO_MODE`) read in
+one file and absent from the example **on purpose** — unset selects a default,
+which is the normal case. 177 of this repo's 286 env vars are that kind. The
+guard covers only the ones whose absence BREAKS something, with a positive
+control asserting the switches are *not* flagged.
+
+**The audit itself came back clean**: every required credential in
+`helpers/`, `flows/`, `scripts/` and `src/` resolves to a name `.env` provides.
+Express was the only instance, which is worth recording as a measurement
+rather than leaving as a worry.
+
+**Mutation-verified**: reintroducing `IG_USER_ID` fails four tests across two
+files. Without that check the guard is a claim.
+
+**Covered** — `duckAgent/tests/test_express_drop_publisher.py` (64 tests, +10)
+and `tests/test_required_credentials_are_declared.py` (5 tests + 9 subtests):
+the real function against the real names; the old names alone refusing; no
+invented name in the module; both real result shapes writing receipts, with a
+container id alone better than nothing, a failure still writing none, and a
+missing id being loud; a partial naming the platform and reason, reaching the
+ledger, with a status-only refusal still producing a reason and a full success
+producing none; and the declaration guard with its scan-coverage control, its
+would-have-caught-it assertion, and its lane-switch control.
+
+**The Instagram half was published after the fix** (reel `18650629855034493`),
+its receipt written with the corrected extractor, and the ledger moved to
+`published_now` on `['facebook', 'instagram']`.
+
+**Open after this surface:**
+- **An unintended real Meta API call was made while verifying.** The stub
+  targeted `post_instagram_image`, but `_publish_instagram` calls
+  `schedule_instagram_image_post` / `schedule_instagram_reel_post`, so the
+  patch did not apply and a live `/media` request went out. It failed on the
+  placeholder URL, so nothing was created — but the lesson is that patching by
+  guessed function name is not isolation, and this file has no single seam.
+- **Receipts record `content_type: None`** for both platforms. The value is
+  passed; something between here and the stored row drops it.
+- **Nothing verifies a published post still EXISTS.** Both ids are recorded and
+  never read back ([[feedback_verify_against_the_marketplace]]).
+
+## Surface 178 — a refused connection no longer costs six hours (2026-11-20)
+
+Closing the Surface 176 item. Gmail refuses a connection when too many are
+already open, and the limit is per ACCOUNT, not per app — Apple Mail on the
+same machine holds several. That refusal is transient, and one instance of it
+at 18:16 meant an approval reply the operator had already sent went unread
+until the next 6-hourly run.
+
+Three attempts with a 5s then 15s backoff, inside the poller rather than in the
+shared `connect_imap` (which `phase1_observer` also calls — a wider blast
+radius than the measurement justified). Every connect failure is retried
+rather than matching on the error text: a missing credential costs 20 wasted
+seconds once every six hours, which is nothing, while a string match that stops
+recognising Gmail's wording costs the whole fix, silently
+([[feedback_pin_the_rule_not_the_reading]]). The per-attempt log lands on the
+refusal receipt, so "it took three tries tonight" is visible after the fact,
+and a recovery on attempt 2 or 3 prints to stderr — healthy today, a warning
+about tomorrow.
+
+**A test caught a real defect in the test itself.** `sleep=time.sleep` as a
+default argument is bound when the function is defined, so
+`patch.object(poller, "time", ...)` could not reach it and the suite really
+waited 20 seconds while believing it had stubbed the wait. Resolved at call
+time now, and pinned by `test_the_wait_is_stubbable_at_all`. The only reason it
+was noticed is that the file's runtime went from 0.2s to 20s.
+
+**Covered** — `tests/test_operator_inbox_poller.py` (47 tests, +13): a
+transient refusal retried and succeeding on the third attempt; the backoff
+being non-zero and sized to the attempt count; the total budget bounded (this
+runs inside a sidecar with steps behind it, so a poller that hangs for minutes
+is its own outage); an exhausted retry still reporting the last error; a
+first-try success sleeping not at all; the attempt log reaching the receipt;
+and the stubbability pin.
+
+**Open after this surface:**
+- **Why so many IMAP connections were open is still unexplained.** Nothing
+  counts them, and Apple Mail's `maild` runs on the same account.
+- **`phase1_observer` has no retry**, and it polls the same mailbox against
+  the same per-account limit.
