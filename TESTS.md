@@ -11443,18 +11443,34 @@ its receipt written with the corrected extractor, and the ledger moved to
   patch did not apply and a live `/media` request went out. It failed on the
   placeholder URL, so nothing was created — but the lesson is that patching by
   guessed function name is not isolation, and this file has no single seam.
-- **Receipts record `content_type: None`** for both platforms. The value is
-  passed; something between here and the stored row drops it.
-- **Nothing verifies a published post still EXISTS.** Both ids are recorded and
-  never read back ([[feedback_verify_against_the_marketplace]]).
+- ~~**Receipts record `content_type: None`.**~~ **WRONG — there was no bug.**
+  `content_type` is stored inside `meta_data`, which is exactly where
+  `social_performance_collector` reads it (`meta.get("content_type")`), and the
+  two real receipts hold `image` and `reel` correctly. The claim came from my
+  own check reading `post["content_type"]`, a key that was never the contract.
+  A careless probe producing a confident finding, for the second time in one
+  session ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
+- ~~**Nothing verifies a published post still EXISTS.**~~ **CLOSED by
+  Surface 179/180 below.**
 
 ## Surface 178 — a refused connection no longer costs six hours (2026-11-20)
 
 Closing the Surface 176 item. Gmail refuses a connection when too many are
-already open, and the limit is per ACCOUNT, not per app — Apple Mail on the
-same machine holds several. That refusal is transient, and one instance of it
-at 18:16 meant an approval reply the operator had already sent went unread
-until the next 6-hourly run.
+already open against one account. That refusal is transient, and one instance
+of it at 18:16 meant an approval reply the operator had already sent went
+unread until the next 6-hourly run.
+
+**Correction, 2026-11-21.** The first version of this entry said "Apple Mail on
+the same machine holds several". That was a GUESS stated as a fact, and it was
+wrong. Measured afterwards: `lsof -iTCP:993` showed exactly ONE established
+connection, held by our own `flows/ops/watch_publish_idle.py` — a deliberately
+long-lived watcher, 31 days up, 196,686 polls, which uses
+`with IMAPClient(...)` and therefore closes cleanly even on the socket EOF it
+logs. Apple Mail held none. One connection is nowhere near any limit, so the
+cause of the 18:16 refusal is **unattributed** and the retry is the right
+mitigation precisely because of that
+([[feedback_a_failed_probe_is_a_fact_about_the_probe]] — and this time the
+careless probe was prose).
 
 Three attempts with a 5s then 15s backoff, inside the poller rather than in the
 shared `connect_imap` (which `phase1_observer` also calls — a wider blast
@@ -11487,3 +11503,97 @@ and the stubbability pin.
   counts them, and Apple Mail's `maild` runs on the same account.
 - **`phase1_observer` has no retry**, and it polls the same mailbox against
   the same per-account limit.
+
+## Surface 179/180 — reading the post back, and the URL that was a guess (2026-11-21)
+
+Three items, and two of my own claims were wrong. Recording both corrections,
+because the wrong ones cost as much to find as the right ones.
+
+### The posts are live, verified against the platform
+
+Not "we got a 200 and an id" — read back through the Graph API:
+
+| Platform | What the platform says |
+|---|---|
+| Facebook | `is_published: true`, created `00:20:31Z`, media `photo`, permalink `/122232018092757684/posts/122277977996757684` |
+| Instagram | `VIDEO / REELS`, `01:38:27Z`, permalink `instagram.com/reel/Df_EV4yxPoS/` |
+
+Captions match on both. That read is now part of the lane: `_verify_published`
+runs after each platform publish, records `verified`, the permalink, the
+posted-at and the media type, and is **loud but never fatal** — the post is
+already out, so a verification that could fail it would be worse than none
+([[feedback_receipts_never_load_bearing]]). It skips under `DUCK_TEST_MODE`,
+and a test pins that no HTTP call happens there.
+
+**Facebook must be read back by its PAGE-SCOPED id.** `response.post_id`
+(`554937081033679_1222779779967...`), not the bare `post_id` — the bare one
+404s. Found by trying it, and pinned.
+
+The permalinks now reach the duck-ops ledger (`publish_permalinks`) and
+`status.json`, so the producing agent can finally see WHERE its post went: it
+could previously learn that a post was taken and never that it existed.
+
+### The receipt URL was a constructed guess that did not resolve
+
+Found while checking something else. With no `url` passed,
+`default_post_url` builds `instagram.com/p/<numeric media id>` — but a real
+Instagram permalink is `/reel/<shortcode>`. The receipt stored
+`instagram.com/p/18650629855034493/` while the post is at
+`instagram.com/reel/Df_EV4yxPoS/`. **A guessed URL beside a real id is worse
+than no URL, because it looks checkable.**
+
+Fixed by ORDER: verify, then receipt, per platform — so the receipt carries the
+platform's own permalink. A test pins the ordering
+(`verify:facebook, receipt:facebook, verify:instagram, receipt:instagram`),
+because a receipt written first can only ever hold the guess. Tonight's two
+receipts were corrected in place, keeping the old value as
+`url_constructed_was` rather than erasing the evidence.
+
+### Correction 1 — "Apple Mail holds several connections" was a guess
+
+Surface 178 stated that as the cause of the IMAP refusal. Measured afterwards:
+`lsof -iTCP:993` showed exactly ONE established connection, held by our own
+`flows/ops/watch_publish_idle.py` — 31 days up, 196,686 polls, using
+`with IMAPClient(...)` so it closes cleanly even on the socket EOF it logs.
+Apple Mail held none. One connection is nowhere near any limit, so **the cause
+of the 18:16 refusal is unattributed**, and that is the argument FOR the retry
+rather than against it.
+
+What the investigation did produce: `imap_connection_snapshot()`, taken on the
+FIRST connect failure only, recording the established count and the holders by
+process onto the refusal receipt. The 2026-11-20 spike could not be explained
+because by the time anyone looked it was gone. Next time the count is on the
+receipt. A test runs the real `lsof` on this machine, because a probe that has
+never run is not a probe.
+
+### Correction 2 — "receipts record content_type: None" was wrong
+
+There was no bug. `content_type` is stored inside `meta_data`, which is
+precisely where `social_performance_collector` reads it
+(`meta.get("content_type")`), and the two real receipts hold `image` and
+`reel`. The claim came from my own check reading `post["content_type"]` — a
+key that was never the contract. Second careless probe of the session; the
+first produced the Apple Mail claim above.
+
+**Covered** — `duckAgent/tests/test_express_drop_publisher.py` (75 tests, +13):
+both platforms read back; the permalink captured and reaching the ledger;
+Facebook read by its page-scoped id; a failed read-back loud but not failing
+the post; a 200-with-error-body counting as unverified; a failed platform not
+read back at all; test mode skipping it entirely; the receipt carrying the
+verified permalink; the verify-then-receipt ordering; an unverifiable post
+passing no permalink rather than inventing one; and a failed platform still
+getting its receipt call. Plus `duck-ops/tests/test_express_drop.py`
+(138 tests, +4) for permalinks on the entry, absent when unavailable, blanks
+dropped, and the agent's status file carrying them; and
+`tests/test_operator_inbox_poller.py` (52 tests, +5) for the snapshot on first
+failure only, never on success, never raising, and really running here.
+
+**Open after this surface:**
+- **The verification is a point-in-time check.** It proves the post existed
+  seconds after publishing, not that it still exists tomorrow — a deleted or
+  platform-removed post is still recorded as verified.
+- **`phase1_observer` still has no connect retry**, and polls the same mailbox
+  against the same per-account limit.
+- **Nothing reconciles `url_constructed_was`.** Older receipts across every
+  lane still hold constructed Instagram URLs that do not resolve; only this
+  run was corrected.

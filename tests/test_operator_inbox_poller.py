@@ -668,3 +668,62 @@ class ATransientRefusalIsRetriedTests(unittest.TestCase):
         self.assertEqual(receipts[0]["outcome"], "imap_connect_failed")
         self.assertEqual(len(receipts[0]["attempts"]),
                          poller.IMAP_CONNECT_ATTEMPTS)
+
+
+class AFailedConnectRecordsWhatWasOpenTests(unittest.TestCase):
+    """Surface 180 — the 18:16 refusal could not be explained afterwards.
+
+    By the time anyone looked, the spike was gone: `lsof -iTCP:993` showed a
+    single connection, held by our own long-lived publish watcher, which
+    closes cleanly. So the stated cause in the first write-up ("Apple Mail
+    holds several") was a guess, and it was wrong. A count taken at the moment
+    of failure is the one observation that settles it next time.
+    """
+
+    def test_a_snapshot_is_taken_on_the_first_failure(self):
+        with patch.object(poller, "connect_imap",
+                          lambda s: (None, None, "refused")), \
+             patch.object(poller, "imap_connection_snapshot",
+                          lambda: {"established": 14, "by_process": {"Mail": 13}}), \
+             patch.object(poller.time, "sleep", lambda _d: None):
+            _client, _error, attempts = poller._connect_with_retry({"host": "h"})
+        self.assertEqual(attempts[0]["connections"]["established"], 14)
+
+    def test_it_is_taken_only_once(self):
+        # By the third attempt the picture has changed, and the question is
+        # what was open when it refused.
+        taken: list[int] = []
+        with patch.object(poller, "connect_imap",
+                          lambda s: (None, None, "refused")), \
+             patch.object(poller, "imap_connection_snapshot",
+                          lambda: taken.append(1) or {"established": 1}), \
+             patch.object(poller.time, "sleep", lambda _d: None):
+            _c, _e, attempts = poller._connect_with_retry({"host": "h"})
+        self.assertEqual(len(taken), 1)
+        self.assertNotIn("connections", attempts[-1])
+
+    def test_a_successful_connect_takes_no_snapshot(self):
+        # It costs an lsof subprocess; the normal path must not pay for it.
+        with patch.object(poller, "imap_connection_snapshot",
+                          lambda: self.fail("must not snapshot on success")), \
+             patch.object(poller, "connect_imap",
+                          lambda s: (MagicMock(), "imap_ssl", None)):
+            client, _error, attempts = poller._connect_with_retry({"host": "h"})
+        self.assertIsNotNone(client)
+        self.assertNotIn("connections", attempts[0])
+
+    def test_the_snapshot_never_raises(self):
+        # Evidence capture must not fail the thing it documents.
+        with patch("subprocess.run", side_effect=OSError("lsof missing")):
+            out = poller.imap_connection_snapshot()
+        self.assertIn("detail", out)
+        self.assertIn("lsof missing", out["detail"])
+
+    def test_the_real_snapshot_runs_on_this_machine(self):
+        # A probe that has never run is not a probe
+        # ([[feedback_a_failed_probe_is_a_fact_about_the_probe]]).
+        out = poller.imap_connection_snapshot()
+        if "detail" in out:
+            self.skipTest(f"lsof unavailable here: {out['detail']}")
+        self.assertIsInstance(out["established"], int)
+        self.assertIsInstance(out["by_process"], dict)

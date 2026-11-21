@@ -1731,6 +1731,7 @@ def record_publish_outcome(stem: str, *, status: str,
                            platforms: Any = (),
                            error: str = "",
                            run_id: str = "",
+                           permalinks: Any = None,
                            at: datetime | None = None,
                            ledger_path: Path | None = None) -> dict:
     """Record what the platforms did with an already-claimed drop.
@@ -1767,6 +1768,12 @@ def record_publish_outcome(stem: str, *, status: str,
     entry["publish_platforms"] = [str(p) for p in (platforms or [])]
     entry["publish_error"] = str(error or "")
     entry["publish_run_id"] = str(run_id or "")
+    # Where the post actually IS, read back from the platform rather than
+    # inferred from a 200. The operator wants the link, and the producing
+    # agent has never had any way to see its own published work.
+    if permalinks:
+        entry["publish_permalinks"] = {str(k): str(v) for k, v in
+                                       dict(permalinks).items() if v}
     _write_ledger(path, proposals)
     return {**entry, "stem": stem}
 
@@ -2230,6 +2237,9 @@ def write_status_file(drop_root: Path, proposals: dict,
             "publish_status": entry.get("publish_status") or None,
             "publish_error": entry.get("publish_error") or None,
             "published_on": entry.get("publish_platforms") or None,
+            # Read back from the platform after publishing, so this is where
+            # the post IS -- not where we believe we sent it.
+            "permalinks": entry.get("publish_permalinks") or None,
         }
     payload = {
         "generated_at": now.isoformat(),

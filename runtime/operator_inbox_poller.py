@@ -548,8 +548,12 @@ def poll_inbox(*, dry_run: bool = False, limit: int = 25) -> list[dict[str, Any]
               file=sys.stderr)
     return receipts
 
-#: Gmail refuses a connection when too many are already open -- Apple Mail on
-#: the same machine holds several, and the limit is per account, not per app.
+#: Gmail refuses a connection when too many are already open against one
+#: account. WHY there were too many on 2026-11-20 is unknown: measured right
+#: after, `lsof -iTCP:993` showed a single connection, held by our own
+#: long-lived publish watcher, which closes cleanly. So the spike was
+#: transient and unattributed -- which is the argument FOR a retry rather than
+#: against one, and the argument for the snapshot below.
 #: That refusal is TRANSIENT and it cost a full six-hour cycle on 2026-11-20:
 #: one `[ALERT] Too many simultaneous connections` at 18:16 meant an approval
 #: reply the operator had already sent went unread until the next run.
@@ -559,6 +563,36 @@ def poll_inbox(*, dry_run: bool = False, limit: int = 25) -> list[dict[str, Any]
 #: that hangs for minutes retrying is its own outage.
 IMAP_CONNECT_ATTEMPTS = 3
 IMAP_CONNECT_BACKOFF_SECONDS = (5.0, 15.0)
+
+
+def imap_connection_snapshot() -> dict[str, Any]:
+    """Who holds an IMAP connection right now, by process.
+
+    Recorded ONLY when a connect fails, and only to make the NEXT occurrence
+    attributable. The 2026-11-20 refusal could not be explained after the
+    fact: by the time anyone looked, the spike was gone and a single
+    connection was open. A count taken at the moment of failure is the one
+    observation that would have settled it.
+
+    Never raises and never blocks the retry: this is evidence gathering, and
+    evidence capture must not fail the thing it documents
+    ([[feedback_receipts_never_load_bearing]]).
+    """
+    out: dict[str, Any] = {"at": _now_iso()}
+    try:
+        import collections
+        import subprocess
+
+        proc = subprocess.run(
+            ["lsof", "-nP", "-iTCP:993", "-sTCP:ESTABLISHED"],
+            capture_output=True, text=True, timeout=10, check=False)
+        lines = [ln for ln in proc.stdout.splitlines()[1:] if ln.strip()]
+        by_command = collections.Counter(ln.split()[0] for ln in lines)
+        out["established"] = len(lines)
+        out["by_process"] = dict(by_command)
+    except Exception as exc:  # noqa: BLE001
+        out["detail"] = f"{type(exc).__name__}: {exc}"
+    return out
 
 
 def _connect_with_retry(settings: dict[str, Any], *,
@@ -593,6 +627,10 @@ def _connect_with_retry(settings: dict[str, Any], *,
                 print(f"[operator-inbox-poller] connected on attempt "
                       f"{index + 1} of {IMAP_CONNECT_ATTEMPTS}", file=sys.stderr)
             return client, None, attempts
+        # Taken on the FIRST failure only: by the third attempt the picture
+        # has changed, and the question is what was open when it refused.
+        if not index:
+            attempts[-1]["connections"] = imap_connection_snapshot()
         if index < IMAP_CONNECT_ATTEMPTS - 1:
             delay = IMAP_CONNECT_BACKOFF_SECONDS[
                 min(index, len(IMAP_CONNECT_BACKOFF_SECONDS) - 1)]

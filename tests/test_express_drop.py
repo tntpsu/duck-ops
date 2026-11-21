@@ -1614,3 +1614,65 @@ class TheScanSaysItDoesNotMailAnyone(_ExpressRoot):
         with contextlib.redirect_stdout(buf):
             drop_intake.main(["--drop-root", str(self.root)])
         self.assertNotIn("sends no email", buf.getvalue())
+
+
+class ThePermalinkIsRecordedWhereBothSidesReadTests(_ExpressRoot):
+    """Surface 179 — "published" meant "Meta returned an id".
+
+    The lane recorded two post ids and read neither back. Three times this
+    system has recorded a successful write a platform had not stored
+    ([[feedback_verify_against_the_marketplace]]), so an id is not proof.
+    """
+
+    def claimed(self) -> None:
+        self.accept()
+        drop_intake.set_approval("post", True, ledger_path=self.ledger)
+        drop_intake.claim_for_lane(drop_intake.EXPRESS_LANE,
+                                   claimed_by="express::run1",
+                                   ledger_path=self.ledger)
+
+    def entry(self) -> dict:
+        return json.loads(self.ledger.read_text())["proposals"]["post"]
+
+    def test_permalinks_are_stored_on_the_entry(self):
+        self.claimed()
+        drop_intake.record_publish_outcome(
+            "post", status="published_now",
+            platforms=["facebook", "instagram"],
+            permalinks={"facebook": "https://facebook.com/p/1",
+                        "instagram": "https://instagram.com/reel/abc"},
+            ledger_path=self.ledger)
+        links = self.entry()["publish_permalinks"]
+        self.assertEqual(links["instagram"], "https://instagram.com/reel/abc")
+
+    def test_an_outcome_without_permalinks_stores_nothing(self):
+        # A verification that could not run must not leave an empty dict that
+        # reads as "verified, no links".
+        self.claimed()
+        drop_intake.record_publish_outcome(
+            "post", status="published_now", platforms=["facebook"],
+            ledger_path=self.ledger)
+        self.assertNotIn("publish_permalinks", self.entry())
+
+    def test_a_blank_link_is_dropped_rather_than_stored(self):
+        self.claimed()
+        drop_intake.record_publish_outcome(
+            "post", status="partial", platforms=["facebook"],
+            permalinks={"facebook": "https://facebook.com/p/1",
+                        "instagram": ""},
+            ledger_path=self.ledger)
+        self.assertEqual(list(self.entry()["publish_permalinks"]), ["facebook"])
+
+    def test_the_agent_status_file_carries_them(self):
+        # The producing agent has never had any way to see its own published
+        # work -- it could learn that a post was TAKEN and never where it went.
+        self.claimed()
+        drop_intake.record_publish_outcome(
+            "post", status="published_now", platforms=["instagram"],
+            permalinks={"instagram": "https://instagram.com/reel/abc"},
+            ledger_path=self.ledger)
+        proposals = json.loads(self.ledger.read_text())["proposals"]
+        payload = json.loads(
+            drop_intake.write_status_file(self.root, proposals).read_text())
+        self.assertEqual(payload["drops"]["post"]["permalinks"],
+                         {"instagram": "https://instagram.com/reel/abc"})
