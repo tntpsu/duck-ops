@@ -11277,3 +11277,82 @@ empty payload and a distinct-question check against the approval card.
   the same as a scan nobody ran.
 - **Nothing verifies a reply was UNDERSTOOD.** `operator_reply_health.json`
   records refusals, and the card reads only its freshness.
+
+## Surface 176 — the poller read nothing and called it a success (2026-11-20)
+
+Operator: *"I sent the approval email. Why isn't that working?"*
+
+The reply was sent. The lane never saw it, and every surface said the lane was
+healthy.
+
+**What the sidecar log showed**, once read instead of assumed:
+
+```
+[18:14:58] STEP  duck_ops_sidecar :: inbox_poller
+[
+  {
+    "at": "2026-11-20T18:16:14",
+    "outcome": "imap_connect_failed",
+    "reason": "imap_ssl@993: b'[ALERT] Too many simultaneous connections. (Failure)';
+               imap_starttls@143: [Errno 65] No route to host"
+  }
+]
+[18:19:10] END   duck_ops_sidecar :: exit=0
+```
+
+Gmail refused the connection, the poller read zero messages, and
+`operator_inbox_poller.main()` returned **0** — as it did for every outcome,
+unconditionally. So:
+
+- the sidecar wrapper's own `poller_rc` check never fired (it greps for a
+  non-zero code and prints `POLLER_FAILED`; it had simply never been given
+  one);
+- `scheduler_health` graded the run healthy;
+- `operator_reply_health.json` was not written, so its `generated_at` stayed
+  at 12:27 — which is the ONE signal that did degrade, and the Surface 175
+  card reads it, but at 6.7h stale it was still inside that card's 12h yellow.
+
+**The loud channel already existed. Nothing fed it**
+([[feedback_swallowed_errors_lie]] — this is the fourth instance, and the first
+where the detector was already written and merely never reached).
+
+**The fix**: `main()` returns 1 on the three outcomes that mean the mailbox was
+never read — `imap_connect_failed`, `mailbox_disabled`, `no_trusted_sender` —
+and says on stderr that every pending approval is still waiting, which is the
+consequence and is not obvious from `imap_connect_failed`.
+
+**What is deliberately NOT a failure**: any `skipped_*` outcome,
+`no_new_replies`, a refused command, and a per-folder `folder_unavailable` or
+`fetch_failed`. Those are a mailbox that WAS read with nothing to act on —
+the normal state for most runs — and failing on them would make a quiet inbox
+look like a broken job, which is the mistake `run_drop_intake.sh` already
+documents for refused drops. Each is pinned by a test.
+
+**Covered** — `tests/test_operator_inbox_poller.py` (40 tests, +7): a connect
+failure exits non-zero; EVERY unreached outcome enumerated as a subTest rather
+than spot-checked ([[feedback_incomplete_fix_enumerate_all_branches]]); six
+quiet-mailbox outcomes that must stay exit 0; a per-folder problem alongside a
+successful folder staying 0; one unreached outcome among many still counting;
+the stderr message naming the consequence; and the WRAPPER contract — that the
+caller greps `poller_rc` and prints `POLLER_FAILED` — because a non-zero code
+only helps if something looks at it.
+
+**A guard caught my own test while writing this.** The wrapper-contract test
+first reached the sidecar script by absolute path, and
+`test_no_test_reaches_outside_its_own_checkout` refused it — the same mistake
+CI had caught in duckAgent an hour earlier, caught here by a rule duck-ops
+already had. Derived from `__file__` now, skipped where the local-only runtime
+dir is absent.
+
+**Open after this surface:**
+- **Why Gmail had too many simultaneous IMAP connections is unexplained.**
+  Apple Mail's `maild` is running on this machine and the poller opens a
+  connection every 6h; nothing counts concurrent connections or retries with
+  backoff, so the next collision is a coin flip.
+- **The poller does not retry.** One refused connection costs a full 6-hour
+  cycle, which on this lane is the difference between a post going out tonight
+  and tomorrow morning.
+- **duckAgent has no equivalent of
+  `test_no_test_reaches_outside_its_own_checkout`.** Its CI caught the
+  hardcoded path by failing; duck-ops catches it before the push. Porting the
+  guard is a few lines and would have saved a red run today.
