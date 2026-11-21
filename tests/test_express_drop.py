@@ -1676,3 +1676,66 @@ class ThePermalinkIsRecordedWhereBothSidesReadTests(_ExpressRoot):
             drop_intake.write_status_file(self.root, proposals).read_text())
         self.assertEqual(payload["drops"]["post"]["permalinks"],
                          {"instagram": "https://instagram.com/reel/abc"})
+
+
+class TheMirrorGuardSaysWhenItIsGuessingTests(_ExpressRoot):
+    """Surface 183 — a safety refusal running against a guessed path, silently.
+
+    Found by `/duck-bug-hunt` Lens 4 (the swallowed-error grep) on 2026-11-21.
+
+    `_mirror_root()` feeds `_refuse_if_inside_mirror`, which exists because the
+    Drive mirror publishes with `--delete`: a drop root inside it is erased on
+    the next mirror run. On any `drive_mirror` import failure the resolver fell
+    back to `~/DuckData` and said nothing — so the refusal would check a
+    directory the mirror no longer publishes to and pass a root it should have
+    refused. That is the exact bug this function's own docstring records from
+    2026-11-13, one layer up.
+
+    Deliberately NOT fatal: resolving the mirror root must not stop the lane
+    over an unrelated import problem. But a guard running against a guess has
+    to say so.
+    """
+
+    def test_a_resolution_failure_is_announced_on_stderr(self):
+        import contextlib, io
+        from unittest.mock import patch
+
+        buf = io.StringIO()
+        with patch.dict(sys.modules, {"drive_mirror": None}), \
+             contextlib.redirect_stderr(buf):
+            root = drop_intake._mirror_root()
+        err = buf.getvalue()
+        self.assertIn("could not resolve the mirror root", err)
+        self.assertIn("may not be where the mirror actually publishes", err)
+        self.assertIsNotNone(root, "it must still return a best guess")
+
+    def test_it_names_the_path_it_fell_back_to(self):
+        # So the operator can tell at a glance whether the guard was pointed
+        # anywhere near the real mirror.
+        import contextlib, io
+        from unittest.mock import patch
+
+        buf = io.StringIO()
+        with patch.dict(os.environ, {"DRIVE_MIRROR_ROOT": "/tmp/probe-mirror"}), \
+             patch.dict(sys.modules, {"drive_mirror": None}), \
+             contextlib.redirect_stderr(buf):
+            drop_intake._mirror_root()
+        self.assertIn("/tmp/probe-mirror", buf.getvalue())
+
+    def test_a_successful_resolution_stays_quiet(self):
+        # Positive control: the normal path must not print on every scan, or
+        # the warning becomes noise and stops being read.
+        import contextlib, io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            drop_intake._mirror_root()
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_the_refusal_it_feeds_still_fires(self):
+        # The guard itself, so this test class cannot pass while the thing it
+        # protects is broken.
+        with self.assertRaises(drop_intake.DropRefused) as caught:
+            drop_intake._refuse_if_inside_mirror(
+                drop_intake._mirror_root() / "DuckDrop")
+        self.assertIn("mirror", str(caught.exception).lower())

@@ -11733,3 +11733,79 @@ verification got wrong.
 - **`meta_helper`'s module constants still exist** and are still snapshotted.
   Leaving them is deliberate — meme depends on them — but they are the hazard
   the accessor exists to avoid.
+
+## Surface 183 — `/duck-bug-hunt` over the express lane (2026-11-21)
+
+The last open item from the `/new-flow` audit, and the lens that had never run
+over this lane — including before its first real post, which half-failed.
+
+### What the deterministic lenses said
+
+| Lens | Result |
+|---|---|
+| 1 — static (F821 over all six lane files) | **clean** |
+| 2 — producer↔reader contract (AST, dataclass round-trips) | **clean**, self-test PASS first |
+| 3 — absence/wiring | **clean for express**: all four card loaders registered, both entrypoints wired through the launchd wrapper. Its one finding is unrelated — `runtime/reauth_etsy_from_chrome.py` is a genuinely-manual tool missing its `# duck-bug-hunt: manual-entrypoint` marker |
+| 4 — anti-pattern greps | 55 exception handlers across the six files, 36 with no `print`/`raise`. Three worth reading; **one real finding** |
+
+**My first Lens-4 implementation was too loose** and flagged handlers that do
+have loud channels, because it substring-matched an `ast.dump` instead of
+walking for a `Call` to `print`/a logger or a `Raise`. Rewritten, the count went
+from "37 suspicious" to 36 classified, most of which return an error string the
+CALLER surfaces — a loud channel that is not a `print`. Worth recording: a lens
+whose output needs triage is a lens that will be ignored.
+
+### Two leads closed by reading them
+
+- **`allowed_lanes()` falling back to `_FALLBACK_LANES`** on a config-read
+  failure looked like the plausible-fallback class. It is not: `consuming_lanes()`
+  — the gate that decides whether a drop can be *used* — returns the hardcoded
+  `DROP_CONSUMING_LANES` frozenset and is not config-derived. A failure there
+  only widens which refusal MESSAGE an unconsumable lane gets, which is the
+  better message. Documented behaviour, no bug.
+- **`except OSError: pass` before rewriting the agent README** — if the read
+  fails it writes. Correct.
+
+### The one real finding: a safety guard that guesses, silently
+
+`_mirror_root()` fell back to `~/DuketData`-style defaults on ANY `drive_mirror`
+import failure and said nothing. That value feeds `_refuse_if_inside_mirror`,
+which exists because the Drive mirror publishes with **`--delete`**: a drop root
+inside it is erased on the next mirror run. So an import failure made a safety
+refusal check a guessed directory and pass a root it should have refused — the
+exact shape of the bug the function's own docstring already records from
+2026-11-13, when its private copy of the default stayed pointed at `~/DuckData`
+after the mirror moved into My Drive.
+
+Latent rather than live today (the drop root is `My Drive/DuckDrop`, the mirror
+`My Drive/DuckData`), which is why nothing had noticed.
+
+**Fixed as loud, not fatal.** Resolving the mirror root must never stop the lane
+over an unrelated import problem, and the fallback is still the best available
+guess — but a guard running against a guess has to say so, naming the path it
+fell back to so the operator can see whether it is anywhere near the real
+mirror ([[feedback_swallowed_errors_lie]]: the loud channel is separate from the
+return value).
+
+**Covered** — `tests/test_express_drop.py` (142 tests, +4): the failure
+announced on stderr, the fallback path named, a successful resolution staying
+QUIET (or the warning becomes noise and stops being read), and the refusal it
+feeds still firing — so this class cannot pass while the thing it protects is
+broken.
+
+**A test-harness slip worth recording**: my check for whether `patch` was
+imported at module level matched the file's per-method `from unittest.mock
+import patch` lines and skipped adding it, so two new tests failed on
+`NameError`. The grep was satisfied by a false positive — the same failure mode
+as the careless probes in Surface 179/180, one layer down.
+
+**Open after this surface:**
+- **Lens 5 (the adversarial LLM panel) has NOT been run.** It is the only lens
+  that catches the incomplete-fix / subtle-logic classes, which is precisely
+  this lane's history — several of my own fixes this week covered one branch and
+  missed a sibling. It spawns ~12 agents, so it is an explicit operator spend
+  rather than something to run unasked.
+- **Lens 6 (external-behavior probes) is reactive by design** and owned
+  elsewhere; the read-back added in Surface 179 is this lane's one such probe.
+- `runtime/reauth_etsy_from_chrome.py` wants a `# duck-bug-hunt:
+  manual-entrypoint` comment so Lens 3 stops reporting it.

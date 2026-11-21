@@ -113,10 +113,29 @@ def _mirror_root() -> Path:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import drive_mirror
         return drive_mirror.DRIVE_MIRROR_ROOT
-    except Exception:
-        return Path(
+    except Exception as exc:
+        # LOUD. This value feeds `_refuse_if_inside_mirror`, which exists
+        # because the mirror publishes with `--delete`: a drop root inside it
+        # is erased on the next mirror run. Falling back silently means that
+        # safety refusal checks a GUESSED directory and passes a root it should
+        # have refused -- the same shape as the bug this function's docstring
+        # already records, where the copy stayed pointed at `~/DuckData` after
+        # the mirror moved into My Drive.
+        #
+        # Not fatal: resolving this must never stop the lane over an unrelated
+        # import problem, and the fallback is still the best available guess.
+        # But a guard running against a guess has to say so
+        # ([[feedback_swallowed_errors_lie]] -- the loud channel is separate
+        # from the return value).
+        fallback = Path(
             os.environ.get("DRIVE_MIRROR_ROOT") or (Path.home() / "DuckData")
         )
+        print(f"[drop-intake] WARNING could not resolve the mirror root from "
+              f"drive_mirror ({type(exc).__name__}: {exc}); the "
+              f"inside-the-mirror refusal is checking {fallback} instead, "
+              f"which may not be where the mirror actually publishes.",
+              file=sys.stderr)
+        return fallback
 
 DROP_INTAKE_STATE_PATH = REPO_ROOT / "state" / "drop_intake.json"
 
