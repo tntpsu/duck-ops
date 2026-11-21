@@ -546,6 +546,38 @@ def poll_inbox(*, dry_run: bool = False, limit: int = 25) -> list[dict[str, Any]
               file=sys.stderr)
     return receipts
 
+#: Outcomes that mean THE MAILBOX WAS NEVER READ. A run that ends in one of
+#: these did not do its job, and until 2026-11-20 it still exited 0 -- so the
+#: sidecar's own `POLLER_FAILED` check could never fire and scheduler_health
+#: graded the run healthy.
+#:
+#: Measured that evening: the 18:16 run hit Gmail's
+#: "[ALERT] Too many simultaneous connections", read nothing, exited 0, and the
+#: sidecar logged exit=0. The operator had sent an approval reply and spent an
+#: hour asking why the lane had not picked it up, while every surface said the
+#: poller was fine ([[feedback_swallowed_errors_lie]] -- a swallowed failure
+#: needs a loud channel, and here the loud channel already existed and was
+#: simply never given a non-zero code to notice).
+#:
+#: Deliberately NOT in this set: every `skipped_*` outcome, `no_new_replies`
+#: and a refused command. Those are a mailbox that WAS read and had nothing to
+#: act on, which is the normal state three times out of four -- failing on
+#: them would make a quiet inbox look like a broken job, the mistake
+#: `run_drop_intake.sh` already documents for refused drops.
+MAILBOX_UNREACHED_OUTCOMES = frozenset({
+    "imap_connect_failed",
+    "mailbox_disabled",
+    "no_trusted_sender",
+})
+
+
+def unreached_outcomes(receipts: list[dict[str, Any]]) -> list[str]:
+    """Which 'never read the mailbox' outcomes a run ended in, if any."""
+    return [str(r.get("outcome")) for r in receipts
+            if isinstance(r, dict)
+            and str(r.get("outcome")) in MAILBOX_UNREACHED_OUTCOMES]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Poll the operator inbox for Duck Ops command replies.")
     parser.add_argument("--dry-run", action="store_true", help="Parse replies but do not dispatch or mark Seen.")
@@ -553,6 +585,14 @@ def main() -> int:
     args = parser.parse_args()
     receipts = poll_inbox(dry_run=args.dry_run, limit=args.limit)
     print(json.dumps(receipts, indent=2, ensure_ascii=False))
+    unreached = unreached_outcomes(receipts)
+    if unreached:
+        # Loud on stderr AND non-zero: the wrapper greps for neither, it
+        # checks the exit code, and scheduler_health grades the wrapper.
+        print(f"[operator-inbox-poller] MAILBOX NOT READ ({', '.join(unreached)}): "
+              "no approval reply could have been seen this run. Every pending "
+              "approval is still waiting.", file=sys.stderr)
+        return 1
     return 0
 
 

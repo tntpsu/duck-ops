@@ -472,3 +472,102 @@ class FolderSelectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AnUnreadMailboxIsAFailedRunTests(unittest.TestCase):
+    """Surface 176 — a mailbox it never reached used to exit 0.
+
+    Measured 2026-11-20. The 18:16 sidecar run hit Gmail's "[ALERT] Too many
+    simultaneous connections", read nothing, and exited 0. The sidecar wrapper
+    already greps for a non-zero `poller_rc` and prints POLLER_FAILED — it
+    just never got one — so the run logged `exit=0`, scheduler_health graded
+    it healthy, and the operator spent an hour asking why an approval reply
+    they had sent was not picked up.
+
+    The loud channel existed. Nothing fed it
+    ([[feedback_swallowed_errors_lie]]).
+    """
+
+    def test_a_connect_failure_exits_non_zero(self):
+        receipts = [{"at": "now", "outcome": "imap_connect_failed",
+                     "reason": "Too many simultaneous connections"}]
+        with patch.object(poller, "poll_inbox", return_value=receipts), \
+             patch.object(sys, "argv", ["operator_inbox_poller.py"]):
+            self.assertEqual(poller.main(), 1)
+
+    def test_every_unreached_outcome_exits_non_zero(self):
+        # Enumerated rather than spot-checked: each of these is a different
+        # way of never reading the mailbox, and one left at exit 0 is one
+        # silent failure mode still open
+        # ([[feedback_incomplete_fix_enumerate_all_branches]]).
+        for outcome in sorted(poller.MAILBOX_UNREACHED_OUTCOMES):
+            with self.subTest(outcome=outcome):
+                with patch.object(poller, "poll_inbox",
+                                  return_value=[{"outcome": outcome}]), \
+                     patch.object(sys, "argv", ["operator_inbox_poller.py"]):
+                    self.assertEqual(poller.main(), 1)
+
+    def test_a_quiet_mailbox_is_NOT_a_failure(self):
+        # The normal state three runs out of four. Failing here would make a
+        # quiet inbox look like a broken job, which is the mistake
+        # run_drop_intake.sh already documents for refused drops.
+        for outcome in ("no_new_replies", "skipped_missing_approval_marker",
+                        "skipped_untrusted_sender", "skipped_stale_reply",
+                        "skipped_duplicate_folder_copy", "ok"):
+            with self.subTest(outcome=outcome):
+                with patch.object(poller, "poll_inbox",
+                                  return_value=[{"outcome": outcome}]), \
+                     patch.object(sys, "argv", ["operator_inbox_poller.py"]):
+                    self.assertEqual(poller.main(), 0)
+
+    def test_a_per_folder_problem_is_not_a_failed_run(self):
+        # `folder_unavailable` and `fetch_failed` are about ONE folder; the
+        # mailbox was still reached and other folders were still read, so the
+        # run is not a wash.
+        receipts = [{"outcome": "folder_unavailable", "folder": "Trash"},
+                    {"outcome": "ok", "folder": "INBOX"}]
+        with patch.object(poller, "poll_inbox", return_value=receipts), \
+             patch.object(sys, "argv", ["operator_inbox_poller.py"]):
+            self.assertEqual(poller.main(), 0)
+
+    def test_one_unreached_outcome_among_many_still_fails(self):
+        receipts = [{"outcome": "ok"},
+                    {"outcome": "imap_connect_failed", "reason": "x"}]
+        self.assertEqual(poller.unreached_outcomes(receipts),
+                         ["imap_connect_failed"])
+
+    def test_the_stderr_message_says_approvals_are_still_waiting(self):
+        # The operator-actionable part: the failure's consequence is that a
+        # reply they already sent has not been seen, which is not obvious
+        # from "imap_connect_failed".
+        import contextlib, io
+
+        buf = io.StringIO()
+        with patch.object(poller, "poll_inbox",
+                          return_value=[{"outcome": "imap_connect_failed"}]), \
+             patch.object(sys, "argv", ["operator_inbox_poller.py"]), \
+             contextlib.redirect_stderr(buf), \
+             contextlib.redirect_stdout(io.StringIO()):
+            poller.main()
+        err = buf.getvalue()
+        self.assertIn("MAILBOX NOT READ", err)
+        self.assertIn("still waiting", err)
+
+    def test_the_wrapper_checks_the_code_this_now_returns(self):
+        # The fix only helps if the caller looks. The sidecar wrapper greps
+        # `poller_rc` and prints POLLER_FAILED; assert that contract rather
+        # than assuming it ([[feedback_loader_and_registration_both_need_tests]]
+        # -- the producer and its consumer both need a test).
+        # DERIVED, not absolute: tests/ -> duck-ops -> ai-agents. The wrapper
+        # lives in a local-only runtime dir outside any checkout, so this is
+        # skipped wherever that dir is absent rather than hardcoding one
+        # machine's home (which tests/test_the_suite_runs_where_it_is_checked_out
+        # correctly refused when this test first tried it).
+        wrapper = (Path(__file__).resolve().parents[2]
+                   / "openclaw_runtime" / "run_duck_ops_sidecar.sh")
+        if not wrapper.is_file():
+            self.skipTest("sidecar wrapper lives outside git; not on this runner")
+        text = wrapper.read_text(encoding="utf-8")
+        self.assertIn("operator_inbox_poller.py", text)
+        self.assertIn("poller_rc", text)
+        self.assertIn("POLLER_FAILED", text)
