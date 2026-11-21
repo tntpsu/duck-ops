@@ -11644,8 +11644,92 @@ This is the discipline working in the direction it failed all session: verify th
 **Verified live**: the real builder against the real ledger returns 0 items because all five entries are approved or declined — and a positive control on a COPY of that ledger with one pending drop returns 1 item, surfaced, with the right reply command. Production ledger byte-identical throughout. Pollution check clean: no express receipts in the live `state/workflow_control/` after a full suite run.
 
 **Open after this surface (audit Tier 2/3, not yet done):**
-- **Express still reads credentials with `os.getenv` rather than importing `meta_helper`'s constants.** `flows/meme/steps.py` imports them; doing the same makes a wrong name impossible instead of merely caught. This is the fix for the bug that half-failed the first post.
-- **`_verify_published` uses raw `requests.get`**, a seam nothing else in the repo knows how to fake — which is exactly why a stub missed it and a real API call went out. Routing it through `make_request` puts it on the established channel.
+- ~~**Express reads credentials with `os.getenv`.**~~ and ~~**`_verify_published` uses raw `requests.get`.**~~ **Both CLOSED by Surface 182 below** — and the obvious fix (copy meme's import) would have been wrong.
 - **Sites 11 and 14 still open**: `viewer_data.py` friendly description, `master_roadmap.md` entry.
 - **`/duck-bug-hunt` has never run over this lane**, including before its first real post.
 - **The ratchet in `test_no_untimed_smtp.py` is keyed on `file:line`**, so any insertion above a grandfathered call reports it as new. Mine moved `review_loop.py:2917` to `:3009`; the call is unchanged.
+
+## Surface 182 — one definition for the Meta credential names (2026-11-21)
+
+Audit Tier 2. Two open items closed, and **the obvious fix turned out to be
+wrong** — which is the only reason this entry is interesting.
+
+### Measuring first changed the design
+
+The plan was to copy `flows/meme/steps.py`: `from helpers.meta_helper import
+META_IG_USER_ID, ...`. A typo then becomes an ImportError at load instead of a
+runtime refusal after a human has approved a post. Before writing it, I
+measured what those constants are:
+
+```python
+# helpers/meta_helper.py, lines 9-12
+META_IG_USER_ID = os.getenv("META_IG_USER_ID")   # at IMPORT time
+```
+
+Probed directly: after `os.environ["META_IG_USER_ID"]` is changed, the imported
+constant **does not move**. So importing it would have:
+
+- frozen the value at import, and
+- made every test that patches `os.environ` unable to reach it — which would
+  delete the `test_an_empty_environment_DOES_refuse` guard entirely, since
+  there would be no way to present the function with no credentials.
+
+A second worry turned out to be moot in the same probe: `meta_helper` loads
+`.env` itself at import, so the "constants are None if imported before dotenv"
+hazard does not apply here.
+
+**So the fix is an accessor, not an import.** `meta_helper.meta_credentials()`
+returns `page_id` / `ig_user_id` / `page_token` with the names defined in
+exactly one place and the values resolved at CALL time — centralised AND
+testable. `page_token` keeps the established precedence (page token first,
+user token as fallback) that the publish paths already used.
+
+Express now spells **no** credential name at all; a test asserts that as the
+absence of any `os.getenv("META*|IG*|INSTAGRAM*")` in the file plus the
+presence of `meta_credentials()`. The name `IG_USER_ID` is no longer possible
+to write there, rather than merely catchable.
+
+### The read-back rides the established client
+
+`_verify_published` used a raw `requests.get` — a seam nothing else in the repo
+uses, which is exactly why a stub aimed at the wrong function missed it and a
+live Meta call escaped a verification run. It now goes through
+`get_meta_token_manager().make_request`. GETs pass that guard by design (the
+container-status poll needs them), so the explicit `DUCK_TEST_MODE` skip is
+still what keeps tests off the network — but the call is now on the one channel
+the repo knows how to fake.
+
+**The test-suite runtime proved the old seam was live:** re-pointing the stubs
+from `requests.get` to the token manager took the express test file from
+**17.05s to 0.81s**. Those seventeen seconds were real network attempts inside
+a test run. Nothing asserted on them, so only the clock noticed.
+
+### A coverage loss, handled rather than ignored
+
+Express dropping out of `test_required_credentials_are_declared`'s scan is a
+real consequence: that guard finds env vars read next to a failure, and express
+no longer reads any. Rather than delete the assertion, it was **re-pointed at
+where the names moved** (`helpers/meta_helper.py` must be in scope) and paired
+with a new one asserting express spells none of its own. The guard follows the
+names.
+
+**Covered** — `duckAgent/tests/test_express_drop_publisher.py` (92 tests) and
+`tests/test_required_credentials_are_declared.py`: neither publish path spells
+a credential name; the accessor is present; `meta_helper` is in the
+declaration scan's scope; express spells none of its own; and the read-back
+tests now stub the token manager, including the unreachable-graph and
+200-with-error-body cases.
+
+**Verified with the real credentials and `DUCK_TEST_MODE=1`:** both gates pass
+on the real names and the outbound guard refuses both calls — the gate is
+proven without a live request, which is the thing the first attempt at this
+verification got wrong.
+
+**Open after this surface:**
+- **The other two dialects remain.** `flows/meme/steps.py` imports the
+  constants (and inherits the import-time snapshot), `flows/duckvideo/steps.py`
+  calls `os.getenv`. `meta_credentials()` is available to both; migrating them
+  is a separate, larger change across live weekly lanes.
+- **`meta_helper`'s module constants still exist** and are still snapshotted.
+  Leaving them is deliberate — meme depends on them — but they are the hazard
+  the accessor exists to avoid.
