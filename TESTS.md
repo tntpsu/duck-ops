@@ -11269,9 +11269,10 @@ carried so the two lists can be read side by side; plus registration on an
 empty payload and a distinct-question check against the approval card.
 
 **Open after this surface:**
-- **The express lane's approval latency is dominated by a 6-hourly poller.**
-  Raising the sidecar cadence (or giving the drop lane its own poll) is the
-  only thing that makes `publish_at: asap` mean anything close to "now".
+- ~~**The express lane's approval latency is dominated by a 6-hourly poller.**~~
+  **Addressed by Surface 184** — a dedicated 20-minute poll job, PREPARED not
+  installed (Tier 3). And "raise the sidecar cadence" would have been the
+  wrong fix: see below.
 - **Consecutive digest failures are still not counted.** The card grades the
   symptom (untold drops), not the job, so a digest that fails every run looks
   the same as a scan nobody ran.
@@ -11809,3 +11810,71 @@ as the careless probes in Surface 179/180, one layer down.
   elsewhere; the read-back added in Surface 179 is this lane's one such probe.
 - `runtime/reauth_etsy_from_chrome.py` wants a `# duck-bug-hunt:
   manual-entrypoint` comment so Lens 3 stops reporting it.
+
+## Surface 184 — audit sites 11 and 14, and a dedicated reply poll (2026-11-21)
+
+The last three items from the `/new-flow` audit and the follow-up list.
+
+### Site 11 — the queue said nothing useful about a drop
+
+`viewer_data._decision_provenance` had no `drops` branch, so a queued agent
+drop fell through to the generic "Surfaced by drops (score 0)". The operator's
+actual question is *who sent me this and what happens if I approve it*, which
+that answers neither half of. It now names the post as outside work and quotes
+the exact reply, and says plainly when a `post_ready:false` drop cannot be
+published however many times it is approved. Three tests, including a positive
+control that `meme` is still "Auto-generated" — the drops branch sits above the
+generated-lane branch, so a regression there would relabel our own content as
+someone else's.
+
+### Site 14 — the roadmap entry
+
+`master_roadmap.md` had zero mentions of the lane, which is how a future
+session rebuilds shipped work
+([[feedback_verify_roadmap_against_code_before_building]]). Entry added under
+Completed Major Work, and it records the uncomfortable half too: that the lane
+shipped without `/new-flow`, `/coverage-matrix` or `/deploy-check`, that the
+audit found five missing wiring sites, and that four production bugs reached
+the first real post.
+
+### A dedicated reply poll — and why the obvious fix was wrong
+
+The stated next step was "raise the reply-poller cadence". Measuring killed
+that: **the `duck_ops_sidecar` takes 15-29 minutes per run** (00:00-00:14,
+06:00-06:29, 12:00-12:28 on 2026-11-21). Hourly would leave it running about
+half the time, for a job that also drains review replies, refreshes operator
+surfaces and runs the notifier.
+
+The poller alone takes ~75 seconds. So it gets its own job:
+
+| | before | after |
+|---|---|---|
+| reply noticed within | up to 6h | up to 20 min |
+| then published within | 10 min | 10 min |
+| **worst case drop → live** | **~6h 10m** | **~30 min** |
+
+Every number is derived from a cadence that exists rather than picked: 20
+minutes beats the 10-minute publish pass without racing it, and is deliberately
+NOT 10 minutes because each poll opens an IMAP connection and the 2026-11-20
+failure was Gmail refusing one for having too many open.
+
+**The sidecar KEEPS its own poller step.** Two callers of an idempotent poll is
+not a conflict — whichever runs first marks the replies Seen and the other
+finds nothing — and removing it would make the new job a single point of
+failure for every approval in the system.
+
+`RunAtLoad` is FALSE, matching the drop scan: a login or a plist reload must
+not fire a poll that dispatches approvals.
+
+**PREPARED, NOT INSTALLED.** The plist is in
+`duckAgent_runtime/prepared_plists/com.philtullai.duckops.operator_reply_poll.plist`
+(`plutil -lint` OK) and installing it is a Tier-3 action for the operator. The
+wrapper was dry-run end to end: exit 0, `operator_reply_health.json` updated,
+nothing dispatched because there was nothing new.
+
+**Open after this surface:**
+- **The job is not installed**, so the latency improvement is not live yet.
+- **`scheduler_health` will not grade it until it is installed**, at which
+  point it joins the roster automatically from the plist.
+- **Lens 5 of `/duck-bug-hunt` has still not reported** — launched over this
+  lane on 2026-11-21, results pending.
