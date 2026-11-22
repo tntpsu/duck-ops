@@ -117,6 +117,7 @@ def resolve_active_occasions(calendar: dict[str, Any], today: date) -> tuple[lis
                     "keywords": [str(k).lower() for k in occ.get("keywords") or []],
                     "recipients": [str(r) for r in occ.get("recipients") or []],
                     "etsy_tag_candidates": [str(t) for t in occ.get("etsy_tag_candidates") or []],
+                    "tag_fit": str(occ.get("tag_fit") or "themed"),
                 })
         except Exception as exc:
             errors.append(f"{occ.get('id', '?')}: {type(exc).__name__}: {exc}")

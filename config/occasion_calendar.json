@@ -4,6 +4,7 @@
   "occasions": [
     {
       "id": "new_year",
+      "tag_fit": "themed",
       "name": "New Year",
       "rule": {"type": "fixed", "month": 1, "day": 1},
       "lead_days": 10,
@@ -17,6 +18,7 @@
     },
     {
       "id": "valentines_day",
+      "tag_fit": "gift",
       "name": "Valentine's Day",
       "rule": {"type": "fixed", "month": 2, "day": 14},
       "lead_days": 18,
@@ -31,6 +33,7 @@
     },
     {
       "id": "st_patricks",
+      "tag_fit": "themed",
       "name": "St. Patrick's Day",
       "rule": {"type": "fixed", "month": 3, "day": 17},
       "lead_days": 12,
@@ -44,6 +47,7 @@
     },
     {
       "id": "easter",
+      "tag_fit": "themed",
       "name": "Easter",
       "rule": {"type": "fixed_dates", "dates": ["2026-04-05", "2027-03-28", "2028-04-16", "2029-04-01", "2030-04-21"]},
       "lead_days": 18,
@@ -58,6 +62,7 @@
     },
     {
       "id": "mothers_day",
+      "tag_fit": "gift",
       "name": "Mother's Day",
       "rule": {"type": "nth_weekday", "month": 5, "weekday": 6, "nth": 2},
       "lead_days": 16,
@@ -72,6 +77,7 @@
     },
     {
       "id": "fathers_day",
+      "tag_fit": "gift",
       "name": "Father's Day",
       "rule": {"type": "nth_weekday", "month": 6, "weekday": 6, "nth": 3},
       "lead_days": 14,
@@ -86,6 +92,7 @@
     },
     {
       "id": "july_4",
+      "tag_fit": "themed",
       "name": "Independence Day",
       "rule": {"type": "fixed", "month": 7, "day": 4},
       "lead_days": 14,
@@ -100,6 +107,7 @@
     },
     {
       "id": "halloween",
+      "tag_fit": "themed",
       "name": "Halloween",
       "rule": {"type": "fixed", "month": 10, "day": 31},
       "lead_days": 25,
@@ -114,6 +122,7 @@
     },
     {
       "id": "thanksgiving",
+      "tag_fit": "themed",
       "name": "Thanksgiving",
       "rule": {"type": "nth_weekday", "month": 11, "weekday": 3, "nth": 4},
       "lead_days": 18,
@@ -128,6 +137,7 @@
     },
     {
       "id": "christmas",
+      "tag_fit": "gift",
       "name": "Christmas",
       "rule": {"type": "fixed", "month": 12, "day": 25},
       "lead_days": 40,

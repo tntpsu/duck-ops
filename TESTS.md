@@ -12101,3 +12101,32 @@ the Thanksgiving refusal.
 no declared policy (`TheLiveStoreIsFullyDeclaredTests` red on live data) --
 both 2026-11-22 slots timed out (`RecoveredTimeout`). Declared PENDING 1 day,
 PER_RUN. The batch timeouts themselves are not investigated here.
+
+## Surface 190 — the occasion-tag lane gets an approval email, a fit check and identity protection (2026-11-22, matrix before code)
+
+**Why:** in five months the lane made 6 proposals and none were approved or applied. Approval worked only from the command line. No email went out, the portal didn't show the proposals, and no reply path existed. The proposals themselves were also unfit to approve:
+- The 3 Thanksgiving picks (Construction, Husky, Pilot) were chosen only because the buyer might be a "dad/coworker". The duck had nothing to do with Thanksgiving.
+- The swap would have dropped each duck's own subject tags. For example, Husky would lose `rubber duck jeep`, its only Jeep tag.
+- Two proposals for Father's Day and one for July 4th were still marked `proposed` months later. An email approving them now would have tagged a Father's Day duck in November.
+
+**Fix, in order:**
+1. **Occasion fit.** Every occasion in the calendar declares `tag_fit`. `gift` means any duck can carry the tags (Christmas, Father's Day). `themed` means the duck must itself match the occasion; the evidence is `classifier_occasion` or `keywords:`, and a recipient match alone does not count (Thanksgiving, July 4). An occasion missing `tag_fit` is treated as `themed`, so it fails closed.
+2. **Identity protection.** A tag is never dropped if it holds the duck's one Jeep tag or contains a word from the duck's subject (its title before the dash, minus filler words). Generic tags (`3d printed ducks`, `plastic ducks`, …) go before long ones.
+3. **Expiry.** A `proposed` item whose occasion is no longer active becomes `expired`, and expired items can't be approved. A listing with `applied` or `revert_pending` tags from another occasion is never re-proposed, because that would overwrite the snapshot the revert depends on.
+4. **Approval email.** One email per run with new proposals. Subject: `MJD: [occasion_tags] … | FLOW:occasion_tags | RUN:<date> | ACTION:review`. Each listing gets Approve and Dismiss buttons (`tags approve <listing_id>` / `tags dismiss <listing_id>`) built with the shared `render_reply_action_buttons`.
+5. **Reply → apply.** `main_agent.handle_mail_event` branches on `flow == "occasion_tags"`. It approves the listings named in the reply, then applies them through the API's `etsy_update_listing`. If nothing was applied it raises, so the poller leaves the email unread.
+6. **No FlowSpec, on purpose.** I tried one and `test_duck_flows::test_no_ghost_entries` refused it, rightly. The lane has no publish-state probe (no `runs/` state file), no static buttons (each one names its listing), and no gateway handoff (duckAgent applies the reply itself). So the entry would declare nothing and no consumer would read it. The `/new-flow` item-9 site is covered by the `handle_mail_event` branch instead.
+7. **Two-card bracket.** Input card: "an occasion is active, the cycle ran in the last 48h, and no fit pick was silently mapped away". Output card: "an approved item not applied within 24h → red".
+
+| Use case | Happy | Unfit / bad input | Uncertain approval state | Etsy failure | Window closed | Idempotency | Test-mode isolation |
+|---|---|---|---|---|---|---|---|
+| Fit check | planned: gift occasion keeps a recipient-only pick | planned: themed occasion drops a recipient-only pick (the Husky case); a missing `tag_fit` counts as themed | n/a | n/a | n/a | planned: same intel gives the same picks | n/a |
+| Identity protection | planned: Jeep tag and subject-word tags survive (Husky, Pilot, Construction fixtures from live state) | planned: when every unprotected slot is used up, only what fits is added, still 13 tags, still 6–20 chars | n/a | n/a | n/a | planned: same plan twice | n/a |
+| Expiry | planned: Father's Day `proposed` in November becomes `expired` | n/a | planned: approving an expired item applies nothing | n/a | planned | planned: expired is never re-proposed for the same occasion | covered by the existing 3-layer overrides guard |
+| Proposal email | planned: subject pattern, one Approve + Dismiss per listing, added/dropped tags shown | planned: no new proposals means no email | n/a | n/a | n/a | planned: a re-run with nothing new sends nothing (`emailed_at` stamped) | planned: `send_email` captured under DUCK_TEST_MODE |
+| Reply parse | planned: `tags approve <id>` and `tags dismiss <id>`, several lines in one reply | planned: unknown id refused by name; Gmail's `----` separator stripped | planned: dismiss is final; approve on dismissed/failed/applied does nothing | n/a | planned: expired refused | planned: approve twice does nothing | n/a |
+| handle_mail_event branch | planned: FLOW:occasion_tags routes to the lane, never to the LLM classifier | planned: nothing decided → raises (email stays unread) | n/a | planned: an Etsy failure after approval → item `failed` + blocked transition; the decision counts, so no raise (a retry could never resurrect it) | n/a | n/a | n/a |
+| Input card | planned: green while active with fresh proposals | planned: red when the cycle is >48h stale while an occasion is active | n/a | n/a | planned: green "no occasion active" | n/a | loader never raises; registration + empty-payload tests |
+| Output card | planned: green when approved = applied | n/a | planned: red when approved is >24h unapplied; yellow when proposals await a reply >72h | planned: red on `failed` within 7d | n/a | n/a | same |
+
+**Left out on purpose:** no auto-apply. Approval is still a per-listing reply and the scheduled cycle only proposes and reverts. The 3 Thanksgiving proposals aren't touched by hand; the new expiry closes them after 11-26. No portal decision card this round; the email is the approval surface, as for drops.
