@@ -1739,3 +1739,68 @@ class TheMirrorGuardSaysWhenItIsGuessingTests(_ExpressRoot):
             drop_intake._refuse_if_inside_mirror(
                 drop_intake._mirror_root() / "DuckDrop")
         self.assertIn("mirror", str(caught.exception).lower())
+
+
+class AReSentNameIsNotSilentlyDroppedTests(_ExpressRoot):
+    """Surface 185 — the docstring promised this could not happen.
+
+    `record_proposals` said "`_move` already makes stems unique on collision,
+    so a genuinely new file cannot land on an old stem". False: the stem is
+    taken from the INBOX name before the move, and `_move` renames only the
+    file. A re-sent post under a reused name was moved into accepted/, skipped
+    here for colliding with the old stem, and listed on no surface. Found by
+    /duck-bug-hunt Lens 5, verified before fixing.
+    """
+
+    def scan_and_record(self, **kw) -> dict:
+        self.drop(**kw)
+        manifest = drop_intake.scan_inbox(self.root)
+        drop_intake.record_proposals(manifest, ledger_path=self.ledger)
+        return json.loads(self.ledger.read_text())["proposals"]
+
+    def test_a_second_file_with_the_same_name_becomes_its_own_proposal(self):
+        # THE REGRESSION.
+        first = self.scan_and_record()
+        self.assertEqual(list(first), ["post"])
+        second = self.scan_and_record()
+        self.assertEqual(len(second), 2, f"the re-send vanished: {list(second)}")
+
+    def test_the_original_proposal_is_untouched(self):
+        # Never overwrite: the first drop keeps its approval and claim state.
+        self.scan_and_record()
+        drop_intake.set_approval("post", True, ledger_path=self.ledger)
+        after = self.scan_and_record()
+        self.assertEqual(after["post"]["approval"], "approved")
+
+    def test_the_new_one_is_named_after_its_moved_file(self):
+        self.scan_and_record()
+        after = self.scan_and_record()
+        new = [s for s in after if s != "post"][0]
+        self.assertEqual(Path(after[new]["asset_path"]).stem, new)
+        self.assertEqual(after[new]["resent_as_name_of"], "post")
+
+    def test_it_still_groups_with_the_post_it_replaces(self):
+        # base_stem strips the move timestamp, so a re-send is one post with
+        # two attempts rather than two unrelated posts.
+        self.scan_and_record()
+        after = self.scan_and_record()
+        new = [s for s in after if s != "post"][0]
+        self.assertEqual(drop_intake.base_stem(new), "post")
+
+    def test_the_same_manifest_twice_is_still_idempotent(self):
+        # The case the original skip existed for. Same stem AND same asset
+        # path is this proposal seen again, not a new file.
+        self.drop()
+        manifest = drop_intake.scan_inbox(self.root)
+        drop_intake.record_proposals(manifest, ledger_path=self.ledger)
+        drop_intake.record_proposals(manifest, ledger_path=self.ledger)
+        self.assertEqual(
+            list(json.loads(self.ledger.read_text())["proposals"]), ["post"])
+
+    def test_the_agent_can_see_the_re_send(self):
+        # It must reach the one channel the agent reads.
+        self.scan_and_record()
+        after = self.scan_and_record()
+        payload = json.loads(
+            drop_intake.write_status_file(self.root, after).read_text())
+        self.assertEqual(len(payload["drops"]), 2)

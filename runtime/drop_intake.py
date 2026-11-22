@@ -1519,21 +1519,64 @@ def _write_ledger(path: Path, proposals: dict) -> None:
     })
 
 
+def _unique_ledger_stem(prop: dict, proposals: dict) -> str:
+    """A stem for a new file whose name collides with an existing proposal.
+
+    Prefer the name `_move` already gave the file (`<stem>.<YYYYMMDD-HHMMSS>`),
+    because that is what an operator will see in accepted/ and what
+    `base_stem()` already knows how to group back to the original post.
+    Fall back to a counter only if even that is taken.
+    """
+    candidate = Path(str(prop.get("asset_path") or "")).stem or str(prop.get("stem"))
+    if candidate and candidate not in proposals:
+        return candidate
+    base = str(prop.get("stem") or "drop")
+    n = 2
+    while f"{base}.{n}" in proposals:
+        n += 1
+    return f"{base}.{n}"
+
+
 def record_proposals(manifest: dict, ledger_path: Path | None = None) -> dict:
     """Merge a scan's proposals into the durable ledger.
 
     Existing entries are never overwritten: a stem already in the ledger keeps
     its approval and claim state, because re-running a scan must not quietly
-    un-approve or un-claim anything. `_move` already makes stems unique on
-    collision, so a genuinely new file cannot land on an old stem.
+    un-approve or un-claim anything.
+
+    CORRECTED 2026-11-21. This docstring used to promise "`_move` already
+    makes stems unique on collision, so a genuinely new file cannot land on an
+    old stem". That was false, and /duck-bug-hunt Lens 5 found it: the stem is
+    taken from the INBOX filename before the move, and `_move` renames only
+    the file. So an agent re-sending a post under a name it had used before
+    had its file moved into accepted/ under a timestamped name, and the
+    proposal was skipped here for colliding with the old stem -- the post was
+    consumed, never proposed, never approvable, and listed on no surface.
+
+    The ledger is the authority on uniqueness, and the asset path tells the
+    two cases apart: the SAME stem with the SAME asset path is this proposal
+    seen again (skip -- idempotency); the same stem with a DIFFERENT asset
+    path is a genuinely new file that happens to share a name, and it is
+    added under the unique name `_move` already gave its file. `base_stem()`
+    strips that timestamp, so the re-send still groups with the post it
+    replaces.
     """
     path = Path(ledger_path) if ledger_path is not None else DROP_PROPOSALS_PATH
     proposals = _read_ledger(path)
     added = []
     for prop in manifest.get("proposals") or []:
         stem = prop.get("stem")
-        if not stem or stem in proposals:
+        if not stem:
             continue
+        if stem in proposals:
+            existing = proposals[stem]
+            if str(existing.get("asset_path") or "") == str(prop.get("asset_path") or ""):
+                continue  # the same proposal, seen again
+            stem = _unique_ledger_stem(prop, proposals)
+            print(f"[drop-intake] {prop.get('stem')!r} is already in the ledger "
+                  f"for a different file; recording this one as {stem!r}")
+            prop = {**prop, "stem": stem,
+                    "resent_as_name_of": prop.get("stem")}
         proposals[stem] = {
             **prop,
             "approval": "operator_required",
