@@ -11801,7 +11801,8 @@ import patch` lines and skipped adding it, so two new tests failed on
 as the careless probes in Surface 179/180, one layer down.
 
 **Open after this surface:**
-- **Lens 5 (the adversarial LLM panel) has NOT been run.** It is the only lens
+- ~~**Lens 5 (the adversarial LLM panel) has NOT been run.**~~ **Run — Surface
+  185.** Original note: It is the only lens
   that catches the incomplete-fix / subtle-logic classes, which is precisely
   this lane's history — several of my own fixes this week covered one branch and
   missed a sibling. It spawns ~12 agents, so it is an explicit operator spend
@@ -11876,5 +11877,68 @@ nothing dispatched because there was nothing new.
 - **The job is not installed**, so the latency improvement is not live yet.
 - **`scheduler_health` will not grade it until it is installed**, at which
   point it joins the roster automatically from the plist.
-- **Lens 5 of `/duck-bug-hunt` has still not reported** — launched over this
-  lane on 2026-11-21, results pending.
+- ~~**Lens 5 of `/duck-bug-hunt` has still not reported.**~~ **Reported — see
+  Surface 185.**
+
+## Surface 185 — `/duck-bug-hunt` Lens 5 over the express lane (2026-11-21)
+
+The adversarial panel: three finder lenses (completeness, control-flow,
+adversarial), each finding refuted by three skeptics defaulting to refuted on
+uncertainty. **96 agents, ~31 minutes, 29 survivors, 2 rejected.** The finders
+overlapped heavily, so 29 survivors are ~15 distinct root causes. Every one
+below was VERIFIED DETERMINISTICALLY before fixing — the skill is explicit that
+survivors are leads, not proven bugs.
+
+**This was the lens that mattered.** Lenses 1-4 found one latent issue between
+them. Lens 5 found five HIGH-severity bugs on a live lane, which is the
+incomplete-fix / subtle-logic class the deterministic lenses structurally
+cannot see — and precisely this lane's history.
+
+### Fixed (each verified, mutation-checked, own commit)
+
+| | Bug | Survivors |
+|---|---|---|
+| **A** | Every drop in one pass shared a run_id (`now` resolved once, second-resolution stamp). `State` loads its file off disk, so drop #2 inherited drop #1's keys, and an image render didn't clear `express_drop_reel` — **an approved image drop would publish the previous drop's VIDEO to Instagram under its own caption, with every surface reporting success.** Reproduced before fixing. Run id now carries the path-sanitised stem; image renders clear a stale reel. | 1, 8, 18 |
+| **B** | `publish_one`'s "Never raises" was a docstring, not a fact: an unguarded Shopify call escaped AFTER the claim, consuming the drop with no outcome, transition or receipt, telling the agent "published", and skipping the rest of the pass. Now one guard whose exception exit does the same bookkeeping as every other failure exit, recording `partial` if a platform had already published. | 9, 19 |
+| **C** | Meta's 10-min floor checked when a drop ARRIVED, never when CLAIMED: a drop for 18:00 approved at 17:55 got a 2-min Facebook schedule, which Meta refuses, so the post half-published. Inside the floor (+2 min render margin) it now sends now. | 2, 12, 23 |
+| **G** | `record_proposals` promised in its docstring that a reused name could not collide. False — stem taken before `_move`, which renames only the file. A re-sent post under an old name was consumed and never proposed. Now: same stem + same asset path = idempotent skip; different asset path = recorded under the name `_move` gave the file. | 10, 21 |
+| **D** | A held missed-window drop made the claim canary go RED "that run published something else", permanently and with the wrong cause, while the express card called it healthy. Now held out, reported YELLOW `operator_unblock` with the real cause and the release command, via duck-ops' own `publish_window` (one parser). | 3, 13, 24 |
+| **O** | **My own Tier-2 regression, found while verifying finding 29.** `_verify_published` passed `timeout=30` to `make_request`, which supplies its own and forwards `**kwargs` → `TypeError` on EVERY real call, swallowed by the function's except. Every real read-back failed silently. Plus the request used the user token while the guard checked the page token. Re-verified on both real posts; pinned against the REAL signature. | 29 |
+
+**Process notes worth keeping:**
+- Verifying finding 29 (a token mismatch, LOW) turned up O, a much worse bug
+  underneath it. A lead's stated severity is not the bug's.
+- Mutation-testing A showed my own tests did not pin the CALL SITE — they
+  called `_run_id` directly, so reverting `publish_one`'s call failed nothing.
+  Pinned separately.
+- A mutation attempt for B produced invalid Python and so proved nothing; it
+  was discarded rather than counted.
+- O's test stub was `make_request(method, url, **kw)` — it accepted anything,
+  so it agreed with the code and disagreed with production. That is the exact
+  lesson written into memory hours earlier, recurring in the fix for it.
+
+### Tracked, not yet fixed
+
+| | Issue | Sev | Survivors |
+|---|---|---|---|
+| E | `_record_proposed` files EVERY lane's drop under `express::`; decline records no transition, so a declined drop's "proposed" item stands forever | MED | 4, 15, 25 |
+| F | A partial records `blocked` with "ask for a fresh drop" — advice that double-posts a half-live post | MED | 5 |
+| J | `express_publish` grades the whole ledger with no recency window; nothing prunes it, so one failure reds the card permanently | MED | 16, 26 |
+| H | A mismatched asset/sidecar pair is classified complete, then skipped — invisible everywhere | MED | 22 |
+| I | A scheduled express drop's eventual IG post (from the local queue) never updates the ledger past `scheduled` | MED | 11 |
+| K | Incomplete grace measured from file mtime, not first sighting; a Drive-synced file can arrive looking hours old | MED | 20 |
+| N | Digest never re-mails when a window expires, and its Approve button cannot release a missed-window drop | MED | 14, 28 |
+| L | Refusal rate double-counts a drop that is incomplete then refused on validation | LOW | 6, 17, 27 |
+| M | Digest age milestone is one global high-water mark, so one old drop suppresses nags for later ones | LOW | 7 |
+
+### Found live while verifying — not from the panel
+
+Gemini sent a Thanksgiving drop during this work. It arrived **sidecar-only
+again** (its second express attempt, second missing video) and **missing
+`source_agent` again** — both reported to it in `status.json` as
+`sidecar_problems` while it waits, which is Surface 172 working live. It also
+arrived TWICE: `…duck.mp4.json` and `…duck (1).mp4.json`. That ` (1)` is
+Google Drive's duplicate-upload suffix, and `base_stem()` strips `_v2` and
+`.YYYYMMDD-HHMMSS` but not ` (N)` — so the two group as two posts, and if both
+completed the operator would see two near-identical approval items for one
+post. **New open item (MED): treat Drive's ` (N)` as a re-send marker.**
