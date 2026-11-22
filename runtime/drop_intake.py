@@ -874,6 +874,91 @@ def _move(src: Path, dest_dir: Path) -> Path:
     return dest
 
 
+def _asset_sha256(path: Path) -> str | None:
+    """Content fingerprint of a drop's asset, or None if it cannot be read."""
+    import hashlib
+
+    try:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+#: The fields that become part of the published post. The hook and closing
+#: line are burned INTO the video by our render, so two drops with the same
+#: source clip and different hook text are different posts -- measured
+#: 2026-11-21 on the live ledger: `mid_november_holiday_horror_dash_standoff`
+#: v1-v4 were one byte-identical video with the same caption, iterating only
+#: the on-screen hook and then adding a closing line, and the operator
+#: APPROVED v4. Fingerprinting the video alone would have refused v2, v3 and
+#: v4 -- including the one that was wanted.
+_POST_TEXT_FIELDS = ("caption", "on_screen_hook_text", "closing_line", "closing_at")
+
+
+def _post_fingerprint(asset_digest: str | None, fields: dict) -> str | None:
+    """Identity of a POST: the asset's bytes plus the text that ships with it."""
+    if not asset_digest:
+        return None
+    import hashlib
+
+    # Normalised, so an absent field and an empty one are the SAME post.
+    # Older ledger rows carry `closing_line: None` where validation now writes
+    # "", and json.dumps encodes those differently -- so without this a re-send
+    # of an older post (holiday v1-v3 are recorded with None) would never match
+    # it and would slip through as new.
+    text = json.dumps({k: (float(fields.get(k) or 0.0) if k == "closing_at"
+                           else str(fields.get(k) or "").strip())
+                       for k in _POST_TEXT_FIELDS},
+                      sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(f"{asset_digest}\n{text}".encode("utf-8")).hexdigest()
+
+
+def _known_asset_hashes(ledger_path: Path | None = None) -> dict[str, tuple[str, dict]]:
+    """POST fingerprint -> (stem, entry) for every ledger entry still readable.
+
+    Keyed on the post, not the file -- see `_POST_TEXT_FIELDS`. Uses the
+    stored fingerprint when an entry has one and recomputes it from the asset
+    on disk plus the entry's own text fields otherwise, so entries recorded
+    before this existed -- last night's post among them -- are still covered.
+    """
+    path = Path(ledger_path) if ledger_path is not None else DROP_PROPOSALS_PATH
+    out: dict[str, tuple[str, dict]] = {}
+    for stem, entry in _read_ledger(path).items():
+        if not isinstance(entry, dict):
+            continue
+        digest = entry.get("post_fingerprint") or _post_fingerprint(
+            entry.get("asset_sha256") or _asset_sha256(
+                Path(str(entry.get("asset_path") or ""))),
+            entry)
+        if digest:
+            out.setdefault(str(digest), (stem, entry))
+    return out
+
+
+def _duplicate_refusal(stem: str, entry: dict) -> str:
+    """Why an identical file is refused, in terms of what happened to the first."""
+    if entry.get("claimed_by"):
+        status = str(entry.get("publish_status") or "")
+        when = str(entry.get("publish_outcome_at") or entry.get("claimed_at") or "")[:10]
+        if status in {"published_now", "scheduled", "partial"}:
+            return (f"this exact post (same file and same text) was already POSTED as \"{stem}\""
+                    + (f" on {when}" if when else "") + ". The same post is "
+                    "never published twice -- send something new.")
+        return (f"this exact post was already taken by a run as \"{stem}\" and "
+                "is not retried. Send something new rather than the same file.")
+    approval = str(entry.get("approval") or "")
+    if approval == "declined":
+        return (f"this exact post was already sent as \"{stem}\" and the "
+                "operator declined it. Sending it again changes nothing.")
+    return (f"this exact post is already waiting as \"{stem}\". It only "
+            "needs approving once -- this copy is a duplicate (Google Drive "
+            "makes these as `name (1)` when a file is uploaded twice).")
+
+
 def scan_inbox(drop_root: Path | None = None, *,
                now: float | None = None,
                settle: int = QUIESCENT_SECONDS) -> dict:
@@ -900,6 +985,14 @@ def scan_inbox(drop_root: Path | None = None, *,
         return manifest
 
     lanes = allowed_lanes()
+    # The operator's rule, 2026-11-21: "I don't want Gemini to send the same
+    # post we posted last night." A byte-identical asset is refused whatever
+    # it is called -- renaming a file does not make it a new post. Checked
+    # against the ledger (anything ever accepted) AND against this scan, so
+    # two identical copies arriving together (Drive's `name (1)`) do not both
+    # get through just because neither is in the ledger yet.
+    known_hashes = _known_asset_hashes()
+    seen_this_scan: dict[str, str] = {}
     for asset in sorted(inbox.iterdir()):
         if asset.name.startswith(".") or asset.is_dir():
             continue
@@ -950,6 +1043,21 @@ def scan_inbox(drop_root: Path | None = None, *,
                 continue
 
             fields = validate_drop(asset, sidecar, lanes=lanes)
+            asset_digest = _asset_sha256(asset)
+            digest = _post_fingerprint(asset_digest, fields)
+            if digest and digest in known_hashes:
+                prior_stem, prior = known_hashes[digest]
+                raise DropRefused(_duplicate_refusal(prior_stem, prior))
+            if digest and digest in seen_this_scan:
+                raise DropRefused(
+                    f"this exact post arrived twice in one scan; it was "
+                    f"accepted as \"{seen_this_scan[digest]}\" and this copy "
+                    "is a duplicate (Google Drive makes these as `name (1)` "
+                    "when a file is uploaded twice).")
+            if digest:
+                seen_this_scan[digest] = record.stem
+                fields["asset_sha256"] = asset_digest
+                fields["post_fingerprint"] = digest
         except DropRefused as exc:
             record.reason = str(exc)
             rejected_dir = drop_root / REJECTED_DIR
@@ -1040,6 +1148,12 @@ def _asset_for_sidecar(sidecar: Path) -> tuple[str, bool]:
 
 _RESEND_SUFFIX = re.compile(r"^(?P<base>.+?)[._-]v(?P<n>\d+)$", re.IGNORECASE)
 _MOVE_STAMP_SUFFIX = re.compile(r"^(?P<base>.+)\.\d{8}-\d{6}$")
+#: Google Drive's own duplicate-upload suffix: uploading `x.mp4` twice gives
+#: `x.mp4` and `x (1).mp4`. Seen live 2026-11-21 -- Gemini's Thanksgiving
+#: drop arrived as `..._duck.mp4.json` AND `..._duck (1).mp4.json`, which
+#: grouped as two unrelated posts. The space is required, as Drive always
+#: writes it, so a name like `duck(2)` or `duck (rare)` is left alone.
+_DRIVE_COPY_SUFFIX = re.compile(r"^(?P<base>.+?) \((?P<n>\d+)\)$")
 
 
 def base_stem(stem: str) -> str:
@@ -1064,6 +1178,10 @@ def base_stem(stem: str) -> str:
         resend = _RESEND_SUFFIX.match(out)
         if resend:
             out = resend.group("base")
+            continue
+        copy = _DRIVE_COPY_SUFFIX.match(out)
+        if copy:
+            out = copy.group("base")
             continue
         break
     return out
@@ -2105,6 +2223,19 @@ a `sidecar_problems` list naming every field rule it breaks -- all of them, not
 the first one -- so you can fix them and re-send the sidecar before the asset
 has even finished uploading. The same list appears in the refusal if the drop
 times out. Only the file type is left unchecked, because that needs the file.
+
+**Never send the same post twice.** A drop is the same post when its file is
+byte-for-byte identical AND its caption, `on_screen_hook_text`, `closing_line`
+and `closing_at` all match one you have already sent -- whatever you name it.
+Renaming a post does not make it a new one. Changing the hook or closing line
+DOES: that text is burned into the video, so the same clip with new on-screen
+words is a genuine revision and is accepted. The refusal says what happened to
+the first copy:
+already posted, already declined, or already waiting for approval. This also
+catches Google Drive's own duplicates (`name (1).mp4`, made when a file is
+uploaded twice), so if you see one of those refused, nothing is lost: the first
+copy is the one that counts. A corrected post is a NEW file -- change it, then
+send it as a retry.
 
 **Name a retry after the post it replaces** -- `duck_fact_v2`, `duck_fact_v3`
 -- which is what you already do. We group those, so a post that keeps failing

@@ -1804,3 +1804,193 @@ class AReSentNameIsNotSilentlyDroppedTests(_ExpressRoot):
         payload = json.loads(
             drop_intake.write_status_file(self.root, after).read_text())
         self.assertEqual(len(payload["drops"]), 2)
+
+
+class TheSamePostIsNeverSentTwiceTests(_ExpressRoot):
+    """Surface 186 — the operator's rule, 2026-11-21: "I don't want Gemini to
+    send the same post we posted last night."
+
+    Nothing enforced it: a re-dropped file under a new name was a brand new
+    proposal. And Google Drive's duplicate uploads (`name (1).mp4`) meant two
+    copies of one post could both be approved. A byte-identical asset is now
+    refused whatever it is called, against the ledger AND within one scan.
+    """
+
+    def accept_one(self, name: str = "post.png", data: bytes = PNG) -> dict:
+        self.drop(name=name, data=data)
+        manifest = drop_intake.scan_inbox(self.root)
+        drop_intake.record_proposals(manifest, ledger_path=self.ledger)
+        return manifest
+
+    def resend(self, name: str, data: bytes = PNG, *, hook: str | None = None,
+               closing: str | None = None, closing_at: float | None = None,
+               caption: str | None = None) -> dict:
+        extra: dict = {}
+        if hook is not None:
+            extra["on_screen_hook_text"] = hook
+        if closing is not None:
+            extra["closing_line"] = closing
+        if closing_at is not None:
+            extra["closing_at"] = closing_at
+        if caption is not None:
+            extra["caption"] = caption
+        self.drop(name=name, data=data, **extra)
+        return drop_intake.scan_inbox(self.root)
+
+    def entry(self, stem: str = "post") -> dict:
+        return json.loads(self.ledger.read_text())["proposals"][stem]
+
+    def patch_ledger(self):
+        from unittest.mock import patch
+        return patch.object(drop_intake, "DROP_PROPOSALS_PATH", self.ledger)
+
+    def test_last_nights_post_under_a_new_name_is_refused(self):
+        # THE RULE. Posted, then re-sent renamed.
+        with self.patch_ledger():
+            self.accept_one()
+            drop_intake.set_approval("post", True, ledger_path=self.ledger)
+            drop_intake.claim_for_lane(drop_intake.EXPRESS_LANE,
+                                       claimed_by="express::run1",
+                                       ledger_path=self.ledger)
+            drop_intake.record_publish_outcome(
+                "post", status="published_now", platforms=["facebook"],
+                ledger_path=self.ledger)
+            manifest = self.resend("totally_new_name.png")
+        self.assertEqual(manifest["rejected_count"], 1)
+        reason = manifest["rejected"][0]["reason"]
+        self.assertIn("already POSTED", reason)
+        self.assertIn("never published twice", reason)
+
+    def test_a_copy_of_a_waiting_drop_is_refused_as_a_duplicate(self):
+        with self.patch_ledger():
+            self.accept_one()
+            manifest = self.resend("post (1).png")
+        self.assertEqual(manifest["rejected_count"], 1)
+        self.assertIn("already waiting", manifest["rejected"][0]["reason"])
+
+    def test_a_copy_of_a_declined_drop_is_refused(self):
+        with self.patch_ledger():
+            self.accept_one()
+            drop_intake.set_approval("post", False, ledger_path=self.ledger)
+            manifest = self.resend("post_again.png")
+        self.assertIn("declined", manifest["rejected"][0]["reason"])
+
+    def test_two_identical_copies_in_one_scan_admit_only_one(self):
+        # Drive's duplicate upload: both arrive before either is in the ledger.
+        self.drop(name="post.png")
+        self.drop(name="post (1).png")
+        with self.patch_ledger():
+            manifest = drop_intake.scan_inbox(self.root)
+        self.assertEqual(manifest["accepted_count"], 1)
+        self.assertEqual(manifest["rejected_count"], 1)
+        self.assertIn("arrived twice in one scan",
+                      manifest["rejected"][0]["reason"])
+
+    def test_a_CHANGED_file_with_the_same_name_is_still_accepted(self):
+        # Positive control: a corrected post is a new file, and the dedupe
+        # must not block a genuine retry.
+        with self.patch_ledger():
+            self.accept_one()
+            manifest = self.resend("post_v2.png", data=PNG + b"edited")
+        self.assertEqual(manifest["accepted_count"], 1)
+        self.assertEqual(manifest["rejected_count"], 0)
+
+    def test_the_fingerprint_is_stored_on_new_proposals(self):
+        with self.patch_ledger():
+            self.accept_one()
+        self.assertEqual(len(self.entry()["asset_sha256"]), 64)
+
+    def test_entries_from_before_this_existed_are_still_covered(self):
+        # Ledger rows written before 2026-11-21 have no stored hash; the file
+        # on disk is hashed instead, so last night's post is protected.
+        with self.patch_ledger():
+            self.accept_one()
+            proposals = json.loads(self.ledger.read_text())
+            proposals["proposals"]["post"].pop("asset_sha256")
+            self.ledger.write_text(json.dumps(proposals))
+            manifest = self.resend("renamed.png")
+        self.assertEqual(manifest["rejected_count"], 1)
+
+    def test_the_refusal_reaches_the_agent(self):
+        with self.patch_ledger():
+            self.accept_one()
+            self.resend("post (1).png")
+        reasons = list((self.root / drop_intake.REJECTED_DIR).glob("*.reason.txt"))
+        self.assertTrue(any("duplicate" in r.read_text() for r in reasons))
+
+    def test_the_contract_tells_the_agent(self):
+        self.assertIn("Never send the same post twice",
+                      drop_intake.MIRROR_DROP_README)
+
+    def test_the_same_clip_with_NEW_hook_text_is_a_new_post(self):
+        """The regression this almost shipped, from the live ledger.
+
+        `mid_november_holiday_horror_dash_standoff` v1-v4 were ONE
+        byte-identical video with the same caption, iterating the on-screen
+        hook and then adding a closing line -- and the operator approved v4.
+        Our render burns that text into the clip, so they were four different
+        posts. A video-only fingerprint refused v2-v4, including the one that
+        was wanted.
+        """
+        with self.patch_ledger():
+            self.accept_one()
+            manifest = self.resend("post_v2.png", hook="POV: a new opening line")
+        self.assertEqual(manifest["accepted_count"], 1,
+                         f"refused: {manifest['rejected']}")
+
+    def test_a_new_closing_line_alone_is_a_new_post(self):
+        with self.patch_ledger():
+            self.accept_one()
+            manifest = self.resend("post_v2.png", closing="and the payoff",
+                                   closing_at=4.0)
+        self.assertEqual(manifest["accepted_count"], 1)
+
+    def test_a_new_caption_alone_is_a_new_post(self):
+        with self.patch_ledger():
+            self.accept_one()
+            manifest = self.resend("post_v2.png",
+                                   caption="A genuinely different caption.")
+        self.assertEqual(manifest["accepted_count"], 1)
+
+    def test_an_absent_field_and_an_empty_one_are_the_same_post(self):
+        # Older ledger rows (holiday v1-v3) carry closing_line None where
+        # validation now writes "". Unnormalised, those fingerprint
+        # differently and a re-send of an old post slips through as new.
+        with self.patch_ledger():
+            self.accept_one()
+            proposals = json.loads(self.ledger.read_text())
+            entry = proposals["proposals"]["post"]
+            entry.pop("post_fingerprint", None)
+            entry["closing_line"] = None
+            entry["closing_at"] = None
+            entry["on_screen_hook_text"] = None
+            self.ledger.write_text(json.dumps(proposals))
+            manifest = self.resend("old_post_resent.png")
+        self.assertEqual(manifest["rejected_count"], 1,
+                         "None and '' must fingerprint as the same post")
+
+    def test_same_file_and_same_text_is_still_refused(self):
+        # And the rule itself still holds once text is part of identity.
+        with self.patch_ledger():
+            self.accept_one()
+            manifest = self.resend("renamed_but_identical.png")
+        self.assertEqual(manifest["rejected_count"], 1)
+
+
+class DrivesDuplicateSuffixGroupsAsOnePostTests(unittest.TestCase):
+    def test_drive_copy_suffixes_are_stripped(self):
+        for raw, expected in (
+            ("thanksgiving_morning_drive_coffee_duck (1)",
+             "thanksgiving_morning_drive_coffee_duck"),
+            ("x (2)", "x"),
+            ("x_v2 (1)", "x"),
+            ("x (1).20261121-101010", "x"),
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(drop_intake.base_stem(raw), expected)
+
+    def test_names_that_merely_contain_parentheses_are_left_alone(self):
+        # Drive always writes the space and a number; anything else is a name.
+        for raw in ("duck (rare)", "duck(2)", "(1)"):
+            with self.subTest(raw=raw):
+                self.assertEqual(drop_intake.base_stem(raw), raw)

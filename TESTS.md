@@ -11922,7 +11922,7 @@ cannot see — and precisely this lane's history.
 | | Issue | Sev | Survivors |
 |---|---|---|---|
 | E | `_record_proposed` files EVERY lane's drop under `express::`; decline records no transition, so a declined drop's "proposed" item stands forever | MED | 4, 15, 25 |
-| F | A partial records `blocked` with "ask for a fresh drop" — advice that double-posts a half-live post | MED | 5 |
+| ~~F~~ | ~~A partial records `blocked` with "ask for a fresh drop"~~ — **fixed, Surface 186** | MED | 5 |
 | J | `express_publish` grades the whole ledger with no recency window; nothing prunes it, so one failure reds the card permanently | MED | 16, 26 |
 | H | A mismatched asset/sidecar pair is classified complete, then skipped — invisible everywhere | MED | 22 |
 | I | A scheduled express drop's eventual IG post (from the local queue) never updates the ledger past `scheduled` | MED | 11 |
@@ -11941,4 +11941,68 @@ arrived TWICE: `…duck.mp4.json` and `…duck (1).mp4.json`. That ` (1)` is
 Google Drive's duplicate-upload suffix, and `base_stem()` strips `_v2` and
 `.YYYYMMDD-HHMMSS` but not ` (N)` — so the two group as two posts, and if both
 completed the operator would see two near-identical approval items for one
-post. **New open item (MED): treat Drive's ` (N)` as a re-send marker.**
+post. ~~New open item (MED): treat Drive's ` (N)` as a re-send marker.~~ **Fixed, Surface 186.**
+
+## Surface 186 — the same post is never sent twice (2026-11-21)
+
+Operator: *"I don't want Gemini to send the same post we posted last night."*
+Nothing enforced that: a re-dropped file under a new name was a brand new
+proposal, and Drive's duplicate uploads (`name (1).mp4`) meant two copies of
+one post could both be approved and both publish.
+
+### The first version would have blocked a post the operator approved
+
+The obvious rule — refuse a byte-identical asset — was built, tested, and then
+checked against the live ledger before shipping. That check found
+`mid_november_holiday_horror_dash_standoff` v1-v4: **one byte-identical video,
+same caption, iterating only the on-screen hook and then adding a closing
+line**, with v4 APPROVED. Our render burns that text into the clip, so these
+were four different posts. A video-only fingerprint would have refused v2, v3
+and v4 — including the one that was wanted.
+
+So identity is the **post**: the asset's bytes plus `caption`,
+`on_screen_hook_text`, `closing_line` and `closing_at`. Same file and same text
+is refused whatever it is called; a new hook, closing line or caption on the
+same clip is a revision and is accepted. Each axis has its own test, and the
+README tells the agent exactly what counts.
+
+**A second bug of mine, found by the same real-data check:** `None` and `""`
+fingerprinted differently. Older ledger rows carry `closing_line: None` where
+validation now writes `""`, so a re-send of an older post would never have
+matched it. Normalised, with a test that rebuilds an old-shape row.
+
+Also seen in that data, and left alone because the code reports it accurately:
+the ledger records holiday v1 and v2 with the SAME hook although v1's sidecar
+file says `''`. The ledger is the authority on what was proposed, so per the
+ledger v2 duplicated v1 — both were declined.
+
+**Verified on the real thing:** last night's actual video and sidecar, renamed,
+in a sandbox against a COPY of the live ledger → refused "already POSTED as
+`this_or_that_thursday_beer_vs_whiskey_dash` on 2026-11-20".
+
+**How it works:** checked against every ledger entry (stored fingerprint, or
+recomputed from the asset on disk plus the entry's own text for rows written
+before this existed) AND within one scan, so two identical copies arriving
+together do not both pass because neither is in the ledger yet. The refusal
+names what happened to the first copy — posted, taken, declined or waiting.
+
+### Also in this surface
+
+- **Drive's ` (N)` suffix is a re-send marker.** `base_stem()` strips it, so a
+  duplicate groups with the post it copies. Space required, as Drive always
+  writes it — `duck (rare)` and `duck(2)` are left alone.
+- **A partial is never told to re-send** (Lens 5 finding 5). The control-plane
+  transition and the OS card both said "ask the agent for a fresh drop" for
+  any failure, which double-posts a half-live post. Both now say it is already
+  live where it is, name the missing platform, and say not to re-send.
+
+**Covered** — `tests/test_express_drop.py` (164 tests, +16) and
+`duckAgent/tests/test_express_drop_publisher.py` + `test_drop_intake_cards.py`
+(+5). Mutation-checked: disabling the ledger check, dropping the text fields
+from the fingerprint, removing normalisation and removing the partial branch
+each fail tests.
+
+**Open:** the fingerprint covers text and asset, not `publish_at` — the same
+post requested for a different time is still refused. Deliberate: that is a
+re-schedule, not a new post, and it should be an operator action rather than a
+re-send.
