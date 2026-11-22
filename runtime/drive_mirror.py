@@ -687,6 +687,45 @@ def _rsync(args: list[str]) -> tuple[int, str]:
     return proc.returncode, (proc.stderr or proc.stdout or "").strip()[:400]
 
 
+#: setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS,
+#: IOPOL_MATERIALIZE_DATALESS_FILES_ON), from <sys/resource.h>.
+_IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES = 3
+_IOPOL_SCOPE_PROCESS = 0
+_IOPOL_MATERIALIZE_DATALESS_FILES_ON = 2
+
+
+def _allow_dataless_materialization() -> str | None:
+    """Let this process (and the rsync it spawns) download cloud-only files.
+
+    Drive for desktop evicts uploaded files to `dataless` placeholders -- on
+    2026-11-21, 18,950 of the mirror's 18,951 files. rsync memory-maps the
+    destination copy of every file it updates, and a launchd job runs with
+    dataless materialization OFF, so each mmap fails with EDEADLK ("Resource
+    deadlock avoided"). The release refused at 03:20 every night from
+    2026-11-19; it had only ever succeeded in manual daytime runs, before the
+    eviction. `-W` does not help: openrsync maps the destination regardless.
+    Reproduced by setting the policy OFF in an interactive shell, fixed by
+    setting it ON, both against the real mirror. The policy is inherited by
+    children, so the rsync subprocess gets it.
+
+    Returns None on success, else why it could not be set (the caller puts
+    that in the refusal so the next failure names its own cause).
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.setiopolicy_np(_IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
+                               _IOPOL_SCOPE_PROCESS,
+                               _IOPOL_MATERIALIZE_DATALESS_FILES_ON) != 0:
+            return f"setiopolicy_np failed (errno {ctypes.get_errno()})"
+    except Exception as exc:  # never let the fix itself stop a release
+        return f"setiopolicy_np unavailable: {exc}"
+    return None
+
+
 def _exclusion_args() -> list[str]:
     args = []
     for pat in EXCLUDE_NAME_PATTERNS:
@@ -1132,11 +1171,16 @@ def release(staging_root: Path, mirror_root: Path) -> tuple[bool, str]:
             f"published root is a real directory in My Drive."
         )
     mirror_root.mkdir(parents=True, exist_ok=True)
+    policy_error = _allow_dataless_materialization()
     code, err = _rsync([
         "-a", "--delete", f"{staging_root}/", f"{mirror_root}/",
     ])
     if code != 0:
-        return False, f"release rsync failed (exit {code}): {err}"
+        detail = f"release rsync failed (exit {code}): {err}"
+        if policy_error:
+            detail += (f" [could not allow downloading cloud-only files: "
+                       f"{policy_error}]")
+        return False, detail
     return True, "released"
 
 

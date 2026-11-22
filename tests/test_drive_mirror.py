@@ -527,3 +527,61 @@ class TestModeIsolationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheReleaseCanOverwriteCloudOnlyFilesTests(unittest.TestCase):
+    """Surface 187. The nightly release refused every night from 2026-11-19:
+    Drive had evicted the mirror to `dataless` placeholders, rsync mmaps the
+    destination of each file it updates, and a launchd job may not download a
+    cloud-only file -- EDEADLK, "Resource deadlock avoided". It had only ever
+    succeeded in manual daytime runs, before the eviction."""
+
+    def setUp(self) -> None:
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "staging").mkdir()
+        (self.tmp / "staging" / "MANIFEST.json").write_text("{}")
+        self.mirror = self.tmp / "mirror"
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_downloads_are_allowed_BEFORE_rsync_runs(self):
+        from unittest.mock import patch
+        calls: list[str] = []
+        with patch.object(drive_mirror, "_allow_dataless_materialization",
+                          lambda: calls.append("policy")), \
+             patch.object(drive_mirror, "_rsync",
+                          lambda args: calls.append("rsync") or (0, "")):
+            ok, _ = drive_mirror.release(self.tmp / "staging", self.mirror)
+        self.assertTrue(ok)
+        self.assertEqual(calls, ["policy", "rsync"])
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS I/O policy")
+    def test_the_policy_really_is_set_on_this_process(self):
+        # The real call, not a mock: a wrong constant would set some OTHER
+        # policy and every mocked test would still pass.
+        import ctypes
+        self.assertIsNone(drive_mirror._allow_dataless_materialization())
+        libc = ctypes.CDLL(None, use_errno=True)
+        # Literals from <sys/resource.h>, NOT the module's constants -- a test
+        # comparing against them agrees with any wrong value they hold.
+        # IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES=3, IOPOL_SCOPE_PROCESS=0,
+        # IOPOL_MATERIALIZE_DATALESS_FILES_ON=2.
+        self.assertEqual(libc.getiopolicy_np(3, 0), 2)
+
+    def test_a_policy_failure_is_named_in_the_refusal(self):
+        from unittest.mock import patch
+        with patch.object(drive_mirror, "_allow_dataless_materialization",
+                          lambda: "setiopolicy_np failed (errno 1)"), \
+             patch.object(drive_mirror, "_rsync",
+                          lambda args: (1, "mmap: Resource deadlock avoided")):
+            ok, detail = drive_mirror.release(self.tmp / "staging", self.mirror)
+        self.assertFalse(ok)
+        self.assertIn("could not allow downloading cloud-only files", detail)
+
+    def test_off_macOS_it_is_a_no_op(self):
+        from unittest.mock import patch
+        with patch.object(drive_mirror.sys, "platform", "linux"):
+            self.assertIsNone(drive_mirror._allow_dataless_materialization())
