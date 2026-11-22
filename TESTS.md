@@ -12035,12 +12035,37 @@ slot passed months ago; 3 occasion-tag approvals for Father's Day / July 4.
 Left open: 3 Etsy review-reply receipts (verifying needs the constrained Etsy
 browser) and the 3 LIVE Thanksgiving tag approvals from 11-08.
 
-**Open (MED): supersession covers `customer_reply` only.** `SUPERSESSION_KEYS`
+~~**Open (MED): supersession covers `customer_reply` only.**~~ **Fixed — Surface 188.** `SUPERSESSION_KEYS`
 has no `newduck` entry, so every prepare iteration of a duck leaves a draft
 record that ages into this card even after the duck publishes — 15 of today's
 42. Needs an exact-name, publish-after-draft rule (a draft made AFTER a publish
 is a real listing edit and must stay visible).
 
-**Open (LOW): a cancelled job has no resolution state.** `jeepfact_wednesday`
+~~**Open (LOW): a cancelled job has no resolution state.**~~ **Fixed — Surface 188.** `jeepfact_wednesday`
 (cancelled by the operator 11-18) warns `not_scheduled` permanently; the only
 resolution status the scheduler honours is `fixed_pending_next_run`.
+
+## Surface 188 — the two follow-ups from Surface 187 (2026-11-22)
+
+**A later publish supersedes its drafts.** `receipt_lifecycle.PUBLISH_SUPERSESSION_KEYS`
+(`newduck → duck_name`) + `PUBLISH_EVIDENCE` (`verified` any reason, or
+`resolved/verified_active_on_shopify`) + `build_publish_index`, passed by the
+card as `published=`. Three guards, each mutation-checked: the publish must be
+at or AFTER the draft (a post-publish draft is a real listing edit and stays
+visible), the name must match exactly after casefold/strip ("Bronco Buddy" does
+not resolve "Bronco Buddy Duck"), and only real publish evidence counts (a
+blocked or superseded sibling proves nothing). Card wiring pinned separately in
+`test_receipt_followthrough_card.py` — disabling the kwarg fails it. Same
+feature-detected skew guard as `live_identity`, so duckAgent CI tolerates an
+older duck-ops checkout; duck-ops pushed first regardless.
+
+**Retired jobs stop warning.** `scheduler_resolutions/<job>.json` with
+`resolution_status: "retired"` → status `retired`, severity `ok`, the reason in
+the summary. Applies only while no plist declares the job (loaded again → the
+record no longer describes it) and only on the healthy/no_history chain (a
+retired job that fails still reports `failed`). Accidental unloads still warn.
+`jeepfact_wednesday` recorded as retired 2026-11-18 (local state, not in git).
+
+**Found on the regrade:** `operator_reply_poll` is now `missed_run`/bad — its
+plist is in ~/Library/LaunchAgents but launchd has not loaded it, so its first
+window (00:40) passed. Correct verdict; needs `launchctl bootstrap`.

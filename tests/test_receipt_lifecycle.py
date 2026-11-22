@@ -532,3 +532,76 @@ class ThePerRunQualityGateLogTests(unittest.TestCase):
         # zero, and `verified` is universally terminal.
         self.assertIsNone(_classify(
             _receipt("quality_gate", "verified", "gating_ready", workflow_id="quality_gate")))
+
+
+class ALaterPublishSupersedesItsDraftsTests(unittest.TestCase):
+    """Surface 188. Every newduck prepare iteration leaves a `draft_ready`
+    receipt and nothing retires it when the duck publishes: on 2026-11-21, 15
+    of the 42 receipts reddening receipt_followthrough were drafts of ducks
+    already live on Shopify."""
+
+    NOW = datetime(2026, 11, 22, tzinfo=timezone.utc)
+
+    def receipt(self, wf, state, reason, name, days_ago):
+        return {"workflow_id": wf, "lane": "newduck", "state": state,
+                "state_reason": reason, "metadata": {"duck_name": name},
+                "updated_at": (self.NOW - timedelta(days=days_ago)).isoformat()}
+
+    def verdict(self, draft, *others):
+        index = rl.build_publish_index([draft, *others])
+        return rl.classify_receipt(draft, now=self.NOW, published=index)
+
+    def test_a_draft_older_than_the_publish_is_superseded(self):
+        draft = self.receipt("newduck::d1", "observed", "draft_ready", "Monster Truck Duck", 200)
+        pub = self.receipt("newduck::p1", "verified", "shopify_activated", "Monster Truck Duck", 190)
+        v = self.verdict(draft, pub)
+        self.assertEqual(v.kind, rl.SUPERSEDED)
+        self.assertEqual(v.superseded_by, "newduck::p1")
+        self.assertFalse(v.overdue)
+
+    def test_a_draft_made_AFTER_the_publish_stays_visible(self):
+        # A listing edit after the duck went live is real work still waiting.
+        pub = self.receipt("newduck::p1", "verified", "shopify_activated", "Santa Duck", 60)
+        draft = self.receipt("newduck::d2", "observed", "draft_ready", "Santa Duck", 45)
+        v = self.verdict(draft, pub)
+        self.assertNotEqual(v.kind, rl.SUPERSEDED)
+        self.assertTrue(v.overdue)
+
+    def test_names_must_match_exactly(self):
+        # "Bronco Buddy" must not resolve "Bronco Buddy Duck": a false
+        # supersession hides the stall the card exists to catch.
+        draft = self.receipt("newduck::d1", "observed", "draft_ready", "Bronco Buddy Duck", 60)
+        pub = self.receipt("newduck::p1", "verified", "shopify_activated", "Bronco Buddy", 40)
+        self.assertNotEqual(self.verdict(draft, pub).kind, rl.SUPERSEDED)
+
+    def test_case_and_whitespace_do_not_count_as_a_different_duck(self):
+        draft = self.receipt("newduck::d1", "observed", "draft_ready", "  pelican duck ", 60)
+        pub = self.receipt("newduck::p1", "verified", "published", "Pelican Duck", 40)
+        self.assertEqual(self.verdict(draft, pub).kind, rl.SUPERSEDED)
+
+    def test_only_a_real_publish_is_evidence(self):
+        # A blocked or superseded sibling proves nothing went live.
+        draft = self.receipt("newduck::d1", "observed", "draft_ready", "Camp Slasher Duck", 60)
+        for state, reason in (("blocked", "copy_review_blocked"),
+                              ("resolved", "superseded_by_published_duck"),
+                              ("observed", "draft_ready")):
+            with self.subTest(state=state, reason=reason):
+                other = self.receipt("newduck::x", state, reason, "Camp Slasher Duck", 10)
+                self.assertNotEqual(self.verdict(draft, other).kind, rl.SUPERSEDED)
+
+    def test_a_shopify_read_back_counts_as_evidence(self):
+        draft = self.receipt("newduck::d1", "proposed", "shopify_activation_pending", "Mr Clean Duck", 200)
+        res = self.receipt("newduck::r1", "resolved", "verified_active_on_shopify", "Mr Clean Duck", 1)
+        self.assertEqual(self.verdict(draft, res).kind, rl.SUPERSEDED)
+
+    def test_the_latest_publish_wins_the_index(self):
+        a = self.receipt("newduck::old", "verified", "published", "Pelican Duck", 100)
+        b = self.receipt("newduck::new", "verified", "published", "Pelican Duck", 5)
+        self.assertEqual(rl.build_publish_index([a, b])[("newduck", "pelican duck")][0],
+                         "newduck::new")
+
+    def test_other_lanes_are_untouched(self):
+        draft = dict(self.receipt("thursday::d", "observed", "batch_ready", "Santa Duck", 60),
+                     lane="thursday")
+        pub = self.receipt("newduck::p", "verified", "published", "Santa Duck", 1)
+        self.assertNotEqual(self.verdict(draft, pub).kind, rl.SUPERSEDED)

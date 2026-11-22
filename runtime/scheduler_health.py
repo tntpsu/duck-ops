@@ -854,7 +854,25 @@ def _evaluate_job(
     # successfully" forever, which is true of the past and useless about the
     # present. `warn`, never `bad`: nothing failed, and an intentional
     # unload is the common case. It clears itself when the plist comes back.
-    if status in {"healthy", "no_history"} and not job.get("plist_path"):
+    retired = (isinstance(resolution, dict)
+               and str(resolution.get("resolution_status") or "").strip() == "retired")
+    if status in {"healthy", "no_history"} and not job.get("plist_path") and retired:
+        # The operator retired it on purpose and said so in a resolution
+        # record. Without this, a deliberate cancellation warned forever:
+        # `jeepfact_wednesday`, retired 2026-11-18, kept the card's warn count
+        # up with nothing anyone could do about it. Gated on the plist being
+        # ABSENT -- if the job is loaded again the record no longer describes
+        # it and the normal verdict returns -- and on the healthy/no_history
+        # chain, so a retired job that somehow fails still reports the failure.
+        status = "retired"
+        severity = "ok"
+        summary = (
+            f"Retired on purpose"
+            f"{' on ' + str(resolution.get('retired_at'))[:10] if resolution.get('retired_at') else ''}: "
+            f"{str(resolution.get('reason') or 'no reason recorded')[:200]}"
+        )
+        recommended_action = "None. Delete the resolution record to watch it again."
+    elif status in {"healthy", "no_history"} and not job.get("plist_path"):
         status = "not_scheduled"
         severity = "warn"
         summary = (

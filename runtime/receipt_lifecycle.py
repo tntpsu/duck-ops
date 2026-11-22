@@ -282,6 +282,70 @@ SUPERSESSION_KEYS: dict[str, str] = {
     "customer_reply": "conversation_thread_key",
 }
 
+#: Per-lane: the metadata field that names the PRODUCT a receipt is about,
+#: for lanes where a later publish of that product supersedes its drafts.
+#:
+#: Every newduck prepare iteration leaves its own `draft_ready` receipt
+#: (`..._hardened2` through `_hardened9` for one Monster Truck Duck), and none
+#: is ever retired when the duck publishes -- so on 2026-11-21, 15 of the 42
+#: receipts reddening `receipt_followthrough` were drafts of ducks already live
+#: on Shopify. Matched on the EXACT name (casefolded, stripped): "Bronco Buddy"
+#: must not resolve "Bronco Buddy Duck", because a false supersession hides the
+#: stall the card exists to catch.
+PUBLISH_SUPERSESSION_KEYS: dict[str, str] = {
+    "newduck": "duck_name",
+}
+
+#: Receipt (state, state_reason) pairs that PROVE the product went live.
+#: `state_reason=None` means any reason in that state.
+PUBLISH_EVIDENCE: dict[str, frozenset[tuple[str, str | None]]] = {
+    "newduck": frozenset({
+        ("verified", None),                                # shopify_activated / published
+        ("resolved", "verified_active_on_shopify"),        # read back from Shopify
+    }),
+}
+
+
+def _parse_when(value: Any) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(str(value or "").strip())
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _is_publish_evidence(receipt: dict) -> bool:
+    lane = str(receipt.get("lane") or "").strip()
+    state = str(receipt.get("state") or "").strip().lower()
+    reason = str(receipt.get("state_reason") or "").strip()
+    accepted = PUBLISH_EVIDENCE.get(lane) or frozenset()
+    return (state, None) in accepted or (state, reason) in accepted
+
+
+def _product_name(receipt: dict) -> str:
+    key = PUBLISH_SUPERSESSION_KEYS.get(str(receipt.get("lane") or "").strip())
+    metadata = receipt.get("metadata")
+    if not key or not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get(key) or "").strip().casefold()
+
+
+def build_publish_index(receipts: Any) -> dict[tuple[str, str], tuple[str, datetime]]:
+    """(lane, product name) -> (workflow_id, time) of its LATEST publish."""
+    index: dict[tuple[str, str], tuple[str, datetime]] = {}
+    for receipt in receipts or []:
+        if not isinstance(receipt, dict) or not _is_publish_evidence(receipt):
+            continue
+        name = _product_name(receipt)
+        when = _parse_when(receipt.get("updated_at"))
+        if not name or when is None:
+            continue
+        key = (str(receipt.get("lane")).strip(), name)
+        if key not in index or when > index[key][1]:
+            index[key] = (str(receipt.get("workflow_id") or ""), when)
+    return index
+
+
 #: Lanes whose off-switch is NOT a `<lane>_execution.json` FlowSpec config.
 #:
 #: `paused_lanes` is built by globbing those FlowSpec configs, so a lane gated
@@ -342,6 +406,7 @@ def classify_receipt(
     now: datetime | None = None,
     paused_lanes: frozenset[str] | set[str] | None = None,
     live_identity: dict[str, str] | None = None,
+    published: dict[tuple[str, str], tuple[str, datetime]] | None = None,
     path: str = "",
 ) -> ReceiptVerdict | None:
     """One receipt's verdict, or None when the state is universally terminal.
@@ -377,6 +442,17 @@ def classify_receipt(
         mine = str(receipt.get("entity_id") or "").strip()
         if current and mine and current != mine:
             superseded_by = current
+
+    # A later publish of the same product supersedes its drafts -- but only a
+    # LATER one. A draft made after the duck went live is a real listing edit
+    # still waiting on someone, and must stay visible.
+    if superseded_by is None and published and lane in PUBLISH_SUPERSESSION_KEYS:
+        name = _product_name(receipt)
+        hit = published.get((lane, name)) if name else None
+        drafted = _parse_when(receipt.get("updated_at"))
+        if (hit and drafted is not None and hit[1] >= drafted
+                and hit[0] != str(receipt.get("workflow_id") or "")):
+            superseded_by = hit[0]
 
     cardinality = PER_ENTITY
     if superseded_by:

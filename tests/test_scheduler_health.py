@@ -1011,3 +1011,63 @@ class AnUnloadedJobIsNotAMissedRunTests(unittest.TestCase):
             )
         self.assertEqual(payload["items"][0]["status"], "missed_run")
         self.assertIsNotNone(payload["items"][0]["expected_at"])
+
+
+class ARetiredJobStopsWarningTests(unittest.TestCase):
+    """Surface 188. A deliberate cancellation had no resolution state, so
+    `jeepfact_wednesday` (retired by the operator 2026-11-18) warned
+    `not_scheduled` permanently with nothing anyone could do about it."""
+
+    def _payload(self, *, retired: bool, exit_code: int = 0, plist: bool = False):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launch_agents = root / "LaunchAgents"; launch_agents.mkdir()
+            if plist:
+                _write_plist(launch_agents / "com.philtullai.duckagent.jeepfact_wednesday.plist",
+                             label="com.philtullai.duckagent.jeepfact_wednesday",
+                             job_name="jeepfact_wednesday",
+                             schedule={"Weekday": 3, "Hour": 9, "Minute": 0})
+            receipts = root / "receipts"; receipts.mkdir()
+            (receipts / "jeepfact_wednesday.json").write_text(json.dumps({
+                "job_name": "jeepfact_wednesday",
+                "run_id": "jeepfact_wednesday_20261118_090004_1",
+                "status": "succeeded" if exit_code == 0 else "failed",
+                "exit_code": exit_code,
+                "started_at": "2026-11-18T09:00:04-05:00",
+                "finished_at": "2026-11-18T09:04:26-05:00",
+            }), encoding="utf-8")
+            resolutions = root / "resolutions"; resolutions.mkdir()
+            if retired:
+                (resolutions / "jeepfact_wednesday.json").write_text(json.dumps({
+                    "job_name": "jeepfact_wednesday", "resolution_status": "retired",
+                    "retired_at": "2026-11-18", "reason": "operator cancelled the lane",
+                }), encoding="utf-8")
+            payload = scheduler_health.build_scheduler_health(
+                now=datetime.fromisoformat("2026-11-22T09:00:00-05:00"),
+                launch_agents_dir=launch_agents, scheduler_log_path=root / "missing.log",
+                receipt_dir=receipts, resolution_dir=resolutions,
+                history_dir=root / "history", write_outputs=False)
+            return payload, next(i for i in payload["items"]
+                                 if i["job_name"] == "jeepfact_wednesday")
+
+    def test_a_retired_job_is_ok_and_says_why(self):
+        payload, item = self._payload(retired=True)
+        self.assertEqual(item["status"], "retired")
+        self.assertEqual(item["severity"], "ok")
+        self.assertIn("operator cancelled the lane", item["summary"])
+        self.assertFalse(item["attention_needed"])
+        self.assertEqual(payload["status"], "ok")
+
+    def test_without_the_record_it_still_warns(self):
+        # Positive control: an ACCIDENTAL unload must stay visible.
+        _, item = self._payload(retired=False)
+        self.assertEqual(item["status"], "not_scheduled")
+        self.assertEqual(item["severity"], "warn")
+
+    def test_a_failure_is_not_excused_by_retirement(self):
+        _, item = self._payload(retired=True, exit_code=1)
+        self.assertEqual(item["status"], "failed")
+
+    def test_the_record_stops_applying_once_the_job_is_loaded_again(self):
+        _, item = self._payload(retired=True, plist=True)
+        self.assertNotEqual(item["status"], "retired")
