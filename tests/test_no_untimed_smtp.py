@@ -61,7 +61,7 @@ _SUBPROCESS_ONLY = {"run", "Popen", "check_output", "check_call"}
 #: here and in TESTS.md Surface 137, not left as prose).
 UNREVIEWED = {
     "drive_mirror.py:684",
-    "drive_mirror.py:813",
+    "drive_mirror.py:852",
     "engineering_governance_digest.py:104",
     "etsy_browser_batch.py:432",
     "etsy_browser_guard.py:269",

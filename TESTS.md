@@ -12006,3 +12006,41 @@ each fail tests.
 post requested for a different time is still refused. Deliberate: that is a
 re-schedule, not a new post, and it should be an operator action rather than a
 re-send.
+
+## Surface 187 — `/duck-health` reds, 2026-11-21
+
+**Drive mirror (drive_mirror_throughput RED + scheduler_health's one bad job — one cause).**
+The nightly release had never succeeded on its schedule: every release was a
+manual daytime run on 11-13, and every 03:20 run from 11-19 refused. Drive had
+evicted 18,950 of 18,951 mirror files to `dataless` placeholders; rsync
+memory-maps each destination it updates, and a launchd job runs with dataless
+materialization off → EDEADLK "Resource deadlock avoided". Reproduced verbatim
+by setting that I/O policy off in a shell; fixed by setting it on in the
+release (inherited by rsync). `-W` does not help (openrsync maps regardless).
+**Verified:** the real job, run under the launchd-equivalent policy, released
+20,429 files at 21:12. Covered: `tests/test_drive_mirror.py`
+(TheReleaseCanOverwriteCloudOnlyFiles — real policy read against the header's
+literal values; a first version compared to the module's own constants and a
+mutation survived it). Scheduler card clears on the 03:20 run, which writes the
+receipt the manual run does not.
+
+**receipt_followthrough 42 → 3.** Not live failures: the card (built 11-18)
+surfaced a backlog that predated it. 39 closed as `resolved` through
+`record_workflow_transition`, each with its evidence in `last_verification`:
+11 newduck `shopify_activation_pending` read against Shopify (9 ACTIVE, Monster
+Truck superseded by its verified publish, the May Baseball draft deleted with
+two older Baseball listings ACTIVE); 15 newduck drafts superseded by a
+verified/resolved record for the same duck; 8 thursday/meme/weekly drafts whose
+slot passed months ago; 3 occasion-tag approvals for Father's Day / July 4.
+Left open: 3 Etsy review-reply receipts (verifying needs the constrained Etsy
+browser) and the 3 LIVE Thanksgiving tag approvals from 11-08.
+
+**Open (MED): supersession covers `customer_reply` only.** `SUPERSESSION_KEYS`
+has no `newduck` entry, so every prepare iteration of a duck leaves a draft
+record that ages into this card even after the duck publishes — 15 of today's
+42. Needs an exact-name, publish-after-draft rule (a draft made AFTER a publish
+is a real listing edit and must stay visible).
+
+**Open (LOW): a cancelled job has no resolution state.** `jeepfact_wednesday`
+(cancelled by the operator 11-18) warns `not_scheduled` permanently; the only
+resolution status the scheduler honours is `fixed_pending_next_run`.
