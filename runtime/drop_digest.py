@@ -87,6 +87,45 @@ def _milestone(age_days: float) -> int:
     return max(crossed) if crossed else 0
 
 
+#: How far back a refusal still earns an email. Bounds the first send after
+#: this shipped, which would otherwise report the whole 200-row history.
+REFUSAL_LOOKBACK_DAYS = 7
+
+
+def _refusal_key(row: dict) -> str:
+    return f"{row.get('stem')}@{row.get('at')}"
+
+
+def _unreported_refusals(prior: dict, now: datetime) -> list[dict]:
+    """Refused drops the operator has not been emailed about.
+
+    The agent learns why from `rejected/<stem>.reason.txt`; the operator used
+    to learn nothing. On 2026-11-22 a Thanksgiving reel was refused (falsely,
+    see `drop_intake.DropUnreadable`) and the operator went looking for an
+    approval email that was never going to come.
+    """
+    ledger = drop_intake._read_incomplete_ledger(drop_intake.DROP_INCOMPLETE_PATH)
+    told = set(prior.get("refusals_told") or [])
+    out = []
+    for row in ledger.get("history") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("outcome")) not in {"refused", "refused_validation"}:
+            continue
+        try:
+            at = datetime.fromisoformat(str(row.get("at")))
+        except ValueError:
+            continue
+        if at.tzinfo is None:
+            at = at.astimezone()
+        if (now - at).total_seconds() > REFUSAL_LOOKBACK_DAYS * 86400:
+            continue
+        if _refusal_key(row) in told:
+            continue
+        out.append(row)
+    return out
+
+
 def decide(now: datetime | None = None, state_path: Path | None = None) -> dict:
     """Should we send, and why? Pure enough to test without a mailbox."""
     now = now or datetime.now().astimezone()
@@ -105,6 +144,17 @@ def decide(now: datetime | None = None, state_path: Path | None = None) -> dict:
     milestone = _milestone(age)
     prior_milestone = int(prior.get("milestone") or 0)
 
+    refused = _unreported_refusals(prior, now)
+    refusals_told = sorted(set(prior.get("refusals_told") or [])
+                           | {_refusal_key(r) for r in refused})
+
+    if not current and refused:
+        return {"send": True, "reason": "refused",
+                "stems": stems, "note_files": note_files,
+                "new_items": [], "milestone": 0, "oldest_age_days": 0.0,
+                "pending": pending, "notes": notes,
+                "refused": refused, "refusals_told": refusals_told}
+
     if not current:
         if prior.get("stems") or prior.get("note_files"):
             reason = "all_clear"
@@ -113,10 +163,13 @@ def decide(now: datetime | None = None, state_path: Path | None = None) -> dict:
         return {"send": reason == "all_clear", "reason": reason,
                 "stems": stems, "note_files": note_files,
                 "new_items": [], "milestone": 0, "oldest_age_days": 0.0,
-                "pending": pending, "notes": notes}
+                "pending": pending, "notes": notes,
+                "refused": [], "refusals_told": refusals_told}
 
     if new_items:
         reason = "new_items"
+    elif refused:
+        reason = "refused"
     elif milestone > prior_milestone:
         reason = f"aged_past_{milestone}d"
     else:
@@ -126,7 +179,8 @@ def decide(now: datetime | None = None, state_path: Path | None = None) -> dict:
             "stems": stems, "note_files": note_files,
             "new_items": new_items, "milestone": milestone,
             "oldest_age_days": round(age, 2),
-            "pending": pending, "notes": notes}
+            "pending": pending, "notes": notes,
+            "refused": refused, "refusals_told": refusals_told}
 
 
 #: Wide enough to judge a frame on a phone, small enough that three of them
@@ -371,6 +425,31 @@ def _reply_channel_note(decision: dict) -> str:
     return operator_reply_health.describe_for_operator(health)
 
 
+def _refusal_html(refused: list[dict]) -> str:
+    if not refused:
+        return ""
+    rows = [f"<div style='border:1px solid #f0c9a4;background:#fff8f0;"
+            "border-radius:10px;padding:12px 14px;margin:0 0 14px 0;'>"
+            f"<div style='font-size:12px;color:{_MUTED};margin:0 0 6px 0;'>"
+            f"<strong>Refused</strong> &mdash; the agent was told why in "
+            "<code>DuckDrop/rejected/</code>; nothing to approve.</div>"]
+    for r in refused:
+        rows.append(f"<p style='margin:6px 0 0 0;font-size:14px;'>"
+                    f"<strong>{_esc(r.get('stem'))}</strong>: "
+                    f"{_esc(r.get('reason') or 'refused')}</p>")
+    rows.append("</div>")
+    return "\n".join(rows)
+
+
+def _refusal_text(refused: list[dict]) -> str:
+    if not refused:
+        return ""
+    lines = ["Refused (the agent was told why in DuckDrop/rejected/):"]
+    lines += [f"  - {r.get('stem')}: {r.get('reason') or 'refused'}"
+              for r in refused]
+    return "\n".join(lines)
+
+
 def render_email(decision: dict, now: datetime | None = None,
                  previews: list[dict] | None = None,
                  reply_to: str | None = None) -> tuple[str, str, str]:
@@ -379,6 +458,23 @@ def render_email(decision: dict, now: datetime | None = None,
     pv = {p["stem"]: p for p in (previews or [])}
     n = len(decision["stems"])
     notes = decision.get("notes") or []
+    refused = decision.get("refused") or []
+
+    if not n and not notes and refused:
+        k = len(refused)
+        subject = (f"MJD: [DROPS] {k} drop{'s' if k != 1 else ''} refused "
+                   f"| FLOW:drops | RUN:{run_id} | ACTION:notify")
+        text = (f"{_refusal_text(refused)}\n\nNothing is waiting on you. "
+                "A fixed re-send arrives as a normal approval email.")
+        html = (f"<div style='font-family:{_FONT};line-height:1.5;"
+                f"color:{_TEXT};max-width:620px;'>"
+                f"<h2 style='margin:0 0 8px 0;'>{k} drop"
+                f"{'s' if k != 1 else ''} refused</h2>"
+                f"{_refusal_html(refused)}"
+                f"<p style='color:{_MUTED};font-size:12px;'>Nothing is "
+                "waiting on you. A fixed re-send arrives as a normal approval "
+                "email.</p></div>")
+        return subject, text, html
 
     if decision["reason"] == "all_clear":
         subject = (f"MJD: [DROPS] queue clear | FLOW:drops | RUN:{run_id} "
@@ -480,6 +576,9 @@ def render_email(decision: dict, now: datetime | None = None,
     # that the reply went missing -- it was that the second and third email
     # looked exactly like the first, so neither side could tell an answer
     # had been sent and lost ([[feedback_notification_is_not_a_data_pipeline]]).
+    if refused:
+        parts.append(_refusal_html(refused))
+
     reply_note = _reply_channel_note(decision)
     if reply_note:
         parts.append(
@@ -499,6 +598,8 @@ def render_email(decision: dict, now: datetime | None = None,
     text = (f"{text_body}\n\nReply to this email with one of the lines "
             f"above.\n\nOldest item: {decision['oldest_age_days']} day(s). "
             f"Sent because: {decision['reason']}.")
+    if refused:
+        text += f"\n\n{_refusal_text(refused)}"
     if reply_note:
         text += f"\n\nHeads up -- {reply_note}"
     return subject, text, html
@@ -610,6 +711,7 @@ def main(argv: list[str] | None = None) -> int:
         "stems": decision["stems"],
         "note_files": decision["note_files"],
         "milestone": decision["milestone"],
+        "refusals_told": decision.get("refusals_told") or [],
     })
     print("[drop-digest] sent")
     return 0

@@ -791,3 +791,81 @@ class ARefusalIsNotASuccessTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class ARefusedDropReachesTheOperatorTests(unittest.TestCase):
+    """2026-11-22: a Thanksgiving reel was refused and the only notice went to
+    the agent, in DuckDrop/rejected/. The operator waited for an approval
+    email that was never coming."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.state = self.root / "digest.json"
+        self.incomplete = self.root / "drop_incomplete.json"
+
+    def _history(self, *rows):
+        self.incomplete.write_text(json.dumps({"pending": {}, "history": list(rows)}),
+                                   encoding="utf-8")
+
+    def _decide(self, entries=None, now=NOW):
+        path = _ledger(self.root, entries or {})
+        with mock.patch.object(drop_intake, "DROP_PROPOSALS_PATH", path), \
+             mock.patch.object(drop_intake, "DROP_INCOMPLETE_PATH", self.incomplete), \
+             mock.patch.object(drop_operator, "_unanswered_notes", return_value=[]):
+            return drop_digest.decide(now=now, state_path=self.state)
+
+    def _refusal(self, stem="turkey", hours_ago=1, outcome="refused_validation"):
+        return {"stem": stem, "outcome": outcome, "reason": "publish_at is in the past",
+                "at": (NOW - timedelta(hours=hours_ago)).isoformat()}
+
+    def test_a_refusal_with_nothing_else_waiting_sends(self):
+        self._history(self._refusal())
+        d = self._decide()
+        self.assertTrue(d["send"])
+        self.assertEqual(d["reason"], "refused")
+        subject, text, html = drop_digest.render_email(d, now=NOW)
+        self.assertIn("1 drop refused", subject)
+        self.assertIn("ACTION:notify", subject)
+        self.assertIn("publish_at is in the past", text)
+        self.assertIn("turkey", html)
+
+    def test_an_incomplete_drop_that_timed_out_also_sends(self):
+        self._history(self._refusal(outcome="refused"))
+        self.assertEqual(self._decide()["reason"], "refused")
+
+    def test_a_refusal_is_reported_once(self):
+        self._history(self._refusal())
+        first = self._decide()
+        self.state.write_text(json.dumps({"stems": [], "note_files": [], "milestone": 0,
+                                          "refusals_told": first["refusals_told"]}),
+                              encoding="utf-8")
+        again = self._decide()
+        self.assertFalse(again["send"])
+        self.assertEqual(again["refused"], [])
+
+    def test_a_second_refusal_of_the_same_post_is_new(self):
+        self._history(self._refusal(hours_ago=5))
+        told = self._decide()["refusals_told"]
+        self.state.write_text(json.dumps({"stems": [], "refusals_told": told}),
+                              encoding="utf-8")
+        self._history(self._refusal(hours_ago=5), self._refusal(hours_ago=1))
+        self.assertEqual(len(self._decide()["refused"]), 1)
+
+    def test_old_refusals_do_not_flood_the_first_send(self):
+        self._history(self._refusal(hours_ago=24 * 8))
+        self.assertFalse(self._decide()["send"])
+
+    def test_successes_are_not_refusals(self):
+        self._history({"stem": "ok", "outcome": "accepted", "at": NOW.isoformat()})
+        self.assertFalse(self._decide()["send"])
+
+    def test_a_refusal_rides_along_with_a_pending_approval(self):
+        self._history(self._refusal(stem="bad"))
+        d = self._decide({"good": _entry()})
+        self.assertEqual(d["reason"], "new_items")
+        subject, text, html = drop_digest.render_email(d, now=NOW)
+        self.assertIn("ACTION:approve", subject)
+        self.assertIn("bad", text)
+        self.assertIn("Refused", html)

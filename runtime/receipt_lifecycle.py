@@ -132,6 +132,13 @@ POLICY: dict[tuple[str, str], Policy] = {
     ("weekly_sale_monitor", "weak_items_present"): _parked(
         "a monitor observation; the weekly sale step consumes it"),
 
+    # --- Etsy browser batch -------------------------------------------------
+    ("etsy_browser_batch", "browser_batch_failed"): _pending(
+        1, "first seen 2026-11-22 (two slots timed out); three slots a day, "
+           "so a healthy lane overwrites this within hours -- still failed a "
+           "day later means the batch itself is broken",
+        cardinality=PER_RUN),
+
     # --- deferred operator emails -----------------------------------------
     # A deferral naming a destination is a HANDOFF CONTRACT, so these are
     # PENDING on the deferral, not parked: the SEO weak_title batch vanished

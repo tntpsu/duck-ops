@@ -451,3 +451,66 @@ class TheOnScreenHookIsAContractFieldTests(_DropRoot):
         # survives beside the new field the contract reads as self-
         # contradictory to whoever has to follow it.
         self.assertNotIn("ALREADY BURNED INTO THE FRAMES", readme)
+
+
+class ACloudOnlyFileIsNeverCalledFakeTests(_DropRoot):
+    """2026-11-22: a valid Thanksgiving reel was refused as "not a real mp4".
+    Drive had evicted it to a cloud-only placeholder, the 00:15 launchd scan
+    could not download it (EDEADLK), and the read error fell through the
+    content check. A machine fault must never read as the agent's fault."""
+
+    def _unreadable(self, name: str):
+        import errno
+        from unittest import mock
+
+        real_open = Path.open
+
+        def fake_open(path, *args, **kwargs):
+            if Path(path).name == name:
+                raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+            return real_open(path, *args, **kwargs)
+
+        return mock.patch.object(Path, "open", fake_open)
+
+    def test_an_unreadable_asset_stays_in_the_inbox_and_is_not_refused(self) -> None:
+        self.drop("turkey.mp4", MP4)
+        with self._unreadable("turkey.mp4"):
+            out = self.scan()
+        self.assertEqual(out["rejected_count"], 0, out["rejected"])
+        self.assertEqual(out["accepted_count"], 0)
+        self.assertEqual(out["unreadable_count"], 1)
+        self.assertIn("Resource deadlock avoided", out["unreadable"][0]["reason"])
+        self.assertTrue((self.inbox / "turkey.mp4").exists())
+        self.assertEqual([], list((self.root / drop_intake.REJECTED_DIR).iterdir()))
+
+    def test_the_next_readable_scan_accepts_it(self) -> None:
+        self.drop("turkey.mp4", MP4)
+        with self._unreadable("turkey.mp4"):
+            self.scan()
+        self.assertEqual(self.scan()["accepted_count"], 1)
+
+    def test_the_scan_asks_to_download_cloud_only_files(self) -> None:
+        from unittest import mock
+        import drive_mirror
+
+        with mock.patch.object(drive_mirror, "_allow_dataless_materialization",
+                               return_value=None) as allow:
+            self.scan()
+        allow.assert_called_once_with()
+
+    def test_a_failure_to_ask_is_recorded_not_swallowed(self) -> None:
+        from unittest import mock
+        import drive_mirror
+
+        with mock.patch.object(drive_mirror, "_allow_dataless_materialization",
+                               return_value="setiopolicy_np failed (errno 1)"):
+            out = self.scan()
+        self.assertEqual(out["materialization_error"],
+                         "setiopolicy_np failed (errno 1)")
+
+    def test_genuinely_fake_contents_are_still_refused(self) -> None:
+        # Positive control: the split must not turn every bad file into a wait.
+        self.drop("fake.mp4", b"#!/bin/sh\n" + b"\x00" * 64)
+        out = self.scan()
+        self.assertEqual(out["rejected_count"], 1)
+        self.assertEqual(out["unreadable_count"], 0)

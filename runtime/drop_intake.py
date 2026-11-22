@@ -361,6 +361,18 @@ _FROZEN_PRODUCTION_INCOMPLETE_PATH = (
 INCOMPLETE_HISTORY_LIMIT = 200
 
 
+class DropUnreadable(RuntimeError):
+    """The scan could not READ a drop -- a fault of this machine, not of the
+    file. The drop stays in the inbox and the next scan tries again.
+
+    Kept apart from DropRefused on purpose: on 2026-11-22 a valid Thanksgiving
+    reel was refused as "not a real mp4" because a launchd job cannot download
+    a cloud-only Drive file (EDEADLK), and the read error fell through a
+    content check. The agent was told its file was fake and the operator never
+    saw the post.
+    """
+
+
 class DropRefused(RuntimeError):
     """A drop that may not become a proposal. Carries an operator-readable
     reason, which is written beside the file so the agent can see it.
@@ -568,8 +580,8 @@ def _magic_matches(path: Path, suffix: str) -> bool:
         return False
     try:
         head = path.open("rb").read(16)
-    except OSError:
-        return False
+    except OSError as exc:
+        raise DropUnreadable(f"could not read {path.name}: {exc}") from None
     for sig in signatures:
         if suffix in _VIDEO_EXTS:
             # ISO base media: 4-byte size then 'ftyp'.
@@ -976,6 +988,7 @@ def scan_inbox(drop_root: Path | None = None, *,
         "accepted": [],
         "rejected": [],
         "waiting": [],
+        "unreadable": [],
         "proposals": [],
     }
     if not inbox.is_dir():
@@ -983,6 +996,13 @@ def scan_inbox(drop_root: Path | None = None, *,
             f"{inbox} does not exist yet; run with --init or add the folder "
             f"to Drive for desktop")
         return manifest
+
+    # Drive evicts uploaded files to cloud-only placeholders, and a launchd
+    # job cannot download one unless it asks to (see drive_mirror).
+    import drive_mirror
+    policy_error = drive_mirror._allow_dataless_materialization()
+    if policy_error:
+        manifest["materialization_error"] = policy_error
 
     lanes = allowed_lanes()
     # The operator's rule, 2026-11-21: "I don't want Gemini to send the same
@@ -1044,6 +1064,11 @@ def scan_inbox(drop_root: Path | None = None, *,
 
             fields = validate_drop(asset, sidecar, lanes=lanes)
             asset_digest = _asset_sha256(asset)
+            if asset_digest is None:
+                # Without the digest the duplicate-post check cannot run, so
+                # an unreadable asset must wait rather than slip past it.
+                raise DropUnreadable(f"could not read {asset.name} to check "
+                                     "it against posts already sent")
             digest = _post_fingerprint(asset_digest, fields)
             if digest and digest in known_hashes:
                 prior_stem, prior = known_hashes[digest]
@@ -1058,6 +1083,10 @@ def scan_inbox(drop_root: Path | None = None, *,
                 seen_this_scan[digest] = record.stem
                 fields["asset_sha256"] = asset_digest
                 fields["post_fingerprint"] = digest
+        except DropUnreadable as exc:
+            manifest["unreadable"].append({"asset": asset.name,
+                                           "reason": str(exc)})
+            continue
         except DropRefused as exc:
             record.reason = str(exc)
             rejected_dir = drop_root / REJECTED_DIR
@@ -1122,6 +1151,7 @@ def scan_inbox(drop_root: Path | None = None, *,
     manifest["accepted_count"] = len(manifest["accepted"])
     manifest["rejected_count"] = len(manifest["rejected"])
     manifest["waiting_count"] = len(manifest["waiting"])
+    manifest["unreadable_count"] = len(manifest["unreadable"])
     manifest["incomplete_count"] = len(manifest["incomplete"])
     return manifest
 
@@ -2706,6 +2736,13 @@ def main(argv: list[str] | None = None) -> int:
     write_status_file(drop_root, proposals,
                       refused=manifest.get("rejected") or [],
                       incomplete=manifest.get("incomplete") or [])
+
+    for row in manifest.get("unreadable") or []:
+        print(f"[drop-intake] UNREADABLE {row['asset']}: {row['reason']} "
+              "-- left in the inbox for the next scan", file=sys.stderr)
+    if manifest.get("materialization_error"):
+        print("[drop-intake] WARNING could not allow downloading cloud-only "
+              f"files: {manifest['materialization_error']}", file=sys.stderr)
 
     # Loud about an orphan, because it is the one outcome that used to be
     # reported nowhere ([[feedback_swallowed_errors_lie]]).

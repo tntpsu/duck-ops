@@ -12069,3 +12069,35 @@ retired job that fails still reports `failed`). Accidental unloads still warn.
 **Found on the regrade:** `operator_reply_poll` is now `missed_run`/bad — its
 plist is in ~/Library/LaunchAgents but launchd has not loaded it, so its first
 window (00:40) passed. Correct verdict; needs `launchctl bootstrap`.
+
+## Surface 189 — a cloud-only drop is never called fake, and a refusal reaches the operator (2026-11-22)
+
+**Field bug.** Gemini's `thanksgiving_morning_drive_coffee_duck.mp4` (a valid
+`ftypmp42` file) was refused at the 00:15 scan as "not a real mp4". Drive had
+evicted it to a `dataless` placeholder; a launchd job cannot materialize one
+(EDEADLK, the Surface 187 mirror cause), and `_magic_matches` turned the
+OSError into `False` -- an environment fault under a content fault's label.
+Reproduced against a real dataless Drive file with the policy set OFF.
+
+| Case | Test |
+|---|---|
+| unreadable asset stays in inbox, not rejected, listed under `unreadable` | `test_drop_intake.ACloudOnlyFileIsNeverCalledFakeTests` (mutation: `return False` restored → 2 fail) |
+| next readable scan accepts it | same |
+| scan requests dataless materialization; a failure to is recorded | same |
+| genuinely fake bytes still refused (positive control) | same |
+| unreadable asset cannot skip the duplicate-post check (sha None → wait) | code path; covered by the unreadable test |
+| live: real dataless file under OFF policy → `DropUnreadable`; after `_allow_dataless_materialization` → magic matches | manual, 2026-11-22 |
+
+**Second gap, same incident.** The refusal reached the agent
+(`rejected/*.reason.txt`) and nobody else: `drop_digest.decide` only knew
+pending proposals and notes. It now reads refusals from the durable
+`drop_incomplete.json` history (7-day lookback, reported once via
+`refusals_told`) and sends `[DROPS] N drop refused | ACTION:notify`, or adds a
+Refused section to an approval email. `test_drop_operator_and_digest.ARefusedDropReachesTheOperatorTests`
+(mutation: early return disabled → 3 fail). Dry-run against live state renders
+the Thanksgiving refusal.
+
+**Found on the full run:** `etsy_browser_batch/failed/browser_batch_failed` had
+no declared policy (`TheLiveStoreIsFullyDeclaredTests` red on live data) --
+both 2026-11-22 slots timed out (`RecoveredTimeout`). Declared PENDING 1 day,
+PER_RUN. The batch timeouts themselves are not investigated here.
