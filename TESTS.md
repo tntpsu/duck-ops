@@ -12174,3 +12174,12 @@ seen in production first; each test fails against the code before its fix.
 | One reply approves a whole tag email | operator: "I don't want to reply to an email for every listing" | unit:test_approve_all_applies_every_listing_in_that_email |
 | `all` never leaks past its email | a later email's proposals, a dismissed listing, an unknown batch, a quoted line | unit:test_approve_all_never_reaches_a_later_email, _leaves_a_dismissed_listing_dismissed, _for_an_unknown_email_is_refused, test_a_quoted_approve_all_is_not_a_command |
 | Evening send keeps its date | `emailed_at` is UTC, so a 19:30 send would be tomorrow's batch; `email_batch` stamps the run date | unit:test_the_email_offers_one_approve_all_for_its_own_batch |
+
+Same day, after the 6 PM posts: the applied approve-all was re-dispatched every
+20 minutes (a reply with nothing left to decide raised, keeping the email
+unread) — dispatch:test_a_repeat_of_a_reply_that_already_took_effect_is_consumed,
+unit:test_repeating_a_batch_reply_reports_already_decided. Dismiss-all added at
+the operator's request — unit:test_dismiss_all_dismisses_that_email_and_touches_nothing_on_etsy.
+The queued IG publisher saved a constructed /p/<media id> URL for the live reel
+18114816749233037 (real: /reel/DgGgvyPK725/) — unit:test_receipt_url_is_the_permalink_read_back_from_meta,
+with test_a_failed_read_back_still_writes_the_receipt as the never-load-bearing control.
