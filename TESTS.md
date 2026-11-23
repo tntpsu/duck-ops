@@ -12158,3 +12158,19 @@ builder both meme and express use ([[feedback_incomplete_fix_enumerate_all_branc
 before ffmpeg — unit:test_cloud_only_clips_are_allowed_to_download_before_ffmpeg_runs;
 live repro: ffprobe on the real dataless file fails with the policy OFF, reads
 10.03s with it ON.
+
+## Surface 192 — the first live meme-lane drop, and one reply for a whole tag email (2026-11-23, regression)
+
+The meme lane's drop path ran live for the first time on 2026-11-23 and
+reached neither the operator's review nor the feed intact. Every row below was
+seen in production first; each test fails against the code before its fix.
+
+| Use case | Failure seen | Test |
+|---|---|---|
+| A claimed video drop renders | reel built, then the step fell through to the template renderer — email and cover carried a "Product photo unavailable" card | unit:test_a_prepared_drop_is_not_painted_over_by_the_template |
+| An approved drop auto-schedules | policy blocked on blank meme text + missing product handle, two fields a drop never has | unit:test_the_live_drop_payload_auto_schedules (payload copied from runs/2026-11-23) |
+| The exemption stays narrow | a generated meme with no product, or a drop with no caption, is still blocked | unit:test_a_generated_meme_without_a_product_is_still_blocked, test_a_drop_with_no_caption_is_still_blocked |
+| Facebook gets the clip, not its poster | no lane had ever posted video to Facebook; drops went out as a photo of the poster frame | unit:test_a_claimed_drop_goes_to_facebook_as_the_video + photo control; helper read-back: test_the_video_helper_reads_the_permalink_back (shapes from the live 2026-11-23 schedule, video 30364677029787185) |
+| One reply approves a whole tag email | operator: "I don't want to reply to an email for every listing" | unit:test_approve_all_applies_every_listing_in_that_email |
+| `all` never leaks past its email | a later email's proposals, a dismissed listing, an unknown batch, a quoted line | unit:test_approve_all_never_reaches_a_later_email, _leaves_a_dismissed_listing_dismissed, _for_an_unknown_email_is_refused, test_a_quoted_approve_all_is_not_a_command |
+| Evening send keeps its date | `emailed_at` is UTC, so a 19:30 send would be tomorrow's batch; `email_batch` stamps the run date | unit:test_the_email_offers_one_approve_all_for_its_own_batch |
