@@ -12130,3 +12130,21 @@ PER_RUN. The batch timeouts themselves are not investigated here.
 | Output card | planned: green when approved = applied | n/a | planned: red when approved is >24h unapplied; yellow when proposals await a reply >72h | planned: red on `failed` within 7d | n/a | n/a | same |
 
 **Left out on purpose:** no auto-apply. Approval is still a per-listing reply and the scheduled cycle only proposes and reverts. The 3 Thanksgiving proposals aren't touched by hand; the new expiry closes them after 11-26. No portal decision card this round; the email is the approval surface, as for drops.
+
+## Surface 191 — a Gmail-wrapped drop approval is still read (2026-11-22, regression)
+
+The operator's `drop approve thanksgiving_morning_drive_coffee_duck` reply was
+ignored twice over. Gmail hard-wrapped the plain text near 78 columns, which
+(a) split `DuckAgent approval metadata:` across a line break, so the poller's
+trust check logged `skipped_missing_approval_marker` and never dispatched, and
+(b) pulled `---- DuckAgent approval` onto the command line, which the
+trailing-only separator strip (Surface of 2026-11-17) left in the stem.
+
+| Use case | Happy | Wrapped marker | Footer words after separator | No marker at all |
+|---|---|---|---|---|
+| Poller trust gate | unit:existing | unit:test_a_marker_gmail_wrapped_across_lines_is_still_dispatched | n/a | unit:test_a_reply_without_the_marker_is_still_refused |
+| Drop command parse | unit:existing | n/a | unit:test_footer_words_pulled_onto_the_command_line_are_cut, test_only_survives_when_footer_words_follow_the_separator | n/a |
+| Receipt policy | — | — | — | live:test_no_live_receipt_falls_into_an_undeclared_pair caught `express/approval_email_sent` (declared 7d) |
+
+Both fixes mutation-checked: removing either one fails its test. The fixtures
+are the delivered reply verbatim, not a re-typed approximation.

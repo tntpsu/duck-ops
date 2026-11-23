@@ -183,6 +183,14 @@ def _strip_quoted_reply(body: str) -> str:
 _SEPARATOR_TAIL = re.compile(r"\s+[-=_*~.]{2,}\s*$")
 
 
+def _has_approval_marker(body: str) -> bool:
+    # Gmail hard-wraps a reply's plain text near 78 columns. A long drop stem
+    # pushed "DuckAgent approval metadata:" across a line break, so a real
+    # approval (2026-11-22, thanksgiving_morning_drive_coffee_duck) was read as
+    # an arbitrary email and never dispatched.
+    return APPROVAL_METADATA_MARKER in " ".join(body.split())
+
+
 def _strip_metadata_footer(body: str) -> str:
     """Trim the 'DuckAgent approval metadata:' footer so the receipt
     log's command_text field shows only the operator-visible command."""
@@ -401,7 +409,7 @@ def _poll_folder(
             # the Duck Ops mailto templates emit. This filters out
             # system notifications (which the operator's own
             # address sends to itself) and arbitrary replies.
-            if APPROVAL_METADATA_MARKER not in body:
+            if not _has_approval_marker(body):
                 receipts.append({
                     "at": _now_iso(),
                     "uid": uid_str,

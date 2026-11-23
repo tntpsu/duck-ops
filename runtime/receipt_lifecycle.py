@@ -248,6 +248,11 @@ POLICY: dict[tuple[str, str], Policy] = {
         cardinality=PER_RUN),
     ("review_carousel", "approval_reminder_sent"): _pending(
         14, "weekly Tuesday lane; cadence x2"),
+    # Appeared in the live store 2026-11-22T20:15, the first express drop to
+    # reach its approval email. 7d matches the digest's last reminder
+    # milestone (AGE_MILESTONES = 1, 3, 7): past that nobody is nudging it.
+    ("express", "approval_email_sent"): _pending(
+        7, "one agent drop waiting on the operator; digest reminds at 1/3/7d"),
 }
 
 

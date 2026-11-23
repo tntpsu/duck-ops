@@ -470,6 +470,38 @@ class FolderSelectionTests(unittest.TestCase):
             [r["outcome"] for r in receipts if r.get("uid") == "8"],
             ["skipped_untrusted_sender"])
 
+    def _raw_reply(self, body: str, message_id: str) -> bytes:
+        msg = EmailMessage()
+        msg["From"] = "op@example.com"
+        msg["Subject"] = "Re: MJD: [DROPS] 1 drop waiting | FLOW:drops | RUN:2026-11-22 | ACTION:approve"
+        msg["Message-ID"] = message_id
+        msg["Date"] = email.utils.format_datetime(
+            datetime.now(timezone.utc) - timedelta(minutes=20))
+        msg.set_content(body)
+        return msg.as_bytes()
+
+    def test_a_marker_gmail_wrapped_across_lines_is_still_dispatched(self) -> None:
+        # The 2026-11-22 reply verbatim: Gmail broke the line between
+        # "approval" and "metadata:" and the approval was never acted on.
+        body = ("drop approve thanksgiving_morning_drive_coffee_duck ---- DuckAgent approval\n"
+                "metadata: FLOW:drops | RUN:2026-11-22 | ACTION:approve Review this draft,\n"
+                "then send this reply. This button does not send automatically.\n")
+        _fake, receipts, dispatch = self._run(
+            {"INBOX": [(b"11", self._raw_reply(body, "<wrapped-1>"))]})
+        dispatch.assert_called_once()
+        self.assertEqual(
+            [r["outcome"] for r in receipts if r.get("uid") == "11"], ["ok"])
+
+    def test_a_reply_without_the_marker_is_still_refused(self) -> None:
+        body = "drop approve thanksgiving_morning_drive_coffee_duck\nDuckAgent approval\n"
+        _fake, receipts, dispatch = self._run(
+            {"INBOX": [(b"12", self._raw_reply(body, "<nomarker-1>"))]})
+        dispatch.assert_not_called()
+        self.assertEqual(
+            [r["outcome"] for r in receipts if r.get("uid") == "12"],
+            ["skipped_missing_approval_marker"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

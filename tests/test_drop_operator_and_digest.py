@@ -721,6 +721,26 @@ class AMailSeparatorMustNotEatTheCommandTests(unittest.TestCase):
                          "a_v3")
 
 
+    def test_footer_words_pulled_onto_the_command_line_are_cut(self):
+        """The 2026-11-22 reply verbatim: Gmail wrapped the footer's first
+        words onto the command line, after the separator."""
+        body = ("drop approve alpha_v3 ---- DuckAgent approval\n"
+                "metadata: FLOW:drops | RUN:2026-11-22 | ACTION:approve Review this draft,\n"
+                "then send this reply. This button does not send automatically.\n")
+        with self._with(self._three()):
+            out = drop_operator.apply_drop_text(body)
+        self.assertEqual(out["applied"], 1, out["response"])
+        self.assertEqual(self._led()["alpha_v3"]["approval"], "approved")
+        self.assertEqual(self._led()["alpha_v1"]["approval"], "operator_required")
+
+    def test_only_survives_when_footer_words_follow_the_separator(self):
+        with self._with(self._three()):
+            out = drop_operator.apply_drop_text(
+                "drop approve alpha_v3 only ---- DuckAgent approval")
+        self.assertEqual(out["applied"], 1, out["response"])
+        self.assertEqual(self._led()["alpha_v1"]["approval"], "declined")
+
+
 class ARefusalIsNotASuccessTests(unittest.TestCase):
     """`applied` is the field the email path gates on.
 

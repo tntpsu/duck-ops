@@ -148,12 +148,13 @@ def _strip_trailing_separator(target: str) -> str:
     char-wise strip would eat a legitimate suffix.
     """
     tokens = (target or "").split()
-    while tokens:
-        last = tokens[-1]
-        if len(last) >= 2 and set(last) <= _SEPARATOR_CHARS:
-            tokens.pop()
-            continue
-        break
+    # Cut at the FIRST separator, not just trailing ones: on 2026-11-22 Gmail
+    # also pulled the footer's first words onto the command line, so the
+    # target read `<stem> ---- DuckAgent approval`.
+    for i, token in enumerate(tokens):
+        if len(token) >= 2 and set(token) <= _SEPARATOR_CHARS:
+            tokens = tokens[:i]
+            break
     return " ".join(tokens)
 
 
