@@ -12148,3 +12148,13 @@ trailing-only separator strip (Surface of 2026-11-17) left in the stem.
 
 Both fixes mutation-checked: removing either one fails its test. The fixtures
 are the delivered reply verbatim, not a re-typed approximation.
+
+**Same night, third branch:** the approved drop then failed to build its reel
+— `Error opening input: Resource deadlock avoided`. Drive had evicted the clip
+to a dataless placeholder and the launchd process had materialization off.
+The policy fix existed in `drive_mirror` and `drop_intake` but not in the reel
+builder both meme and express use ([[feedback_incomplete_fix_enumerate_all_branches]]).
+`duckAgent/helpers/image_lane_reel.py::allow_dataless_materialization` now runs
+before ffmpeg — unit:test_cloud_only_clips_are_allowed_to_download_before_ffmpeg_runs;
+live repro: ffprobe on the real dataless file fails with the policy OFF, reads
+10.03s with it ON.
