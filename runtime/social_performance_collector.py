@@ -28,7 +28,8 @@ ROLLUPS_PATH = DUCK_OPS_ROOT / "state" / "social_performance_rollups.json"
 HISTORY_PATH = DUCK_OPS_ROOT / "state" / "social_performance_history.json"
 OPERATOR_JSON_PATH = OUTPUT_OPERATOR_DIR / "social_insights.json"
 OUTPUT_MD_PATH = OUTPUT_OPERATOR_DIR / "social_insights.md"
-HASHTAG_PATTERN = re.compile(r"(?<!\w)#([A-Za-z0-9_]+)")
+# A tag needs a letter ("rule #1" is not a hashtag); mirrors duckAgent post_storage.
+HASHTAG_PATTERN = re.compile(r"(?<!\w)#([A-Za-z0-9_]*[A-Za-z][A-Za-z0-9_]*)")
 
 
 def _ensure_duckagent_python() -> None:
@@ -1150,7 +1151,7 @@ def build_social_performance_payload(*, window_days: int = 30, fetch_metrics: bo
             "post_id": item.get("post_id"),
             "title": item.get("title"),
             "theme": item.get("theme"),
-            "url": item.get("url") or ((item.get("metrics") or {}).get("permalink")),
+            "url": ((item.get("metrics") or {}).get("permalink")) or item.get("url"),
             "engagement_score": item.get("engagement_score"),
             "engagement_rate": item.get("engagement_rate"),
         }

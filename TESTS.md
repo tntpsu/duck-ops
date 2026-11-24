@@ -12183,3 +12183,23 @@ the operator's request — unit:test_dismiss_all_dismisses_that_email_and_touche
 The queued IG publisher saved a constructed /p/<media id> URL for the live reel
 18114816749233037 (real: /reel/DgGgvyPK725/) — unit:test_receipt_url_is_the_permalink_read_back_from_meta,
 with test_a_failed_read_back_still_writes_the_receipt as the never-load-bearing control.
+
+2026-11-24 follow-ups to Surface 192:
+- "rule #1" in the coffee caption was read as hashtag "1" by the receipt
+  (duckAgent post_storage) and both duck-ops collectors, and the group post kit
+  stripped it, leaving "rule :" in the group copy. All four patterns now need a
+  letter — unit:test_receipt_hashtags_skip_numbers_after_a_hash,
+  test_a_number_after_a_hash_is_prose_not_a_hashtag,
+  tests/test_hashtag_needs_a_letter.py (both collectors).
+- `default_post_url` no longer builds `instagram.com/p/<numeric media id>/`; the
+  old test asserting that URL was pinning the bug and now asserts None. The
+  collector prefers the permalink it reads from Meta over a stored URL. One-time
+  backfill: 83 of 88 IG receipts filled from Graph read-back; 4 of the 5
+  unreadable were June-6 test-fixture entries (post_id 17912345) in the live
+  runs/2026-06-08 meme receipt — removed (10 fixture rows, 2 real posts kept).
+- Live-store guard: `meme/approval_email_sent` appeared with the v4 hold;
+  declared for meme, jeepfact and duckvideo alongside express.
+- tests/test_shopify_seo_outcomes.py read the LIVE writeback receipt folder in
+  every test that did not stage its own; two live `no_checks` receipts
+  (Baseball Duck, 2026-11-23) failed two tests. setUp now points it at an
+  empty temp dir.

@@ -253,6 +253,15 @@ POLICY: dict[tuple[str, str], Policy] = {
     # milestone (AGE_MILESTONES = 1, 3, 7): past that nobody is nudging it.
     ("express", "approval_email_sent"): _pending(
         7, "one agent drop waiting on the operator; digest reminds at 1/3/7d"),
+    # Every drop-consuming lane writes this pair once a drop reaches its
+    # approval email; meme appeared 2026-11-23 (the v4 hold). Declared for all
+    # four so the next lane's first drop does not fail the live-store guard.
+    ("meme", "approval_email_sent"): _pending(
+        7, "one agent drop waiting on the operator; digest reminds at 1/3/7d"),
+    ("jeepfact", "approval_email_sent"): _pending(
+        7, "one agent drop waiting on the operator; digest reminds at 1/3/7d"),
+    ("duckvideo", "approval_email_sent"): _pending(
+        7, "one agent drop waiting on the operator; digest reminds at 1/3/7d"),
 }
 
 

@@ -30,7 +30,8 @@ INTER_ACCOUNT_DELAY_SECONDS = 0.5
 PROFILE_RATE_LIMIT_CIRCUIT_BREAKER_THRESHOLD = 2
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9']+")
-HASHTAG_PATTERN = re.compile(r"(?<!\w)#([A-Za-z0-9_]+)")
+# A tag needs a letter ("rule #1" is not a hashtag); mirrors duckAgent post_storage.
+HASHTAG_PATTERN = re.compile(r"(?<!\w)#([A-Za-z0-9_]*[A-Za-z][A-Za-z0-9_]*)")
 DUCK_FAMILY_PATTERN = re.compile(r"\b([A-Za-z0-9'&-]+(?:\s+[A-Za-z0-9'&-]+){0,2})\s+duck\b", re.IGNORECASE)
 META_CONTENT_RE = re.compile(r'<meta[^>]+content="([^"]+)"[^>]+(?:name|property)="([^"]+)"', re.IGNORECASE)
 DESCRIPTION_COUNTS_RE = re.compile(

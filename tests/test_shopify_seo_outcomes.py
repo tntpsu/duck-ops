@@ -17,6 +17,18 @@ import shopify_seo_outcomes
 
 
 class ShopifySeoOutcomesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Tests that do not stage writeback receipts must not read the live
+        # folder: two live `no_checks` receipts on 2026-11-23 turned the
+        # verification label to writeback_failing and failed tests here.
+        # A test that stages receipts patches this again inside its own block.
+        self._empty_receipts = TemporaryDirectory()
+        patcher = patch.object(shopify_seo_outcomes, "SEO_WRITEBACK_RECEIPT_DIR",
+                               Path(self._empty_receipts.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._empty_receipts.cleanup)
+
     def test_target_issue_codes_expand_new_category_batches(self) -> None:
         codes = shopify_seo_outcomes._target_issue_codes(
             {"seo_category": "weak_title"},
