@@ -12203,3 +12203,11 @@ with test_a_failed_read_back_still_writes_the_receipt as the never-load-bearing 
   every test that did not stage its own; two live `no_checks` receipts
   (Baseball Duck, 2026-11-23) failed two tests. setUp now points it at an
   empty temp dir.
+- SEO outcomes graded a `no_checks` writeback receipt (nothing requested, so
+  nothing written) as a verification failure, putting a false "1 immediate
+  writeback failure — fix those first" on the Business Desk from the 2026-11-23
+  Baseball Duck apply. It is now `writeback_no_op`, counted separately —
+  unit:test_a_no_op_writeback_is_not_a_verification_failure. Underlying cause,
+  not fixed here: the product description template IS the copy the audit flags
+  as `low_value_seo_copy`, so when the LLM description is rejected the fallback
+  echoes the weak live copy and the item can never be fixed by a batch.

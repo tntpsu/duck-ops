@@ -77,6 +77,7 @@ STATUS_ORDER = {
     "stable": 3,
     "monitoring": 4,
     "writeback_verified": 5,
+    "writeback_no_op": 6,
 }
 GUIDANCE_ORDER = {
     "fix_now": 0,
@@ -404,7 +405,16 @@ def _latest_writeback_receipts() -> list[dict[str, Any]]:
 def _writeback_outcome_item(receipt: dict[str, Any], *, now: datetime) -> dict[str, Any]:
     verified_at = _normalize_text(receipt.get("verified_at")) or None
     failure_codes = [_normalize_text(code) for code in list(receipt.get("failure_codes") or []) if _normalize_text(code)]
-    status = "writeback_verification_failed" if failure_codes or _normalize_text(receipt.get("status")).lower() != "verified" else "writeback_verified"
+    receipt_status = _normalize_text(receipt.get("status")).lower()
+    if failure_codes or receipt_status not in {"verified", "no_checks"}:
+        status = "writeback_verification_failed"
+    elif receipt_status == "no_checks":
+        # The applier wrote nothing because no field was requested; that is a
+        # no-op, not a failed write (Baseball Duck, 2026-11-23, raised a false
+        # "writeback failing" on the Business Desk).
+        status = "writeback_no_op"
+    else:
+        status = "writeback_verified"
     lane = _normalize_text(receipt.get("lane"))
     label = f"{lane.replace('_', ' ').title()} SEO writeback" if lane else "SEO writeback"
     return {
@@ -666,6 +676,7 @@ def build_shopify_seo_outcomes_payload() -> dict[str, Any]:
             "writeback_receipt_count": len(writeback_items),
             "writeback_verified_count": sum(1 for item in writeback_items if item.get("status") == "writeback_verified"),
             "writeback_failed_count": sum(1 for item in writeback_items if item.get("status") == "writeback_verification_failed"),
+            "writeback_no_op_count": sum(1 for item in writeback_items if item.get("status") == "writeback_no_op"),
             "traffic_signal_available_count": 0,
             "traffic_signal_note": "No search-click or traffic collector is wired into Duck Ops yet, so this monitor currently measures durable SEO cleanup rather than organic lift.",
         },

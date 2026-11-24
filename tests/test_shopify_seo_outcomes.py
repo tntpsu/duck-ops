@@ -412,6 +412,45 @@ class ShopifySeoOutcomesTests(unittest.TestCase):
             markdown = markdown_path.read_text(encoding="utf-8")
             self.assertIn("Immediate writeback failures: `1`", markdown)
 
+    def test_a_no_op_writeback_is_not_a_verification_failure(self) -> None:
+        # Shape copied from the live 2026-11-23 Baseball Duck receipt.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audit_path = root / "audit.json"
+            receipt_dir = root / "receipts"
+            receipt_dir.mkdir()
+            audit_path.write_text(json.dumps({"generated_at": datetime.now().astimezone().isoformat(),
+                                              "resources": []}), encoding="utf-8")
+            receipt_dir.joinpath("noop.json").write_text(json.dumps({
+                "receipt_id": "noop",
+                "verified_at": datetime.now().astimezone().isoformat(),
+                "status": "no_checks",
+                "summary": "Shopify SEO writeback had nothing to verify -- no field was requested, so nothing was written.",
+                "lane": "shopify_seo_review",
+                "source": "shopify_seo_review_apply",
+                "resource_kind": "product",
+                "resource_id": "gid://shopify/Product/8127322259639",
+                "title": "Baseball Duck",
+                "applied_fields": [],
+                "checks": [],
+                "failure_codes": [],
+            }), encoding="utf-8")
+            with patch.object(shopify_seo_outcomes, "SEO_AUDIT_PATH", audit_path), patch.object(
+                shopify_seo_outcomes, "SEO_REVIEW_RUN_DIR", root / "runs"
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_WRITEBACK_RECEIPT_DIR", receipt_dir
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_STATE_PATH", root / "state.json"
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_OPERATOR_JSON_PATH", root / "op.json"
+            ), patch.object(
+                shopify_seo_outcomes, "SEO_OUTCOMES_MD_PATH", root / "op.md"
+            ):
+                payload = shopify_seo_outcomes.build_shopify_seo_outcomes()
+            self.assertEqual(payload["summary"]["writeback_failed_count"], 0)
+            self.assertEqual(payload["summary"]["writeback_no_op_count"], 1)
+            self.assertNotEqual(payload["verification_truth"]["label"], "writeback_failing")
+
     def test_build_shopify_seo_outcomes_surfaces_review_chain_status(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
